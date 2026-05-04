@@ -1,0 +1,98 @@
+.diff-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.dt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 16px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.dt-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dt-file-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.dt-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.dt-badge-created {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.dt-badge-modified {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dt-badge-deleted {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.dt-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dt-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dt-stats {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dt-stat-added {
+  color: var(--success);
+}
+
+.dt-stat-removed {
+  color: var(--danger);
+}
+
+.dt-editor {
+  flex: 1;
+  overflow: hidden;
+}
+
+.dt-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}

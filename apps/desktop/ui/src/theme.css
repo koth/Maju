@@ -1,0 +1,149 @@
+:root {
+  /* Low-glare slate theme */
+  --agent-primary: #6aa89f;
+  --agent-primary-hover: #8fc7bd;
+  --agent-cream: #d7e1df;
+  --agent-ink: #151b22;
+  --agent-success: #8fbc8f;
+  --agent-warning: #c8a86a;
+  --agent-danger: #d08770;
+  --agent-charcoal-980: #0f1419;
+  --agent-charcoal-950: #121820;
+  --agent-charcoal-900: #151d26;
+  --agent-charcoal-850: #19222c;
+  --agent-charcoal-800: #202b35;
+  --agent-charcoal-700: #2f3a44;
+  --agent-warm-500: #76848a;
+  --agent-warm-300: #aebdc2;
+
+  /* Surfaces */
+  --app-bg: var(--agent-charcoal-980);
+  --panel-bg: var(--agent-charcoal-900);
+  --surface-bg: var(--agent-charcoal-850);
+  --surface-alt-bg: var(--agent-charcoal-800);
+  --surface-muted-bg: #121820;
+  --shell-rail-bg: #0c1117;
+  --shell-sidebar-bg: #111821;
+  --shell-center-bg: #151c25;
+  --shell-review-bg: #10161d;
+  --surface-hover: rgba(215, 225, 223, 0.045);
+  --surface-active: rgba(215, 225, 223, 0.075);
+  --surface-selected: rgba(106, 168, 159, 0.14);
+  --surface-selected-strong: rgba(106, 168, 159, 0.22);
+
+  /* Borders */
+  --border: rgba(215, 225, 223, 0.10);
+  --border-strong: rgba(215, 225, 223, 0.14);
+  --border-subtle: rgba(215, 225, 223, 0.055);
+  --border-focus: var(--agent-primary-hover);
+
+  /* Text */
+  --text-strong: var(--agent-cream);
+  --text-muted: var(--agent-warm-300);
+  --text-soft: var(--agent-warm-500);
+
+  /* Semantic colors */
+  --accent: var(--agent-primary);
+  --accent-hover: var(--agent-primary-hover);
+  --accent-soft: rgba(106, 168, 159, 0.14);
+  --success: #9fca9f;
+  --success-soft: rgba(143, 188, 143, 0.14);
+  --warning: #d6b36f;
+  --warning-soft: rgba(200, 168, 106, 0.14);
+  --danger: #d08770;
+  --danger-soft: rgba(208, 135, 112, 0.16);
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 255px;
+
+  /* Typography */
+  --font-display: 'IBM Plex Sans', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-sans: 'IBM Plex Sans', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace;
+  --font-size-shell-label: 11px;
+  --font-size-shell-meta: 12px;
+  --font-size-thread-row: 13px;
+  --font-size-thread-title: 20px;
+  --letter-spacing-shell: 0.045em;
+
+  /* Shell layout */
+  --shell-rail-width: 72px;
+  --shell-sidebar-width: 296px;
+  --shell-sidebar-collapsed-width: 0px;
+  --shell-review-width: 288px;
+  --shell-chrome-height: 42px;
+  --thread-header-height: 68px;
+  --shell-padding-x: 16px;
+  --shell-padding-y: 14px;
+  --shell-column-gap: 0px;
+
+  /* Interaction */
+  --interactive-hover: rgba(215, 225, 223, 0.055);
+  --interactive-active: rgba(215, 225, 223, 0.09);
+  --interactive-selected: rgba(106, 168, 159, 0.16);
+  --interactive-selected-border: rgba(143, 199, 189, 0.32);
+  --shadow-selected: 0 10px 28px rgba(0, 0, 0, 0.26);
+  --shadow-shell: 0 18px 54px rgba(0, 0, 0, 0.3);
+  --shadow-agent-glow: 0 0 0 1px rgba(106, 168, 159, 0.12), 0 18px 48px rgba(0, 0, 0, 0.28);
+  --transition-fast: 130ms ease;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--app-bg);
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

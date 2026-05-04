@@ -1,0 +1,19 @@
+[package]
+name = "app-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+acp-core = { path = "../acp-core" }
+anyhow.workspace = true
+dirs-next = "2.0"
+git-service = { path = "../git-service" }
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+session-store = { path = "../session-store" }
+uuid.workspace = true
+workspace-model = { path = "../workspace-model" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "acp-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agent-client-protocol.workspace = true
+agent-client-protocol-tokio.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+similar.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+workspace-model = { path = "../workspace-model" }

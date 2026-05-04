@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegram/nicegram/main/nicegram-scheme.json",
+  "identifier": "default",
+  "description": "Default capability set for Kodex",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "shell:allow-open",
+    "dialog:allow-open"
+  ]
+}

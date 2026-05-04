@@ -1,0 +1,92 @@
+.changes-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+}
+
+.changes-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  margin-bottom: 12px;
+}
+
+.changes-empty {
+  color: var(--text-soft);
+  font-size: 13px;
+  font-style: italic;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.changes-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.changes-row:hover {
+  background: var(--surface-hover);
+}
+
+.changes-badge {
+  flex-shrink: 0;
+  width: 20px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+}
+
+.badge-created {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.badge-modified {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.badge-deleted {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.changes-path {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-stats {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.changes-stat-added {
+  color: var(--success);
+}
+
+.changes-stat-removed {
+  color: var(--danger);
+}

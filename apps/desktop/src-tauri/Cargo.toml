@@ -1,0 +1,19 @@
+[package]
+name = "kodex-desktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+acp-core = { path = "../../../crates/acp-core" }
+anyhow.workspace = true
+app-core = { path = "../../../crates/app-core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tokio.workspace = true
+workspace-model = { path = "../../../crates/workspace-model" }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

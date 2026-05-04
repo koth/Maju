@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+apps/desktop/ui/node_modules/
+
+# Build outputs
+target/
+apps/desktop/ui/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/nul
+# Local app data and logs
+.kodex/
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

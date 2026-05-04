@@ -1,0 +1,127 @@
+.changes-bar {
+  flex-shrink: 0;
+  border: 1px solid var(--border-subtle);
+  background: rgba(215, 225, 223, 0.03);
+  border-radius: 18px;
+  margin: 6px 0;
+  overflow: hidden;
+}
+
+/* ── Header: clickable summary line ── */
+.changes-bar-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 18px;
+  font-size: 13px;
+}
+
+.changes-bar-header:hover {
+  background: var(--surface-hover);
+}
+
+.changes-bar-chevron {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-soft);
+  transition: transform 0.15s;
+}
+
+.changes-bar-chevron.open {
+  transform: rotate(90deg);
+}
+
+.changes-bar-label {
+  font-weight: 760;
+  color: var(--text-strong);
+}
+
+.changes-bar-totals {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.changes-bar-added {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.changes-bar-removed {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ── Expanded file list ── */
+.changes-bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 4px 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.changes-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.changes-bar-row:hover {
+  background: var(--surface-hover);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.changes-bar-badge {
+  flex-shrink: 0;
+  width: 18px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+}
+
+.badge-created {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.badge-modified {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.badge-deleted {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.changes-bar-path {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changes-bar-stats {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}

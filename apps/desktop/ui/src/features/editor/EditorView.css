@@ -1,0 +1,36 @@
+.editor-view {
+  flex: 1;
+  overflow: auto;
+  background: var(--surface-muted-bg);
+}
+
+.editor-content {
+  padding: 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-strong);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+.editor-loading,
+.editor-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.editor-error {
+  color: var(--danger);
+}
+
+.search-highlight {
+  background: rgba(255, 80, 80, 0.25);
+  border: 1px solid rgba(255, 80, 80, 0.6);
+  border-radius: 2px;
+}

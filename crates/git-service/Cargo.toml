@@ -1,0 +1,13 @@
+[package]
+name = "git-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+git2.workspace = true
+serde.workspace = true
+workspace-model = { path = "../workspace-model" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,109 @@
+import { useRef, useEffect, Suspense, lazy } from "react";
+import type { UiSnapshot } from "../../types";
+import { ToolCallCard } from "../tooling/ToolCallCard";
+import "./ConversationTimeline.css";
+
+const MarkdownBody = lazy(() => import("./MarkdownBody"));
+
+interface Props {
+  snapshot: UiSnapshot;
+  onPermissionSelect: (requestId: string, optionId: string | null) => void;
+}
+
+export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const userScrolledUp = useRef(false);
+  const prevLen = useRef(0);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const handleScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      userScrolledUp.current = !atBottom;
+    };
+
+    el.addEventListener("scroll", handleScroll);
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!userScrolledUp.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+    prevLen.current = snapshot.timeline.length;
+  }, [snapshot.timeline.length]);
+
+  const isLastMessage = (index: number) =>
+    index === snapshot.timeline.length - 1;
+
+  return (
+    <div className="timeline-scroll" ref={scrollRef}>
+      <div className="timeline-items">
+        {snapshot.timeline.map((item, i) => {
+          if ("Message" in item) {
+            const msg = snapshot.messages.find((m) => m.id === item.Message);
+            if (!msg) return null;
+
+            if (msg.role === "User") {
+              return (
+                <div key={i} className="msg msg-user">
+                  <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
+                  <div className="msg-content msg-content-user">
+                    <Suspense fallback={<pre className="msg-fallback">{msg.body}</pre>}>
+                      <MarkdownBody content={msg.body} />
+                    </Suspense>
+                  </div>
+                </div>
+              );
+            }
+
+            if (msg.role === "Assistant") {
+              const isStreaming =
+                snapshot.session.status === "Streaming" && isLastMessage(i);
+              return (
+                <div key={i} className="msg msg-assistant">
+                  <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
+                  <div className="msg-content msg-content-assistant">
+                    <Suspense fallback={<pre className="msg-fallback">{msg.body}</pre>}>
+                      <MarkdownBody content={msg.body} />
+                    </Suspense>
+                    {isStreaming && <span className="streaming-cursor" />}
+                  </div>
+                </div>
+              );
+            }
+
+            // System messages
+            return (
+              <div key={i} className="msg msg-system">
+                <span className="msg-content msg-content-system">{msg.body}</span>
+              </div>
+            );
+          }
+
+          if ("Tool" in item) {
+            const tool = snapshot.tools.find((t) => t.id === item.Tool);
+            if (!tool) return null;
+            if (tool.call_id === "workspace.scan" && !tool.parent_call_id)
+              return null;
+            if (tool.parent_call_id) return null;
+
+            return (
+              <ToolCallCard
+                key={i}
+                tool={tool}
+                snapshot={snapshot}
+                nested={false}
+                onPermissionSelect={onPermissionSelect}
+              />
+            );
+          }
+
+          return null;
+        })}
+      </div>
+    </div>
+  );
+}

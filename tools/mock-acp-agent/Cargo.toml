@@ -1,0 +1,10 @@
+[package]
+name = "mock-acp-agent"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+agent-client-protocol.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
