@@ -33,6 +33,7 @@ pub struct Application {
     store: SessionStore,
     app_paths: AppPaths,
     pub agent_command: String,
+    acp_port: u16,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,
@@ -140,6 +141,10 @@ impl Application {
 
         let store = SessionStore::open(app_paths.root(), workspace_root)?;
 
+        // Read ACP port from settings (used by opencode for TCP transport)
+        let settings = crate::settings::load_app_settings(&app_paths);
+        let acp_port = settings.acp_port;
+
         // Check for existing session and its ACP session ID for --resume
         let resume_session_id = store
             .list_sessions()
@@ -156,6 +161,7 @@ impl Application {
             agent_command: agent_command.clone(),
             resume_session_id,
             log_id: make_log_id(),
+            acp_port,
         })?;
 
         // Try to restore the most recent session, otherwise create a new one
@@ -216,6 +222,7 @@ impl Application {
             store,
             app_paths,
             agent_command,
+            acp_port,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -574,6 +581,7 @@ impl Application {
             agent_command: self.agent_command.clone(),
             resume_session_id: resume_acp_id,
             log_id: make_log_id(),
+            acp_port: self.acp_port,
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
@@ -638,6 +646,7 @@ impl Application {
             agent_command: self.agent_command.clone(),
             resume_session_id: None,
             log_id: make_log_id(),
+            acp_port: self.acp_port,
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");
@@ -696,6 +705,7 @@ impl Application {
             agent_command: self.agent_command.clone(),
             resume_session_id: resume_id,
             log_id: make_log_id(),
+            acp_port: self.acp_port,
         })
         .map_err(|e| e.to_string())?;
 

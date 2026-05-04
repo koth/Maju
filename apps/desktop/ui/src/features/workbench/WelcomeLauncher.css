@@ -21,18 +21,23 @@
   align-items: center;
   justify-content: center;
   gap: 12px;
-  max-width: 480px;
+  max-width: 720px;
   width: 100%;
   padding: 0 24px;
   margin: 0 auto;
 }
 
-.welcome-title {
-  font-size: 32px;
+.welcome-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
   font-weight: 700;
   color: var(--text-strong);
-  letter-spacing: 6px;
+  line-height: 1.2;
   margin: 0;
+  text-align: center;
+  white-space: pre;
+  letter-spacing: 0;
+  transform-origin: center;
 }
 
 .welcome-subtitle {

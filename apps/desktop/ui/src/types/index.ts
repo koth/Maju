@@ -249,6 +249,7 @@ export type AgentCliId = "codebuddy" | "opencode";
 
 export interface AppSettings {
   selected_agent: AgentCliId;
+  acp_port: number;
 }
 
 export interface AgentCliStatus {

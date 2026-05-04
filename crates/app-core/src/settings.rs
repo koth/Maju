@@ -8,6 +8,7 @@ const SETTINGS_FILE: &str = "settings.json";
 fn default_settings() -> AppSettings {
     AppSettings {
         selected_agent: AgentCliId::Codebuddy,
+        acp_port: 0,
     }
 }
 
@@ -68,8 +69,10 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         anyhow::bail!("{} is not installed", status.binary);
     }
 
+    let existing = load_app_settings(paths);
     let settings = AppSettings {
         selected_agent: agent,
+        acp_port: existing.acp_port,
     };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
@@ -146,7 +149,35 @@ fn binary_name(binary: &str) -> String {
 }
 
 fn find_binary(binary: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+
+    // Start with the current process PATH
+    if let Some(paths) = std::env::var_os("PATH") {
+        search_paths.extend(std::env::split_paths(&paths));
+    }
+
+    // On macOS, GUI apps launched from Finder/Dock do not inherit the
+    // shell’s PATH (e.g. /opt/homebrew/bin). Append common directories
+    // so CLI detection works out of the box.
+    #[cfg(target_os = "macos")]
+    {
+        for extra in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/sbin",
+            "/usr/sbin",
+            "/sbin",
+        ] {
+            let p = PathBuf::from(extra);
+            if !search_paths.contains(&p) {
+                search_paths.push(p);
+            }
+        }
+    }
+
     let names: Vec<String> = if cfg!(windows) {
         vec![
             format!("{binary}.exe"),
@@ -157,7 +188,8 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
         vec![binary.to_string()]
     };
 
-    std::env::split_paths(&paths)
+    search_paths
+        .into_iter()
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|path| path.is_file())
 }
@@ -190,6 +222,7 @@ mod tests {
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
         let settings = AppSettings {
             selected_agent: AgentCliId::Opencode,
+            acp_port: 9988,
         };
 
         save_app_settings(&paths, &settings).unwrap();
@@ -234,6 +267,7 @@ mod tests {
             &paths,
             &AppSettings {
                 selected_agent: AgentCliId::Opencode,
+                acp_port: 9988,
             },
         )
         .unwrap();

@@ -421,6 +421,14 @@ pub enum AgentCliId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
+    /// TCP port for agents that use TCP transport (e.g. opencode acp).
+    /// Only used when selected_agent is Opencode. Default: 9988.
+    #[serde(default = "default_acp_port")]
+    pub acp_port: u16,
+}
+
+fn default_acp_port() -> u16 {
+    0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

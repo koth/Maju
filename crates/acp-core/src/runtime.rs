@@ -687,9 +687,23 @@ fn agent_spawn_command(command_path: &Path, args: &[String]) -> Command {
 
     #[cfg(not(windows))]
     {
-        let mut command = Command::new(command_path);
-        command.args(args);
-        command
+        // On Unix, if the command is a script (e.g. node script with shebang),
+        // std::process::Command won't interpret the shebang. Use /bin/sh -c
+        // to ensure scripts are properly executed.
+        if is_script_file(command_path) {
+            let mut command = Command::new("/bin/sh");
+            let mut cmd_str = command_path.to_string_lossy().to_string();
+            for arg in args {
+                cmd_str.push(' ');
+                cmd_str.push_str(&shell_words::quote(arg));
+            }
+            command.arg("-c").arg(cmd_str);
+            command
+        } else {
+            let mut command = Command::new(command_path);
+            command.args(args);
+            command
+        }
     }
 }
 
@@ -700,6 +714,20 @@ fn is_windows_batch_script(path: &Path) -> bool {
         .is_some_and(|extension| {
             extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
         })
+}
+
+#[cfg(not(windows))]
+fn is_script_file(path: &Path) -> bool {
+    use std::io::Read;
+
+    if let Ok(mut file) = std::fs::File::open(path) {
+        let mut buf = [0u8; 2];
+        if file.read_exact(&mut buf).is_ok() {
+            // Check for shebang (#!)
+            return buf == [0x23, 0x21];
+        }
+    }
+    false
 }
 
 struct HiddenAgentProcess {
@@ -750,6 +778,18 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         for (name, value) in &self.env {
             command.env(name, value);
         }
+        // Ensure PATH includes common directories for CLI tools (e.g. node, python)
+        // GUI apps on macOS may not inherit the shell's PATH.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+        for extra in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"] {
+            let p = std::path::PathBuf::from(extra);
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        let new_path = std::env::join_paths(paths).unwrap_or_default();
+        command.env("PATH", new_path);
         command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -777,7 +817,25 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         thread::spawn(move || read_agent_stderr(child_stderr, stderr_tx));
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<String>();
-        thread::spawn(move || write_agent_stdin(child_stdin, stdin_rx));
+
+        // Some ACP agents (e.g. opencode acp) shut down their ACP handler when
+        // stdin reaches EOF.  We must keep the stdin handle alive for the entire
+        // lifetime of the child process — not just until the write channel closes
+        // or connect_to returns.  Spawn a dedicated thread that holds the handle
+        // and only drops it when the child exits (detected via child_monitor).
+        let shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>> =
+            Arc::new(Mutex::new(Some(child_stdin)));
+        let keepalive_stdin = shared_stdin.clone();
+        // Use a channel so we can signal the keepalive thread to exit.
+        let (stdin_keepalive_tx, stdin_keepalive_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            // Block until signaled or the sender is dropped (process exit).
+            let _ = stdin_keepalive_rx.recv();
+            if let Ok(mut guard) = keepalive_stdin.lock() {
+                guard.take();
+            }
+        });
+        thread::spawn(move || write_agent_stdin(shared_stdin, stdin_rx));
 
         let child_monitor = monitor_hidden_agent_child(child, stderr_rx);
         let outgoing_sink = futures::sink::unfold(stdin_tx, |tx, line: String| async move {
@@ -785,6 +843,184 @@ impl ConnectTo<Client> for HiddenAgentProcess {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stdin closed")
             })?;
             Ok::<_, std::io::Error>(tx)
+        });
+
+        let protocol = agent_client_protocol::ConnectTo::<Client>::connect_to(
+            Lines::new(outgoing_sink, incoming_lines),
+            client,
+        );
+
+        // Hold stdin_keepalive_tx for the entire duration of the select! so the
+        // keepalive thread doesn't drop the stdin handle prematurely.
+        let _keepalive = stdin_keepalive_tx;
+
+        tokio::select! {
+            result = protocol => result,
+            result = child_monitor => result,
+        }
+    }
+}
+
+/// ACP transport that spawns the agent process and connects via TCP.
+///
+/// Used for agents like `opencode acp` that listen on a TCP port instead of
+/// communicating over stdio.  The agent is spawned with `--port <port>` and
+/// the client connects to `127.0.0.1:<port>`.
+struct TcpAgentProcess {
+    command: PathBuf,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    current_dir: PathBuf,
+    port: u16,
+}
+
+impl TcpAgentProcess {
+    fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
+        let parsed = HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
+        Ok(Self {
+            command: parsed.command,
+            args: parsed.args,
+            env: parsed.env,
+            current_dir: parsed.current_dir,
+            port: config.acp_port,
+        })
+    }
+}
+
+/// Wrapper that dispatches to either stdio or TCP transport.
+enum AgentTransport {
+    Stdio(HiddenAgentProcess),
+    Tcp(TcpAgentProcess),
+}
+
+impl ConnectTo<Client> for AgentTransport {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<<Client as Role>::Counterpart>,
+    ) -> agent_client_protocol::Result<()> {
+        match self {
+            AgentTransport::Stdio(agent) => agent.connect_to(client).await,
+            AgentTransport::Tcp(agent) => agent.connect_to(client).await,
+        }
+    }
+}
+
+impl ConnectTo<Client> for TcpAgentProcess {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<<Client as Role>::Counterpart>,
+    ) -> agent_client_protocol::Result<()> {
+        // Build the command, appending --port <port>
+        let mut command = agent_spawn_command(&self.command, &self.args);
+        command.args(["--port", &self.port.to_string()]);
+        command.current_dir(&self.current_dir);
+        for (name, value) in &self.env {
+            command.env(name, value);
+        }
+        // Ensure PATH includes common directories
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+        for extra in ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"] {
+            let p = std::path::PathBuf::from(extra);
+            if !paths.contains(&p) {
+                paths.push(p);
+            }
+        }
+        let new_path = std::env::join_paths(paths).unwrap_or_default();
+        command.env("PATH", new_path);
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        hide_console_window(&mut command);
+
+        let mut child = command
+            .spawn()
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+
+        // Keep stdin handle alive for the entire session.  opencode acp exits
+        // when stdin reaches EOF, regardless of whether it uses stdio or TCP.
+        let _child_stdin = child.stdin.take().ok_or_else(|| {
+            agent_client_protocol::util::internal_error("failed to open agent stdin")
+        })?;
+
+        let child_stderr = child.stderr.take().ok_or_else(|| {
+            agent_client_protocol::util::internal_error("failed to open agent stderr")
+        })?;
+
+        let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+        thread::spawn(move || read_agent_stderr(child_stderr, stderr_tx));
+
+        let child_monitor = monitor_hidden_agent_child(child, stderr_rx);
+
+        // Wait for the agent to start listening on the port.
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", self.port)
+            .parse()
+            .map_err(|e| agent_client_protocol::util::internal_error(format!("invalid address: {e}")))?;
+
+        let stream = {
+            let mut last_err = None;
+            let mut connected = None;
+            for attempt in 0..50 {
+                match std::net::TcpStream::connect_timeout(
+                    &addr,
+                    std::time::Duration::from_millis(200),
+                ) {
+                    Ok(s) => {
+                        connected = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < 49 {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                }
+            }
+            connected.ok_or_else(|| {
+                agent_client_protocol::util::internal_error(format!(
+                    "failed to connect to agent at 127.0.0.1:{}: {}",
+                    self.port,
+                    last_err.map(|e| e.to_string()).unwrap_or_default()
+                ))
+            })?
+        };
+
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| agent_client_protocol::util::internal_error(format!("set_nonblocking: {e}")))?;
+
+        let tcp_stream = tokio::net::TcpStream::from_std(stream)
+            .map_err(|e| agent_client_protocol::util::internal_error(format!("TcpStream::from_std: {e}")))?;
+
+        let (read_half, write_half) = tcp_stream.into_split();
+        let reader = tokio::io::BufReader::new(read_half);
+        let incoming_lines = futures::stream::unfold(reader, |mut reader| async move {
+            let mut line = String::new();
+            match tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await {
+                Ok(0) => None,
+                Ok(_) => {
+                    trim_line_ending(&mut line);
+                    Some((Ok(line), reader))
+                }
+                Err(e) => Some((Err(e), reader)),
+            }
+        });
+
+        let writer = tokio::io::BufWriter::new(write_half);
+        let outgoing_sink = futures::sink::unfold(writer, |mut writer, line: String| async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(line.as_bytes()).await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+            })?;
+            writer.write_all(b"\n").await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+            })?;
+            writer.flush().await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+            })?;
+            Ok::<_, std::io::Error>(writer)
         });
 
         let protocol = agent_client_protocol::ConnectTo::<Client>::connect_to(
@@ -842,8 +1078,17 @@ fn read_agent_stderr(stderr: std::process::ChildStderr, tx: mpsc::Sender<String>
     let _ = tx.send(collected);
 }
 
-fn write_agent_stdin(mut stdin: std::process::ChildStdin, rx: mpsc::Receiver<String>) {
+fn write_agent_stdin(
+    shared_stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    rx: mpsc::Receiver<String>,
+) {
     for line in rx {
+        let Ok(mut guard) = shared_stdin.lock() else {
+            break;
+        };
+        let Some(ref mut stdin) = *guard else {
+            break;
+        };
         if stdin.write_all(line.as_bytes()).is_err() {
             break;
         }
@@ -958,8 +1203,11 @@ pub(crate) fn run_session(
         .context("failed to create tokio runtime")?;
 
     runtime.block_on(async move {
-        let agent =
-            HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
+        let agent = if config.acp_port > 0 {
+            AgentTransport::Tcp(TcpAgentProcess::from_config(&config)?)
+        } else {
+            AgentTransport::Stdio(HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?)
+        };
         let tx_permissions = tx_events.clone();
         let permission_log_config = config.clone();
         let permission_workspace_root = config.workspace_root.clone();
