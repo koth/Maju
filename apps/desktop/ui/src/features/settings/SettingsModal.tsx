@@ -80,14 +80,14 @@ export function SettingsModal({ onClose }: Props) {
   }, []);
 
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="设置">
       <div className="settings-modal">
         <header className="settings-header">
           <div>
             <div className="settings-kicker">Kodex</div>
-            <h2>Settings</h2>
+            <h2>设置</h2>
           </div>
-          <button type="button" className="settings-close" onClick={onClose} aria-label="Close settings">
+          <button type="button" className="settings-close" onClick={onClose} aria-label="关闭设置">
             ×
           </button>
         </header>
@@ -95,24 +95,24 @@ export function SettingsModal({ onClose }: Props) {
         <section className="settings-section">
           <div className="settings-section-header">
             <div>
-              <h3>Agent</h3>
-              <p>Choose the ACP agent CLI used for future sessions.</p>
+              <h3>智能体</h3>
+              <p>选择用于未来会话的 ACP 智能体 CLI。</p>
             </div>
             <button type="button" className="settings-secondary-btn" onClick={handleDetect} disabled={loading}>
-              Re-detect
+              重新检测
             </button>
           </div>
 
-          {loading && <div className="settings-status">Loading settings...</div>}
+          {loading && <div className="settings-status">正在加载设置...</div>}
           {error && (
             <div className="settings-error">
               <span>{error}</span>
-              <button type="button" onClick={load}>Retry</button>
+              <button type="button" onClick={load}>重试</button>
             </div>
           )}
           {snapshot?.env_override && (
             <div className="settings-warning">
-              ACP_AGENT_COMMAND is set and overrides this selection: <code>{snapshot.env_override}</code>
+              ACP_AGENT_COMMAND 已设置，将覆盖此选择：<code>{snapshot.env_override}</code>
             </div>
           )}
           {installResult && (
@@ -128,9 +128,9 @@ export function SettingsModal({ onClose }: Props) {
                 <div className="agent-main">
                   <div className="agent-title-row">
                     <h4>{agent.label}</h4>
-                    {agent.selected && <span className="agent-badge">Selected</span>}
+                    {agent.selected && <span className="agent-badge">已选择</span>}
                     <span className={`agent-status ${agent.installed ? "is-installed" : "is-missing"}`}>
-                      {agent.installed ? "Installed" : "Not installed"}
+                      {agent.installed ? "已安装" : "未安装"}
                     </span>
                   </div>
                   <p>
@@ -145,7 +145,7 @@ export function SettingsModal({ onClose }: Props) {
                     disabled={!agent.installed || agent.selected || busyAgent === agent.id || !!snapshot.env_override}
                     onClick={() => handleSelect(agent.id)}
                   >
-                    {busyAgent === agent.id ? "Saving..." : "Use"}
+                    {busyAgent === agent.id ? "保存中..." : "使用"}
                   </button>
                   {!agent.installed && (
                     <button
@@ -154,7 +154,7 @@ export function SettingsModal({ onClose }: Props) {
                       disabled={busyAgent === agent.id}
                       onClick={() => handleInstall(agent.id)}
                     >
-                      {busyAgent === agent.id ? "Installing..." : "Install"}
+                      {busyAgent === agent.id ? "安装中..." : "安装"}
                     </button>
                   )}
                 </div>

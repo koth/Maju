@@ -9,7 +9,7 @@ export function WindowControls() {
       <button
         className="window-control-btn window-control-minimize"
         onClick={() => appWindow.minimize()}
-        title="Minimize"
+        title="最小化"
       >
         <svg width="10" height="1" viewBox="0 0 10 1">
           <rect width="10" height="1" fill="currentColor" />
@@ -18,7 +18,7 @@ export function WindowControls() {
       <button
         className="window-control-btn window-control-maximize"
         onClick={() => appWindow.toggleMaximize()}
-        title="Maximize"
+        title="最大化"
       >
         <svg width="10" height="10" viewBox="0 0 10 10">
           <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1" />
@@ -27,7 +27,7 @@ export function WindowControls() {
       <button
         className="window-control-btn window-control-close"
         onClick={() => appWindow.close()}
-        title="Close"
+        title="关闭"
       >
         <svg width="10" height="10" viewBox="0 0 10 10">
           <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" />

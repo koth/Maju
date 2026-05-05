@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import type { UiSnapshot, TabDescriptor } from "../../types";
-import { sessionGetState, gitRefresh, sessionResolvePermission } from "../../lib/tauri";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import type { UiSnapshot, TabDescriptor, SessionFileChange } from "../../types";
+import { sessionGetState, gitRefresh, sessionResolvePermission, reviewGetGitDiffContent } from "../../lib/tauri";
 import { onUiSnapshot } from "../../lib/events";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer } from "../composer/Composer";
@@ -22,7 +22,7 @@ import "./Workbench.css";
 const CONVERSATION_TAB: TabDescriptor = {
   id: "conversation",
   type: "conversation",
-  label: "Agent",
+  label: "智能体",
 };
 
 export function Workbench() {
@@ -210,6 +210,32 @@ export function Workbench() {
     setActiveTabId(id);
   }, []);
 
+  // Computed before conditional returns — hooks must be unconditional
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
+  const isDiffTab = activeTab.type === "diff" && activeTab.filePath != null;
+
+  const [gitDiffChange, setGitDiffChange] = useState<SessionFileChange | null>(null);
+
+  const activeDiffChange = useMemo(() => {
+    if (isDiffTab && activeTab.filePath) {
+      const fromSession = snapshot?.session_changes?.find((c) => c.path === activeTab.filePath) ?? null;
+      if (fromSession) return fromSession;
+    }
+    return null;
+  }, [isDiffTab, activeTab.filePath, snapshot?.session_changes]);
+
+  // Fetch git diff content when no session change
+  useEffect(() => {
+    if (isDiffTab && activeTab.filePath && !activeDiffChange) {
+      setGitDiffChange(null);
+      reviewGetGitDiffContent(activeTab.filePath).then(setGitDiffChange).catch(() => setGitDiffChange(null));
+    } else {
+      setGitDiffChange(null);
+    }
+  }, [isDiffTab, activeTab.filePath, activeDiffChange]);
+
+  const resolvedDiffChange = activeDiffChange ?? gitDiffChange;
+
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
     return <WelcomeLauncher onWorkspaceOpened={handleWorkspaceOpened} />;
@@ -217,8 +243,10 @@ export function Workbench() {
 
   if (!snapshot) {
     return (
-      <div className="workbench">
-        <div className="workbench-loading">Loading...</div>
+      <div className="workbench" style={{ alignItems: "center", justifyContent: "center" }}>
+        <div style={{ color: "var(--text-strong, #d7e1df)", fontSize: 16, fontFamily: "monospace" }}>
+          正在等待后端快照...
+        </div>
       </div>
     );
   }
@@ -231,19 +259,11 @@ export function Workbench() {
     );
   }
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
-
   // Use agent CLI label for conversation tab display
-  const agentLabel = snapshot.session.agent_cli || "Agent";
+  const agentLabel = snapshot.session.agent_cli || "智能体";
   const displayTabs = tabs.map((t) =>
     t.type === "conversation" ? { ...t, label: agentLabel } : t,
   );
-
-  // Find the SessionFileChange for a diff tab
-  const activeDiffChange =
-    activeTab.type === "diff" && activeTab.filePath
-      ? snapshot.session_changes?.find((c) => c.path === activeTab.filePath) ?? null
-      : null;
 
   return (
     <div className="workbench">
@@ -307,13 +327,11 @@ export function Workbench() {
                 />
               </div>
             )}
-            {activeTab.type === "diff" && activeDiffChange && (
-              <DiffTab change={activeDiffChange} />
+            {activeTab.type === "diff" && resolvedDiffChange && (
+              <DiffTab change={resolvedDiffChange} />
             )}
-            {activeTab.type === "diff" && !activeDiffChange && (
-              <div className="workbench-loading">
-                No diff data available for this file
-              </div>
+            {activeTab.type === "diff" && !resolvedDiffChange && (
+              <div className="workbench-loading">正在加载差异...</div>
             )}
             {activeTab.type === "editor" && activeTab.filePath && (
               <EditorView

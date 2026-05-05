@@ -106,8 +106,8 @@ export function GlobalChrome({
             type="button"
             className={`chrome-icon-btn ${searchOpen ? "is-active" : ""}`}
             onClick={toggleSearch}
-            title="Search workspace"
-            aria-label="Search workspace"
+            title="搜索工作区"
+            aria-label="搜索工作区"
           >
             <SearchIcon />
           </button>
@@ -116,7 +116,7 @@ export function GlobalChrome({
               ref={inputRef}
               type="text"
               className="chrome-search-input"
-              placeholder="Search files..."
+              placeholder="搜索文件..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -137,8 +137,8 @@ export function GlobalChrome({
           className="chrome-icon-btn"
           onClick={onRefreshGit}
           disabled={refreshing}
-          title="Refresh Git status"
-          aria-label="Refresh Git status"
+          title="刷新 Git 状态"
+          aria-label="刷新 Git 状态"
         >
           <GitBranchIcon />
         </button>
@@ -146,8 +146,8 @@ export function GlobalChrome({
           type="button"
           className={`chrome-icon-btn ${rightPanelCollapsed ? "" : "is-active"}`}
           onClick={onToggleRightPanel}
-          title={rightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
-          aria-label={rightPanelCollapsed ? "Show right sidebar" : "Hide right sidebar"}
+          title={rightPanelCollapsed ? "显示右侧栏" : "隐藏右侧栏"}
+          aria-label={rightPanelCollapsed ? "显示右侧栏" : "隐藏右侧栏"}
           aria-pressed={!rightPanelCollapsed}
         >
           <RightSidebarIcon />

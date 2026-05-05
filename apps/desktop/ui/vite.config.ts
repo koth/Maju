@@ -4,8 +4,18 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "tauri-cors-fix",
+      enforce: "post",
+      transformIndexHtml(html) {
+        return html.replace(/\s*crossorigin\s*/g, " ");
+      },
+    },
+  ],
   clearScreen: false,
+  base: "./",
   server: {
     port: 1420,
     strictPort: true,

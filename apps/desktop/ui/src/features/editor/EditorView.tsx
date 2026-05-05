@@ -157,16 +157,16 @@ export function EditorView({ path, lineNumber, searchQuery, navToken }: Props) {
   );
 
   if (error) {
-    return <div className="editor-error">Failed to load file: {error}</div>;
+    return <div className="editor-error">加载文件失败：{error}</div>;
   }
 
   if (content === null) {
-    return <div className="editor-loading">Loading file...</div>;
+    return <div className="editor-loading">正在加载文件...</div>;
   }
 
   return (
     <div className="editor-view">
-      <Suspense fallback={<div className="editor-loading">Loading editor...</div>}>
+      <Suspense fallback={<div className="editor-loading">正在加载编辑器...</div>}>
         <MonacoEditor
           height="100%"
           language={language}

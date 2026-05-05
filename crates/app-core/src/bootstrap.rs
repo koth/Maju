@@ -12,14 +12,14 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         name: workspace_root
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
+            .unwrap_or("工作区")
             .to_string(),
         root: workspace_root.to_path_buf(),
     };
 
     let repository = GitService::open(workspace_root).unwrap_or_else(|_| RepositorySnapshot {
-        branch: "no-repo".into(),
-        head: "n/a".into(),
+        branch: "无仓库".into(),
+        head: "无".into(),
         changed_files: Vec::new(),
     });
 
@@ -27,14 +27,14 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         id: uuid::Uuid::new_v4(),
         role: MessageRole::Assistant,
         body: format!(
-            "Ready in {}. Describe the change, bug, or task you want to handle.",
+            "已在 {} 中就绪。描述您想要处理的变更、问题或任务。",
             descriptor.name
         ),
     };
     let system_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role: MessageRole::System,
-        body: "CodeBuddy stays idle until you submit a prompt from the composer below.".into(),
+        body: "CodeBuddy 将保持空闲，直到您从下方编辑器提交提示。".into(),
     };
 
     Ok(UiSnapshot {
@@ -42,7 +42,7 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         session: SessionSummary {
             id: uuid::Uuid::new_v4(),
             workspace_id: descriptor.id,
-            title: "New ACP session".into(),
+            title: "新 ACP 会话".into(),
             model: "gpt-5.4".into(),
             mode: None,
             agent_cli: None,
@@ -63,13 +63,13 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             parent_call_id: None,
             name: "workspace.scan".into(),
             kind: "system".into(),
-            summary: "Ready to inspect ACP and Git activity".into(),
+            summary: "准备检查 ACP 和 Git 活动".into(),
             status: ToolStatus::Pending,
             is_subagent: false,
             detail_text: String::new(),
             logs: vec![ToolLogEntry {
-                title: "Ready".into(),
-                body: "Waiting for the first ACP tool call".into(),
+                title: "就绪".into(),
+                body: "等待第一个 ACP 工具调用".into(),
             }],
             diff_paths: Vec::new(),
             diff_previews: Vec::new(),
@@ -84,12 +84,12 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         inspector_tab: InspectorTab::Diff,
         inspector_sections: vec![
             SidebarSection {
-                title: "Summary".into(),
-                items: vec!["Conversation and tool activity available".into()],
+                title: "摘要".into(),
+                items: vec!["会话和工具活动可用".into()],
             },
             SidebarSection {
-                title: "Artifacts".into(),
-                items: vec!["Specs", "Design", "Tasks"]
+                title: "产物".into(),
+                items: vec!["规范", "设计", "任务"]
                     .into_iter()
                     .map(String::from)
                     .collect(),

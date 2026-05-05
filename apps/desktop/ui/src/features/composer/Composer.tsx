@@ -157,7 +157,7 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
         file.type.startsWith("image/") ? imageInputEnabled : fileInputEnabled,
       );
       if (selected.length !== files.length) {
-        setControlError("Some files were skipped because the active agent does not support them");
+        setControlError("部分文件已被跳过，因为当前智能体不支持它们");
       }
       const nextAttachments = await Promise.all(selected.map(readAttachment));
       setAttachments((current) => [...current, ...nextAttachments]);
@@ -271,14 +271,14 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
       <div className="composer">
         <div className="composer-inner composer-disconnected">
           <span className="composer-disconnected-text">
-            Session disconnected
+            会话已断开
           </span>
           <button
             className="composer-reconnect-btn"
             onClick={handleReconnect}
             disabled={reconnecting}
           >
-            {reconnecting ? "Reconnecting..." : "Reconnect"}
+            {reconnecting ? "正在重新连接..." : "重新连接"}
           </button>
         </div>
       </div>
@@ -290,7 +290,7 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
       <div className={`composer-inner ${turnActive ? "is-turn-active" : ""}`}>
         <div className="composer-input-wrap">
           {slashMenuOpen && filteredCommands.length > 0 && (
-            <div className="composer-slash-menu" role="listbox" aria-label="Slash commands">
+            <div className="composer-slash-menu" role="listbox" aria-label="斜杠命令">
               {filteredCommands.map((cmd) => (
                 <button
                   key={cmd.name}
@@ -315,21 +315,21 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={turnActive ? "Agent is working... add guidance or stop this turn" : "Delegate a task, attach context, then press Ctrl+Enter"}
+            placeholder={turnActive ? "智能体正在工作...添加指引或停止本轮" : "委托任务，附加上下文，然后按 Ctrl+Enter 发送"}
             rows={2}
           />
           <button
             className={`composer-send-btn ${canSend ? "composer-send-btn-active" : ""} ${turnActive ? "composer-stop-btn" : ""}`}
             disabled={turnActive ? cancelling : !canSend}
             onClick={turnActive ? handleCancel : handleSend}
-            title={turnActive ? "Cancel current turn" : "Send prompt"}
-            aria-label={turnActive ? "Cancel current turn" : "Send prompt"}
+            title={turnActive ? "取消当前轮次" : "发送提示"}
+            aria-label={turnActive ? "取消当前轮次" : "发送提示"}
           >
             {turnActive ? <span className="composer-stop-icon" /> : "↑"}
           </button>
         </div>
         {attachments.length > 0 && (
-          <div className="composer-attachment-strip" aria-label="Attached files">
+          <div className="composer-attachment-strip" aria-label="已附加的文件">
             {attachments.map((attachment) => (
               <div className="composer-attachment-chip" key={attachment.id}>
                 {attachment.previewUrl ? (
@@ -341,7 +341,7 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
                 <button
                   type="button"
                   onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
-                  aria-label={`Remove ${attachment.name}`}
+                  aria-label={`移除 ${attachment.name}`}
                 >
                   x
                 </button>
@@ -362,8 +362,8 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
             type="button"
             disabled={!controlsEnabled || !attachmentInputEnabled || pendingControlId !== null}
             onClick={() => attachmentInputRef.current?.click()}
-            title={attachmentInputEnabled ? "Attach image or file" : "Active agent does not support attachments"}
-            aria-label="Attach image or file"
+            title={attachmentInputEnabled ? "附加图片或文件" : "当前智能体不支持附件"}
+            aria-label="附加图片或文件"
           >
             +
           </button>
@@ -390,7 +390,7 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
                   onClick={handleSwitchWorkspace}
                   disabled={switchingWorkspace || snapshot.session.status !== "Idle"}
                 >
-                  {switchingWorkspace ? "Switching..." : "Switch workspace"}
+                  {switchingWorkspace ? "正在切换..." : "切换工作区"}
                 </button>
               </div>
             )}
@@ -557,7 +557,7 @@ function SessionControlSelect({
         onClick={() => onOpenChange(!open)}
       >
         {label && <span className="composer-control-label">{label}</span>}
-        <span className="composer-control-value">{pending ? "Updating" : selected.label}</span>
+        <span className="composer-control-value">{pending ? "更新中" : selected.label}</span>
         <span className="composer-control-chevron">v</span>
       </button>
       {open && !unavailable && (

@@ -5,7 +5,7 @@ mod paths;
 mod reducer;
 pub mod settings;
 
-pub use application::Application;
+pub use application::{Application, normalize_path_for_storage, normalize_tracked_path};
 pub use paths::AppPaths;
 
 #[cfg(test)]
@@ -823,7 +823,7 @@ mod tests {
     fn reducer_applies_session_title_updated() {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
-        assert_eq!(ui.session.title, "New ACP session");
+        assert_eq!(ui.session.title, "新 ACP 会话");
 
         super::reducer::apply_event(
             &mut ui,

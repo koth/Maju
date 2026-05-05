@@ -89,21 +89,21 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
  ██║  ██╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
  ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝`}
         </pre>
-        <p className="welcome-subtitle">The Agentic Code Editor</p>
+        <p className="welcome-subtitle">智能体代码编辑器</p>
 
         <button
           className="welcome-open-btn"
           onClick={handleOpenFolder}
           disabled={loading}
         >
-          {loading ? "Opening..." : "Open Folder"}
+          {loading ? "正在打开..." : "打开文件夹"}
         </button>
 
         {error && <p className="welcome-error">{error}</p>}
 
         {recents.length > 0 && (
           <div className="welcome-recents">
-            <h2 className="welcome-recents-title">Recent Workspaces</h2>
+            <h2 className="welcome-recents-title">近期工作区</h2>
             <ul className="welcome-recents-list">
               {recents.map((r) => (
                 <li
@@ -118,7 +118,7 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
                     <span className="recent-name">{folderName(r.path)}</span>
                     <span className="recent-path">{r.path}</span>
                     {!r.exists && (
-                      <span className="recent-missing">not found</span>
+                      <span className="recent-missing">未找到</span>
                     )}
                   </button>
                   <button
@@ -127,7 +127,7 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
                       e.stopPropagation();
                       handleRemoveRecent(r.path);
                     }}
-                    title="Remove from recent"
+                    title="从最近列表中移除"
                   >
                     x
                   </button>

@@ -31,7 +31,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             ui.agent_plan.clear();
             ui.session.status = SessionStatus::Idle;
             ui.inspector_sections.push(SidebarSection {
-                title: "Turn Result".into(),
+                title: "轮次结果".into(),
                 items: vec![stop_reason],
             });
         }
@@ -149,14 +149,14 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         ClientEvent::ToolPermissionRequest { id, name, options } => {
             let tool = ensure_tool(ui, &id, None, &name, "permission", false);
             let summary = if options.is_empty() {
-                "Awaiting permission".to_string()
+                "等待权限".to_string()
             } else {
                 let labels = options
                     .iter()
                     .map(|option| option.label.as_str())
                     .collect::<Vec<_>>()
                     .join(" / ");
-                format!("Awaiting permission | {labels}")
+                format!("等待权限 | {labels}")
             };
             tool.name = name;
             tool.kind = "permission".into();
@@ -228,7 +228,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.raw_output = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS);
                 tool.terminal_output = terminal_output.map(cap_terminal_output);
                 tool.error = None;
-                push_tool_log(tool, "Completed", outcome.clone());
+                push_tool_log(tool, "已完成", outcome.clone());
                 (tool.name.clone(), tool.raw_input.clone())
             };
             if completed_tool_name == "TaskCreate" {
@@ -248,12 +248,12 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             if let Some(name) = name {
                 tool.name = name;
             }
-            tool.summary = "Tool failed".into();
+            tool.summary = "工具失败".into();
             tool.status = ToolStatus::Failed;
             tool.raw_output = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS);
             tool.terminal_output = terminal_output.map(cap_terminal_output);
             tool.error = Some(error.clone());
-            push_tool_log(tool, "Error", error);
+            push_tool_log(tool, "错误", error);
             refresh_session_status(ui);
         }
         ClientEvent::ToolDiff {
@@ -289,12 +289,12 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                     });
                 }
                 if !is_synthetic_write {
-                    tool.summary = format!("Editing {path}");
+                    tool.summary = format!("正在编辑 {path}");
                     if !matches!(tool.status, ToolStatus::Succeeded | ToolStatus::Failed) {
                         tool.status = ToolStatus::Running;
                     }
                     tool.error = None;
-                    push_tool_log(tool, "Edit", path.clone());
+                    push_tool_log(tool, "编辑", path.clone());
                     ui.session.status = SessionStatus::WaitingForTool;
                 }
             }
@@ -323,10 +323,10 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.status = ToolStatus::Interrupted;
                 tool.summary = reason.clone();
                 tool.error = Some(reason.clone());
-                push_tool_log(tool, "Interrupted", reason.clone());
+                push_tool_log(tool, "已中断", reason.clone());
             }
             ui.inspector_sections.push(SidebarSection {
-                title: "Interruption".into(),
+                title: "中断".into(),
                 items: vec![reason],
             });
         }
@@ -396,13 +396,14 @@ fn upsert_session_change(
             existing.change_type = incoming_change_type;
         }
         existing.new_text = new_text;
+        existing.path = normalized_path;
         existing.timestamp = chrono_now_iso();
         refresh_change_stats(existing);
         return;
     }
 
     let mut change = SessionFileChange {
-        path,
+        path: normalized_path,
         change_type: incoming_change_type,
         old_text,
         new_text,
@@ -498,7 +499,7 @@ fn apply_codebuddy_task_update(ui: &mut UiSnapshot, raw_input: Option<&str>) {
         })
         .unwrap_or_else(|| AgentPlanEntry {
             id: Some(task_id.clone()),
-            content: format!("Task #{task_id}"),
+            content: format!("任务 #{task_id}"),
             priority: AgentPlanEntryPriority::Medium,
             status: AgentPlanEntryStatus::Pending,
         });
@@ -716,7 +717,7 @@ fn ensure_tool<'a>(
         parent_call_id,
         name: name.to_string(),
         kind: kind.to_string(),
-        summary: "Waiting for activity".into(),
+        summary: "等待活动".into(),
         status: ToolStatus::Pending,
         is_subagent,
         detail_text: String::new(),
@@ -760,13 +761,13 @@ fn finalize_running_children(
             && except_call_id != Some(tool.call_id.as_str())
     }) {
         tool.status = ToolStatus::Succeeded;
-        if tool.summary.trim().is_empty() || tool.summary == "Waiting for activity" {
-            tool.summary = "Completed".into();
+        if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
+            tool.summary = "已完成".into();
         }
         push_tool_log(
             tool,
-            "Completed",
-            "Inferred from subsequent parent activity",
+            "已完成",
+            "根据后续父活动推断",
         );
     }
 }
@@ -787,26 +788,26 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
         } else {
             ToolStatus::Succeeded
         };
-        if tool.summary.trim().is_empty() || tool.summary == "Waiting for activity" {
+        if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
             tool.summary = if stop_reason == "cancelled" {
-                "Cancelled".into()
+                "已取消".into()
             } else {
-                "Completed".into()
+                "已完成".into()
             };
         }
         let label = if stop_reason == "cancelled" {
-            "Cancelled"
+            "已取消"
         } else {
-            "Completed"
+            "已完成"
         };
-        push_tool_log(tool, label, format!("Turn finished: {stop_reason}"));
+        push_tool_log(tool, label, format!("轮次结束：{stop_reason}"));
     }
 }
 
 fn summarize_completion(outcome: &str) -> String {
     let compact = collapse_whitespace(outcome);
     if compact.is_empty() {
-        "Completed".into()
+        "已完成".into()
     } else if compact.chars().count() > 120 {
         let truncated: String = compact.chars().take(117).collect();
         format!("{truncated}...")

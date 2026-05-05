@@ -16,12 +16,12 @@ export function ChangesPanel({ changes, onFileSelect }: Props) {
   return (
     <div className="changes-panel">
       <div className="changes-header">
-        Changes ({sorted.length})
+        更改 ({sorted.length})
       </div>
 
       {sorted.length === 0 ? (
         <div className="changes-empty">
-          No files changed in this session
+          此会话中无文件被更改
         </div>
       ) : (
         <div className="changes-list">

@@ -12,12 +12,12 @@ export function AgentPlanPanel({ entries }: Props) {
   const active = entries.find((entry) => entry.status === "in_progress");
 
   return (
-    <section className="agent-plan" aria-label="Agent plan">
+    <section className="agent-plan" aria-label="智能体计划">
       <div className="agent-plan-header">
         <div>
-          <div className="agent-plan-eyebrow">Mission plan</div>
+          <div className="agent-plan-eyebrow">任务计划</div>
           <div className="agent-plan-title">
-            {active ? active.content : `${completed}/${entries.length} tasks completed`}
+            {active ? active.content : `已完成 ${completed}/${entries.length} 个任务`}
           </div>
         </div>
         <span className="agent-plan-count">{completed}/{entries.length}</span>
@@ -46,21 +46,21 @@ export function AgentPlanPanel({ entries }: Props) {
 }
 
 function statusMark(status: AgentPlanEntry["status"]) {
-  if (status === "completed") return "Done";
-  if (status === "cancelled") return "Skip";
-  if (status === "in_progress") return "Now";
-  return "Next";
+  if (status === "completed") return "完成";
+  if (status === "cancelled") return "跳过";
+  if (status === "in_progress") return "进行中";
+  return "待处理";
 }
 
 function statusLabel(status: AgentPlanEntry["status"]) {
-  if (status === "completed") return "Completed";
-  if (status === "cancelled") return "Cancelled";
-  if (status === "in_progress") return "In progress";
-  return "Pending";
+  if (status === "completed") return "已完成";
+  if (status === "cancelled") return "已取消";
+  if (status === "in_progress") return "进行中";
+  return "待处理";
 }
 
 function priorityLabel(priority: AgentPlanEntry["priority"]) {
-  if (priority === "high") return "High";
-  if (priority === "low") return "Low";
-  return "Medium";
+  if (priority === "high") return "高";
+  if (priority === "low") return "低";
+  return "中";
 }

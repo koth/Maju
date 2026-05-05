@@ -21,14 +21,14 @@ impl SessionStore {
         let sessions_dir = app_data_root.join("sessions");
         fs::create_dir_all(&sessions_dir).with_context(|| {
             format!(
-                "failed to create session data dir at {}",
+                "在 {} 创建会话数据目录失败",
                 sessions_dir.display()
             )
         })?;
 
         let db_path = sessions_dir.join("sessions.db");
         let conn = Connection::open(&db_path)
-            .with_context(|| format!("failed to open sessions.db at {}", db_path.display()))?;
+            .with_context(|| format!("在 {} 打开 sessions.db 失败", db_path.display()))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
@@ -296,7 +296,7 @@ impl SessionStore {
     pub fn create_session(&self, id: &str, model: &str) -> Result<()> {
         let now = now_iso();
         self.conn.execute(
-            "INSERT INTO sessions (id, title, model, status, created_at, updated_at, workspace_root) VALUES (?1, 'New Session', ?2, 'Idle', ?3, ?4, ?5)",
+            "INSERT INTO sessions (id, title, model, status, created_at, updated_at, workspace_root) VALUES (?1, '新会话', ?2, 'Idle', ?3, ?4, ?5)",
             params![id, model, now, now, &self.workspace_root],
         )?;
         Ok(())
@@ -868,7 +868,7 @@ mod tests {
 
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].title, "New Session");
+        assert_eq!(sessions[0].title, "新会话");
     }
 
     #[test]
@@ -1040,7 +1040,7 @@ mod tests {
                 "
                 CREATE TABLE sessions (
                     id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL DEFAULT 'New Session',
+                title TEXT NOT NULL DEFAULT '新会话',
                     model TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'Idle',
                     created_at TEXT NOT NULL,

@@ -80,7 +80,7 @@ export default function MarkdownBody({ content }: Props) {
           );
         },
         img({ src, alt }) {
-          return <img className="md-image" src={src} alt={alt ?? "Attached image"} />;
+          return <img className="md-image" src={src} alt={alt ?? "附加的图片"} />;
         },
         strong({ children }) {
           return <strong className="md-bold">{children}</strong>;

@@ -48,6 +48,7 @@ fn main() {
             commands::settings::settings_select_agent,
             commands::settings::settings_install_agent,
             commands::review::review_get_diff,
+            commands::review::review_get_git_diff_content,
             commands::review::review_apply_patch,
             commands::review::review_reject_patch,
             commands::workspace::workspace_open,

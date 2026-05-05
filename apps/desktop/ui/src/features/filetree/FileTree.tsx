@@ -159,7 +159,7 @@ export function FileTree({ onFileOpen, refreshSignal = 0 }: FileTreeProps) {
 
   return (
     <div className="filetree">
-      <div className="filetree-header">ALL FILES</div>
+      <div className="filetree-header">所有文件</div>
       <div className="filetree-list">
         {rootEntries.map((entry) => (
           <TreeNode

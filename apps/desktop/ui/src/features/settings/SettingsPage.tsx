@@ -83,35 +83,35 @@ export function SettingsPage({ onBack }: Props) {
     <div className="settings-page">
       <aside className="settings-sidebar">
         <button type="button" className="settings-back" onClick={onBack}>
-          <span className="settings-back-arrow">←</span> Back to app
+          <span className="settings-back-arrow">←</span> 返回应用
         </button>
 
         <div className="settings-nav-group">
-          <span className="settings-nav-label">App</span>
-          <button type="button" className="settings-nav-item is-active">General</button>
+          <span className="settings-nav-label">应用</span>
+          <button type="button" className="settings-nav-item is-active">通用</button>
         </div>
       </aside>
 
       <main className="settings-content">
         <header className="settings-content-header">
-          <h1>General</h1>
-          <p>Default provider and agent configuration.</p>
+          <h1>通用</h1>
+          <p>默认提供者和智能体配置。</p>
         </header>
 
         <section className="settings-section">
-          <h2 className="settings-section-title">Default Provider</h2>
-          <p className="settings-section-desc">Choose the ACP agent CLI used for new sessions.</p>
+          <h2 className="settings-section-title">默认提供者</h2>
+          <p className="settings-section-desc">选择用于新会话的 ACP 智能体 CLI。</p>
 
-          {loading && <div className="settings-status">Loading...</div>}
+          {loading && <div className="settings-status">加载中...</div>}
           {error && (
             <div className="settings-error">
               <span>{error}</span>
-              <button type="button" className="settings-link-btn" onClick={load}>Retry</button>
+              <button type="button" className="settings-link-btn" onClick={load}>重试</button>
             </div>
           )}
           {snapshot?.env_override && (
             <div className="settings-warning">
-              <code>ACP_AGENT_COMMAND</code> is set and overrides this selection: <code>{snapshot.env_override}</code>
+              <code>ACP_AGENT_COMMAND</code> 已设置，将覆盖此选择：<code>{snapshot.env_override}</code>
             </div>
           )}
           {installResult && (
@@ -130,7 +130,7 @@ export function SettingsPage({ onBack }: Props) {
                     <code>{agent.binary}</code>
                     {agent.detected_path && <span> · {agent.detected_path}</span>}
                     <span className={`settings-row-badge ${agent.installed ? "is-installed" : "is-missing"}`}>
-                      {agent.installed ? "Installed" : "Not installed"}
+                      {agent.installed ? "已安装" : "未安装"}
                     </span>
                   </div>
                 </div>
@@ -142,7 +142,7 @@ export function SettingsPage({ onBack }: Props) {
                       disabled={agent.selected || busyAgent === agent.id || !!snapshot.env_override}
                       onClick={() => handleSelect(agent.id)}
                     >
-                      {agent.selected ? "Selected" : busyAgent === agent.id ? "Saving..." : "Use"}
+                      {agent.selected ? "已选择" : busyAgent === agent.id ? "保存中..." : "使用"}
                     </button>
                   ) : (
                     <button
@@ -151,7 +151,7 @@ export function SettingsPage({ onBack }: Props) {
                       disabled={busyAgent === agent.id}
                       onClick={() => handleInstall(agent.id)}
                     >
-                      {busyAgent === agent.id ? "Installing..." : "Install"}
+                      {busyAgent === agent.id ? "安装中..." : "安装"}
                     </button>
                   )}
                 </div>
@@ -161,7 +161,7 @@ export function SettingsPage({ onBack }: Props) {
 
           <div className="settings-detect-row">
             <button type="button" className="settings-link-btn" onClick={handleDetect} disabled={loading}>
-              Re-detect installed CLIs
+              重新检测已安装的 CLI
             </button>
           </div>
         </section>

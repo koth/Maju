@@ -64,11 +64,11 @@ export function DiffView({ path }: Props) {
   );
 
   if (error) {
-    return <div className="editor-error">Failed to load diff: {error}</div>;
+    return <div className="editor-error">加载差异失败：{error}</div>;
   }
 
   if (original === null || modified === null) {
-    return <div className="editor-loading">Loading diff...</div>;
+    return <div className="editor-loading">正在加载差异...</div>;
   }
 
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -91,7 +91,7 @@ export function DiffView({ path }: Props) {
 
   return (
     <div className="editor-view">
-      <Suspense fallback={<div className="editor-loading">Loading diff editor...</div>}>
+      <Suspense fallback={<div className="editor-loading">正在加载差异编辑器...</div>}>
         <MonacoDiffEditor
           height="100%"
           language={language}

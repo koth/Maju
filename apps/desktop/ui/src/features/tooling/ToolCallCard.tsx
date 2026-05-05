@@ -74,7 +74,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
         <span className="tc-verb">{verb}</span>
         <span className="tc-cmd">{headerTitle}</span>
         {category === "editing" && (diffStats.added > 0 || diffStats.removed > 0) && (
-          <span className="tc-diff-stats" aria-label={`${diffStats.added} additions, ${diffStats.removed} deletions`}>
+          <span className="tc-diff-stats" aria-label={`${diffStats.added} 处添加，${diffStats.removed} 处删除`}>
             {diffStats.added > 0 && <span className="tc-diff-added">+{diffStats.added}</span>}
             {diffStats.removed > 0 && <span className="tc-diff-removed">-{diffStats.removed}</span>}
           </span>
@@ -88,7 +88,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
 
       {needsPermission && (
         <div className="tc-permission-panel">
-          <div className="tc-permission-title">Choose permission</div>
+          <div className="tc-permission-title">选择权限</div>
           <div className="tc-permission-actions">
             {tool.permission_options.map((option) => (
               <button
@@ -133,7 +133,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
               {detailLines.omitted > 0 && (
                 <div className="tc-output-line tc-output-ellipsis">
                   <span className="tc-output-prefix">  </span>… +
-                  {detailLines.omitted} lines
+                  {detailLines.omitted} 行
                 </div>
               )}
             </div>
@@ -153,7 +153,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
               {logEntries.omitted > 0 && (
                 <div className="tc-output-line tc-output-ellipsis">
                   <span className="tc-output-prefix">  </span>… +
-                  {logEntries.omitted} updates
+                  {logEntries.omitted} 条更新
                 </div>
               )}
             </div>
@@ -183,7 +183,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
               {outputLines.omitted > 0 && (
                 <div className="tc-output-line tc-output-ellipsis">
                   <span className="tc-output-prefix">  </span>… +
-                  {outputLines.omitted} lines
+                  {outputLines.omitted} 行
                 </div>
               )}
             </div>
@@ -203,7 +203,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
               {rawOutputLines.omitted > 0 && (
                 <div className="tc-output-line tc-output-ellipsis">
                   <span className="tc-output-prefix">  </span>… +
-                  {rawOutputLines.omitted} lines
+                  {rawOutputLines.omitted} 行
                 </div>
               )}
             </div>
@@ -249,7 +249,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
           >
             <span className={`tc-children-chevron ${!childrenCollapsed ? "tc-children-chevron-open" : ""}`}>›</span>
             <span className="tc-children-count">
-              {children.length} tool call{children.length > 1 ? "s" : ""}
+              {children.length} 个工具调用
             </span>
           </div>
           {!childrenCollapsed && children.map((child) => (
@@ -402,9 +402,9 @@ function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): s
   const inputTitle = extractInputTitle(tool);
   if (inputTitle) return truncate(inputTitle, 80);
 
-  // For edit tools, extract just the filename from diff_paths or name
+  // For edit tools, show workspace-relative path for context
   if (trackedDiffPaths.length > 0) {
-    return shortPath(trackedDiffPaths[trackedDiffPaths.length - 1]);
+    return truncate(trackedDiffPaths[trackedDiffPaths.length - 1].replace(/\\/g, "/"), 80);
   }
 
   const namePath = extractPathFromToolName(tool.name);
@@ -429,7 +429,7 @@ function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): s
 
   // If name is a backtick-wrapped command, use just the tool kind
   if (tool.name.startsWith("`")) {
-    return tool.kind || "Command";
+    return tool.kind || "命令";
   }
 
   if (isCommandTool(tool)) {
@@ -447,7 +447,7 @@ function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): s
   }
 
   // Last resort: tool kind or generic label
-  return tool.kind || tool.name || "Tool";
+  return tool.kind || tool.name || "工具";
 }
 
 /**
@@ -786,17 +786,17 @@ function commandToolLabel(tool: ToolInvocation): string {
 }
 
 function toolVerb(status: ToolStatus, category: ToolCategory): string {
-  if (status === "Failed") return "Failed";
-  if (status === "Interrupted") return "Interrupted";
+  if (status === "Failed") return "失败";
+  if (status === "Interrupted") return "已中断";
 
   const running = status === "Running" || status === "Pending";
   switch (category) {
     case "exploring":
-      return running ? "Exploring" : "Explored";
+      return running ? "探索中" : "已探索";
     case "editing":
-      return running ? "Editing" : "Edited";
+      return running ? "编辑中" : "已编辑";
     case "executing":
-      return running ? "Running" : "Ran";
+      return running ? "运行中" : "已运行";
   }
 }
 
@@ -825,7 +825,7 @@ function getOutputLines(tool: ToolInvocation): {
     if (!raw) {
       const code = tool.terminal_output.exit_code;
       if (code !== null && code !== 0) {
-        return { lines: [`(exit code ${code})`], omitted: 0 };
+        return { lines: [`(退出码 ${code})`], omitted: 0 };
       }
       return { lines: [], omitted: 0 };
     }

@@ -36,7 +36,7 @@ export function ChangesBar({ changes, onFileSelect }: Props) {
           ›
         </span>
         <span className="changes-bar-label">
-          Changes: {sorted.length} file{sorted.length !== 1 ? "s" : ""}
+          更改：{sorted.length} 个文件
         </span>
         <span className="changes-bar-totals">
           {totalAdded > 0 && (

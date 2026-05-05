@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useMemo } from "react";
+import { lazy, Suspense, useCallback, useMemo, useState, useRef } from "react";
 import type { SessionFileChange, FileChangeType } from "../../types";
 import { KODEX_THEME_NAME, kodexDarkTheme } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
@@ -32,6 +32,10 @@ interface Props {
 }
 
 export function DiffTab({ change }: Props) {
+  const [sideBySide, setSideBySide] = useState(true);
+  const sideBySideRef = useRef(true);
+  const editorRef = useRef<import("monaco-editor").editor.IStandaloneDiffEditor | null>(null);
+
   const language = useMemo(() => {
     const ext = change.path.split(".").pop()?.toLowerCase() ?? "";
     return LANG_MAP[ext] ?? "plaintext";
@@ -52,10 +56,27 @@ export function DiffTab({ change }: Props) {
     [language],
   );
 
+  const handleMount = useCallback(
+    (editor: import("monaco-editor").editor.IStandaloneDiffEditor) => {
+      editorRef.current = editor;
+      editor.updateOptions({ renderSideBySide: true });
+    },
+    [],
+  );
+
+  const toggleSideBySide = useCallback(() => {
+    setSideBySide((prev) => {
+      const next = !prev;
+      sideBySideRef.current = next;
+      editorRef.current?.updateOptions({ renderSideBySide: next });
+      return next;
+    });
+  }, []);
+
   const badgeConfig: Record<FileChangeType, { label: string; className: string }> = {
-    Created: { label: "ADDED", className: "dt-badge-created" },
-    Modified: { label: "MODIFIED", className: "dt-badge-modified" },
-    Deleted: { label: "DELETED", className: "dt-badge-deleted" },
+    Created: { label: "已添加", className: "dt-badge-created" },
+    Modified: { label: "已修改", className: "dt-badge-modified" },
+    Deleted: { label: "已删除", className: "dt-badge-deleted" },
   };
   const badge = badgeConfig[change.change_type];
 
@@ -69,6 +90,14 @@ export function DiffTab({ change }: Props) {
           <span className={`dt-badge ${badge.className}`}>{badge.label}</span>
         </div>
         <div className="dt-header-right">
+          <button
+            type="button"
+            className="dt-mode-btn"
+            title={sideBySide ? "切换到内联差异" : "切换到并排差异"}
+            onClick={toggleSideBySide}
+          >
+            {sideBySide ? "并排" : "内联"}
+          </button>
           <span className="dt-path">{change.path}</span>
           <div className="dt-stats">
             {change.added_lines > 0 && (
@@ -81,7 +110,7 @@ export function DiffTab({ change }: Props) {
         </div>
       </div>
       <div className="dt-editor">
-        <Suspense fallback={<div className="dt-loading">Loading diff editor...</div>}>
+        <Suspense fallback={<div className="dt-loading">正在加载差异编辑器...</div>}>
           <MonacoDiffEditor
             height="100%"
             language={language}
@@ -89,9 +118,10 @@ export function DiffTab({ change }: Props) {
             modified={change.new_text}
             theme="kodex-dark"
             beforeMount={handleBeforeMount}
+            onMount={handleMount}
             options={{
               readOnly: true,
-              renderSideBySide: true,
+              renderSideBySide: sideBySide,
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               fontSize: 13,

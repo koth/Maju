@@ -17,7 +17,7 @@ export function SearchResults({ result, loading, error, onFileOpen, onClose }: P
     if (loading) {
       return (
         <div className="search-results-dropdown">
-          <div className="search-results-status">Searching...</div>
+          <div className="search-results-status">搜索中...</div>
         </div>
       );
     }
@@ -35,7 +35,7 @@ export function SearchResults({ result, loading, error, onFileOpen, onClose }: P
     if (result.files.length === 0) {
       return (
         <div className="search-results-dropdown">
-          <div className="search-results-status">No results found</div>
+          <div className="search-results-status">未找到结果</div>
         </div>
       );
     }
@@ -44,10 +44,10 @@ export function SearchResults({ result, loading, error, onFileOpen, onClose }: P
       <div className="search-results-dropdown">
         <div className="search-results-header">
           <span className="search-results-count">
-            {result.total_matches} match{result.total_matches !== 1 ? "es" : ""} in {result.files.length} file{result.files.length !== 1 ? "s" : ""}
+            在 {result.files.length} 个文件中找到 {result.total_matches} 个匹配
           </span>
           {result.truncated && (
-            <span className="search-results-truncated">Results truncated</span>
+            <span className="search-results-truncated">结果已截断</span>
           )}
         </div>
         <div className="search-results-list">
@@ -87,7 +87,7 @@ export function SearchResults({ result, loading, error, onFileOpen, onClose }: P
                       onClose();
                     }}
                   >
-                    ...{remaining} more match{remaining !== 1 ? "es" : ""}
+                    ...剩余 {remaining} 个匹配
                   </div>
                 )}
               </div>

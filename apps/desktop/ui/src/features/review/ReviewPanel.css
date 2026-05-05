@@ -249,3 +249,58 @@
   font-size: 12px;
   line-height: 1.35;
 }
+
+.review-diff-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 4px;
+}
+
+.review-diff-row {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  gap: 6px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.review-diff-dir {
+  color: var(--text-muted);
+}
+
+.review-diff-dir:hover {
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.review-diff-file {
+  color: var(--text-strong);
+}
+
+.review-diff-file:hover {
+  background: var(--interactive-hover);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.review-diff-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.review-diff-stats {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.review-diff-children {
+  display: flex;
+  flex-direction: column;
+}

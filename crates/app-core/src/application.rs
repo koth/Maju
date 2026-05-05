@@ -47,7 +47,7 @@ pub struct Application {
     file_tracker: FileChangeTracker,
 }
 
-fn normalize_tracked_path(path: &str) -> String {
+pub fn normalize_tracked_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let normalized = normalized
         .strip_prefix("//?/")
@@ -61,6 +61,20 @@ fn normalize_tracked_path(path: &str) -> String {
     } else {
         normalized
     }
+}
+
+pub fn normalize_path_for_storage(path: &str, workspace_root: &Path) -> String {
+    let normalized = normalize_tracked_path(path);
+    let ws_root = normalize_tracked_path(&workspace_root.display().to_string());
+    let ws_prefix = if ws_root.ends_with('/') {
+        ws_root
+    } else {
+        format!("{}/", ws_root)
+    };
+    normalized
+        .strip_prefix(&ws_prefix)
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn prompt_text(prompt: &[UserPromptContent]) -> Option<String> {
@@ -184,7 +198,7 @@ impl Application {
                     // Restore file changes from SQLite
                     ui.session_changes = store.load_file_changes(session_id).unwrap_or_default();
                     let seq = store.next_seq(session_id).unwrap_or(1);
-                    let needs_title = recent.title == "New Session";
+                    let needs_title = recent.title == "新会话";
                     (needs_title, seq)
                 } else {
                     // Failed to load — create new session
@@ -255,25 +269,25 @@ impl Application {
         prompt: Vec<UserPromptContent>,
     ) -> anyhow::Result<()> {
         if self.in_flight_prompt.is_some() {
-            let error = anyhow::anyhow!("a prompt is already running");
+            let error = anyhow::anyhow!("提示请求已在运行中");
             self.push_system_message(error.to_string());
             return Err(error);
         }
 
         let display_body = prompt_display_body(&prompt);
-        let title_source = prompt_text(&prompt).unwrap_or_else(|| "Image prompt".into());
+        let title_source = prompt_text(&prompt).unwrap_or_else(|| "图片提示".into());
         if display_body.is_empty() {
-            let error = anyhow::anyhow!("prompt cannot be empty");
+            let error = anyhow::anyhow!("提示内容不能为空");
             self.push_system_message(error.to_string());
             return Err(error);
         }
         if prompt_has_image(&prompt) && !self.ui.prompt_capabilities.image {
-            let error = anyhow::anyhow!("active agent does not support image prompts");
+            let error = anyhow::anyhow!("当前智能体不支持图片提示");
             self.push_system_message(error.to_string());
             return Err(error);
         }
         if prompt_has_file(&prompt) && !self.ui.prompt_capabilities.embedded_context {
-            let error = anyhow::anyhow!("active agent does not support file attachments");
+            let error = anyhow::anyhow!("当前智能体不支持文件附件");
             self.push_system_message(error.to_string());
             return Err(error);
         }
@@ -286,9 +300,9 @@ impl Application {
                 let reason = self
                     .session
                     .last_error()
-                    .unwrap_or_else(|| "ACP subprocess exited unexpectedly".to_string());
+                    .unwrap_or_else(|| "ACP 子进程意外退出".to_string());
                 let error = anyhow::anyhow!(reason);
-                self.push_system_message(format!("Session disconnected: {error}"));
+                self.push_system_message(format!("会话已断开：{error}"));
                 return Err(error);
             }
         }
@@ -315,7 +329,7 @@ impl Application {
         self.ui.session.status = SessionStatus::Streaming;
 
         // Step 1: Immediately set a truncated title from user prompt (no delay)
-        if self.needs_title && self.ui.session.title == "New Session" {
+        if self.needs_title && self.ui.session.title == "新会话" {
             let title = extract_title_from_prompt(&title_source);
             self.ui.session.title = title.clone();
             let _ = self
@@ -344,27 +358,27 @@ impl Application {
             let last_error = self.session.last_error();
             if last_error.is_none() && self.should_auto_reconnect_after_clean_exit() {
                 if let Err(error) = self.reconnect_session() {
-                    let reason = format!("ACP subprocess exited and reconnect failed: {error}");
+                    let reason = format!("ACP 子进程退出且重连失败：{error}");
                     apply_event(
                         &mut self.ui,
                         ClientEvent::Interrupted {
                             reason: reason.clone(),
                         },
                     );
-                    self.push_system_message(format!("Session disconnected: {}", reason));
+                    self.push_system_message(format!("会话已断开：{}", reason));
                 }
                 return;
             }
 
             let reason =
-                last_error.unwrap_or_else(|| "ACP subprocess exited unexpectedly".to_string());
+                last_error.unwrap_or_else(|| "ACP 子进程意外退出".to_string());
             apply_event(
                 &mut self.ui,
                 ClientEvent::Interrupted {
                     reason: reason.clone(),
                 },
             );
-            self.push_system_message(format!("Session disconnected: {}", reason));
+            self.push_system_message(format!("会话已断开：{}", reason));
             return;
         }
 
@@ -384,7 +398,7 @@ impl Application {
                 self.ui.session.status = SessionStatus::Interrupted;
                 self.ui.agent_plan.clear();
                 self.push_system_message(format!(
-                    "Failed to read ACP events from `{}`: {}",
+                    "从 `{}` 读取 ACP 事件失败：{}",
                     self.agent_command, error
                 ));
                 self.in_flight_prompt = None;
@@ -413,25 +427,27 @@ impl Application {
         }
 
         // Preprocess ToolDiff events: capture base text from disk before apply_event
+        let workspace_root = self.ui.workspace.root.clone();
         let mut events = events;
         let mut had_tool_diff = false;
         for event in events.iter_mut() {
             if let ClientEvent::ToolDiff { path, old_text, .. } = event {
                 had_tool_diff = true;
+                // Normalize path to workspace-relative with forward slashes
+                let normalized = normalize_path_for_storage(path, &workspace_root);
+                let abs_path = workspace_root.join(&normalized);
                 // If old_text is None and we don't already have a base for this path,
                 // read the file from disk to capture the pre-modification content
                 if old_text.is_none() {
-                    let already_tracked =
-                        self.ui.session_changes.iter().any(|c| {
-                            normalize_tracked_path(&c.path) == normalize_tracked_path(path)
-                        });
-                    if !already_tracked {
-                        // Try to read from disk — if file doesn't exist, it's a new file (leave None)
-                        if let Ok(content) = std::fs::read_to_string(path.as_str()) {
-                            *old_text = Some(content);
-                        }
+                    if let Some(tracked) = self.ui.session_changes.iter().find(|c| {
+                        normalize_tracked_path(&c.path) == normalize_tracked_path(&normalized)
+                    }) {
+                        *old_text = tracked.old_text.clone();
+                    } else if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                        *old_text = Some(content);
                     }
                 }
+                *path = normalized;
             }
         }
 
@@ -517,17 +533,17 @@ impl Application {
         {
             tool.status = ToolStatus::Interrupted;
             if tool.summary.trim().is_empty()
-                || tool.summary == "Waiting for activity"
-                || tool.summary.starts_with("Awaiting permission")
+                || tool.summary == "等待活动"
+                || tool.summary.starts_with("等待权限")
             {
-                tool.summary = "Cancelled".into();
+                tool.summary = "已取消".into();
             }
             if tool.kind == "permission" && tool.permission_decision.is_none() {
-                tool.permission_decision = Some("cancelled".into());
+                tool.permission_decision = Some("已取消".into());
             }
             tool.logs.push(ToolLogEntry {
-                title: "Cancelled".into(),
-                body: "Client sent session/cancel for the active turn".into(),
+                title: "已取消".into(),
+                body: "客户端发送了 session/cancel 取消当前轮次".into(),
             });
             cancelled_tools.push(tool.clone());
         }
@@ -544,7 +560,7 @@ impl Application {
         value_id: &str,
     ) -> Result<workspace_model::SessionConfigState, String> {
         if self.in_flight_prompt.is_some() || self.ui.session.status != SessionStatus::Idle {
-            return Err("Session controls can only be changed while the session is idle".into());
+            return Err("会话控件只能在会话空闲时更改".into());
         }
 
         let control = self
@@ -554,13 +570,13 @@ impl Application {
             .iter()
             .find(|control| control.id == control_id)
             .cloned()
-            .ok_or_else(|| format!("Unknown session control: {control_id}"))?;
+            .ok_or_else(|| format!("未知的会话控件：{control_id}"))?;
 
         if !control.enabled {
-            return Err(format!("Session control is unavailable: {}", control.label));
+            return Err(format!("会话控件不可用：{}", control.label));
         }
         if !control.choices.iter().any(|choice| choice.id == value_id) {
-            return Err(format!("Unknown value for {}: {value_id}", control.label));
+            return Err(format!("{} 的值未知：{value_id}", control.label));
         }
 
         let events = match control.source {
@@ -678,7 +694,7 @@ impl Application {
             self.ui.session.title = s.title.clone();
         }
 
-        self.needs_title = self.ui.session.title == "New Session";
+        self.needs_title = self.ui.session.title == "新会话";
         self.agent_title_received = false;
         Ok(())
     }
@@ -709,7 +725,7 @@ impl Application {
         let _ = session.set_permission_mode("Build");
 
         self.ui.session.id = new_id;
-        self.ui.session.title = "New Session".to_string();
+        self.ui.session.title = "新会话".to_string();
         self.ui.session.model = initial_model;
         self.ui.session.mode = Some("Build".into());
         let agent_cli_label = crate::settings::agent_label_for_command(&self.agent_command);
@@ -740,7 +756,7 @@ impl Application {
     pub fn session_delete(&mut self, id: &str) -> Result<(), String> {
         // Don't allow deleting the active session
         if self.ui.session.id.to_string() == id {
-            return Err("Cannot delete the active session".to_string());
+            return Err("无法删除当前活动的会话".to_string());
         }
         self.store.delete_session(id).map_err(|e| e.to_string())
     }
@@ -950,10 +966,17 @@ impl Application {
         for change in changes {
             let normalized = normalize_tracked_path(&change.path);
             let is_new = !self.ui.session_changes.iter().any(|c| normalize_tracked_path(&c.path) == normalized);
+            let effective_old_text = change.old_text.clone().or_else(|| {
+                self.ui
+                    .session_changes
+                    .iter()
+                    .find(|c| normalize_tracked_path(&c.path) == normalized)
+                    .and_then(|c| c.old_text.clone())
+            });
             let hunks = if change.skipped_diff {
                 Vec::new()
             } else {
-                diff_to_hunks(change.old_text.as_deref(), &change.new_text)
+                diff_to_hunks(effective_old_text.as_deref(), &change.new_text)
             };
 
             if is_new {
@@ -1000,6 +1023,8 @@ impl Application {
         fn normalize_path(p: &str) -> String {
             normalize_tracked_path(p)
         }
+
+        let workspace_root = self.ui.workspace.root.clone();
 
         // Collect normalized paths already tracked in session_changes
         let tracked_paths: HashSet<String> = self
@@ -1056,10 +1081,9 @@ impl Application {
 
         // For each detected file write, read current content and upsert into SessionFileChange
         for (call_id, path) in write_paths {
-            let display_path = path.clone();
-            let file_path = PathBuf::from(&path);
-            if let Ok(new_text) = std::fs::read_to_string(&file_path) {
-                let normalized = normalize_path(&path);
+            let normalized = normalize_path_for_storage(&path, &workspace_root);
+            let abs_path = workspace_root.join(&normalized);
+            if let Ok(new_text) = std::fs::read_to_string(&abs_path) {
                 // Check if we already have this path (with normalized comparison)
                 if let Some(existing) = self
                     .ui
@@ -1084,7 +1108,7 @@ impl Application {
                     // New entry
                     let hunks = diff_to_hunks(None, &new_text);
                     self.ui.session_changes.push(SessionFileChange {
-                        path: display_path.clone(),
+                        path: normalized.clone(),
                         change_type: FileChangeType::Modified,
                         old_text: None,
                         new_text,
@@ -1122,16 +1146,16 @@ impl Application {
                         .iter_mut()
                         .find(|tool| tool.call_id == call_id)
                 {
-                    let path_buf = PathBuf::from(&display_path);
+                    let path_buf = PathBuf::from(&normalized);
                     if !tool.diff_paths.iter().any(|existing| {
                         normalize_path(&existing.display().to_string())
-                            == normalize_path(&display_path)
+                            == normalize_path(&normalized)
                     }) {
                         tool.diff_paths.push(path_buf.clone());
                     }
                     if let Some(preview) = tool.diff_previews.iter_mut().find(|preview| {
                         normalize_path(&preview.path.display().to_string())
-                            == normalize_path(&display_path)
+                            == normalize_path(&normalized)
                     }) {
                         preview.hunks = hunks;
                     } else {

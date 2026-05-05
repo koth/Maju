@@ -57,6 +57,10 @@ export async function reviewGetDiff(path: string): Promise<ChangedFile | null> {
   return invoke<ChangedFile | null>("review_get_diff", { path });
 }
 
+export async function reviewGetGitDiffContent(path: string): Promise<SessionFileChange | null> {
+  return invoke<SessionFileChange | null>("review_get_git_diff_content", { path });
+}
+
 export async function reviewApplyPatch(path: string): Promise<void> {
   return invoke("review_apply_patch", { path });
 }

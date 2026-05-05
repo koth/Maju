@@ -69,11 +69,11 @@ export function SessionList({ activeSessionId, workspace, onSessionChanged }: Pr
     <div className="session-list">
       <div className="sl-header">
         <div className="sl-heading">
-          <span className="sl-kicker">Navigator</span>
-          <span className="sl-title">Workspaces</span>
+          <span className="sl-kicker">导航</span>
+          <span className="sl-title">工作区</span>
         </div>
         <button className="sl-new-btn" type="button" onClick={handleCreate}>
-          New
+          新建
         </button>
       </div>
 
@@ -88,15 +88,15 @@ export function SessionList({ activeSessionId, workspace, onSessionChanged }: Pr
 
       <div className="sl-thread-branch">
         <div className="sl-thread-branch-title">
-          <span>Threads</span>
-          <span>Updated by recent activity</span>
+          <span>会话</span>
+          <span>按最近活动排序</span>
         </div>
 
         <div className="sl-items">
         {sessions.length === 0 && (
           <div className="sl-empty">
-            <span className="sl-empty-title">No threads yet</span>
-            <span className="sl-empty-copy">Start a thread inside this workspace.</span>
+            <span className="sl-empty-title">暂无会话</span>
+            <span className="sl-empty-copy">在此工作区中开始一个会话。</span>
           </div>
         )}
 
@@ -151,7 +151,7 @@ function ThreadRow({
         <div className="sl-item-title" title={session.title}>{session.title}</div>
         <div className="sl-item-meta">
           <span>{formatRelativeTime(session.updated_at || session.created_at)}</span>
-          <span>{session.message_count} messages</span>
+          <span>{session.message_count} 条消息</span>
         </div>
       </div>
       <div className="sl-item-side">
@@ -164,7 +164,7 @@ function ThreadRow({
               event.stopPropagation();
               onDelete(session.id);
             }}
-            title="Delete session"
+            title="删除会话"
           >
             x
           </button>
@@ -179,9 +179,9 @@ function groupSessions(sessions: SessionListItem[]): SessionGroup[] {
     return getTimestamp(b.updated_at || b.created_at) - getTimestamp(a.updated_at || a.created_at);
   });
   const buckets: SessionGroup[] = [
-    { label: "Today", sessions: [] },
-    { label: "Previous 7 days", sessions: [] },
-    { label: "Earlier", sessions: [] },
+    { label: "今天", sessions: [] },
+    { label: "过去 7 天", sessions: [] },
+    { label: "更早", sessions: [] },
   ];
 
   sorted.forEach((session) => {
@@ -200,19 +200,19 @@ function groupSessions(sessions: SessionListItem[]): SessionGroup[] {
 
 function formatRelativeTime(value: string) {
   const timestamp = getTimestamp(value);
-  if (!timestamp) return "Recently";
+  if (!timestamp) return "最近";
 
   const diffMs = Date.now() - timestamp;
   const minutes = Math.max(0, Math.floor(diffMs / 60000));
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  if (hours < 48) return "Yesterday";
+  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 48) return "昨天";
 
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
+  if (days < 7) return `${days} 天前`;
 
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }

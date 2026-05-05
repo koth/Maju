@@ -27,7 +27,7 @@ export function ThreadHeader({
         </h1>
       </div>
       <div className="thread-header-actions">
-        <span className="thread-header-count">{changeCount} changes</span>
+        <span className="thread-header-count">{changeCount} 处更改</span>
         <StatusPill status={session.status} />
       </div>
     </header>
@@ -36,10 +36,10 @@ export function ThreadHeader({
 
 function StatusPill({ status }: { status: string }) {
   const config: Record<string, { label: string; className: string }> = {
-    Idle: { label: "Idle", className: "status-idle" },
-    Streaming: { label: "Replying", className: "status-streaming" },
-    WaitingForTool: { label: "Using tools", className: "status-waiting" },
-    Interrupted: { label: "Interrupted", className: "status-interrupted" },
+    Idle: { label: "空闲", className: "status-idle" },
+    Streaming: { label: "回复中", className: "status-streaming" },
+    WaitingForTool: { label: "使用工具中", className: "status-waiting" },
+    Interrupted: { label: "已中断", className: "status-interrupted" },
   };
   const { label, className } = config[status] || {
     label: status,
