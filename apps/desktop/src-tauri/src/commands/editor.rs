@@ -5,7 +5,11 @@ use tauri::State;
 /// Resolve a path: if absolute, use as-is; if relative, join with workspace root.
 fn resolve_path(root: &std::path::Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() { p } else { root.join(path) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(path)
+    }
 }
 
 #[tauri::command]

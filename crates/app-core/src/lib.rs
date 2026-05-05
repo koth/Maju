@@ -1,5 +1,6 @@
 mod application;
 mod bootstrap;
+mod file_tracker;
 mod paths;
 mod reducer;
 pub mod settings;
@@ -13,9 +14,10 @@ mod tests {
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, SessionConfigCategory,
-        SessionConfigChoice, SessionConfigControl, SessionConfigSource, SessionConfigState,
-        TerminalOutput, ToolStatus, UserPromptContent,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, MessageRole,
+        SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
+        SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus,
+        UserPromptContent,
     };
 
     use tempfile::tempdir;
@@ -396,9 +398,11 @@ mod tests {
             &mut ui,
             ClientEvent::ToolUpdated {
                 id: "create-2".into(),
+                parent_id: None,
                 name: None,
                 kind: None,
                 summary: Some("Task #2 created successfully: 修复任务名展示".into()),
+                is_subagent: false,
                 raw_input: Some(
                     r#"{"subject":"修复任务名展示","description":"不要显示 Task #2"}"#
                         .replace('\\', "")
@@ -443,9 +447,11 @@ mod tests {
             &mut ui,
             ClientEvent::ToolUpdated {
                 id: "update-2".into(),
+                parent_id: None,
                 name: None,
                 kind: None,
                 summary: Some("Updated task #2 status".into()),
+                is_subagent: false,
                 raw_input: Some(
                     r#"{"taskId":"2","status":"in_progress"}"#.replace('\\', "").into(),
                 ),
@@ -470,9 +476,11 @@ mod tests {
             &mut ui,
             ClientEvent::ToolUpdated {
                 id: "read-large".into(),
+                parent_id: None,
                 name: Some("Read".into()),
                 kind: Some("read".into()),
                 summary: Some("Read large file".into()),
+                is_subagent: false,
                 raw_input: Some(huge.clone()),
                 raw_output: Some(huge.clone()),
                 terminal_output: Some(TerminalOutput {
@@ -835,5 +843,73 @@ mod tests {
         );
 
         assert_eq!(ui.session.title, "Refactor login flow");
+    }
+
+    #[test]
+    fn reducer_hides_thought_text_and_tracks_thinking_activity() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        let initial_msg_count = ui.messages.len();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ThinkingActivity { active: true },
+        );
+
+        assert_eq!(ui.thinking_status, Some(ThinkingStatus::Active));
+        assert!(ui.timeline.iter().any(|item| matches!(item, TimelineItem::Thinking)));
+        assert_eq!(ui.messages.len(), initial_msg_count);
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "Here is the answer.".into(),
+            },
+        );
+
+        assert_eq!(ui.thinking_status, Some(ThinkingStatus::Completed));
+        assert_eq!(ui.messages.len(), initial_msg_count + 1);
+        assert!(!ui.messages[initial_msg_count].body.contains("thinking"));
+    }
+
+    #[test]
+    fn reducer_tool_update_can_promote_existing_tool_to_subagent() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "task-1".into(),
+                parent_id: None,
+                name: "task".into(),
+                kind: "tool".into(),
+                summary: "task".into(),
+                is_subagent: false,
+                raw_input: Some("{}".into()),
+            },
+        );
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolUpdated {
+                id: "task-1".into(),
+                parent_id: Some("parent-1".into()),
+                name: Some("task".into()),
+                kind: Some("explore".into()),
+                summary: Some("探索项目结构和状态".into()),
+                is_subagent: true,
+                raw_input: Some("{\"description\":\"探索项目结构和状态\",\"subagent_type\":\"explore\"}".into()),
+                raw_output: None,
+                terminal_output: None,
+                is_partial: false,
+            },
+        );
+
+        let tool = ui.tools.first().expect("tool should exist");
+        assert_eq!(tool.parent_call_id.as_deref(), Some("parent-1"));
+        assert_eq!(tool.kind, "explore");
+        assert!(tool.is_subagent);
     }
 }

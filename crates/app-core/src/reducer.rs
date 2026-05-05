@@ -2,7 +2,8 @@ use acp_core::{ClientEvent, diff_to_hunks};
 use serde_json::Value;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffLineKind,
-    FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput, TimelineItem,
+    FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
+    ThinkingStatus, TimelineItem,
     ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
 };
 
@@ -14,8 +15,19 @@ const MAX_TOOL_LOG_CHARS: usize = 4 * 1024;
 pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
     match event {
         ClientEvent::SessionStarted { .. } => {}
+        ClientEvent::ThinkingActivity { active } => {
+            if active {
+                if ui.thinking_status != Some(ThinkingStatus::Active) {
+                    ui.timeline.push(TimelineItem::Thinking);
+                }
+                ui.thinking_status = Some(ThinkingStatus::Active);
+            } else {
+                ui.thinking_status = Some(ThinkingStatus::Completed);
+            }
+        }
         ClientEvent::TurnFinished { stop_reason } => {
             finalize_open_tools(ui, &stop_reason);
+            ui.thinking_status = None;
             ui.agent_plan.clear();
             ui.session.status = SessionStatus::Idle;
             ui.inspector_sections.push(SidebarSection {
@@ -30,6 +42,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 return;
             }
             if role == workspace_model::MessageRole::Assistant {
+                if ui.thinking_status == Some(ThinkingStatus::Active) {
+                    ui.thinking_status = Some(ThinkingStatus::Completed);
+                }
                 ui.session.status = SessionStatus::Streaming;
             }
             push_message(ui, role, content);
@@ -78,21 +93,29 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         }
         ClientEvent::ToolUpdated {
             id,
+            parent_id,
             name,
             kind,
             summary,
+            is_subagent,
             raw_input,
             raw_output,
             terminal_output,
             is_partial,
         } => {
+            if let Some(parent_id) = parent_id.as_deref() {
+                finalize_running_children(ui, parent_id, Some(&id));
+            }
             let (updated_tool_name, updated_raw_input) = {
-                let tool = ensure_tool(ui, &id, None, "tool", "tool", false);
+                let tool = ensure_tool(ui, &id, parent_id, "tool", "tool", is_subagent);
                 if let Some(name) = name {
                     tool.name = name;
                 }
                 if let Some(kind) = kind {
                     tool.kind = kind;
+                }
+                if is_subagent {
+                    tool.is_subagent = true;
                 }
                 if let Some(summary) = summary {
                     tool.summary = summary.clone();
@@ -856,7 +879,7 @@ fn cap_string(value: String, max_chars: usize) -> String {
 fn last_message_id(item: &TimelineItem) -> Option<uuid::Uuid> {
     match item {
         TimelineItem::Message(id) => Some(*id),
-        TimelineItem::Tool(_) => None,
+        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
     }
 }
 

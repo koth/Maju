@@ -1,4 +1,5 @@
 use crate::bootstrap::build_initial_ui;
+use crate::file_tracker::FileChangeTracker;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
 use acp_core::{ClientEvent, PromptTask, SessionConfig, SessionHandle, diff_to_hunks};
@@ -43,6 +44,7 @@ pub struct Application {
     agent_title_received: bool,
     /// When true, discard replay events from session/load until user sends first prompt
     skip_replay: bool,
+    file_tracker: FileChangeTracker,
 }
 
 fn normalize_tracked_path(path: &str) -> String {
@@ -228,6 +230,7 @@ impl Application {
             needs_title,
             agent_title_received: false,
             skip_replay,
+            file_tracker: FileChangeTracker::new(workspace_root),
         })
     }
 
@@ -273,6 +276,21 @@ impl Application {
             let error = anyhow::anyhow!("active agent does not support file attachments");
             self.push_system_message(error.to_string());
             return Err(error);
+        }
+
+        if !self.session.is_alive() {
+            if self.session.last_error().is_none() && self.should_auto_reconnect_after_clean_exit()
+            {
+                self.reconnect_session().map_err(anyhow::Error::msg)?;
+            } else {
+                let reason = self
+                    .session
+                    .last_error()
+                    .unwrap_or_else(|| "ACP subprocess exited unexpectedly".to_string());
+                let error = anyhow::anyhow!(reason);
+                self.push_system_message(format!("Session disconnected: {error}"));
+                return Err(error);
+            }
         }
 
         let message = ChatMessage {
@@ -323,10 +341,23 @@ impl Application {
             && !self.session.is_alive()
             && self.ui.session.status != SessionStatus::Interrupted
         {
-            let reason = self
-                .session
-                .last_error()
-                .unwrap_or_else(|| "ACP subprocess exited unexpectedly".to_string());
+            let last_error = self.session.last_error();
+            if last_error.is_none() && self.should_auto_reconnect_after_clean_exit() {
+                if let Err(error) = self.reconnect_session() {
+                    let reason = format!("ACP subprocess exited and reconnect failed: {error}");
+                    apply_event(
+                        &mut self.ui,
+                        ClientEvent::Interrupted {
+                            reason: reason.clone(),
+                        },
+                    );
+                    self.push_system_message(format!("Session disconnected: {}", reason));
+                }
+                return;
+            }
+
+            let reason =
+                last_error.unwrap_or_else(|| "ACP subprocess exited unexpectedly".to_string());
             apply_event(
                 &mut self.ui,
                 ClientEvent::Interrupted {
@@ -339,6 +370,7 @@ impl Application {
 
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
+            self.session.update_session_id(&events);
             for event in events {
                 apply_event(&mut self.ui, event.clone());
                 self.persist_event(&event);
@@ -403,8 +435,19 @@ impl Application {
             }
         }
 
-        // Process events (borrow of in_flight is released before self.persist_event)
+        // Process events and track tool lifecycle for file change detection
         for event in &events {
+            match event {
+                ClientEvent::ToolStarted { id, .. } => {
+                    self.file_tracker.start_recording(id, Vec::new());
+                }
+                ClientEvent::ToolCompleted { id, .. }
+                | ClientEvent::ToolFailed { id, .. } => {
+                    let changes = self.file_tracker.finish_recording(id);
+                    self.apply_tracker_changes(id, changes);
+                }
+                _ => {}
+            }
             apply_event(&mut self.ui, event.clone());
             self.persist_event(event);
         }
@@ -435,6 +478,20 @@ impl Application {
 
     pub fn has_in_flight_prompt(&self) -> bool {
         self.in_flight_prompt.is_some()
+    }
+
+    fn should_auto_reconnect_after_clean_exit(&self) -> bool {
+        if !self.agent_command.to_ascii_lowercase().contains("opencode") {
+            return false;
+        }
+
+        !self.session.id.is_empty()
+            || self
+                .store
+                .get_acp_session_id(&self.ui.session.id.to_string())
+                .ok()
+                .flatten()
+                .is_some()
     }
 
     pub fn cancel_prompt(&mut self) -> Result<(), String> {
@@ -698,7 +755,9 @@ impl Application {
                 .unwrap_or(None)
         };
 
-        let session = SessionHandle::start(SessionConfig {
+        let resume_id_for_handle = resume_id.clone();
+        let has_resume_id = resume_id_for_handle.is_some();
+        let mut session = SessionHandle::start(SessionConfig {
             workspace_root: self.ui.workspace.root.display().to_string(),
             app_data_root: self.app_paths.root().display().to_string(),
             model: self.ui.session.model.clone(),
@@ -708,6 +767,9 @@ impl Application {
             acp_port: self.acp_port,
         })
         .map_err(|e| e.to_string())?;
+        if let Some(acp_id) = resume_id_for_handle {
+            session.id = acp_id;
+        }
 
         self.session = session;
         self.ui.session.status = SessionStatus::Idle;
@@ -716,6 +778,7 @@ impl Application {
         self.ui.agent_plan.clear();
         self.in_flight_prompt = None;
         self.agent_title_received = false;
+        self.skip_replay = has_resume_id;
         Ok(())
     }
 
@@ -876,6 +939,59 @@ impl Application {
     }
 
     /// Detect file writes from completed tool calls by examining tool summaries/titles.
+    /// Apply verified file changes from the tracker to session state and tool diff previews.
+    fn apply_tracker_changes(
+        &mut self,
+        call_id: &str,
+        changes: Vec<crate::file_tracker::VerifiedFileChange>,
+    ) {
+        use acp_core::diff_to_hunks;
+
+        for change in changes {
+            let normalized = normalize_tracked_path(&change.path);
+            let is_new = !self.ui.session_changes.iter().any(|c| normalize_tracked_path(&c.path) == normalized);
+            let hunks = if change.skipped_diff {
+                Vec::new()
+            } else {
+                diff_to_hunks(change.old_text.as_deref(), &change.new_text)
+            };
+
+            if is_new {
+                let added = hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == DiffLineKind::Added).count();
+                let removed = hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == DiffLineKind::Removed).count();
+
+                self.ui.session_changes.push(SessionFileChange {
+                    path: change.path.clone(),
+                    change_type: change.change_type,
+                    old_text: change.old_text.clone(),
+                    new_text: change.new_text.clone(),
+                    added_lines: added,
+                    removed_lines: removed,
+                    timestamp: {
+                        use std::time::SystemTime;
+                        let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                        format!("{secs}")
+                    },
+                });
+            }
+
+            // Attach diff preview to the tool that caused the change
+            if let Some(tool) = self.ui.tools.iter_mut().find(|t| t.call_id == call_id) {
+                let path_buf = PathBuf::from(&change.path);
+                if !tool.diff_paths.iter().any(|p| normalize_tracked_path(&p.display().to_string()) == normalized) {
+                    tool.diff_paths.push(path_buf.clone());
+                }
+                if !change.skipped_diff {
+                    if let Some(preview) = tool.diff_previews.iter_mut().find(|p| normalize_tracked_path(&p.path.display().to_string()) == normalized) {
+                        preview.hunks = hunks;
+                    } else {
+                        tool.diff_previews.push(ToolDiffPreview { path: path_buf, hunks });
+                    }
+                }
+            }
+        }
+    }
+
     /// CodeBuddy agent uses terminal commands (cat > file << 'EOF') to write files,
     /// so we can't rely on ToolDiff events from the ACP protocol. Instead, we check
     /// completed tools for edit-related patterns and read the current file content.
@@ -917,8 +1033,7 @@ impl Application {
                 }
 
                 // Check raw_input JSON for file_path/filePath/path fields in edit/write tools
-                let lower = (tool.kind.clone() + " " + &tool.name).to_lowercase();
-                if lower.contains("edit") || lower.contains("write") {
+                if is_file_write_tool_identity(&tool.kind, &tool.name) {
                     if let Some(ref input) = tool.raw_input {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(input) {
                             let file_path = json
@@ -1031,6 +1146,22 @@ impl Application {
     }
 }
 
+fn is_file_write_tool_identity(kind: &str, name: &str) -> bool {
+    kind_and_name_tokens(kind, name).any(|token| {
+        matches!(
+            token.as_str(),
+            "edit" | "write" | "patch" | "applypatch" | "apply_patch" | "apply-patch"
+        )
+    })
+}
+
+fn kind_and_name_tokens<'a>(kind: &'a str, name: &'a str) -> impl Iterator<Item = String> + 'a {
+    kind.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .chain(name.split(|ch: char| !ch.is_ascii_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
 /// Extract a concise session title from the user's first prompt.
 /// Takes the first line, strips common prefixes, and truncates to 60 chars.
 fn extract_title_from_prompt(prompt: &str) -> String {
@@ -1060,6 +1191,25 @@ fn extract_title_from_prompt(prompt: &str) -> String {
     } else {
         let truncated: String = text.chars().take(57).collect();
         format!("{truncated}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_file_write_tool_identity;
+
+    #[test]
+    fn write_tool_detection_does_not_match_editor_paths() {
+        assert!(!is_file_write_tool_identity(
+            "read",
+            "docs\\editor-subsystem-design.md"
+        ));
+        assert!(!is_file_write_tool_identity(
+            "read",
+            "D:/work/kodex/docs/editor-subsystem-design.md"
+        ));
+        assert!(is_file_write_tool_identity("edit", "docs/architecture.md"));
+        assert!(is_file_write_tool_identity("tool", "mcp__opencode__write"));
     }
 }
 

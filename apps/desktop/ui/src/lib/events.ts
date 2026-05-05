@@ -1,5 +1,9 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot } from "../types";
+import type { UiSnapshot, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot } from "../types";
+
+export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
+  return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
+}
 
 export function onSessionStatus(callback: (status: SessionSummary) => void): Promise<UnlistenFn> {
   return listen<SessionSummary>("session:status", (event) => callback(event.payload));

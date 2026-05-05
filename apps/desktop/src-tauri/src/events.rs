@@ -1,6 +1,15 @@
 use tauri::{AppHandle, Emitter};
 use workspace_model::UiSnapshot;
 
+pub fn emit_ui_snapshot(app: &AppHandle, snapshot: &UiSnapshot) {
+    let _ = app.emit("ui:snapshot", snapshot);
+    emit_session_status(app, snapshot);
+    emit_session_message(app, snapshot);
+    emit_tool_updated(app, snapshot);
+    emit_git_status_changed(app, snapshot);
+    emit_session_config_updated(app, snapshot);
+}
+
 pub fn emit_session_status(app: &AppHandle, snapshot: &UiSnapshot) {
     let _ = app.emit("session:status", &snapshot.session);
 }

@@ -16,7 +16,7 @@ license = "MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
-agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model", "unstable_session_usage"] }
 agent-client-protocol-tokio = "0.11.1"
 anyhow = "1.0"
 futures = "0.3"

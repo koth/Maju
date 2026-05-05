@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { UiSnapshot, TabDescriptor } from "../../types";
 import { sessionGetState, gitRefresh, sessionResolvePermission } from "../../lib/tauri";
+import { onUiSnapshot } from "../../lib/events";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer } from "../composer/Composer";
+import { AgentPlanPanel } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
@@ -49,9 +51,34 @@ export function Workbench() {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    onUiSnapshot((nextSnapshot) => {
+      if (disposed) return;
+      prevSnapshotJson.current = JSON.stringify(nextSnapshot);
+      setWorkspaceReady(true);
+      setSnapshot(nextSnapshot);
+    })
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!workspaceReady) return;
     pollState();
-    const interval = setInterval(pollState, 500);
+    const interval = setInterval(pollState, 2000);
     return () => clearInterval(interval);
   }, [pollState, workspaceReady]);
 
@@ -268,6 +295,7 @@ export function Workbench() {
                   snapshot={snapshot}
                   onPermissionSelect={handlePermissionSelect}
                 />
+                <AgentPlanPanel entries={snapshot.agent_plan ?? []} />
                 <ChangesBar
                   changes={snapshot.session_changes ?? []}
                   onFileSelect={handleOpenDiffTab}

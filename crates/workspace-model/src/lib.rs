@@ -223,6 +223,13 @@ pub struct ChatMessage {
 pub enum TimelineItem {
     Message(Uuid),
     Tool(Uuid),
+    Thinking,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ThinkingStatus {
+    Active,
+    Completed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -385,6 +392,8 @@ pub struct UiSnapshot {
     pub inspector_tab: InspectorTab,
     pub inspector_sections: Vec<SidebarSection>,
     pub session_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub thinking_status: Option<ThinkingStatus>,
 }
 
 // ── Search types ──

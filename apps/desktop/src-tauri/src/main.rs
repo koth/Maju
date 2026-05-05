@@ -6,6 +6,8 @@ mod recent_workspaces;
 mod state;
 
 use state::AppState;
+use std::time::Duration;
+use tauri::Manager;
 
 fn main() {
     install_panic_logger();
@@ -14,6 +16,10 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .setup(|app| {
+            start_snapshot_bridge(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::session::session_get_state,
             commands::session::session_send_prompt,
@@ -51,6 +57,40 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kodex");
+}
+
+fn start_snapshot_bridge(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_snapshot_json = String::new();
+
+        loop {
+            let next_snapshot = app
+                .state::<AppState>()
+                .with_app(|application| {
+                    application.poll_prompt_progress();
+                    Ok(application.ui.clone())
+                })
+                .ok();
+
+            match next_snapshot {
+                Some(snapshot) => {
+                    if let Ok(json) = serde_json::to_string(&snapshot) {
+                        if json != last_snapshot_json {
+                            last_snapshot_json = json;
+                            events::emit_ui_snapshot(&app, &snapshot);
+                        }
+                    } else {
+                        events::emit_ui_snapshot(&app, &snapshot);
+                    }
+                }
+                None => {
+                    last_snapshot_json.clear();
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(120));
+        }
+    });
 }
 
 fn install_panic_logger() {

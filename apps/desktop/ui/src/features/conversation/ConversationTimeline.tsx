@@ -33,7 +33,7 @@ export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
     prevLen.current = snapshot.timeline.length;
-  }, [snapshot.timeline.length]);
+  }, [snapshot.timeline.length, snapshot.thinking_status]);
 
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
@@ -42,7 +42,11 @@ export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
     <div className="timeline-scroll" ref={scrollRef}>
       <div className="timeline-items">
         {snapshot.timeline.map((item, i) => {
-          if ("Message" in item) {
+          if (typeof item === "string" && item === "Thinking") {
+            return null;
+          }
+
+          if (typeof item === "object" && "Message" in item) {
             const msg = snapshot.messages.find((m) => m.id === item.Message);
             if (!msg) return null;
 
@@ -75,7 +79,6 @@ export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
               );
             }
 
-            // System messages
             return (
               <div key={i} className="msg msg-system">
                 <span className="msg-content msg-content-system">{msg.body}</span>
@@ -83,7 +86,7 @@ export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
             );
           }
 
-          if ("Tool" in item) {
+          if (typeof item === "object" && "Tool" in item) {
             const tool = snapshot.tools.find((t) => t.id === item.Tool);
             if (!tool) return null;
             if (tool.call_id === "workspace.scan" && !tool.parent_call_id)
@@ -103,6 +106,12 @@ export function ConversationTimeline({ snapshot, onPermissionSelect }: Props) {
 
           return null;
         })}
+        {snapshot.thinking_status === "Active" && (
+          <div className="thinking-indicator thinking-active">
+            <span className="thinking-bullet">•</span>
+            <span className="thinking-text">思考中</span>
+          </div>
+        )}
       </div>
     </div>
   );

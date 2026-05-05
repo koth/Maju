@@ -45,9 +45,11 @@ pub enum ClientEvent {
     },
     ToolUpdated {
         id: String,
+        parent_id: Option<String>,
         name: Option<String>,
         kind: Option<String>,
         summary: Option<String>,
+        is_subagent: bool,
         raw_input: Option<String>,
         raw_output: Option<String>,
         terminal_output: Option<TerminalOutput>,
@@ -105,6 +107,9 @@ pub enum ClientEvent {
     },
     PlanUpdated {
         entries: Vec<AgentPlanEntry>,
+    },
+    ThinkingActivity {
+        active: bool,
     },
     TurnFinished {
         stop_reason: String,

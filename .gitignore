@@ -7,6 +7,12 @@ target/
 apps/desktop/ui/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/nul
+apps/desktop/ui/.vite/
+
+# SQLite temporary files
+*.db-wal
+*.db-shm
+
 # Local app data and logs
 .kodex/
 *.log
@@ -19,3 +25,7 @@ apps/desktop/src-tauri/nul
 # OS/editor noise
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

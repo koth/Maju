@@ -13,7 +13,7 @@ use agent_client_protocol::schema::{
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
     TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
     ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
     WriteTextFileResponse,
@@ -735,9 +735,16 @@ struct HiddenAgentProcess {
     args: Vec<String>,
     env: Vec<(String, String)>,
     current_dir: PathBuf,
+    log_config: Option<SessionConfig>,
 }
 
 impl HiddenAgentProcess {
+    fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
+        let mut process = Self::from_command(&config.agent_command, &config.workspace_root)?;
+        process.log_config = Some(config.clone());
+        Ok(process)
+    }
+
     fn from_command(command: &str, current_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let args = shell_words::split(command).map_err(|err| anyhow!(err.to_string()))?;
         if args.is_empty() {
@@ -764,6 +771,7 @@ impl HiddenAgentProcess {
             args: args[command_index + 1..].to_vec(),
             env,
             current_dir: current_dir.into(),
+            log_config: None,
         })
     }
 }
@@ -837,7 +845,8 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         });
         thread::spawn(move || write_agent_stdin(shared_stdin, stdin_rx));
 
-        let child_monitor = monitor_hidden_agent_child(child, stderr_rx);
+        let log_config = self.log_config.clone();
+        let child_monitor = monitor_hidden_agent_child(child, stderr_rx, log_config.clone());
         let outgoing_sink = futures::sink::unfold(stdin_tx, |tx, line: String| async move {
             tx.send(line).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stdin closed")
@@ -854,9 +863,23 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         // keepalive thread doesn't drop the stdin handle prematurely.
         let _keepalive = stdin_keepalive_tx;
 
+        tokio::pin!(protocol);
+        tokio::pin!(child_monitor);
         tokio::select! {
-            result = protocol => result,
-            result = child_monitor => result,
+            result = &mut protocol => result,
+            result = &mut child_monitor => match result {
+                Ok(()) => {
+                    if let Some(config) = log_config.as_ref() {
+                        let _ = append_runtime_event_log(
+                            config,
+                            "agent/clean_exit_waiting_for_protocol",
+                            &json!({ "reason": "agent process exited before protocol completed" }),
+                        );
+                    }
+                    (&mut protocol).await
+                }
+                Err(error) => Err(error),
+            },
         }
     }
 }
@@ -872,17 +895,20 @@ struct TcpAgentProcess {
     env: Vec<(String, String)>,
     current_dir: PathBuf,
     port: u16,
+    log_config: SessionConfig,
 }
 
 impl TcpAgentProcess {
     fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
-        let parsed = HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
+        let parsed =
+            HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
         Ok(Self {
             command: parsed.command,
             args: parsed.args,
             env: parsed.env,
             current_dir: parsed.current_dir,
             port: config.acp_port,
+            log_config: config.clone(),
         })
     }
 }
@@ -951,12 +977,14 @@ impl ConnectTo<Client> for TcpAgentProcess {
         let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
         thread::spawn(move || read_agent_stderr(child_stderr, stderr_tx));
 
-        let child_monitor = monitor_hidden_agent_child(child, stderr_rx);
+        let log_config = self.log_config.clone();
+        let child_monitor = monitor_hidden_agent_child(child, stderr_rx, Some(log_config.clone()));
 
         // Wait for the agent to start listening on the port.
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", self.port)
-            .parse()
-            .map_err(|e| agent_client_protocol::util::internal_error(format!("invalid address: {e}")))?;
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", self.port).parse().map_err(|e| {
+                agent_client_protocol::util::internal_error(format!("invalid address: {e}"))
+            })?;
 
         let stream = {
             let mut last_err = None;
@@ -987,12 +1015,13 @@ impl ConnectTo<Client> for TcpAgentProcess {
             })?
         };
 
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| agent_client_protocol::util::internal_error(format!("set_nonblocking: {e}")))?;
+        stream.set_nonblocking(true).map_err(|e| {
+            agent_client_protocol::util::internal_error(format!("set_nonblocking: {e}"))
+        })?;
 
-        let tcp_stream = tokio::net::TcpStream::from_std(stream)
-            .map_err(|e| agent_client_protocol::util::internal_error(format!("TcpStream::from_std: {e}")))?;
+        let tcp_stream = tokio::net::TcpStream::from_std(stream).map_err(|e| {
+            agent_client_protocol::util::internal_error(format!("TcpStream::from_std: {e}"))
+        })?;
 
         let (read_half, write_half) = tcp_stream.into_split();
         let reader = tokio::io::BufReader::new(read_half);
@@ -1009,28 +1038,41 @@ impl ConnectTo<Client> for TcpAgentProcess {
         });
 
         let writer = tokio::io::BufWriter::new(write_half);
-        let outgoing_sink = futures::sink::unfold(writer, |mut writer, line: String| async move {
-            use tokio::io::AsyncWriteExt;
-            writer.write_all(line.as_bytes()).await.map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-            })?;
-            writer.write_all(b"\n").await.map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-            })?;
-            writer.flush().await.map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-            })?;
-            Ok::<_, std::io::Error>(writer)
-        });
+        let outgoing_sink =
+            futures::sink::unfold(writer, |mut writer, line: String| async move {
+                use tokio::io::AsyncWriteExt;
+                writer.write_all(line.as_bytes()).await.map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                })?;
+                writer.write_all(b"\n").await.map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                })?;
+                writer.flush().await.map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
+                })?;
+                Ok::<_, std::io::Error>(writer)
+            });
 
         let protocol = agent_client_protocol::ConnectTo::<Client>::connect_to(
             Lines::new(outgoing_sink, incoming_lines),
             client,
         );
 
+        tokio::pin!(protocol);
+        tokio::pin!(child_monitor);
         tokio::select! {
-            result = protocol => result,
-            result = child_monitor => result,
+            result = &mut protocol => result,
+            result = &mut child_monitor => match result {
+                Ok(()) => {
+                    let _ = append_runtime_event_log(
+                        &log_config,
+                        "agent/clean_exit_waiting_for_protocol",
+                        &json!({ "reason": "agent process exited before protocol completed" }),
+                    );
+                    (&mut protocol).await
+                }
+                Err(error) => Err(error),
+            },
         }
     }
 }
@@ -1113,6 +1155,7 @@ fn trim_line_ending(line: &mut String) {
 async fn monitor_hidden_agent_child(
     mut child: Child,
     stderr_rx: mpsc::Receiver<String>,
+    log_config: Option<SessionConfig>,
 ) -> agent_client_protocol::Result<()> {
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     thread::spawn(move || {
@@ -1124,11 +1167,34 @@ async fn monitor_hidden_agent_child(
         .await
         .map_err(|_| agent_client_protocol::util::internal_error("agent wait thread closed"))?
         .map_err(agent_client_protocol::Error::into_internal_error)?;
-    if status.success() {
+    let success = status.success();
+    let stderr = if success {
+        String::new()
+    } else {
+        stderr_rx.try_recv().unwrap_or_default()
+    };
+    let payload = if stderr.is_empty() {
+        json!({
+            "success": success,
+            "status": status.to_string(),
+            "exitCode": status.code()
+        })
+    } else {
+        json!({
+            "success": success,
+            "status": status.to_string(),
+            "exitCode": status.code(),
+            "stderr": stderr.clone()
+        })
+    };
+    if let Some(config) = log_config.as_ref() {
+        let _ = append_runtime_event_log(config, "agent/process_exit", &payload);
+    }
+
+    if success {
         return Ok(());
     }
 
-    let stderr = stderr_rx.try_recv().unwrap_or_default();
     let message = if stderr.is_empty() {
         format!("agent process exited with {status}")
     } else {
@@ -1197,16 +1263,30 @@ pub(crate) fn run_session(
     rx_commands: mpsc::Receiver<RuntimeCommand>,
     permission_broker: PermissionBroker,
 ) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("failed to create tokio runtime")?;
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let _ = append_runtime_event_log(
+                &config,
+                "runtime/session_result",
+                &json!({
+                    "status": "error",
+                    "error": format!("failed to create tokio runtime: {err}")
+                }),
+            );
+            return Err(err).context("failed to create tokio runtime");
+        }
+    };
 
-    runtime.block_on(async move {
+    let log_config = config.clone();
+    let result: anyhow::Result<()> = runtime.block_on(async move {
         let agent = if config.acp_port > 0 {
             AgentTransport::Tcp(TcpAgentProcess::from_config(&config)?)
         } else {
-            AgentTransport::Stdio(HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?)
+            AgentTransport::Stdio(HiddenAgentProcess::from_config(&config)?)
         };
         let tx_permissions = tx_events.clone();
         let permission_log_config = config.clone();
@@ -1628,6 +1708,7 @@ pub(crate) fn run_session(
                                                     | SessionUpdate::CurrentModeUpdate(_) => {
                                                         let _ = emit_notification(
                                                             &tx_events,
+                                                            &config.workspace_root,
                                                             notification,
                                                         );
                                                     }
@@ -1727,7 +1808,25 @@ pub(crate) fn run_session(
 
                                     let message = match next_message {
                                         Ok(Ok(message)) => Some(message),
-                                        Ok(Err(err)) => return Err(err),
+                                        Ok(Err(err)) => {
+                                            if let Some(reason) =
+                                                recv_stop_reason_with_grace(&stop_rx).await
+                                            {
+                                                append_runtime_event_log(
+                                                    &config,
+                                                    "session/read_update_closed_after_stop",
+                                                    &json!({ "error": err.to_string() }),
+                                                )?;
+                                                emit_turn_finished(&config, &tx_events, reason)?;
+                                                return Ok(());
+                                            }
+                                            append_runtime_event_log(
+                                                &config,
+                                                "session/read_update_error",
+                                                &json!({ "error": err.to_string() }),
+                                            )?;
+                                            return Err(err);
+                                        }
                                         Err(_) => None,
                                     };
 
@@ -1771,14 +1870,7 @@ pub(crate) fn run_session(
 
                                     let Some(message) = message else {
                                         if let Ok(reason) = stop_rx.try_recv() {
-                                            let stop_reason = format_stop_reason(reason);
-                                            append_runtime_event_log(
-                                                &config,
-                                                "session/stop_reason",
-                                                &json!({ "stopReason": stop_reason.clone() }),
-                                            )?;
-                                            let _ = tx_events
-                                                .send(ClientEvent::TurnFinished { stop_reason });
+                                            emit_turn_finished(&config, &tx_events, reason)?;
                                             break;
                                         }
                                         continue;
@@ -1797,7 +1889,7 @@ pub(crate) fn run_session(
                                                         &config,
                                                         &notification,
                                                     )?;
-                                                    emit_notification(&tx_events, notification)?;
+                                                    emit_notification(&tx_events, &config.workspace_root, notification)?;
                                                     Ok(())
                                                 },
                                             )
@@ -1817,16 +1909,7 @@ pub(crate) fn run_session(
                                         agent_client_protocol::SessionMessage::StopReason(
                                             reason,
                                         ) => {
-                                            append_runtime_event_log(
-                                                &config,
-                                                "session/stop_reason",
-                                                &json!({
-                                                    "stopReason": format_stop_reason(reason)
-                                                }),
-                                            )?;
-                                            let _ = tx_events.send(ClientEvent::TurnFinished {
-                                                stop_reason: format_stop_reason(reason),
-                                            });
+                                            emit_turn_finished(&config, &tx_events, reason)?;
                                             break;
                                         }
                                         other => {
@@ -1929,7 +2012,44 @@ pub(crate) fn run_session(
             .map_err(|err| anyhow!(err.to_string()))?;
 
         Ok(())
-    })
+    });
+
+    let payload = match &result {
+        Ok(()) => json!({ "status": "ok" }),
+        Err(error) => json!({ "status": "error", "error": error.to_string() }),
+    };
+    let _ = append_runtime_event_log(&log_config, "runtime/session_result", &payload);
+
+    result
+}
+
+fn emit_turn_finished(
+    config: &SessionConfig,
+    tx_events: &mpsc::Sender<ClientEvent>,
+    reason: StopReason,
+) -> anyhow::Result<()> {
+    let stop_reason = format_stop_reason(reason);
+    append_runtime_event_log(
+        config,
+        "session/stop_reason",
+        &json!({ "stopReason": stop_reason.clone() }),
+    )?;
+    let _ = tx_events.send(ClientEvent::TurnFinished { stop_reason });
+    Ok(())
+}
+
+async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Option<StopReason> {
+    for attempt in 0..5 {
+        match stop_rx.try_recv() {
+            Ok(reason) => return Some(reason),
+            Err(mpsc::TryRecvError::Disconnected) => return None,
+            Err(mpsc::TryRecvError::Empty) if attempt < 4 => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(mpsc::TryRecvError::Empty) => return None,
+        }
+    }
+    None
 }
 
 fn read_workspace_text_file(

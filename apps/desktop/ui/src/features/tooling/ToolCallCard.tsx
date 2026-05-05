@@ -30,15 +30,18 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
 
   const [childrenCollapsed, setChildrenCollapsed] = useState(false);
 
+  const trackedDiffPaths = getTrackedDiffPaths(tool);
+  const diffPreviews = getTrackedDiffPreviews(tool);
   const category = classifyTool(tool);
   const bullet = statusBullet(tool.status);
   const verb = toolVerb(tool.status, category);
-  const headerTitle = extractHeaderTitle(tool);
-  const cmdDetail = extractCommandDetail(tool);
+  const headerTitle = extractHeaderTitle(tool, trackedDiffPaths);
+  const cmdDetail = extractCommandDetail(tool, trackedDiffPaths);
   const outputLines = getOutputLines(tool);
+  const detailLines = getDetailLines(tool);
+  const logEntries = getVisibleLogEntries(tool);
   const errorLine =
     tool.error && !isVagueError(tool.error) ? tool.error : null;
-  const diffPreviews = tool.diff_previews ?? [];
   const diffStats = getDiffStats(diffPreviews);
 
   // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
@@ -53,10 +56,12 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
   const hasDetail =
     !!errorLine ||
     !!cmdDetail ||
+    detailLines.lines.length > 0 ||
+    logEntries.entries.length > 0 ||
     outputLines.lines.length > 0 ||
     rawOutputLines.lines.length > 0 ||
     diffPreviews.length > 0 ||
-    tool.diff_paths.length > 0;
+    trackedDiffPaths.length > 0;
 
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>
@@ -112,6 +117,45 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
                 <span className="tc-output-prefix">└ </span>
                 <span className="tc-cmd-detail">{cmdDetail}</span>
               </div>
+            </div>
+          )}
+
+          {detailLines.lines.length > 0 && (
+            <div className="tc-output-block">
+              {detailLines.lines.map((line, i) => (
+                <div key={i} className="tc-output-line">
+                  <span className="tc-output-prefix">
+                    {i === 0 ? "└ " : "  "}
+                  </span>
+                  {line}
+                </div>
+              ))}
+              {detailLines.omitted > 0 && (
+                <div className="tc-output-line tc-output-ellipsis">
+                  <span className="tc-output-prefix">  </span>… +
+                  {detailLines.omitted} lines
+                </div>
+              )}
+            </div>
+          )}
+
+          {logEntries.entries.length > 0 && (
+            <div className="tc-output-block">
+              {logEntries.entries.map((entry, i) => (
+                <div key={`${entry.title}-${i}`} className="tc-output-line tc-log-line">
+                  <span className="tc-output-prefix">
+                    {i === 0 ? "└ " : "  "}
+                  </span>
+                  <span className="tc-log-title">{entry.title}</span>
+                  <span className="tc-log-body">{entry.body}</span>
+                </div>
+              ))}
+              {logEntries.omitted > 0 && (
+                <div className="tc-output-line tc-output-ellipsis">
+                  <span className="tc-output-prefix">  </span>… +
+                  {logEntries.omitted} updates
+                </div>
+              )}
             </div>
           )}
 
@@ -181,9 +225,9 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
             </div>
           )}
 
-          {diffPreviews.length === 0 && tool.diff_paths.length > 0 && (
+          {diffPreviews.length === 0 && trackedDiffPaths.length > 0 && (
             <div className="tc-output-block">
-              {tool.diff_paths.map((p, i) => (
+              {trackedDiffPaths.map((p, i) => (
                 <div key={i} className="tc-output-line">
                   <span className="tc-output-prefix">
                     {i === 0 ? "└ " : "  "}
@@ -354,13 +398,13 @@ function permissionTone(kind: string) {
  * Prefers stable input metadata and file paths over completion output.
  * Keeps raw commands in the expanded detail instead of the header.
  */
-function extractHeaderTitle(tool: ToolInvocation): string {
+function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): string {
   const inputTitle = extractInputTitle(tool);
   if (inputTitle) return truncate(inputTitle, 80);
 
   // For edit tools, extract just the filename from diff_paths or name
-  if (tool.diff_paths.length > 0) {
-    return shortPath(tool.diff_paths[tool.diff_paths.length - 1]);
+  if (trackedDiffPaths.length > 0) {
+    return shortPath(trackedDiffPaths[trackedDiffPaths.length - 1]);
   }
 
   const namePath = extractPathFromToolName(tool.name);
@@ -526,10 +570,10 @@ function looksLikeToolOutput(text: string): boolean {
  * Extract the detailed command/path for the expandable section.
  * Returns null if there's nothing meaningful to show beyond the header.
  */
-function extractCommandDetail(tool: ToolInvocation): string | null {
+function extractCommandDetail(tool: ToolInvocation, trackedDiffPaths: string[]): string | null {
   // For edit tools, show full file path
-  if (tool.diff_paths.length > 0) {
-    return tool.diff_paths[tool.diff_paths.length - 1];
+  if (trackedDiffPaths.length > 0) {
+    return trackedDiffPaths[trackedDiffPaths.length - 1];
   }
 
   if (tool.raw_input) {
@@ -585,16 +629,18 @@ type ToolCategory = "exploring" | "editing" | "executing";
 
 function classifyTool(tool: ToolInvocation): ToolCategory {
   const identity = `${tool.kind} ${tool.name}`.toLowerCase();
+  const subagentType = getSubagentType(tool);
 
-  if (tool.diff_paths.length > 0 || (tool.diff_previews?.length ?? 0) > 0) {
+  if (isExplicitEditToolInvocation(tool)) {
     return "editing";
+  }
+
+  if (subagentType === "explore") {
+    return "exploring";
   }
 
   if (isCommandTool(tool)) {
     return "executing";
-  }
-  if (isExplicitEditTool(identity)) {
-    return "editing";
   }
   if (isExploreTool(tool, `${identity} ${tool.summary}`.toLowerCase())) {
     return "exploring";
@@ -606,6 +652,72 @@ function isExplicitEditTool(identity: string): boolean {
   return /(^|[\s._:-])(?:edit|write|patch|apply[_-]?patch)([\s._:-]|$)/.test(
     identity
   );
+}
+
+function isExplicitEditToolInvocation(tool: ToolInvocation): boolean {
+  return isExplicitEditTool(`${tool.kind} ${tool.name}`.toLowerCase());
+}
+
+function getTrackedDiffPaths(tool: ToolInvocation): string[] {
+  return isExplicitEditToolInvocation(tool) ? tool.diff_paths : [];
+}
+
+function getTrackedDiffPreviews(tool: ToolInvocation): ToolDiffPreview[] {
+  return isExplicitEditToolInvocation(tool) ? tool.diff_previews ?? [] : [];
+}
+
+function getSubagentType(tool: ToolInvocation): string | null {
+  if (!tool.is_subagent || !tool.raw_input) return null;
+  try {
+    const input = JSON.parse(tool.raw_input);
+    return typeof input.subagent_type === "string"
+      ? input.subagent_type.toLowerCase()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeComparableText(text: string | null | undefined): string {
+  return (text ?? "").replace(/\r\n/g, "\n").trim();
+}
+
+function getDetailLines(tool: ToolInvocation): {
+  lines: string[];
+  omitted: number;
+} {
+  const detail = normalizeComparableText(tool.detail_text);
+  if (!detail) return { lines: [], omitted: 0 };
+
+  const allLines = detail.split("\n");
+  if (allLines.length <= MAX_OUTPUT_LINES) {
+    return { lines: allLines, omitted: 0 };
+  }
+
+  const tail = allLines.slice(-MAX_OUTPUT_LINES);
+  return { lines: tail, omitted: allLines.length - MAX_OUTPUT_LINES };
+}
+
+function getVisibleLogEntries(tool: ToolInvocation): {
+  entries: ToolInvocation["logs"];
+  omitted: number;
+} {
+  const detail = normalizeComparableText(tool.detail_text);
+  const rawOutput = normalizeComparableText(tool.raw_output);
+  const entries = tool.logs.filter((entry) => {
+    const body = normalizeComparableText(entry.body);
+    if (!body) return false;
+    if (detail && body === detail) return false;
+    if (rawOutput && body === rawOutput) return false;
+    return true;
+  });
+
+  if (entries.length <= MAX_OUTPUT_LINES) {
+    return { entries, omitted: 0 };
+  }
+
+  const tail = entries.slice(-MAX_OUTPUT_LINES);
+  return { entries: tail, omitted: entries.length - MAX_OUTPUT_LINES };
 }
 
 function isExploreTool(tool: ToolInvocation, lower: string): boolean {
@@ -738,6 +850,13 @@ function getRawOutputLines(tool: ToolInvocation): {
 
   const raw = tool.raw_output?.trim();
   if (!raw) return { lines: [], omitted: 0 };
+  const normalizedRaw = normalizeComparableText(raw);
+  if (normalizedRaw === normalizeComparableText(tool.detail_text)) {
+    return { lines: [], omitted: 0 };
+  }
+  if (tool.logs.some((entry) => normalizeComparableText(entry.body) === normalizedRaw)) {
+    return { lines: [], omitted: 0 };
+  }
 
   // Skip vague/unhelpful outputs
   if (isVagueError(raw)) return { lines: [], omitted: 0 };

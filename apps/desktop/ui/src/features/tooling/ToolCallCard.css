@@ -59,7 +59,7 @@
 
 .tc-bullet-active {
   color: var(--accent);
-  animation: bulletPulse 1.2s ease-in-out infinite;
+  animation: tc-bullet-blink 1.1s ease-in-out infinite;
 }
 
 .tc-bullet-ok {
@@ -74,9 +74,22 @@
   color: var(--warning);
 }
 
-@keyframes bulletPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+@keyframes tc-bullet-blink {
+  0%,
+  100% {
+    opacity: 0.38;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-bullet-active {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 .tc-verb {
@@ -136,6 +149,20 @@
 .tc-output-ellipsis {
   color: var(--text-soft);
   font-style: italic;
+}
+
+.tc-log-line {
+  gap: 6px;
+}
+
+.tc-log-title {
+  color: var(--text-muted);
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.tc-log-body {
+  color: var(--text-soft);
 }
 
 /* ── Command detail in expanded view ── */

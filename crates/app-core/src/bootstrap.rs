@@ -96,5 +96,6 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             },
         ],
         session_changes: Vec::new(),
+        thinking_status: None,
     })
 }

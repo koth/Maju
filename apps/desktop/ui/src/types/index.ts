@@ -9,7 +9,10 @@ export type SessionConfigSource = "ConfigOption" | "SessionModel" | "LegacyMode"
 
 export type TimelineItem =
   | { Message: string }
-  | { Tool: string };
+  | { Tool: string }
+  | "Thinking";
+
+export type ThinkingStatus = "Active" | "Completed";
 
 export interface WorkspaceDescriptor {
   id: string;
@@ -179,6 +182,7 @@ export interface UiSnapshot {
   inspector_tab: InspectorTab;
   inspector_sections: SidebarSection[];
   session_changes: SessionFileChange[];
+  thinking_status: ThinkingStatus | null;
 }
 
 export interface RecentWorkspace {

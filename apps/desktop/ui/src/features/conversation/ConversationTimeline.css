@@ -257,3 +257,40 @@
 .md-tbody .md-tr:hover .md-td {
   background: rgba(255, 255, 255, 0.02);
 }
+
+/* ── Thinking indicator ── */
+.thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 4px 22px;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.thinking-bullet {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.thinking-active {
+  animation: thinking-blink 1.1s ease-in-out infinite;
+}
+
+@keyframes thinking-blink {
+  0%,
+  100% {
+    opacity: 0.38;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-active {
+    animation: none;
+    opacity: 1;
+  }
+}

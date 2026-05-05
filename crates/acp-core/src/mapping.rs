@@ -25,11 +25,12 @@ const BUILD_MODE_ID: &str = "build";
 
 pub(crate) fn emit_notification(
     tx: &mpsc::Sender<ClientEvent>,
+    workspace_root: &str,
     notification: SessionNotification,
 ) -> anyhow::Result<()> {
     let raw_notification =
         serde_json::to_value(&notification).map_err(|err| anyhow!(err.to_string()))?;
-    if emit_codebuddy_notification(tx, &raw_notification)? {
+    if emit_codebuddy_notification(tx, workspace_root, &raw_notification)? {
         return Ok(());
     }
 
@@ -38,10 +39,12 @@ pub(crate) fn emit_notification(
             emit_content(tx, MessageRole::User, chunk.content)
         }
         SessionUpdate::AgentMessageChunk(chunk) => {
+            let _ = tx.send(ClientEvent::ThinkingActivity { active: false });
             emit_content(tx, MessageRole::Assistant, chunk.content)
         }
-        SessionUpdate::AgentThoughtChunk(chunk) => {
-            emit_content(tx, MessageRole::System, chunk.content)
+        SessionUpdate::AgentThoughtChunk(_chunk) => {
+            tx.send(ClientEvent::ThinkingActivity { active: true })
+                .map_err(|_| anyhow!("failed to emit thinking activity"))
         }
         SessionUpdate::ToolCall(tool) => emit_tool_call(tx, tool),
         SessionUpdate::ToolCallUpdate(update) => emit_tool_update(tx, update),
@@ -500,6 +503,7 @@ fn emit_tool_call(tx: &mpsc::Sender<ClientEvent>, tool: ToolCall) -> anyhow::Res
 
 fn emit_codebuddy_notification(
     tx: &mpsc::Sender<ClientEvent>,
+    workspace_root: &str,
     payload: &Value,
 ) -> anyhow::Result<bool> {
     let Some(update) = payload.get("update") else {
@@ -511,11 +515,11 @@ fn emit_codebuddy_notification(
 
     match kind {
         "tool_call" => {
-            emit_codebuddy_tool_call(tx, update)?;
+            emit_codebuddy_tool_call(tx, workspace_root, update)?;
             Ok(true)
         }
         "tool_call_update" => {
-            emit_codebuddy_tool_call_update(tx, update)?;
+            emit_codebuddy_tool_call_update(tx, workspace_root, update)?;
             Ok(true)
         }
         "agent_message_chunk" => {
@@ -534,21 +538,14 @@ fn emit_codebuddy_notification(
     }
 }
 
-fn emit_codebuddy_tool_call(tx: &mpsc::Sender<ClientEvent>, update: &Value) -> anyhow::Result<()> {
+fn emit_codebuddy_tool_call(tx: &mpsc::Sender<ClientEvent>, workspace_root: &str, update: &Value) -> anyhow::Result<()> {
     let id = update
         .get("toolCallId")
         .and_then(Value::as_str)
         .unwrap_or("tool")
         .to_string();
-    let meta = update.get("_meta").and_then(Value::as_object);
-    let parent_id = meta
-        .and_then(|meta| meta.get("codebuddy.ai/parentToolCallId"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let is_subagent = meta
-        .and_then(|meta| meta.get("codebuddy.ai/isSubagent"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let parent_id = codebuddy_parent_tool_call_id(update);
+    let is_subagent = codebuddy_is_subagent(update);
     let status = tool_call_status(update);
     let name = tool_display_name(update);
     let kind = tool_kind_label(update);
@@ -565,7 +562,8 @@ fn emit_codebuddy_tool_call(tx: &mpsc::Sender<ClientEvent>, update: &Value) -> a
     })
     .map_err(|_| anyhow!("failed to emit CodeBuddy tool start"))?;
 
-    emit_codebuddy_diff_content(tx, &id, update)?;
+    emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
+    emit_codebuddy_text_content(tx, &id, update)?;
 
     if status.as_deref() == Some("completed") {
         let terminal_output = update.get("rawOutput").and_then(parse_terminal_output);
@@ -584,6 +582,7 @@ fn emit_codebuddy_tool_call(tx: &mpsc::Sender<ClientEvent>, update: &Value) -> a
 
 fn emit_codebuddy_tool_call_update(
     tx: &mpsc::Sender<ClientEvent>,
+    workspace_root: &str,
     update: &Value,
 ) -> anyhow::Result<()> {
     let id = update
@@ -591,6 +590,8 @@ fn emit_codebuddy_tool_call_update(
         .and_then(Value::as_str)
         .unwrap_or("tool")
         .to_string();
+    let parent_id = codebuddy_parent_tool_call_id(update);
+    let is_subagent = codebuddy_is_subagent(update);
     let status = tool_call_status(update);
     let is_partial = status.is_none();
 
@@ -605,18 +606,7 @@ fn emit_codebuddy_tool_call_update(
     let kind = if is_partial {
         None
     } else {
-        update
-            .get("kind")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| {
-                update
-                    .get("_meta")
-                    .and_then(Value::as_object)
-                    .and_then(|meta| meta.get("codebuddy.ai/toolName"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
+        Some(tool_kind_label(update))
     };
     let summary = if is_partial {
         None
@@ -639,14 +629,17 @@ fn emit_codebuddy_tool_call_update(
     };
 
     if !is_partial {
-        emit_codebuddy_diff_content(tx, &id, update)?;
+        emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
+        emit_codebuddy_text_content(tx, &id, update)?;
     }
 
     tx.send(ClientEvent::ToolUpdated {
         id: id.clone(),
+        parent_id,
         name: name.clone(),
         kind,
         summary: summary.clone(),
+        is_subagent,
         raw_input: raw_input.map(format_json),
         raw_output: raw_output.map(format_value_for_ui),
         terminal_output: terminal_output.clone(),
@@ -693,6 +686,7 @@ fn emit_codebuddy_tool_call_update(
 
 fn emit_codebuddy_diff_content(
     tx: &mpsc::Sender<ClientEvent>,
+    workspace_root: &str,
     id: &str,
     update: &Value,
 ) -> anyhow::Result<()> {
@@ -710,7 +704,17 @@ fn emit_codebuddy_diff_content(
         let old_text = item
             .get("oldText")
             .and_then(Value::as_str)
-            .map(str::to_string);
+            .map(str::to_string)
+            // If the agent didn't send oldText, try reading from disk
+            // so we compute a real diff instead of marking the whole file as Added
+            .or_else(|| {
+                let full_path = if std::path::Path::new(path).is_relative() {
+                    std::path::Path::new(workspace_root).join(path)
+                } else {
+                    std::path::PathBuf::from(path)
+                };
+                std::fs::read_to_string(&full_path).ok()
+            });
 
         tx.send(ClientEvent::ToolDiff {
             id: id.to_string(),
@@ -724,6 +728,23 @@ fn emit_codebuddy_diff_content(
     Ok(())
 }
 
+fn emit_codebuddy_text_content(
+    tx: &mpsc::Sender<ClientEvent>,
+    id: &str,
+    update: &Value,
+) -> anyhow::Result<()> {
+    let text = extract_text(update.get("content"));
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    tx.send(ClientEvent::ToolMessageChunk {
+        id: id.to_string(),
+        content: text,
+    })
+    .map_err(|_| anyhow!("failed to emit CodeBuddy tool text content"))
+}
+
 fn emit_codebuddy_agent_chunk(
     tx: &mpsc::Sender<ClientEvent>,
     update: &Value,
@@ -733,14 +754,9 @@ fn emit_codebuddy_agent_chunk(
         return Ok(());
     }
 
-    if let Some(parent_id) = update
-        .get("_meta")
-        .and_then(Value::as_object)
-        .and_then(|meta| meta.get("codebuddy.ai/parentToolCallId"))
-        .and_then(Value::as_str)
-    {
+    if let Some(parent_id) = codebuddy_parent_tool_call_id(update) {
         tx.send(ClientEvent::ToolMessageChunk {
-            id: parent_id.to_string(),
+            id: parent_id,
             content: text,
         })
         .map_err(|_| anyhow!("failed to emit CodeBuddy tool message chunk"))
@@ -904,12 +920,15 @@ fn explicit_tool_display_name(update: &Value) -> Option<String> {
 }
 
 fn tool_kind_label(update: &Value) -> String {
-    update
-        .get("_meta")
-        .and_then(Value::as_object)
-        .and_then(|meta| meta.get("codebuddy.ai/toolName"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    codebuddy_subagent_type(update)
+        .or_else(|| {
+            update
+                .get("_meta")
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("codebuddy.ai/toolName"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .or_else(|| {
             update
                 .get("kind")
@@ -943,6 +962,49 @@ fn tool_summary(update: &Value, fallback: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn codebuddy_parent_tool_call_id(update: &Value) -> Option<String> {
+    update
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("codebuddy.ai/parentToolCallId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            update
+                .get("rawInput")
+                .and_then(|input| input.get("parent_tool_call_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn codebuddy_subagent_type(update: &Value) -> Option<String> {
+    update
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("codebuddy.ai/subagentType"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            update
+                .get("rawInput")
+                .and_then(|input| input.get("subagent_type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+fn codebuddy_is_subagent(update: &Value) -> bool {
+    update
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("codebuddy.ai/isSubagent"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || codebuddy_subagent_type(update).is_some()
+        || codebuddy_parent_tool_call_id(update).is_some()
 }
 
 fn tool_call_status(update: &Value) -> Option<String> {
@@ -1290,6 +1352,7 @@ mod tests {
 
         emit_notification(
             &tx,
+            "",
             SessionNotification::new(
                 "session-1",
                 SessionUpdate::Plan(Plan::new(vec![
@@ -1340,5 +1403,104 @@ mod tests {
             }
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn codebuddy_task_tool_call_marks_latest_subagent_format_as_subagent() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "title": "task",
+                    "toolCallId": "chatcmpl-tool-1",
+                    "rawInput": {
+                        "description": "探索项目结构和状态",
+                        "prompt": "探索 D:/work/kodex",
+                        "subagent_type": "explore"
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolStarted {
+                id,
+                parent_id,
+                name,
+                kind,
+                summary,
+                is_subagent,
+                raw_input,
+            } => {
+                assert_eq!(id, "chatcmpl-tool-1");
+                assert_eq!(parent_id, None);
+                assert_eq!(name, "task");
+                assert_eq!(kind, "explore");
+                assert_eq!(summary, "探索项目结构和状态");
+                assert!(is_subagent);
+                assert!(raw_input.unwrap_or_default().contains("subagent_type"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codebuddy_task_update_emits_tool_message_chunk_from_content_text() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "chatcmpl-tool-1",
+                    "title": "task",
+                    "status": "completed",
+                    "rawInput": {
+                        "description": "探索项目结构和状态",
+                        "subagent_type": "explore"
+                    },
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "task_id: ses_123\n\n<task_result>done</task_result>"
+                            }
+                        }
+                    ],
+                    "rawOutput": {
+                        "output": "task_id: ses_123\n\n<task_result>done</task_result>",
+                        "metadata": {
+                            "sessionId": "ses_123",
+                            "truncated": false
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolMessageChunk { id, content }
+                if id == "chatcmpl-tool-1" && content.contains("<task_result>done</task_result>")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolCompleted { id, .. } if id == "chatcmpl-tool-1"
+        )));
     }
 }
