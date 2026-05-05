@@ -593,6 +593,27 @@ mod tests {
     }
 
     #[test]
+    fn reducer_ignores_noop_fs_write_diff() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "fs_write:notes.txt".into(),
+                path: "notes.txt".into(),
+                old_text: Some("same\ncontent\n".into()),
+                new_text: "same\ncontent\n".into(),
+            },
+        );
+
+        assert!(ui.session_changes.is_empty());
+        assert!(ui.tools.is_empty());
+    }
+
+    #[test]
     fn idle_session_can_switch_agent_provided_model() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
@@ -851,13 +872,14 @@ mod tests {
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
         let initial_msg_count = ui.messages.len();
 
-        super::reducer::apply_event(
-            &mut ui,
-            ClientEvent::ThinkingActivity { active: true },
-        );
+        super::reducer::apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
 
         assert_eq!(ui.thinking_status, Some(ThinkingStatus::Active));
-        assert!(ui.timeline.iter().any(|item| matches!(item, TimelineItem::Thinking)));
+        assert!(
+            ui.timeline
+                .iter()
+                .any(|item| matches!(item, TimelineItem::Thinking))
+        );
         assert_eq!(ui.messages.len(), initial_msg_count);
 
         super::reducer::apply_event(
@@ -900,7 +922,9 @@ mod tests {
                 kind: Some("explore".into()),
                 summary: Some("探索项目结构和状态".into()),
                 is_subagent: true,
-                raw_input: Some("{\"description\":\"探索项目结构和状态\",\"subagent_type\":\"explore\"}".into()),
+                raw_input: Some(
+                    "{\"description\":\"探索项目结构和状态\",\"subagent_type\":\"explore\"}".into(),
+                ),
                 raw_output: None,
                 terminal_output: None,
                 is_partial: false,

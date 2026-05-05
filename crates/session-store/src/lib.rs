@@ -19,12 +19,8 @@ impl SessionStore {
     /// Open (or create) the global session database at `{app_data_root}/sessions/sessions.db`.
     pub fn open(app_data_root: &Path, workspace_root: &Path) -> Result<Self> {
         let sessions_dir = app_data_root.join("sessions");
-        fs::create_dir_all(&sessions_dir).with_context(|| {
-            format!(
-                "在 {} 创建会话数据目录失败",
-                sessions_dir.display()
-            )
-        })?;
+        fs::create_dir_all(&sessions_dir)
+            .with_context(|| format!("在 {} 创建会话数据目录失败", sessions_dir.display()))?;
 
         let db_path = sessions_dir.join("sessions.db");
         let conn = Connection::open(&db_path)

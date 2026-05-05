@@ -1889,7 +1889,11 @@ pub(crate) fn run_session(
                                                         &config,
                                                         &notification,
                                                     )?;
-                                                    emit_notification(&tx_events, &config.workspace_root, notification)?;
+                                                    emit_notification(
+                                                        &tx_events,
+                                                        &config.workspace_root,
+                                                        notification,
+                                                    )?;
                                                     Ok(())
                                                 },
                                             )

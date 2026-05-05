@@ -24,11 +24,10 @@ struct FileMeta {
 /// starts and compares against the filesystem when the tool finishes.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolRecordingWindow {
-    pub(crate) call_id: String,
     baseline: HashMap<String, FileMeta>,
+    baseline_text: HashMap<String, String>,
     /// Candidate paths observed during execution (from watcher hints or tool input).
     candidates: Vec<String>,
-    workspace_root: PathBuf,
 }
 
 /// Session-level tracker that manages per-tool recording windows and a
@@ -94,34 +93,90 @@ impl FileChangeTracker {
 
     /// Start a recording window for a tool call. Captures current file metadata.
     pub(crate) fn start_recording(&mut self, call_id: &str, hint_paths: Vec<String>) {
+        let hint_paths = hint_paths
+            .into_iter()
+            .map(|path| self.normalize_candidate_path(&path))
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+
         let mut baseline = HashMap::new();
         for path in &hint_paths {
             if let Some(meta) = self.index.get(path) {
                 baseline.insert(path.clone(), meta.clone());
             }
         }
-        // If no hint paths, snapshot the full index for broad comparison
+        // If no hint paths, snapshot the full index for broad comparison.
         if baseline.is_empty() {
             baseline = self.index.clone();
         }
+
+        let baseline_text = self.capture_baseline_text(&baseline);
         self.active_windows.insert(
             call_id.to_string(),
             ToolRecordingWindow {
-                call_id: call_id.to_string(),
                 baseline,
+                baseline_text,
                 candidates: hint_paths,
-                workspace_root: self.workspace_root.clone(),
             },
         );
     }
 
     /// Add a candidate path hint during tool execution.
     pub(crate) fn add_candidate(&mut self, call_id: &str, path: String) {
+        let path = self.normalize_candidate_path(&path);
+        if path.is_empty() {
+            return;
+        }
         if let Some(window) = self.active_windows.get_mut(call_id) {
             if !window.candidates.contains(&path) {
                 window.candidates.push(path);
             }
         }
+    }
+
+    /// Look up the baseline text for a given path across all active recording windows.
+    /// Returns the content that was on disk when the tool started, suitable for
+    /// computing a "what did this tool change?" diff.
+    pub(crate) fn get_any_baseline_text(&self, path: &str) -> Option<&str> {
+        let normalized = self.normalize_candidate_path(path);
+        for window in self.active_windows.values() {
+            if let Some(text) = window.baseline_text.get(&normalized) {
+                return Some(text.as_str());
+            }
+        }
+        None
+    }
+
+    fn normalize_candidate_path(&self, path: &str) -> String {
+        let normalized = path.replace('\\', "/");
+        let root = self.workspace_root.to_string_lossy().replace('\\', "/");
+        let root_prefix = if root.ends_with('/') {
+            root
+        } else {
+            format!("{root}/")
+        };
+        normalized
+            .strip_prefix(&root_prefix)
+            .unwrap_or(&normalized)
+            .trim_start_matches("./")
+            .to_string()
+    }
+
+    fn capture_baseline_text(
+        &self,
+        baseline: &HashMap<String, FileMeta>,
+    ) -> HashMap<String, String> {
+        let mut texts = HashMap::new();
+        for (path, meta) in baseline {
+            if meta.len > MAX_DIFF_FILE_SIZE {
+                continue;
+            }
+            let full_path = self.workspace_root.join(path);
+            if let Ok(text) = fs::read_to_string(full_path) {
+                texts.insert(path.clone(), text);
+            }
+        }
+        texts
     }
 
     /// Finish recording for a tool call. Compares before/after state and returns
@@ -184,6 +239,7 @@ impl FileChangeTracker {
                 }
 
                 let len = file_meta.map(|m| m.len()).unwrap_or(0);
+                let old_text = window.baseline_text.get(path).cloned();
 
                 if len > MAX_DIFF_FILE_SIZE {
                     results.push(VerifiedFileChange {
@@ -193,7 +249,7 @@ impl FileChangeTracker {
                         } else {
                             FileChangeType::Created
                         },
-                        old_text: None,
+                        old_text,
                         new_text: String::new(),
                         hunks: Vec::new(),
                         skipped_diff: true,
@@ -209,7 +265,7 @@ impl FileChangeTracker {
                         } else {
                             FileChangeType::Created
                         },
-                        old_text: None,
+                        old_text,
                         new_text: String::new(),
                         hunks: Vec::new(),
                         skipped_diff: true,
@@ -217,23 +273,44 @@ impl FileChangeTracker {
                     continue;
                 };
 
-                results.push(VerifiedFileChange {
-                    path: path.clone(),
-                    change_type: if base_meta.is_some() {
-                        FileChangeType::Modified
-                    } else {
-                        FileChangeType::Created
-                    },
-                    old_text: None,
-                    new_text,
-                    hunks: Vec::new(),
-                    skipped_diff: false,
-                });
+                if base_meta.is_some() {
+                    let Some(old_text) = old_text else {
+                        results.push(VerifiedFileChange {
+                            path: path.clone(),
+                            change_type: FileChangeType::Modified,
+                            old_text: None,
+                            new_text: String::new(),
+                            hunks: Vec::new(),
+                            skipped_diff: true,
+                        });
+                        continue;
+                    };
+                    if old_text == new_text {
+                        continue;
+                    }
+                    results.push(VerifiedFileChange {
+                        path: path.clone(),
+                        change_type: FileChangeType::Modified,
+                        old_text: Some(old_text),
+                        new_text,
+                        hunks: Vec::new(),
+                        skipped_diff: false,
+                    });
+                } else {
+                    results.push(VerifiedFileChange {
+                        path: path.clone(),
+                        change_type: FileChangeType::Created,
+                        old_text: None,
+                        new_text,
+                        hunks: Vec::new(),
+                        skipped_diff: false,
+                    });
+                }
             } else if base_meta.is_some() {
                 results.push(VerifiedFileChange {
                     path: path.clone(),
                     change_type: FileChangeType::Deleted,
-                    old_text: None,
+                    old_text: window.baseline_text.get(path).cloned(),
                     new_text: String::new(),
                     hunks: Vec::new(),
                     skipped_diff: true,
@@ -286,6 +363,20 @@ mod tests {
     }
 
     #[test]
+    fn get_any_baseline_text_returns_tool_start_content() {
+        let dir = tempdir();
+        let file_path = dir.path().join("foo.txt");
+        fs::write(&file_path, "before").unwrap();
+
+        let mut tracker = FileChangeTracker::new(dir.path());
+        tracker.start_recording("call-1", vec!["foo.txt".to_string()]);
+
+        fs::write(&file_path, "after").unwrap();
+
+        assert_eq!(tracker.get_any_baseline_text("foo.txt"), Some("before"));
+    }
+
+    #[test]
     fn modified_file_is_detected() {
         let dir = tempdir();
         let file_path = dir.path().join("foo.txt");
@@ -300,6 +391,7 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "foo.txt");
         assert_eq!(changes[0].change_type, FileChangeType::Modified);
+        assert_eq!(changes[0].old_text.as_deref(), Some("hello"));
         assert_eq!(changes[0].new_text, "hello world");
         assert!(!changes[0].skipped_diff);
     }

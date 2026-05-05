@@ -38,7 +38,8 @@ impl GitService {
 
             let status = entry.status();
             let section = classify(status);
-            let stats = compute_diff_stats(&repo, &entry, &section).unwrap_or_else(|_| infer_stats(status));
+            let stats =
+                compute_diff_stats(&repo, &entry, &section).unwrap_or_else(|_| infer_stats(status));
 
             changed_files.push(ChangedFile {
                 path: PathBuf::from(path),
@@ -64,9 +65,7 @@ impl GitService {
 
     pub fn stage(path: impl AsRef<Path>, paths: &[String]) -> anyhow::Result<()> {
         let repo = Repository::discover(path).context("未找到 Git 仓库")?;
-        let workdir = repo
-            .workdir()
-            .context("仓库没有工作目录")?;
+        let workdir = repo.workdir().context("仓库没有工作目录")?;
         let mut index = repo.index().context("无法打开 Git 索引")?;
 
         for raw_path in paths {
@@ -148,7 +147,11 @@ fn compute_diff_stats(
             let full_path = workdir.join(path);
             if full_path.exists() {
                 let content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                let lines = if content.is_empty() { 0 } else { content.lines().count() };
+                let lines = if content.is_empty() {
+                    0
+                } else {
+                    content.lines().count()
+                };
                 (lines, 0)
             } else {
                 (0, 0)
@@ -162,7 +165,12 @@ fn compute_diff_stats(
                     opts.pathspec(path);
                     repo.diff_tree_to_index(Some(tree), None, Some(&mut opts))?
                 }
-                None => return Ok(DiffStats { added: 0, removed: 0 }),
+                None => {
+                    return Ok(DiffStats {
+                        added: 0,
+                        removed: 0,
+                    });
+                }
             };
             count_diff_stats(&diff)
         }
@@ -202,7 +210,8 @@ mod tests {
         let tree_id = index.write_tree().unwrap();
         let tree = repo.find_tree(tree_id).unwrap();
         let sig = git2::Signature::now("test", "test@test.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
         drop(tree);
         (dir, repo)
     }
@@ -220,7 +229,8 @@ mod tests {
         let parent_commit = parent_oid.and_then(|oid| repo.find_commit(oid).ok());
         let parents: Vec<git2::Commit> = parent_commit.into_iter().collect();
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parent_refs).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parent_refs)
+            .unwrap();
         drop(tree);
     }
 
@@ -262,7 +272,11 @@ mod tests {
         fs::write(dir.path().join("new_file.rs"), "line1\nline2\nline3\n").unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
-        let file = snapshot.changed_files.iter().find(|f| f.path.ends_with("new_file.rs")).unwrap();
+        let file = snapshot
+            .changed_files
+            .iter()
+            .find(|f| f.path.ends_with("new_file.rs"))
+            .unwrap();
         assert_eq!(file.stats.added, 3);
         assert_eq!(file.stats.removed, 0);
     }
@@ -276,7 +290,11 @@ mod tests {
         fs::write(dir.path().join("main.rs"), "aaa\nxxx\nyyy\n").unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
-        let file = snapshot.changed_files.iter().find(|f| f.path.ends_with("main.rs")).unwrap();
+        let file = snapshot
+            .changed_files
+            .iter()
+            .find(|f| f.path.ends_with("main.rs"))
+            .unwrap();
         // 5 original lines -> 3 new lines: 3 additions of new content lines, 3 removals of old
         // Actually the diff: -bbb, -ccc, -ddd; +xxx, +yyy = 3 removed, 2 added
         // Wait: original "aaa\nbbb\nccc\nddd\n" has 4 lines.
@@ -299,7 +317,11 @@ mod tests {
         index.write().unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
-        let file = snapshot.changed_files.iter().find(|f| f.path.ends_with("staged_file.rs")).unwrap();
+        let file = snapshot
+            .changed_files
+            .iter()
+            .find(|f| f.path.ends_with("staged_file.rs"))
+            .unwrap();
         assert_eq!(file.stats.added, 1);
         assert_eq!(file.stats.removed, 0);
     }
@@ -312,7 +334,11 @@ mod tests {
         fs::write(dir.path().join("c.rs"), "// c\n").unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
-        let untracked: Vec<_> = snapshot.changed_files.iter().filter(|f| matches!(f.section, ChangeSection::Untracked)).collect();
+        let untracked: Vec<_> = snapshot
+            .changed_files
+            .iter()
+            .filter(|f| matches!(f.section, ChangeSection::Untracked))
+            .collect();
         assert_eq!(untracked.len(), 3);
     }
 }

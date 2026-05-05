@@ -42,10 +42,9 @@ pub(crate) fn emit_notification(
             let _ = tx.send(ClientEvent::ThinkingActivity { active: false });
             emit_content(tx, MessageRole::Assistant, chunk.content)
         }
-        SessionUpdate::AgentThoughtChunk(_chunk) => {
-            tx.send(ClientEvent::ThinkingActivity { active: true })
-                .map_err(|_| anyhow!("failed to emit thinking activity"))
-        }
+        SessionUpdate::AgentThoughtChunk(_chunk) => tx
+            .send(ClientEvent::ThinkingActivity { active: true })
+            .map_err(|_| anyhow!("failed to emit thinking activity")),
         SessionUpdate::ToolCall(tool) => emit_tool_call(tx, tool),
         SessionUpdate::ToolCallUpdate(update) => emit_tool_update(tx, update),
         SessionUpdate::ConfigOptionUpdate(update) => emit_config_option_update(tx, update),
@@ -431,6 +430,7 @@ pub fn diff_to_hunks(old_text: Option<&str>, new_text: &str) -> Vec<DiffHunk> {
     let diff = TextDiff::from_lines(old, new_text);
     let mut lines = Vec::new();
 
+    let mut has_changes = false;
     for change in diff.iter_all_changes() {
         let content = change.as_str().unwrap_or_default();
         // Strip trailing newline added by line-based diffing
@@ -440,7 +440,12 @@ pub fn diff_to_hunks(old_text: Option<&str>, new_text: &str) -> Vec<DiffHunk> {
             ChangeTag::Delete => DiffLineKind::Removed,
             ChangeTag::Insert => DiffLineKind::Added,
         };
+        has_changes |= matches!(kind, DiffLineKind::Added | DiffLineKind::Removed);
         lines.push(DiffLine { kind, content });
+    }
+
+    if !has_changes {
+        return Vec::new();
     }
 
     vec![DiffHunk {
@@ -538,7 +543,11 @@ fn emit_codebuddy_notification(
     }
 }
 
-fn emit_codebuddy_tool_call(tx: &mpsc::Sender<ClientEvent>, workspace_root: &str, update: &Value) -> anyhow::Result<()> {
+fn emit_codebuddy_tool_call(
+    tx: &mpsc::Sender<ClientEvent>,
+    workspace_root: &str,
+    update: &Value,
+) -> anyhow::Result<()> {
     let id = update
         .get("toolCallId")
         .and_then(Value::as_str)
@@ -686,7 +695,7 @@ fn emit_codebuddy_tool_call_update(
 
 fn emit_codebuddy_diff_content(
     tx: &mpsc::Sender<ClientEvent>,
-    workspace_root: &str,
+    _workspace_root: &str,
     id: &str,
     update: &Value,
 ) -> anyhow::Result<()> {
@@ -704,17 +713,7 @@ fn emit_codebuddy_diff_content(
         let old_text = item
             .get("oldText")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            // If the agent didn't send oldText, try reading from disk
-            // so we compute a real diff instead of marking the whole file as Added
-            .or_else(|| {
-                let full_path = if std::path::Path::new(path).is_relative() {
-                    std::path::Path::new(workspace_root).join(path)
-                } else {
-                    std::path::PathBuf::from(path)
-                };
-                std::fs::read_to_string(&full_path).ok()
-            });
+            .map(str::to_string);
 
         tx.send(ClientEvent::ToolDiff {
             id: id.to_string(),
@@ -1294,20 +1293,14 @@ fn emit_tool_content(
 ) -> anyhow::Result<()> {
     match content {
         ToolCallContent::Content(content) => emit_content(tx, MessageRole::System, content.content),
-        ToolCallContent::Diff(diff) => {
-            // If ACP didn't provide old_text but the file exists on disk, read it
-            // so we can compute a real diff instead of showing everything as "Added"
-            let old_text = diff
-                .old_text
-                .or_else(|| std::fs::read_to_string(&diff.path).ok());
-            tx.send(ClientEvent::ToolDiff {
+        ToolCallContent::Diff(diff) => tx
+            .send(ClientEvent::ToolDiff {
                 id: tool_call_id.to_string(),
                 path: diff.path.display().to_string(),
-                old_text,
+                old_text: diff.old_text,
                 new_text: diff.new_text,
             })
-            .map_err(|_| anyhow!("failed to emit tool diff"))
-        }
+            .map_err(|_| anyhow!("failed to emit tool diff")),
         ToolCallContent::Terminal(terminal) => tx
             .send(ClientEvent::ToolProgress {
                 id: tool_call_id.to_string(),
@@ -1344,6 +1337,12 @@ mod tests {
                 .iter()
                 .any(|line| matches!(line.kind, DiffLineKind::Added) && line.content == "gamma")
         );
+    }
+
+    #[test]
+    fn diff_conversion_returns_empty_for_unchanged_content() {
+        let hunks = diff_to_hunks(Some("alpha\nbeta"), "alpha\nbeta");
+        assert!(hunks.is_empty());
     }
 
     #[test]

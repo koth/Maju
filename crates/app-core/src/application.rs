@@ -8,7 +8,7 @@ use session_store::SessionStore;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use workspace_model::{
-    ChatMessage, DiffLineKind, FileChangeType, MessageRole, SessionConfigSource, SessionFileChange,
+    ChatMessage, DiffLineKind, MessageRole, SessionConfigSource, SessionFileChange,
     SessionListItem, SessionStatus, TimelineItem, ToolDiffPreview, ToolLogEntry, ToolStatus,
     UserPromptContent,
 };
@@ -75,6 +75,15 @@ pub fn normalize_path_for_storage(path: &str, workspace_root: &Path) -> String {
         .strip_prefix(&ws_prefix)
         .unwrap_or(&normalized)
         .to_string()
+}
+
+fn current_timestamp() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
 
 fn prompt_text(prompt: &[UserPromptContent]) -> Option<String> {
@@ -370,8 +379,7 @@ impl Application {
                 return;
             }
 
-            let reason =
-                last_error.unwrap_or_else(|| "ACP 子进程意外退出".to_string());
+            let reason = last_error.unwrap_or_else(|| "ACP 子进程意外退出".to_string());
             apply_event(
                 &mut self.ui,
                 ClientEvent::Interrupted {
@@ -426,24 +434,33 @@ impl Application {
             return;
         }
 
-        // Preprocess ToolDiff events: capture base text from disk before apply_event
+        // Preprocess ToolDiff events: fill in old_text from the correct baseline.
+        // For the tool card diff, old_text should be "what was on disk when the tool started"
+        // so the card shows what THIS tool changed.
+        // For session-level changes, the reducer's upsert_session_change preserves the
+        // first-ever baseline separately.
         let workspace_root = self.ui.workspace.root.clone();
         let mut events = events;
-        let mut had_tool_diff = false;
+        let mut had_file_changes = false;
         for event in events.iter_mut() {
             if let ClientEvent::ToolDiff { path, old_text, .. } = event {
-                had_tool_diff = true;
+                had_file_changes = true;
                 // Normalize path to workspace-relative with forward slashes
                 let normalized = normalize_path_for_storage(path, &workspace_root);
                 let abs_path = workspace_root.join(&normalized);
-                // If old_text is None and we don't already have a base for this path,
-                // read the file from disk to capture the pre-modification content
                 if old_text.is_none() {
-                    if let Some(tracked) = self.ui.session_changes.iter().find(|c| {
+                    // 1. file_tracker baseline: content at tool-start time (best for tool card)
+                    if let Some(baseline) = self.file_tracker.get_any_baseline_text(&normalized) {
+                        *old_text = Some(baseline.to_string());
+                    }
+                    // 2. session_changes new_text: the result of the previous edit = this edit's base
+                    else if let Some(tracked) = self.ui.session_changes.iter().find(|c| {
                         normalize_tracked_path(&c.path) == normalize_tracked_path(&normalized)
                     }) {
-                        *old_text = tracked.old_text.clone();
-                    } else if let Ok(content) = std::fs::read_to_string(&abs_path) {
+                        *old_text = Some(tracked.new_text.clone());
+                    }
+                    // 3. last resort: read from disk (may be post-modification, but better than None)
+                    else if let Ok(content) = std::fs::read_to_string(&abs_path) {
                         *old_text = Some(content);
                     }
                 }
@@ -457,10 +474,9 @@ impl Application {
                 ClientEvent::ToolStarted { id, .. } => {
                     self.file_tracker.start_recording(id, Vec::new());
                 }
-                ClientEvent::ToolCompleted { id, .. }
-                | ClientEvent::ToolFailed { id, .. } => {
+                ClientEvent::ToolCompleted { id, .. } | ClientEvent::ToolFailed { id, .. } => {
                     let changes = self.file_tracker.finish_recording(id);
-                    self.apply_tracker_changes(id, changes);
+                    had_file_changes |= self.apply_tracker_changes(id, changes);
                 }
                 _ => {}
             }
@@ -469,13 +485,13 @@ impl Application {
         }
         self.session.update_session_id(&events);
 
-        // Persist session_changes to SQLite after event processing
-        if had_tool_diff {
+        // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
+        had_file_changes |= self.detect_file_writes_from_tools();
+
+        // Persist session_changes to SQLite after all file-change sources have run.
+        if had_file_changes {
             self.persist_file_changes();
         }
-
-        // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
-        self.detect_file_writes_from_tools();
 
         if is_finished {
             if self.ui.session.status == SessionStatus::Streaming {
@@ -960,71 +976,114 @@ impl Application {
         &mut self,
         call_id: &str,
         changes: Vec<crate::file_tracker::VerifiedFileChange>,
-    ) {
+    ) -> bool {
         use acp_core::diff_to_hunks;
 
+        let mut changed = false;
         for change in changes {
             let normalized = normalize_tracked_path(&change.path);
-            let is_new = !self.ui.session_changes.iter().any(|c| normalize_tracked_path(&c.path) == normalized);
-            let effective_old_text = change.old_text.clone().or_else(|| {
-                self.ui
-                    .session_changes
-                    .iter()
-                    .find(|c| normalize_tracked_path(&c.path) == normalized)
-                    .and_then(|c| c.old_text.clone())
-            });
+            let existing_index = self
+                .ui
+                .session_changes
+                .iter()
+                .position(|c| normalize_tracked_path(&c.path) == normalized);
+            let effective_old_text = existing_index
+                .and_then(|index| self.ui.session_changes[index].old_text.clone())
+                .or_else(|| change.old_text.clone());
             let hunks = if change.skipped_diff {
                 Vec::new()
             } else {
                 diff_to_hunks(effective_old_text.as_deref(), &change.new_text)
             };
 
-            if is_new {
-                let added = hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == DiffLineKind::Added).count();
-                let removed = hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == DiffLineKind::Removed).count();
+            if !change.skipped_diff {
+                if effective_old_text.as_deref().unwrap_or_default() == change.new_text {
+                    if let Some(index) = existing_index {
+                        self.ui.session_changes.remove(index);
+                        changed = true;
+                    }
+                    continue;
+                }
 
-                self.ui.session_changes.push(SessionFileChange {
-                    path: change.path.clone(),
-                    change_type: change.change_type,
-                    old_text: change.old_text.clone(),
-                    new_text: change.new_text.clone(),
-                    added_lines: added,
-                    removed_lines: removed,
-                    timestamp: {
-                        use std::time::SystemTime;
-                        let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-                        format!("{secs}")
-                    },
-                });
+                let added = hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .filter(|l| l.kind == DiffLineKind::Added)
+                    .count();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .filter(|l| l.kind == DiffLineKind::Removed)
+                    .count();
+
+                if added == 0 && removed == 0 {
+                    continue;
+                }
+
+                if let Some(index) = existing_index {
+                    let existing = &mut self.ui.session_changes[index];
+                    if existing.old_text.is_none() {
+                        existing.old_text = effective_old_text.clone();
+                    }
+                    existing.new_text = change.new_text.clone();
+                    existing.change_type = change.change_type.clone();
+                    existing.added_lines = added;
+                    existing.removed_lines = removed;
+                    existing.timestamp = current_timestamp();
+                } else {
+                    self.ui.session_changes.push(SessionFileChange {
+                        path: change.path.clone(),
+                        change_type: change.change_type.clone(),
+                        old_text: effective_old_text.clone(),
+                        new_text: change.new_text.clone(),
+                        added_lines: added,
+                        removed_lines: removed,
+                        timestamp: current_timestamp(),
+                    });
+                }
+                changed = true;
             }
 
-            // Attach diff preview to the tool that caused the change
-            if let Some(tool) = self.ui.tools.iter_mut().find(|t| t.call_id == call_id) {
+            // Attach diff preview to the tool that caused the change.
+            if !hunks.is_empty()
+                && let Some(tool) = self.ui.tools.iter_mut().find(|t| t.call_id == call_id)
+            {
                 let path_buf = PathBuf::from(&change.path);
-                if !tool.diff_paths.iter().any(|p| normalize_tracked_path(&p.display().to_string()) == normalized) {
+                if !tool
+                    .diff_paths
+                    .iter()
+                    .any(|p| normalize_tracked_path(&p.display().to_string()) == normalized)
+                {
                     tool.diff_paths.push(path_buf.clone());
                 }
-                if !change.skipped_diff {
-                    if let Some(preview) = tool.diff_previews.iter_mut().find(|p| normalize_tracked_path(&p.path.display().to_string()) == normalized) {
-                        preview.hunks = hunks;
-                    } else {
-                        tool.diff_previews.push(ToolDiffPreview { path: path_buf, hunks });
-                    }
+                if let Some(preview) = tool
+                    .diff_previews
+                    .iter_mut()
+                    .find(|p| normalize_tracked_path(&p.path.display().to_string()) == normalized)
+                {
+                    preview.hunks = hunks;
+                } else {
+                    tool.diff_previews.push(ToolDiffPreview {
+                        path: path_buf,
+                        hunks,
+                    });
                 }
             }
         }
+        changed
     }
 
     /// CodeBuddy agent uses terminal commands (cat > file << 'EOF') to write files,
     /// so we can't rely on ToolDiff events from the ACP protocol. Instead, we check
     /// completed tools for edit-related patterns and read the current file content.
-    fn detect_file_writes_from_tools(&mut self) {
+    fn detect_file_writes_from_tools(&mut self) -> bool {
         // Normalize path for comparison: forward slashes, lowercase drive letter on Windows
         fn normalize_path(p: &str) -> String {
             normalize_tracked_path(p)
         }
 
         let workspace_root = self.ui.workspace.root.clone();
+        let mut changed = false;
 
         // Collect normalized paths already tracked in session_changes
         let tracked_paths: HashSet<String> = self
@@ -1041,9 +1100,17 @@ impl Application {
             .iter()
             .filter(|t| t.status == ToolStatus::Succeeded)
             .filter_map(|tool| {
-                // Check diff_paths first (set by ToolDiff events from ACP WriteTextFileRequest)
-                if !tool.diff_paths.is_empty() {
-                    let path = tool.diff_paths[0].display().to_string();
+                // Check diff_paths first (set by ToolDiff events from ACP WriteTextFileRequest).
+                // Only treat it as a real write when the preview has actual changed lines;
+                // a path-only or context-only preview is often just a no-op edit notification.
+                if let Some(preview) = tool.diff_previews.iter().find(|preview| {
+                    preview.hunks.iter().any(|hunk| {
+                        hunk.lines.iter().any(|line| {
+                            matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed)
+                        })
+                    })
+                }) {
+                    let path = preview.path.display().to_string();
                     if !tracked_paths.contains(&normalize_path(&path)) {
                         return Some((tool.call_id.clone(), path));
                     }
@@ -1079,67 +1146,50 @@ impl Application {
             })
             .collect();
 
-        // For each detected file write, read current content and upsert into SessionFileChange
+        // For each detected file write, read current content and update only
+        // already-tracked changes. Creating a new change without a baseline makes
+        // the UI render the whole file as added, so the file tracker must be the
+        // source of new session_changes.
         for (call_id, path) in write_paths {
             let normalized = normalize_path_for_storage(&path, &workspace_root);
             let abs_path = workspace_root.join(&normalized);
-            if let Ok(new_text) = std::fs::read_to_string(&abs_path) {
-                // Check if we already have this path (with normalized comparison)
-                if let Some(existing) = self
-                    .ui
-                    .session_changes
-                    .iter_mut()
-                    .find(|c| normalize_path(&c.path) == normalized)
-                {
-                    // Update existing entry
-                    let hunks = diff_to_hunks(existing.old_text.as_deref(), &new_text);
-                    existing.new_text = new_text;
-                    existing.added_lines = hunks
-                        .iter()
-                        .flat_map(|h| &h.lines)
-                        .filter(|l| l.kind == DiffLineKind::Added)
-                        .count();
-                    existing.removed_lines = hunks
-                        .iter()
-                        .flat_map(|h| &h.lines)
-                        .filter(|l| l.kind == DiffLineKind::Removed)
-                        .count();
-                } else {
-                    // New entry
-                    let hunks = diff_to_hunks(None, &new_text);
-                    self.ui.session_changes.push(SessionFileChange {
-                        path: normalized.clone(),
-                        change_type: FileChangeType::Modified,
-                        old_text: None,
-                        new_text,
-                        added_lines: hunks
-                            .iter()
-                            .flat_map(|h| &h.lines)
-                            .filter(|l| l.kind == DiffLineKind::Added)
-                            .count(),
-                        removed_lines: hunks
-                            .iter()
-                            .flat_map(|h| &h.lines)
-                            .filter(|l| l.kind == DiffLineKind::Removed)
-                            .count(),
-                        timestamp: {
-                            use std::time::SystemTime;
-                            let secs = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            format!("{secs}")
-                        },
-                    });
-                }
-
-                let preview_hunks = self
+            if let Ok(new_text) = std::fs::read_to_string(&abs_path)
+                && let Some(index) = self
                     .ui
                     .session_changes
                     .iter()
-                    .find(|c| normalize_path(&c.path) == normalized)
-                    .map(|change| diff_to_hunks(change.old_text.as_deref(), &change.new_text));
-                if let Some(hunks) = preview_hunks
+                    .position(|c| normalize_path(&c.path) == normalized)
+            {
+                let old_text = self.ui.session_changes[index].old_text.clone();
+                if old_text.as_deref().unwrap_or_default() == new_text {
+                    self.ui.session_changes.remove(index);
+                    changed = true;
+                    continue;
+                }
+
+                let hunks = diff_to_hunks(old_text.as_deref(), &new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .filter(|l| l.kind == DiffLineKind::Added)
+                    .count();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .filter(|l| l.kind == DiffLineKind::Removed)
+                    .count();
+                if added == 0 && removed == 0 {
+                    continue;
+                }
+
+                let existing = &mut self.ui.session_changes[index];
+                existing.new_text = new_text;
+                existing.added_lines = added;
+                existing.removed_lines = removed;
+                existing.timestamp = current_timestamp();
+                changed = true;
+
+                if !hunks.is_empty()
                     && let Some(tool) = self
                         .ui
                         .tools
@@ -1167,6 +1217,8 @@ impl Application {
                 }
             }
         }
+
+        changed
     }
 }
 

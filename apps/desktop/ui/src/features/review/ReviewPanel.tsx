@@ -98,7 +98,7 @@ interface Props {
 }
 
 export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onFileOpen }: Props) {
-  const [tab, setTab] = useState<InspectorTab>("差异");
+  const [tab, setTab] = useState<InspectorTab>("Diff");
   const [filter, setFilter] = useState("");
   const [fileTreeRefreshSignal, setFileTreeRefreshSignal] = useState(0);
 
@@ -137,14 +137,14 @@ export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onF
     <div className="review-panel">
       <div className="review-tabs">
         <button
-          className={`review-tab ${tab === "差异" ? "review-tab-active" : ""}`}
-          onClick={() => setTab("差异")}
+          className={`review-tab ${tab === "Diff" ? "review-tab-active" : ""}`}
+          onClick={() => setTab("Diff")}
         >
           Git
         </button>
         <button
-          className={`review-tab ${tab === "文件" ? "review-tab-active" : ""}`}
-          onClick={() => setTab("文件")}
+          className={`review-tab ${tab === "Files" ? "review-tab-active" : ""}`}
+          onClick={() => setTab("Files")}
         >
           所有文件
         </button>
@@ -153,22 +153,22 @@ export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onF
           type="button"
           className="review-refresh-btn"
           onClick={handleRefresh}
-          disabled={tab === "差异" && refreshing}
-          title={tab === "差异" ? "刷新 Git 状态" : "刷新选中的文件目录"}
-          aria-label={tab === "差异" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+          disabled={tab === "Diff" && refreshing}
+          title={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+          aria-label={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
         >
           <RefreshIcon />
         </button>
       </div>
 
-      <div className="review-tab-panel" hidden={tab !== "文件"}>
+      <div className="review-tab-panel" hidden={tab !== "Files"}>
         <FileTree
           onFileOpen={onFileOpen}
           refreshSignal={fileTreeRefreshSignal}
         />
       </div>
 
-      <div className="review-tab-panel" hidden={tab !== "差异"}>
+      <div className="review-tab-panel" hidden={tab !== "Diff"}>
           <div className="review-meta">
             {snapshot.repository.changed_files.length} 个变更文件
             {filteredFiles.length > MAX_REVIEW_FILES && (

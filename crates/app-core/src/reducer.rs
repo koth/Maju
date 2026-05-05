@@ -3,8 +3,8 @@ use serde_json::Value;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffLineKind,
     FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
-    ThinkingStatus, TimelineItem,
-    ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
+    ThinkingStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus,
+    UiSnapshot,
 };
 
 const MAX_TOOL_DETAIL_CHARS: usize = 32 * 1024;
@@ -272,21 +272,24 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 Some(ensure_tool(ui, &id, None, "Edit", "edit", false))
             } {
                 let path_buf = std::path::PathBuf::from(&path);
-                if !tool.diff_paths.iter().any(|existing| {
-                    normalize_change_path(&existing.display().to_string()) == normalized_path
-                }) {
-                    tool.diff_paths.push(path_buf.clone());
-                }
-                if let Some(preview) = tool.diff_previews.iter_mut().find(|preview| {
-                    normalize_change_path(&preview.path.display().to_string()) == normalized_path
-                }) {
-                    preview.path = path_buf;
-                    preview.hunks = diff_hunks.clone();
-                } else {
-                    tool.diff_previews.push(ToolDiffPreview {
-                        path: path_buf,
-                        hunks: diff_hunks.clone(),
-                    });
+                if !diff_hunks.is_empty() {
+                    if !tool.diff_paths.iter().any(|existing| {
+                        normalize_change_path(&existing.display().to_string()) == normalized_path
+                    }) {
+                        tool.diff_paths.push(path_buf.clone());
+                    }
+                    if let Some(preview) = tool.diff_previews.iter_mut().find(|preview| {
+                        normalize_change_path(&preview.path.display().to_string())
+                            == normalized_path
+                    }) {
+                        preview.path = path_buf;
+                        preview.hunks = diff_hunks.clone();
+                    } else {
+                        tool.diff_previews.push(ToolDiffPreview {
+                            path: path_buf,
+                            hunks: diff_hunks.clone(),
+                        });
+                    }
                 }
                 if !is_synthetic_write {
                     tool.summary = format!("正在编辑 {path}");
@@ -386,11 +389,22 @@ fn upsert_session_change(
         FileChangeType::Modified
     };
 
-    if let Some(existing) = ui
+    if let Some(index) = ui
         .session_changes
-        .iter_mut()
-        .find(|change| normalize_change_path(&change.path) == normalized_path)
+        .iter()
+        .position(|change| normalize_change_path(&change.path) == normalized_path)
     {
+        let baseline = ui.session_changes[index]
+            .old_text
+            .as_deref()
+            .or(old_text.as_deref())
+            .unwrap_or_default();
+        if baseline == new_text {
+            ui.session_changes.remove(index);
+            return;
+        }
+
+        let existing = &mut ui.session_changes[index];
         if existing.old_text.is_none() && old_text.is_some() {
             existing.old_text = old_text;
             existing.change_type = incoming_change_type;
@@ -399,6 +413,10 @@ fn upsert_session_change(
         existing.path = normalized_path;
         existing.timestamp = chrono_now_iso();
         refresh_change_stats(existing);
+        return;
+    }
+
+    if old_text.as_deref().unwrap_or_default() == new_text {
         return;
     }
 
@@ -412,7 +430,9 @@ fn upsert_session_change(
         timestamp: chrono_now_iso(),
     };
     refresh_change_stats(&mut change);
-    ui.session_changes.push(change);
+    if change.added_lines > 0 || change.removed_lines > 0 {
+        ui.session_changes.push(change);
+    }
 }
 
 fn refresh_change_stats(change: &mut SessionFileChange) {
@@ -764,11 +784,7 @@ fn finalize_running_children(
         if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
             tool.summary = "已完成".into();
         }
-        push_tool_log(
-            tool,
-            "已完成",
-            "根据后续父活动推断",
-        );
+        push_tool_log(tool, "已完成", "根据后续父活动推断");
     }
 }
 

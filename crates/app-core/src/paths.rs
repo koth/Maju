@@ -8,8 +8,7 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn resolve() -> Result<Self> {
-        let home = dirs_next::home_dir()
-            .ok_or_else(|| anyhow!("无法解析当前用户的主目录"))?;
+        let home = dirs_next::home_dir().ok_or_else(|| anyhow!("无法解析当前用户的主目录"))?;
         Ok(Self::from_root(home.join(".kodex")))
     }
 
@@ -52,9 +51,8 @@ impl AppPaths {
             self.sessions_dir(),
             self.workspaces_dir(),
         ] {
-            std::fs::create_dir_all(&dir).with_context(|| {
-                format!("创建 Kodex 数据目录 {} 失败", dir.display())
-            })?;
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("创建 Kodex 数据目录 {} 失败", dir.display()))?;
         }
         Ok(())
     }
