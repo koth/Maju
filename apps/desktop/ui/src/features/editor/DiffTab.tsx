@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useMemo, useState, useRef } from "react";
-import type { SessionFileChange, FileChangeType } from "../../types";
-import { KODEX_THEME_NAME, kodexDarkTheme } from "./monaco-theme";
+import type { SessionFileChange, FileChangeType, AppTheme } from "../../types";
+import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
 import "./DiffTab.css";
 
@@ -8,7 +8,6 @@ const MonacoDiffEditor = lazy(() =>
   import("@monaco-editor/react").then((mod) => ({ default: mod.DiffEditor })),
 );
 
-let themeRegistered = false;
 let textmateInitStarted = false;
 
 const LANG_MAP: Record<string, string> = {
@@ -29,9 +28,10 @@ const LANG_MAP: Record<string, string> = {
 
 interface Props {
   change: SessionFileChange;
+  appTheme: AppTheme;
 }
 
-export function DiffTab({ change }: Props) {
+export function DiffTab({ change, appTheme }: Props) {
   const [sideBySide, setSideBySide] = useState(true);
   const sideBySideRef = useRef(true);
   const editorRef = useRef<import("monaco-editor").editor.IStandaloneDiffEditor | null>(null);
@@ -43,10 +43,7 @@ export function DiffTab({ change }: Props) {
 
   const handleBeforeMount = useCallback(
     (monaco: typeof import("monaco-editor")) => {
-      if (!themeRegistered) {
-        monaco.editor.defineTheme(KODEX_THEME_NAME, kodexDarkTheme);
-        themeRegistered = true;
-      }
+      registerKodexThemes(monaco);
       if (!textmateInitStarted) {
         textmateInitStarted = true;
         initTextMate().catch(() => {});
@@ -116,7 +113,7 @@ export function DiffTab({ change }: Props) {
             language={language}
             original={change.old_text ?? ""}
             modified={change.new_text}
-            theme="kodex-dark"
+            theme={monacoThemeForAppTheme(appTheme)}
             beforeMount={handleBeforeMount}
             onMount={handleMount}
             options={{

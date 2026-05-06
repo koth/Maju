@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import type { editor as monacoEditor } from "monaco-editor";
+import type { AppTheme } from "../../types";
 import { editorOpenFile } from "../../lib/tauri";
 import { saveViewState, restoreViewState } from "./monaco-view-state";
-import { KODEX_THEME_NAME, kodexDarkTheme } from "./monaco-theme";
+import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
 import "./EditorView.css";
 
@@ -10,7 +11,6 @@ const MonacoEditor = lazy(() =>
   import("@monaco-editor/react").then((mod) => ({ default: mod.default })),
 );
 
-let themeRegistered = false;
 let textmateInitStarted = false;
 
 const LANG_MAP: Record<string, string> = {
@@ -34,9 +34,10 @@ interface Props {
   lineNumber?: number;
   searchQuery?: string;
   navToken?: number;
+  appTheme: AppTheme;
 }
 
-export function EditorView({ path, lineNumber, searchQuery, navToken }: Props) {
+export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
@@ -143,10 +144,7 @@ export function EditorView({ path, lineNumber, searchQuery, navToken }: Props) {
 
   const handleBeforeMount = useCallback(
     (monaco: typeof import("monaco-editor")) => {
-      if (!themeRegistered) {
-        monaco.editor.defineTheme(KODEX_THEME_NAME, kodexDarkTheme);
-        themeRegistered = true;
-      }
+      registerKodexThemes(monaco);
       if (!textmateInitStarted) {
         textmateInitStarted = true;
         initTextMate().catch(() => {});
@@ -171,7 +169,7 @@ export function EditorView({ path, lineNumber, searchQuery, navToken }: Props) {
           height="100%"
           language={language}
           value={content}
-          theme="kodex-dark"
+          theme={monacoThemeForAppTheme(appTheme)}
           beforeMount={handleBeforeMount}
           onMount={handleEditorMount}
           options={{

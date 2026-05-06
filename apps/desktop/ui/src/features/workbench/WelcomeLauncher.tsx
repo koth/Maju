@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import type { RecentWorkspace } from "../../types";
-import { workspaceOpen, workspaceGetRecent, workspaceRemoveRecent } from "../../lib/tauri";
+import { workspaceOpen, workspaceGetRecent, workspaceRemoveRecent, workspaceRestoreOpen } from "../../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { WindowControls } from "./WindowControls";
 import "./WelcomeLauncher.css";
@@ -17,23 +17,44 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
   const [autoOpened, setAutoOpened] = useState(false);
 
   useEffect(() => {
-    workspaceGetRecent()
-      .then((list) => {
+    let disposed = false;
+
+    const loadInitialWorkspaces = async () => {
+      try {
+        const list = await workspaceGetRecent();
+        if (disposed) return;
         setRecents(list);
-        // Auto-open the most recent workspace if it exists
-        const first = list.find((r) => r.exists);
-        if (first && !autoOpened) {
+
+        if (!autoOpened) {
           setAutoOpened(true);
           setLoading(true);
-          workspaceOpen(first.path)
-            .then(() => onWorkspaceOpened())
-            .catch((e) => {
-              setError(String(e));
-              setLoading(false);
-            });
+          const restored = await workspaceRestoreOpen();
+          if (disposed) return;
+          if (restored) {
+            onWorkspaceOpened();
+            return;
+          }
+
+          const first = list.find((r) => r.exists);
+          if (first) {
+            await workspaceOpen(first.path);
+            if (!disposed) onWorkspaceOpened();
+          } else {
+            setLoading(false);
+          }
         }
-      })
-      .catch(() => {});
+      } catch (e) {
+        if (!disposed) {
+          setError(String(e));
+          setLoading(false);
+        }
+      }
+    };
+
+    loadInitialWorkspaces();
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   const handleOpenFolder = useCallback(async () => {

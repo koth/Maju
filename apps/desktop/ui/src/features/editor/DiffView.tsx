@@ -1,18 +1,20 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import type { AppTheme } from "../../types";
 import { editorOpenFile, reviewGetDiff } from "../../lib/tauri";
+import { getAppliedAppTheme } from "../../theme";
+import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import "./EditorView.css";
 
 const MonacoDiffEditor = lazy(() =>
   import("@monaco-editor/react").then((mod) => ({ default: mod.DiffEditor })),
 );
 
-let themeRegistered = false;
-
 interface Props {
   path: string;
+  appTheme?: AppTheme;
 }
 
-export function DiffView({ path }: Props) {
+export function DiffView({ path, appTheme }: Props) {
   const [original, setOriginal] = useState<string | null>(null);
   const [modified, setModified] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,12 +55,7 @@ export function DiffView({ path }: Props) {
 
   const handleBeforeMount = useCallback(
     (monaco: typeof import("monaco-editor")) => {
-      if (!themeRegistered) {
-        import("./monaco-theme").then(({ KODEX_THEME_NAME, kodexDarkTheme }) => {
-          monaco.editor.defineTheme(KODEX_THEME_NAME, kodexDarkTheme);
-        });
-        themeRegistered = true;
-      }
+      registerKodexThemes(monaco);
     },
     [],
   );
@@ -97,7 +94,7 @@ export function DiffView({ path }: Props) {
           language={language}
           original={original}
           modified={modified}
-          theme="kodex-dark"
+          theme={monacoThemeForAppTheme(appTheme ?? getAppliedAppTheme())}
           beforeMount={handleBeforeMount}
           options={{
             readOnly: true,

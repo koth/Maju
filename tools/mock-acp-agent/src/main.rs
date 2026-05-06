@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
                     "mock-loaded",
                     vec![
                         ModelInfo::new("mock-loaded", "Mock Loaded"),
+                        ModelInfo::new("mock-smart", "Mock Smart"),
                         ModelInfo::new("mock-loaded-alt", "Mock Loaded Alt"),
                     ],
                 )))

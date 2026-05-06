@@ -1,7 +1,7 @@
 use crate::AppPaths;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use workspace_model::{AgentCliId, AgentCliStatus, AgentSettingsSnapshot, AppSettings};
+use workspace_model::{AgentCliId, AgentCliStatus, AgentSettingsSnapshot, AppSettings, AppTheme};
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -9,6 +9,7 @@ fn default_settings() -> AppSettings {
     AppSettings {
         selected_agent: AgentCliId::Codebuddy,
         acp_port: 0,
+        theme: AppTheme::KodexDark,
     }
 }
 
@@ -73,7 +74,15 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
     let settings = AppSettings {
         selected_agent: agent,
         acp_port: existing.acp_port,
+        theme: existing.theme,
     };
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn select_theme(paths: &AppPaths, theme: AppTheme) -> Result<AgentSettingsSnapshot> {
+    let existing = load_app_settings(paths);
+    let settings = AppSettings { theme, ..existing };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
 }
@@ -214,6 +223,7 @@ mod tests {
         let settings = load_app_settings(&paths);
 
         assert_eq!(settings.selected_agent, AgentCliId::Codebuddy);
+        assert_eq!(settings.theme, AppTheme::KodexDark);
     }
 
     #[test]
@@ -223,6 +233,7 @@ mod tests {
         let settings = AppSettings {
             selected_agent: AgentCliId::Opencode,
             acp_port: 9988,
+            theme: AppTheme::Midnight,
         };
 
         save_app_settings(&paths, &settings).unwrap();
@@ -241,6 +252,7 @@ mod tests {
         let settings = load_app_settings(&paths);
 
         assert_eq!(settings.selected_agent, AgentCliId::Codebuddy);
+        assert_eq!(settings.theme, AppTheme::KodexDark);
     }
 
     #[test]
@@ -268,6 +280,7 @@ mod tests {
             &AppSettings {
                 selected_agent: AgentCliId::Opencode,
                 acp_port: 9988,
+                theme: AppTheme::Graphite,
             },
         )
         .unwrap();

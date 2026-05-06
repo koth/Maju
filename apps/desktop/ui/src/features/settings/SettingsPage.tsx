@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentCliId, AgentInstallResult, AgentSettingsSnapshot } from "../../types";
+import type { AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme } from "../../types";
 import {
   settingsDetectAgents,
   settingsGetAgentSnapshot,
   settingsInstallAgent,
   settingsSelectAgent,
+  settingsSelectTheme,
 } from "../../lib/tauri";
+import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
 interface Props {
   onBack: () => void;
+  onThemeChange?: (theme: AppTheme) => void;
 }
 
-export function SettingsPage({ onBack }: Props) {
+export function SettingsPage({ onBack, onThemeChange }: Props) {
   const [snapshot, setSnapshot] = useState<AgentSettingsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAgent, setBusyAgent] = useState<AgentCliId | null>(null);
+  const [busyTheme, setBusyTheme] = useState<AppTheme | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [installResult, setInstallResult] = useState<AgentInstallResult | null>(null);
 
@@ -23,13 +27,15 @@ export function SettingsPage({ onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      setSnapshot(await settingsGetAgentSnapshot());
+      const nextSnapshot = await settingsGetAgentSnapshot();
+      setSnapshot(nextSnapshot);
+      onThemeChange?.(applyAppTheme(nextSnapshot.settings.theme));
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onThemeChange]);
 
   useEffect(() => {
     load();
@@ -64,6 +70,20 @@ export function SettingsPage({ onBack }: Props) {
     }
   }, []);
 
+  const handleThemeSelect = useCallback(async (theme: AppTheme) => {
+    setBusyTheme(theme);
+    setError(null);
+    try {
+      const nextSnapshot = await settingsSelectTheme(theme);
+      setSnapshot(nextSnapshot);
+      onThemeChange?.(applyAppTheme(nextSnapshot.settings.theme));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyTheme(null);
+    }
+  }, [onThemeChange]);
+
   const handleInstall = useCallback(async (agent: AgentCliId) => {
     setBusyAgent(agent);
     setError(null);
@@ -95,8 +115,38 @@ export function SettingsPage({ onBack }: Props) {
       <main className="settings-content">
         <header className="settings-content-header">
           <h1>通用</h1>
-          <p>默认提供者和智能体配置。</p>
+          <p>外观、默认提供者和智能体配置。</p>
         </header>
+
+        <section className="settings-section">
+          <h2 className="settings-section-title">主题</h2>
+          <p className="settings-section-desc">选择一套偏暗色系的应用配色。</p>
+          <div className="settings-theme-grid">
+            {APP_THEMES.map((theme) => {
+              const selected = snapshot?.settings.theme === theme.id;
+              return (
+                <button
+                  key={theme.id}
+                  type="button"
+                  className={`settings-theme-card ${selected ? "is-selected" : ""}`}
+                  disabled={loading || busyTheme !== null || selected}
+                  onClick={() => handleThemeSelect(theme.id)}
+                >
+                  <span className="settings-theme-swatches" aria-hidden="true">
+                    {theme.swatches.map((color) => (
+                      <span key={color} style={{ background: color }} />
+                    ))}
+                  </span>
+                  <span className="settings-theme-copy">
+                    <span className="settings-theme-title">{theme.label}</span>
+                    <span className="settings-theme-desc">{selected ? "当前主题" : theme.description}</span>
+                  </span>
+                  {busyTheme === theme.id && <span className="settings-theme-saving">保存中...</span>}
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
         <section className="settings-section">
           <h2 className="settings-section-title">默认提供者</h2>

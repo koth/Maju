@@ -171,11 +171,12 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         ClientEvent::ToolPermissionResolved { id, outcome } => {
             let tool = ensure_tool(ui, &id, None, "Permission", "permission", false);
             tool.summary = outcome.clone();
-            tool.status = ToolStatus::Running;
+            tool.status = ToolStatus::Succeeded;
             tool.permission_options.clear();
             tool.permission_decision = Some(outcome.clone());
+            tool.error = None;
             push_tool_log(tool, "Decision", outcome);
-            ui.session.status = SessionStatus::WaitingForTool;
+            refresh_session_status(ui);
         }
         ClientEvent::SessionConfigUpdated { mut state } => {
             preserve_local_mode(&mut state, ui.session.mode.as_deref());

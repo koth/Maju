@@ -8,12 +8,13 @@ use session_store::SessionStore;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use workspace_model::{
-    ChatMessage, DiffLineKind, MessageRole, SessionConfigSource, SessionFileChange,
-    SessionListItem, SessionStatus, TimelineItem, ToolDiffPreview, ToolLogEntry, ToolStatus,
-    UserPromptContent,
+    AgentCliId, ChatMessage, DiffHunk, DiffLineKind, MessageRole, SessionConfigSource,
+    SessionFileChange, SessionListItem, SessionStatus, TimelineItem, ToolDiffPreview,
+    ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
 };
 
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";
+const RESTORED_INCOMPLETE_TOOL_REASON: &str = "上次会话结束前未完成";
 
 fn make_log_id() -> String {
     use std::time::SystemTime;
@@ -44,6 +45,7 @@ pub struct Application {
     agent_title_received: bool,
     /// When true, discard replay events from session/load until user sends first prompt
     skip_replay: bool,
+    pending_model_restore: Option<String>,
     file_tracker: FileChangeTracker,
 }
 
@@ -84,6 +86,52 @@ fn current_timestamp() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{secs}")
+}
+
+fn tool_diff_hunks(
+    previous_session_new_text: Option<&str>,
+    tool_old_text: Option<&str>,
+    tool_new_text: &str,
+) -> Vec<DiffHunk> {
+    diff_to_hunks(previous_session_new_text.or(tool_old_text), tool_new_text)
+}
+
+fn interrupt_incomplete_tools(tools: &mut [ToolInvocation]) -> Vec<String> {
+    let mut updated_ids = Vec::new();
+
+    for tool in tools
+        .iter_mut()
+        .filter(|tool| matches!(tool.status, ToolStatus::Pending | ToolStatus::Running))
+    {
+        tool.status = ToolStatus::Interrupted;
+        if tool.summary.trim().is_empty()
+            || tool.summary == "等待活动"
+            || tool.summary.starts_with("等待权限")
+        {
+            tool.summary = RESTORED_INCOMPLETE_TOOL_REASON.into();
+        }
+        if tool.kind == "permission" && tool.permission_decision.is_none() {
+            tool.permission_decision = Some("已中断".into());
+        }
+        if tool.error.is_none() {
+            tool.error = Some(RESTORED_INCOMPLETE_TOOL_REASON.into());
+        }
+        if tool.logs.last().map(|entry| entry.body.as_str())
+            != Some(RESTORED_INCOMPLETE_TOOL_REASON)
+        {
+            tool.logs.push(ToolLogEntry {
+                title: "已中断".into(),
+                body: RESTORED_INCOMPLETE_TOOL_REASON.into(),
+            });
+            if tool.logs.len() > 12 {
+                let keep_from = tool.logs.len() - 12;
+                tool.logs.drain(0..keep_from);
+            }
+        }
+        updated_ids.push(tool.id.to_string());
+    }
+
+    updated_ids
 }
 
 fn prompt_text(prompt: &[UserPromptContent]) -> Option<String> {
@@ -190,14 +238,30 @@ impl Application {
         })?;
 
         // Try to restore the most recent session, otherwise create a new one
-        let (needs_title, seq_counter) = match store.list_sessions() {
+        let (needs_title, seq_counter, pending_model_restore) = match store.list_sessions() {
             Ok(sessions) if !sessions.is_empty() => {
                 let recent = &sessions[0]; // list_sessions orders by updated_at DESC
                 let session_id = &recent.id;
                 if let Ok((messages, tools, timeline)) = store.load_session(session_id) {
                     ui.session.id = uuid::Uuid::parse_str(session_id).unwrap_or(ui.session.id);
                     ui.session.title = recent.title.clone();
+                    let mut tools = tools;
+                    let interrupted_tool_ids = interrupt_incomplete_tools(&mut tools);
+                    for tool_id in &interrupted_tool_ids {
+                        if let Some(tool) =
+                            tools.iter().find(|tool| tool.id.to_string() == *tool_id)
+                        {
+                            let _ = store.update_tool(
+                                tool_id,
+                                "Interrupted",
+                                tool.raw_output.as_deref(),
+                                tool.error.as_deref(),
+                            );
+                        }
+                    }
+                    let mut pending_model_restore = None;
                     if let Ok(Some((model, mode))) = store.get_session_model_mode(session_id) {
+                        pending_model_restore = Some(model.clone());
                         ui.session.model = model;
                         ui.session.mode = mode;
                     }
@@ -208,19 +272,19 @@ impl Application {
                     ui.session_changes = store.load_file_changes(session_id).unwrap_or_default();
                     let seq = store.next_seq(session_id).unwrap_or(1);
                     let needs_title = recent.title == "新会话";
-                    (needs_title, seq)
+                    (needs_title, seq, pending_model_restore)
                 } else {
                     // Failed to load — create new session
                     let session_id = ui.session.id.to_string();
                     store.create_session(&session_id, &ui.session.model)?;
-                    (true, 1)
+                    (true, 1, None)
                 }
             }
             _ => {
                 // No sessions exist — create a new one
                 let session_id = ui.session.id.to_string();
                 store.create_session(&session_id, &ui.session.model)?;
-                (true, 1)
+                (true, 1, None)
             }
         };
 
@@ -253,6 +317,7 @@ impl Application {
             needs_title,
             agent_title_received: false,
             skip_replay,
+            pending_model_restore,
             file_tracker: FileChangeTracker::new(workspace_root),
         })
     }
@@ -394,8 +459,7 @@ impl Application {
             let events = self.session.collect_pending_events();
             self.session.update_session_id(&events);
             for event in events {
-                apply_event(&mut self.ui, event.clone());
-                self.persist_event(&event);
+                self.apply_event_and_restore_model(event);
             }
             return;
         };
@@ -651,7 +715,19 @@ impl Application {
 
     pub fn session_switch(&mut self, id: &str) -> Result<(), String> {
         // Load session data from SQLite
-        let (messages, tools, timeline) = self.store.load_session(id).map_err(|e| e.to_string())?;
+        let (messages, mut tools, timeline) =
+            self.store.load_session(id).map_err(|e| e.to_string())?;
+        let interrupted_tool_ids = interrupt_incomplete_tools(&mut tools);
+        for tool_id in &interrupted_tool_ids {
+            if let Some(tool) = tools.iter().find(|tool| tool.id.to_string() == *tool_id) {
+                let _ = self.store.update_tool(
+                    tool_id,
+                    "Interrupted",
+                    tool.raw_output.as_deref(),
+                    tool.error.as_deref(),
+                );
+            }
+        }
         let (model, mode) = self
             .store
             .get_session_model_mode(id)
@@ -712,19 +788,23 @@ impl Application {
 
         self.needs_title = self.ui.session.title == "新会话";
         self.agent_title_received = false;
+        self.pending_model_restore = Some(self.ui.session.model.clone());
         Ok(())
     }
 
-    pub fn session_create(&mut self) -> Result<(), String> {
+    pub fn session_create(&mut self, agent: Option<AgentCliId>) -> Result<(), String> {
         let new_id = uuid::Uuid::new_v4();
         let initial_model = AGENT_DEFAULT_MODEL_LABEL.to_string();
         self.store
             .create_session(&new_id.to_string(), &initial_model)
             .map_err(|e| e.to_string())?;
 
-        // Re-read current agent selection from persisted settings
-        let current_agent_command =
-            crate::settings::resolve_agent_command_with_settings(&self.app_paths);
+        let current_agent_command = match agent {
+            Some(agent) => crate::settings::command_for_agent(agent).unwrap_or_else(|| {
+                crate::settings::resolve_agent_command_with_settings(&self.app_paths)
+            }),
+            None => self.agent_command.clone(),
+        };
         self.agent_command = current_agent_command;
 
         // Start a new ACP session handle (no resume for new session)
@@ -760,6 +840,7 @@ impl Application {
         self.seq_counter = 1;
         self.needs_title = true;
         self.agent_title_received = false;
+        self.pending_model_restore = None;
         self.persist_session_model_mode();
         let _ = self.store.update_session_agent_cli(
             &self.ui.session.id.to_string(),
@@ -808,9 +889,26 @@ impl Application {
         self.ui.prompt_capabilities = Default::default();
         self.ui.available_commands.clear();
         self.ui.agent_plan.clear();
+        let interrupted_tool_ids = interrupt_incomplete_tools(&mut self.ui.tools);
+        for tool_id in &interrupted_tool_ids {
+            if let Some(tool) = self
+                .ui
+                .tools
+                .iter()
+                .find(|tool| tool.id.to_string() == *tool_id)
+            {
+                let _ = self.store.update_tool(
+                    tool_id,
+                    "Interrupted",
+                    tool.raw_output.as_deref(),
+                    tool.error.as_deref(),
+                );
+            }
+        }
         self.in_flight_prompt = None;
         self.agent_title_received = false;
         self.skip_replay = has_resume_id;
+        self.pending_model_restore = Some(self.ui.session.model.clone());
         Ok(())
     }
 
@@ -970,6 +1068,56 @@ impl Application {
         );
     }
 
+    fn apply_event_and_restore_model(&mut self, event: ClientEvent) {
+        let should_restore_model = matches!(event, ClientEvent::SessionConfigUpdated { .. });
+        apply_event(&mut self.ui, event.clone());
+        if should_restore_model {
+            self.restore_pending_model_selection();
+        }
+        self.persist_event(&event);
+    }
+
+    fn restore_pending_model_selection(&mut self) {
+        let Some(saved_model) = self.pending_model_restore.clone() else {
+            return;
+        };
+        let Some(model_control) = self
+            .ui
+            .session_config
+            .controls
+            .iter()
+            .find(|control| control.category == workspace_model::SessionConfigCategory::Model)
+        else {
+            return;
+        };
+
+        if model_control.current_value_id == saved_model
+            || model_control.current_value_label == saved_model
+        {
+            self.pending_model_restore = None;
+            return;
+        }
+
+        let Some(choice) = model_control
+            .choices
+            .iter()
+            .find(|choice| choice.id == saved_model || choice.label == saved_model)
+            .cloned()
+        else {
+            self.pending_model_restore = None;
+            return;
+        };
+
+        self.pending_model_restore = None;
+        let Ok(events) = self.session.set_model(choice.id) else {
+            return;
+        };
+        for event in events {
+            apply_event(&mut self.ui, event.clone());
+            self.persist_event(&event);
+        }
+    }
+
     /// Detect file writes from completed tool calls by examining tool summaries/titles.
     /// Apply verified file changes from the tracker to session state and tool diff previews.
     fn apply_tracker_changes(
@@ -987,13 +1135,26 @@ impl Application {
                 .session_changes
                 .iter()
                 .position(|c| normalize_tracked_path(&c.path) == normalized);
+            let previous_session_new_text =
+                existing_index.map(|index| self.ui.session_changes[index].new_text.clone());
             let effective_old_text = existing_index
                 .and_then(|index| self.ui.session_changes[index].old_text.clone())
                 .or_else(|| change.old_text.clone());
-            let hunks = if change.skipped_diff {
+            let session_hunks = if change.skipped_diff {
                 Vec::new()
             } else {
                 diff_to_hunks(effective_old_text.as_deref(), &change.new_text)
+            };
+            let tool_hunks = if change.skipped_diff {
+                Vec::new()
+            } else if previous_session_new_text.is_none() && !change.hunks.is_empty() {
+                change.hunks.clone()
+            } else {
+                tool_diff_hunks(
+                    previous_session_new_text.as_deref(),
+                    change.old_text.as_deref(),
+                    &change.new_text,
+                )
             };
 
             if !change.skipped_diff {
@@ -1002,15 +1163,16 @@ impl Application {
                         self.ui.session_changes.remove(index);
                         changed = true;
                     }
+                    self.attach_tool_diff_preview(call_id, &change.path, &normalized, tool_hunks);
                     continue;
                 }
 
-                let added = hunks
+                let added = session_hunks
                     .iter()
                     .flat_map(|h| &h.lines)
                     .filter(|l| l.kind == DiffLineKind::Added)
                     .count();
-                let removed = hunks
+                let removed = session_hunks
                     .iter()
                     .flat_map(|h| &h.lines)
                     .filter(|l| l.kind == DiffLineKind::Removed)
@@ -1044,33 +1206,47 @@ impl Application {
                 changed = true;
             }
 
-            // Attach diff preview to the tool that caused the change.
-            if !hunks.is_empty()
-                && let Some(tool) = self.ui.tools.iter_mut().find(|t| t.call_id == call_id)
-            {
-                let path_buf = PathBuf::from(&change.path);
-                if !tool
-                    .diff_paths
-                    .iter()
-                    .any(|p| normalize_tracked_path(&p.display().to_string()) == normalized)
-                {
-                    tool.diff_paths.push(path_buf.clone());
-                }
-                if let Some(preview) = tool
-                    .diff_previews
-                    .iter_mut()
-                    .find(|p| normalize_tracked_path(&p.path.display().to_string()) == normalized)
-                {
-                    preview.hunks = hunks;
-                } else {
-                    tool.diff_previews.push(ToolDiffPreview {
-                        path: path_buf,
-                        hunks,
-                    });
-                }
-            }
+            // Attach only this tool's diff preview, not the cumulative session diff.
+            self.attach_tool_diff_preview(call_id, &change.path, &normalized, tool_hunks);
         }
         changed
+    }
+
+    fn attach_tool_diff_preview(
+        &mut self,
+        call_id: &str,
+        path: &str,
+        normalized_path: &str,
+        hunks: Vec<DiffHunk>,
+    ) {
+        if hunks.is_empty() {
+            return;
+        }
+        let Some(tool) = self.ui.tools.iter_mut().find(|t| t.call_id == call_id) else {
+            return;
+        };
+
+        let path_buf = PathBuf::from(path);
+        if !tool
+            .diff_paths
+            .iter()
+            .any(|p| normalize_tracked_path(&p.display().to_string()) == normalized_path)
+        {
+            tool.diff_paths.push(path_buf.clone());
+        }
+        if let Some(preview) = tool
+            .diff_previews
+            .iter_mut()
+            .find(|p| normalize_tracked_path(&p.path.display().to_string()) == normalized_path)
+        {
+            preview.path = path_buf;
+            preview.hunks = hunks;
+        } else {
+            tool.diff_previews.push(ToolDiffPreview {
+                path: path_buf,
+                hunks,
+            });
+        }
     }
 
     /// CodeBuddy agent uses terminal commands (cat > file << 'EOF') to write files,
@@ -1161,19 +1337,22 @@ impl Application {
                     .position(|c| normalize_path(&c.path) == normalized)
             {
                 let old_text = self.ui.session_changes[index].old_text.clone();
+                let previous_session_new_text = self.ui.session_changes[index].new_text.clone();
+                let tool_hunks = tool_diff_hunks(Some(&previous_session_new_text), None, &new_text);
                 if old_text.as_deref().unwrap_or_default() == new_text {
                     self.ui.session_changes.remove(index);
                     changed = true;
+                    self.attach_tool_diff_preview(&call_id, &normalized, &normalized, tool_hunks);
                     continue;
                 }
 
-                let hunks = diff_to_hunks(old_text.as_deref(), &new_text);
-                let added = hunks
+                let session_hunks = diff_to_hunks(old_text.as_deref(), &new_text);
+                let added = session_hunks
                     .iter()
                     .flat_map(|h| &h.lines)
                     .filter(|l| l.kind == DiffLineKind::Added)
                     .count();
-                let removed = hunks
+                let removed = session_hunks
                     .iter()
                     .flat_map(|h| &h.lines)
                     .filter(|l| l.kind == DiffLineKind::Removed)
@@ -1189,32 +1368,7 @@ impl Application {
                 existing.timestamp = current_timestamp();
                 changed = true;
 
-                if !hunks.is_empty()
-                    && let Some(tool) = self
-                        .ui
-                        .tools
-                        .iter_mut()
-                        .find(|tool| tool.call_id == call_id)
-                {
-                    let path_buf = PathBuf::from(&normalized);
-                    if !tool.diff_paths.iter().any(|existing| {
-                        normalize_path(&existing.display().to_string())
-                            == normalize_path(&normalized)
-                    }) {
-                        tool.diff_paths.push(path_buf.clone());
-                    }
-                    if let Some(preview) = tool.diff_previews.iter_mut().find(|preview| {
-                        normalize_path(&preview.path.display().to_string())
-                            == normalize_path(&normalized)
-                    }) {
-                        preview.hunks = hunks;
-                    } else {
-                        tool.diff_previews.push(ToolDiffPreview {
-                            path: path_buf,
-                            hunks,
-                        });
-                    }
-                }
+                self.attach_tool_diff_preview(&call_id, &normalized, &normalized, tool_hunks);
             }
         }
 
@@ -1272,7 +1426,28 @@ fn extract_title_from_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_file_write_tool_identity;
+    use super::{is_file_write_tool_identity, tool_diff_hunks};
+    use workspace_model::DiffLineKind;
+
+    #[test]
+    fn tool_diff_uses_previous_session_new_text_for_repeated_file_edits() {
+        let hunks = tool_diff_hunks(Some("one\ntwo\n"), Some("one\n"), "one\nthree\n");
+        let added = hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        let removed = hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(added, vec!["three"]);
+        assert_eq!(removed, vec!["two"]);
+    }
 
     #[test]
     fn write_tool_detection_does_not_match_editor_paths() {

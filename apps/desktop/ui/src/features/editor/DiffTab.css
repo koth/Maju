@@ -107,6 +107,16 @@
   overflow: hidden;
 }
 
+.dt-editor .monaco-diff-editor .line-insert,
+.dt-editor .monaco-diff-editor .char-insert,
+.dt-editor .monaco-diff-editor .line-delete,
+.dt-editor .monaco-diff-editor .char-delete {
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: 0 !important;
+  text-decoration: none !important;
+}
+
 .dt-loading {
   display: flex;
   align-items: center;

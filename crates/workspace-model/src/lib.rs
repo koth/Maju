@@ -353,6 +353,26 @@ pub struct SessionListItem {
     pub updated_at: String,
     pub message_count: i64,
     pub acp_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenWorkspaceItem {
+    pub workspace: WorkspaceDescriptor,
+    pub active_session_id: Uuid,
+    pub session_count: usize,
+    pub is_active: bool,
+    pub connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSessionList {
+    pub workspace: WorkspaceDescriptor,
+    pub sessions: Vec<SessionListItem>,
+    pub active_session_id: Uuid,
+    pub is_active: bool,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,6 +447,21 @@ pub enum AgentCliId {
     Opencode,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTheme {
+    KodexDark,
+    Midnight,
+    Graphite,
+    Forest,
+}
+
+impl Default for AppTheme {
+    fn default() -> Self {
+        Self::KodexDark
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
@@ -434,6 +469,8 @@ pub struct AppSettings {
     /// Only used when selected_agent is Opencode. Default: 9988.
     #[serde(default = "default_acp_port")]
     pub acp_port: u16,
+    #[serde(default)]
+    pub theme: AppTheme,
 }
 
 fn default_acp_port() -> u16 {

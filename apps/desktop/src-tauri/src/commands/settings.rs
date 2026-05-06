@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use std::process::{Command, Stdio};
 use tauri::State;
-use workspace_model::{AgentCliId, AgentInstallResult, AgentSettingsSnapshot};
+use workspace_model::{AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -24,6 +24,12 @@ pub fn settings_select_agent(
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::select_agent(&paths, agent).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_select_theme(theme: AppTheme) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::select_theme(&paths, theme).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

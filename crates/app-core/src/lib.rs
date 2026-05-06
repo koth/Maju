@@ -14,7 +14,7 @@ mod tests {
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, MessageRole,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, MessageRole,
         SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
         SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus,
         UserPromptContent,
@@ -574,6 +574,20 @@ mod tests {
             ui.session_changes[0].new_text,
             "before\nnew section\ndone\n"
         );
+        let first_tool_added = ui.tools[0].diff_previews[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        let second_tool_added = ui.tools[1].diff_previews[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(first_tool_added, vec!["new section"]);
+        assert_eq!(second_tool_added, vec!["done"]);
 
         super::reducer::apply_event(
             &mut ui,
@@ -657,7 +671,7 @@ mod tests {
             .unwrap();
         assert_eq!(app.ui.session.model, "Mock Smart");
 
-        app.session_create().unwrap();
+        app.session_create(None).unwrap();
 
         assert_eq!(app.ui.session.model, "Agent default");
         assert!(app.ui.session_config.controls.is_empty());
@@ -722,6 +736,148 @@ mod tests {
         wait_for_control(&mut reopened, SessionConfigCategory::Mode);
 
         assert_eq!(reopened.ui.session.mode.as_deref(), Some("Build"));
+    }
+
+    #[test]
+    fn selected_model_persists_across_application_bootstrap() {
+        let dir = tempdir().unwrap();
+
+        {
+            let mut app = test_app(&dir);
+            wait_for_control(&mut app, SessionConfigCategory::Model);
+            app.set_session_config_control("model", "mock-smart")
+                .unwrap();
+            assert_eq!(app.ui.session.model, "Mock Smart");
+        }
+
+        let mut reopened = test_app(&dir);
+        wait_for_control(&mut reopened, SessionConfigCategory::Model);
+
+        assert_eq!(reopened.ui.session.model, "Mock Smart");
+        let model_control = reopened
+            .ui
+            .session_config
+            .controls
+            .iter()
+            .find(|control| control.category == SessionConfigCategory::Model)
+            .expect("model control should exist after bootstrap");
+        assert_eq!(model_control.current_value_id, "mock-smart");
+
+        let app_root = dir.path().join("home").join(".kodex");
+        let store = SessionStore::open(&app_root, dir.path()).unwrap();
+        let (model, _) = store
+            .get_session_model_mode(&reopened.ui.session.id.to_string())
+            .unwrap()
+            .expect("session metadata should exist");
+        assert_eq!(model, "Mock Smart");
+    }
+
+    #[test]
+    fn permission_resolution_completes_permission_tool() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "perm-1".into(),
+                name: "Read".into(),
+                options: vec![],
+            },
+        );
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "perm-1")
+            .expect("permission tool should exist");
+        assert_eq!(tool.status, ToolStatus::Running);
+        assert_eq!(
+            ui.session.status,
+            workspace_model::SessionStatus::WaitingForTool
+        );
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "perm-1".into(),
+                outcome: "Permission selected: Allow".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "perm-1")
+            .expect("permission tool should exist");
+        assert_eq!(tool.status, ToolStatus::Succeeded);
+        assert!(tool.permission_options.is_empty());
+        assert_eq!(
+            tool.permission_decision.as_deref(),
+            Some("Permission selected: Allow")
+        );
+    }
+
+    #[test]
+    fn bootstrap_interrupts_persisted_running_tools() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let app_paths = AppPaths::from_root(dir.path().join("home").join(".kodex"));
+        let store = SessionStore::open(app_paths.root(), &workspace).unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        store.create_session(&session_id, "Agent default").unwrap();
+
+        let tool = workspace_model::ToolInvocation {
+            id: uuid::Uuid::new_v4(),
+            call_id: "call-running-1".into(),
+            parent_call_id: None,
+            name: "Explore".into(),
+            kind: "Explore".into(),
+            summary: "Explore model persistence".into(),
+            status: ToolStatus::Running,
+            is_subagent: false,
+            detail_text: String::new(),
+            logs: Vec::new(),
+            diff_paths: Vec::new(),
+            diff_previews: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+            terminal_output: None,
+            error: None,
+            permission_options: Vec::new(),
+            permission_decision: None,
+        };
+        store.insert_tool(&session_id, &tool, 1).unwrap();
+        drop(store);
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("app-core should live under crates/app-core")
+            .join("Cargo.toml");
+        let manifest = manifest.display().to_string().replace('\\', "/");
+
+        let app = Application::bootstrap_with_app_paths(
+            &workspace,
+            format!(
+                "cargo run --manifest-path {} -p mock-acp-agent --quiet --",
+                manifest
+            ),
+            app_paths.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(app.ui.tools.len(), 1);
+        assert_eq!(app.ui.tools[0].status, ToolStatus::Interrupted);
+        assert_eq!(
+            app.ui.tools[0].error.as_deref(),
+            Some("上次会话结束前未完成")
+        );
+
+        let reopened_store = SessionStore::open(app_paths.root(), &workspace).unwrap();
+        let (_, persisted_tools, _) = reopened_store.load_session(&session_id).unwrap();
+        assert_eq!(persisted_tools.len(), 1);
+        assert_eq!(persisted_tools[0].status, ToolStatus::Interrupted);
     }
 
     fn test_app(dir: &tempfile::TempDir) -> Application {
@@ -931,7 +1087,11 @@ mod tests {
             },
         );
 
-        let tool = ui.tools.first().expect("tool should exist");
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "task-1")
+            .expect("tool should exist");
         assert_eq!(tool.parent_call_id.as_deref(), Some("parent-1"));
         assert_eq!(tool.kind, "explore");
         assert!(tool.is_subagent);

@@ -1,8 +1,10 @@
+use crate::commands::workspace::save_open_workspace_state;
 use crate::state::AppState;
 use app_core::normalize_tracked_path;
 use tauri::{AppHandle, State};
 use workspace_model::{
-    SessionConfigState, SessionFileChange, SessionListItem, UiSnapshot, UserPromptContent,
+    AgentCliId, SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent,
+    WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -53,23 +55,42 @@ pub fn session_cancel(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn session_list(state: State<'_, AppState>) -> Result<Vec<SessionListItem>, String> {
-    state.with_app(|app| app.session_list())
+pub fn session_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceSessionList>, String> {
+    state.list_workspace_sessions()
 }
 
 #[tauri::command]
-pub fn session_switch(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.with_app(|app| app.session_switch(&id))
+pub fn session_switch(
+    state: State<'_, AppState>,
+    id: String,
+    workspace_root: Option<String>,
+) -> Result<(), String> {
+    state.with_workspace_app(workspace_root, |app| app.session_switch(&id))?;
+    save_open_workspace_state(&state)
 }
 
 #[tauri::command]
-pub fn session_create(state: State<'_, AppState>) -> Result<(), String> {
-    state.with_app(|app| app.session_create())
+pub fn session_create(
+    state: State<'_, AppState>,
+    workspace_root: Option<String>,
+    agent: Option<AgentCliId>,
+) -> Result<(), String> {
+    let default_agent = agent.or_else(|| {
+        app_core::AppPaths::resolve()
+            .ok()
+            .map(|paths| app_core::settings::load_app_settings(&paths).selected_agent)
+    });
+    state.with_workspace_app(workspace_root, |app| app.session_create(default_agent))?;
+    save_open_workspace_state(&state)
 }
 
 #[tauri::command]
-pub fn session_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.with_app(|app| app.session_delete(&id))
+pub fn session_delete(
+    state: State<'_, AppState>,
+    id: String,
+    workspace_root: Option<String>,
+) -> Result<(), String> {
+    state.with_workspace_app(workspace_root, |app| app.session_delete(&id))
 }
 
 #[tauri::command]

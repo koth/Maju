@@ -197,6 +197,24 @@ export interface SessionListItem {
   created_at: string;
   updated_at: string;
   message_count: number;
+  acp_session_id?: string | null;
+  agent_cli?: string | null;
+}
+
+export interface OpenWorkspaceItem {
+  workspace: WorkspaceDescriptor;
+  active_session_id: string;
+  session_count: number;
+  is_active: boolean;
+  connected: boolean;
+}
+
+export interface WorkspaceSessionList {
+  workspace: WorkspaceDescriptor;
+  sessions: SessionListItem[];
+  active_session_id: string;
+  is_active: boolean;
+  connected: boolean;
 }
 
 export type FileChangeType = "Created" | "Modified" | "Deleted";
@@ -250,10 +268,12 @@ export interface SearchResult {
 // App settings types
 
 export type AgentCliId = "codebuddy" | "opencode";
+export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest";
 
 export interface AppSettings {
   selected_agent: AgentCliId;
   acp_port: number;
+  theme: AppTheme;
 }
 
 export interface AgentCliStatus {

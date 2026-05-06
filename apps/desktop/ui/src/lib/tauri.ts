@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionListItem, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme } from "../types";
 
 export async function sessionGetState(): Promise<UiSnapshot> {
   return invoke<UiSnapshot>("session_get_state");
@@ -69,12 +69,28 @@ export async function reviewRejectPatch(path: string): Promise<void> {
   return invoke("review_reject_patch", { path });
 }
 
-export async function workspaceOpen(path: string): Promise<UiSnapshot> {
-  return invoke<UiSnapshot>("workspace_open", { path });
+export async function workspaceOpen(path: string, agent?: AgentCliId): Promise<UiSnapshot> {
+  return invoke<UiSnapshot>("workspace_open", { path, agent });
 }
 
 export async function workspaceClose(): Promise<void> {
   return invoke("workspace_close");
+}
+
+export async function workspaceListOpen(): Promise<OpenWorkspaceItem[]> {
+  return invoke<OpenWorkspaceItem[]>("workspace_list_open");
+}
+
+export async function workspaceHasOpen(): Promise<boolean> {
+  return invoke<boolean>("workspace_has_open");
+}
+
+export async function workspaceRestoreOpen(): Promise<UiSnapshot | null> {
+  return invoke<UiSnapshot | null>("workspace_restore_open");
+}
+
+export async function workspaceSetActive(path: string): Promise<UiSnapshot> {
+  return invoke<UiSnapshot>("workspace_set_active", { path });
 }
 
 export async function workspaceGetRecent(): Promise<RecentWorkspace[]> {
@@ -85,20 +101,20 @@ export async function workspaceRemoveRecent(path: string): Promise<void> {
   return invoke("workspace_remove_recent", { path });
 }
 
-export async function sessionList(): Promise<SessionListItem[]> {
-  return invoke<SessionListItem[]>("session_list");
+export async function sessionList(): Promise<WorkspaceSessionList[]> {
+  return invoke<WorkspaceSessionList[]>("session_list");
 }
 
-export async function sessionSwitch(id: string): Promise<void> {
-  return invoke("session_switch", { id });
+export async function sessionSwitch(id: string, workspaceRoot?: string): Promise<void> {
+  return invoke("session_switch", { id, workspaceRoot });
 }
 
-export async function sessionCreate(): Promise<void> {
-  return invoke("session_create");
+export async function sessionCreate(workspaceRoot?: string, agent?: AgentCliId): Promise<void> {
+  return invoke("session_create", { workspaceRoot, agent });
 }
 
-export async function sessionDelete(id: string): Promise<void> {
-  return invoke("session_delete", { id });
+export async function sessionDelete(id: string, workspaceRoot?: string): Promise<void> {
+  return invoke("session_delete", { id, workspaceRoot });
 }
 
 export async function sessionGetChanges(): Promise<SessionFileChange[]> {
@@ -131,6 +147,10 @@ export async function settingsDetectAgents(): Promise<AgentSettingsSnapshot> {
 
 export async function settingsSelectAgent(agent: AgentCliId): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_select_agent", { agent });
+}
+
+export async function settingsSelectTheme(theme: AppTheme): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_theme", { theme });
 }
 
 export async function settingsInstallAgent(agent: AgentCliId): Promise<AgentInstallResult> {

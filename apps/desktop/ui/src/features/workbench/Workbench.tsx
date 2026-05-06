@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import type { UiSnapshot, TabDescriptor, SessionFileChange } from "../../types";
-import { sessionGetState, gitRefresh, sessionResolvePermission, reviewGetGitDiffContent } from "../../lib/tauri";
+import type { UiSnapshot, TabDescriptor, SessionFileChange, AppTheme } from "../../types";
+import { sessionGetState, gitRefresh, sessionResolvePermission, reviewGetGitDiffContent, settingsGetAgentSnapshot } from "../../lib/tauri";
 import { onUiSnapshot } from "../../lib/events";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer } from "../composer/Composer";
@@ -17,6 +17,7 @@ import { GlobalChrome } from "./GlobalChrome";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadSidebarShell } from "./ThreadSidebarShell";
 import { SettingsPage } from "../settings/SettingsPage";
+import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import "./Workbench.css";
 
 const CONVERSATION_TAB: TabDescriptor = {
@@ -33,9 +34,16 @@ export function Workbench() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [gitRefreshing, setGitRefreshing] = useState(false);
   const gitRefreshInFlight = useRef(false);
   const prevSnapshotJson = useRef<string>("");
+
+  useEffect(() => {
+    settingsGetAgentSnapshot()
+      .then((snapshot) => setAppTheme(applyAppTheme(snapshot.settings.theme)))
+      .catch(() => setAppTheme(applyAppTheme(DEFAULT_APP_THEME)));
+  }, []);
 
   const pollState = useCallback(async () => {
     try {
@@ -254,7 +262,7 @@ export function Workbench() {
   if (settingsOpen) {
     return (
       <div className="workbench">
-        <SettingsPage onBack={() => setSettingsOpen(false)} />
+        <SettingsPage onBack={() => setSettingsOpen(false)} onThemeChange={setAppTheme} />
       </div>
     );
   }
@@ -276,8 +284,10 @@ export function Workbench() {
       <ThreadSidebarShell collapsed={sidebarCollapsed}>
         <SessionList
           activeSessionId={snapshot.session.id}
-          workspace={snapshot.workspace}
+          activeWorkspaceRoot={snapshot.workspace.root}
+          currentSessionStatus={snapshot.session.status}
           onSessionChanged={handleSessionChanged}
+          onWorkspaceChanged={handleWorkspaceChanged}
         />
       </ThreadSidebarShell>
 
@@ -328,7 +338,7 @@ export function Workbench() {
               </div>
             )}
             {activeTab.type === "diff" && resolvedDiffChange && (
-              <DiffTab change={resolvedDiffChange} />
+              <DiffTab change={resolvedDiffChange} appTheme={appTheme} />
             )}
             {activeTab.type === "diff" && !resolvedDiffChange && (
               <div className="workbench-loading">正在加载差异...</div>
@@ -339,6 +349,7 @@ export function Workbench() {
                 lineNumber={activeTab.lineNumber}
                 searchQuery={activeTab.searchQuery}
                 navToken={activeTab.navToken}
+                appTheme={appTheme}
               />
             )}
           </main>

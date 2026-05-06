@@ -383,7 +383,7 @@ impl SessionStore {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.title, s.status, s.created_at, s.updated_at,
                     (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as msg_count,
-                    s.acp_session_id
+                    s.acp_session_id, s.agent_cli
              FROM sessions s WHERE s.workspace_root = ?1 ORDER BY s.updated_at DESC",
         )?;
 
@@ -396,6 +396,7 @@ impl SessionStore {
                 updated_at: row.get(4)?,
                 message_count: row.get(5)?,
                 acp_session_id: row.get(6)?,
+                agent_cli: row.get(7)?,
             })
         })?;
 

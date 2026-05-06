@@ -2,6 +2,7 @@
 
 mod commands;
 mod events;
+mod open_workspaces;
 mod recent_workspaces;
 mod state;
 
@@ -46,6 +47,7 @@ fn main() {
             commands::settings::settings_get_agent_snapshot,
             commands::settings::settings_detect_agents,
             commands::settings::settings_select_agent,
+            commands::settings::settings_select_theme,
             commands::settings::settings_install_agent,
             commands::review::review_get_diff,
             commands::review::review_get_git_diff_content,
@@ -53,6 +55,10 @@ fn main() {
             commands::review::review_reject_patch,
             commands::workspace::workspace_open,
             commands::workspace::workspace_close,
+            commands::workspace::workspace_list_open,
+            commands::workspace::workspace_has_open,
+            commands::workspace::workspace_restore_open,
+            commands::workspace::workspace_set_active,
             commands::workspace::workspace_get_recent,
             commands::workspace::workspace_remove_recent,
         ])
@@ -67,10 +73,7 @@ fn start_snapshot_bridge(app: tauri::AppHandle) {
         loop {
             let next_snapshot = app
                 .state::<AppState>()
-                .with_app(|application| {
-                    application.poll_prompt_progress();
-                    Ok(application.ui.clone())
-                })
+                .poll_all_and_get_active_snapshot()
                 .ok();
 
             match next_snapshot {
