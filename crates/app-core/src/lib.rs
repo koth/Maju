@@ -662,6 +662,33 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_preserves_persisted_session_agent_label() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let app_paths = AppPaths::from_root(dir.path().join("home").join(".kodex"));
+        let store = SessionStore::open(app_paths.root(), &workspace).unwrap();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        store.create_session(&session_id, "Agent default").unwrap();
+        store
+            .update_session_agent_cli(&session_id, "goose")
+            .unwrap();
+        drop(store);
+
+        let app =
+            Application::bootstrap_with_app_paths(&workspace, "codebuddy --acp", app_paths.clone())
+                .unwrap();
+
+        assert_eq!(app.ui.session.id.to_string(), session_id);
+        assert_eq!(app.ui.session.agent_cli.as_deref(), Some("goose"));
+        assert!(app.agent_command.to_lowercase().contains("goose"));
+
+        let reopened_store = SessionStore::open(app_paths.root(), &workspace).unwrap();
+        let sessions = reopened_store.list_sessions().unwrap();
+        assert_eq!(sessions[0].agent_cli.as_deref(), Some("goose"));
+    }
+
+    #[test]
     fn creating_session_uses_new_agent_session_and_agent_default_model() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);

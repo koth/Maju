@@ -29,9 +29,9 @@ const AGENTS: &[AgentCliDefinition] = &[
         acp_arg: "--acp",
     },
     AgentCliDefinition {
-        id: AgentCliId::Opencode,
-        label: "OpenCode",
-        binary: "opencode",
+        id: AgentCliId::Goose,
+        label: "goose",
+        binary: "goose",
         acp_arg: "acp",
     },
 ];
@@ -145,6 +145,17 @@ pub fn agent_label_for_command(command: &str) -> String {
     "CodeBuddy".to_string()
 }
 
+/// Resolve a previously persisted human-friendly agent label back to an ACP command.
+pub fn command_for_agent_label(label: &str) -> Option<String> {
+    let normalized = label.trim().to_lowercase();
+    AGENTS
+        .iter()
+        .find(|agent| {
+            normalized == agent.label.to_lowercase() || normalized == agent.binary.to_lowercase()
+        })
+        .and_then(|agent| command_for_agent(agent.id))
+}
+
 fn settings_path(paths: &AppPaths) -> PathBuf {
     paths.config_dir().join(SETTINGS_FILE)
 }
@@ -165,9 +176,18 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
         search_paths.extend(std::env::split_paths(&paths));
     }
 
-    // On macOS, GUI apps launched from Finder/Dock do not inherit the
-    // shell’s PATH (e.g. /opt/homebrew/bin). Append common directories
-    // so CLI detection works out of the box.
+    // GUI apps launched from Finder/Dock often do not inherit the user's
+    // interactive shell PATH. Include common user-local and system locations
+    // so CLIs installed by scripts (e.g. goose in ~/.local/bin) are detected.
+    if let Some(home) = dirs_next::home_dir() {
+        for suffix in [".local/bin", "bin"] {
+            let p = home.join(suffix);
+            if !search_paths.contains(&p) {
+                search_paths.push(p);
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         for extra in [
@@ -231,8 +251,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
         let settings = AppSettings {
-            selected_agent: AgentCliId::Opencode,
-            acp_port: 9988,
+            selected_agent: AgentCliId::Goose,
+            acp_port: 0,
             theme: AppTheme::Midnight,
         };
 
@@ -258,12 +278,21 @@ mod tests {
     #[test]
     fn command_for_agent_uses_selected_binary_name() {
         let codebuddy = command_for_agent(AgentCliId::Codebuddy).unwrap();
-        let opencode = command_for_agent(AgentCliId::Opencode).unwrap();
+        let goose = command_for_agent(AgentCliId::Goose).unwrap();
 
         assert!(codebuddy.to_lowercase().contains("codebuddy"));
-        assert!(opencode.to_lowercase().contains("opencode"));
+        assert!(goose.to_lowercase().contains("goose"));
         assert!(codebuddy.ends_with(" --acp"));
-        assert!(opencode.ends_with(" acp"));
+        assert!(goose.ends_with(" acp"));
+    }
+
+    #[test]
+    fn command_for_agent_label_resolves_persisted_labels() {
+        let goose = command_for_agent_label("goose").unwrap();
+        let codebuddy = command_for_agent_label("CodeBuddy").unwrap();
+
+        assert!(goose.to_lowercase().contains("goose"));
+        assert!(codebuddy.to_lowercase().contains("codebuddy"));
     }
 
     #[test]
@@ -278,8 +307,8 @@ mod tests {
         save_app_settings(
             &paths,
             &AppSettings {
-                selected_agent: AgentCliId::Opencode,
-                acp_port: 9988,
+                selected_agent: AgentCliId::Goose,
+                acp_port: 0,
                 theme: AppTheme::Graphite,
             },
         )

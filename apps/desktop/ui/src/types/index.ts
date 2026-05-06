@@ -267,7 +267,7 @@ export interface SearchResult {
 
 // App settings types
 
-export type AgentCliId = "codebuddy" | "opencode";
+export type AgentCliId = "codebuddy" | "goose";
 export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest";
 
 export interface AppSettings {

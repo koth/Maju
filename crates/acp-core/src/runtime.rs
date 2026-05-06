@@ -8,9 +8,9 @@ use agent_client_protocol::schema::{
     BlobResourceContents, CancelNotification, ClientCapabilities, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionKind, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PermissionOptionKind, PromptRequest, PromptResponse, ProtocolVersion,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
@@ -826,7 +826,7 @@ impl ConnectTo<Client> for HiddenAgentProcess {
 
         let (stdin_tx, stdin_rx) = mpsc::channel::<String>();
 
-        // Some ACP agents (e.g. opencode acp) shut down their ACP handler when
+        // Some ACP agents shut down their ACP handler when
         // stdin reaches EOF.  We must keep the stdin handle alive for the entire
         // lifetime of the child process — not just until the write channel closes
         // or connect_to returns.  Spawn a dedicated thread that holds the handle
@@ -886,9 +886,9 @@ impl ConnectTo<Client> for HiddenAgentProcess {
 
 /// ACP transport that spawns the agent process and connects via TCP.
 ///
-/// Used for agents like `opencode acp` that listen on a TCP port instead of
-/// communicating over stdio.  The agent is spawned with `--port <port>` and
-/// the client connects to `127.0.0.1:<port>`.
+/// Used for agents that listen on a TCP port instead of communicating over
+/// stdio. The agent is spawned with `--port <port>` and the client connects to
+/// `127.0.0.1:<port>`.
 struct TcpAgentProcess {
     command: PathBuf,
     args: Vec<String>,
@@ -964,7 +964,7 @@ impl ConnectTo<Client> for TcpAgentProcess {
             .spawn()
             .map_err(agent_client_protocol::Error::into_internal_error)?;
 
-        // Keep stdin handle alive for the entire session.  opencode acp exits
+        // Keep stdin handle alive for the entire session. Some TCP ACP agents exit
         // when stdin reaches EOF, regardless of whether it uses stdio or TCP.
         let _child_stdin = child.stdin.take().ok_or_else(|| {
             agent_client_protocol::util::internal_error("failed to open agent stdin")
@@ -1623,6 +1623,11 @@ pub(crate) fn run_session(
                         &init_response.agent_capabilities.prompt_capabilities,
                     );
                     let supports_load_session = init_response.agent_capabilities.load_session;
+                    let supports_session_list = init_response
+                        .agent_capabilities
+                        .session_capabilities
+                        .list
+                        .is_some();
                     let has_resume_id = config.resume_session_id.is_some();
 
                     // Decide whether to load an existing session or create a new one
@@ -1734,6 +1739,15 @@ pub(crate) fn run_session(
                     let _ = tx_events.send(ClientEvent::SessionStarted {
                         session_id: session.session_id().0.to_string(),
                     });
+                    if supports_session_list {
+                        sync_session_title_from_list(
+                            &config,
+                            &tx_events,
+                            &connection,
+                            session.session_id(),
+                        )
+                        .await?;
+                    }
                     let _ = tx_events.send(ClientEvent::PromptCapabilitiesUpdated {
                         capabilities: prompt_capabilities.clone(),
                     });
@@ -1817,7 +1831,15 @@ pub(crate) fn run_session(
                                                     "session/read_update_closed_after_stop",
                                                     &json!({ "error": err.to_string() }),
                                                 )?;
-                                                emit_turn_finished(&config, &tx_events, reason)?;
+                                                emit_turn_finished(
+                                                    &config,
+                                                    &tx_events,
+                                                    &session.connection(),
+                                                    session.session_id(),
+                                                    supports_session_list,
+                                                    reason,
+                                                )
+                                                .await?;
                                                 return Ok(());
                                             }
                                             append_runtime_event_log(
@@ -1870,7 +1892,15 @@ pub(crate) fn run_session(
 
                                     let Some(message) = message else {
                                         if let Ok(reason) = stop_rx.try_recv() {
-                                            emit_turn_finished(&config, &tx_events, reason)?;
+                                            emit_turn_finished(
+                                                &config,
+                                                &tx_events,
+                                                &session.connection(),
+                                                session.session_id(),
+                                                supports_session_list,
+                                                reason,
+                                            )
+                                            .await?;
                                             break;
                                         }
                                         continue;
@@ -1913,7 +1943,15 @@ pub(crate) fn run_session(
                                         agent_client_protocol::SessionMessage::StopReason(
                                             reason,
                                         ) => {
-                                            emit_turn_finished(&config, &tx_events, reason)?;
+                                            emit_turn_finished(
+                                                &config,
+                                                &tx_events,
+                                                &session.connection(),
+                                                session.session_id(),
+                                                supports_session_list,
+                                                reason,
+                                            )
+                                            .await?;
                                             break;
                                         }
                                         other => {
@@ -2027,9 +2065,12 @@ pub(crate) fn run_session(
     result
 }
 
-fn emit_turn_finished(
+async fn emit_turn_finished(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    supports_session_list: bool,
     reason: StopReason,
 ) -> anyhow::Result<()> {
     let stop_reason = format_stop_reason(reason);
@@ -2038,7 +2079,52 @@ fn emit_turn_finished(
         "session/stop_reason",
         &json!({ "stopReason": stop_reason.clone() }),
     )?;
+
+    if supports_session_list {
+        sync_session_title_from_list(config, tx_events, connection, session_id).await?;
+    }
+
     let _ = tx_events.send(ClientEvent::TurnFinished { stop_reason });
+    Ok(())
+}
+
+async fn sync_session_title_from_list(
+    config: &SessionConfig,
+    tx_events: &mpsc::Sender<ClientEvent>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+) -> anyhow::Result<()> {
+    let request = ListSessionsRequest::new().cwd(PathBuf::from(&config.workspace_root));
+    let response = connection
+        .send_request_to(Agent, request)
+        .block_task()
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+
+    let matched = response
+        .sessions
+        .into_iter()
+        .find(|session| session.session_id == *session_id);
+
+    if let Some(session) = matched
+        && let Some(title) = session.title
+    {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            append_runtime_event_log(
+                config,
+                "session/list_title_sync",
+                &json!({
+                    "sessionId": session_id.0.as_ref(),
+                    "title": trimmed,
+                }),
+            )?;
+            let _ = tx_events.send(ClientEvent::SessionTitleUpdated {
+                title: trimmed.to_string(),
+            });
+        }
+    }
+
     Ok(())
 }
 

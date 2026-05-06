@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use workspace_model::{DiffHunk, FileChangeType};
@@ -18,6 +19,7 @@ const MAX_CANDIDATES_PER_TOOL: usize = 64;
 struct FileMeta {
     mtime: SystemTime,
     len: u64,
+    fingerprint: u64,
 }
 
 /// A scoped recording window that captures baseline file metadata when a tool
@@ -38,6 +40,20 @@ pub(crate) struct FileChangeTracker {
     index: HashMap<String, FileMeta>,
     /// Currently active recording windows, keyed by call_id.
     active_windows: HashMap<String, ToolRecordingWindow>,
+}
+
+fn file_fingerprint(path: &Path, len: u64) -> u64 {
+    if len > MAX_DIFF_FILE_SIZE {
+        return len;
+    }
+
+    let Ok(bytes) = fs::read(path) else {
+        return len;
+    };
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl FileChangeTracker {
@@ -81,10 +97,11 @@ impl FileChangeTracker {
                     .to_string_lossy()
                     .replace('\\', "/");
                 self.index.insert(
-                    rel,
+                    rel.clone(),
                     FileMeta {
                         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                         len: meta.len(),
+                        fingerprint: file_fingerprint(&path, meta.len()),
                     },
                 );
             }
@@ -93,6 +110,14 @@ impl FileChangeTracker {
 
     /// Start a recording window for a tool call. Captures current file metadata.
     pub(crate) fn start_recording(&mut self, call_id: &str, hint_paths: Vec<String>) {
+        // A poll batch may contain ToolStarted followed by ToolDiff for the same
+        // call. Application pre-starts recording before diff preprocessing so the
+        // ToolDiff can use the tool-start baseline; the normal event-application
+        // pass will see ToolStarted again. Keep the earliest baseline.
+        if self.active_windows.contains_key(call_id) {
+            return;
+        }
+
         let hint_paths = hint_paths
             .into_iter()
             .map(|path| self.normalize_candidate_path(&path))
@@ -227,8 +252,10 @@ impl FileChangeTracker {
                 let file_meta = fs::metadata(&full_path);
                 let is_changed = match (base_meta, file_meta.as_ref()) {
                     (Some(base), Ok(current)) => {
-                        current.modified().unwrap_or(SystemTime::UNIX_EPOCH) != base.mtime
-                            || current.len() != base.len
+                        let mtime = current.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        let len = current.len();
+                        let fingerprint = file_fingerprint(&full_path, len);
+                        mtime != base.mtime || len != base.len || fingerprint != base.fingerprint
                     }
                     (None, Ok(_)) => true, // new file
                     (_, Err(_)) => false,
@@ -393,6 +420,33 @@ mod tests {
         assert_eq!(changes[0].change_type, FileChangeType::Modified);
         assert_eq!(changes[0].old_text.as_deref(), Some("hello"));
         assert_eq!(changes[0].new_text, "hello world");
+        assert!(!changes[0].skipped_diff);
+    }
+
+    #[test]
+    fn modified_file_is_detected_even_when_metadata_timestamp_does_not_change() {
+        let dir = tempdir();
+        let file_path = dir.path().join("foo.txt");
+        fs::write(&file_path, "hello").unwrap();
+        let original_meta = fs::metadata(&file_path).unwrap();
+        let original_mtime = original_meta.modified().unwrap();
+
+        let mut tracker = FileChangeTracker::new(dir.path());
+        tracker.start_recording("call-1", vec!["foo.txt".to_string()]);
+
+        fs::write(&file_path, "world").unwrap();
+        filetime::set_file_mtime(
+            &file_path,
+            filetime::FileTime::from_system_time(original_mtime),
+        )
+        .unwrap();
+
+        let changes = tracker.finish_recording("call-1");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "foo.txt");
+        assert_eq!(changes[0].change_type, FileChangeType::Modified);
+        assert_eq!(changes[0].old_text.as_deref(), Some("hello"));
+        assert_eq!(changes[0].new_text, "world");
         assert!(!changes[0].skipped_diff);
     }
 

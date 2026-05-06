@@ -707,24 +707,42 @@ fn emit_codebuddy_diff_content(
         let Some(path) = item.get("path").and_then(Value::as_str) else {
             continue;
         };
-        let Some(new_text) = item.get("newText").and_then(Value::as_str) else {
-            continue;
-        };
         let old_text = item
             .get("oldText")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let new_text = item
+            .get("newText")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| edit_preview_new_text_from_raw_input(update.get("rawInput")));
+        let Some(new_text) = new_text else {
+            continue;
+        };
 
         tx.send(ClientEvent::ToolDiff {
             id: id.to_string(),
             path: path.to_string(),
             old_text,
-            new_text: new_text.to_string(),
+            new_text,
         })
         .map_err(|_| anyhow!("failed to emit CodeBuddy diff content"))?;
     }
 
     Ok(())
+}
+
+fn edit_preview_new_text_from_raw_input(raw_input: Option<&Value>) -> Option<String> {
+    let raw_input = raw_input?;
+    let before = raw_input.get("before")?.as_str()?;
+    let after = raw_input.get("after")?.as_str()?;
+    let current = raw_input
+        .get("content")
+        .or_else(|| raw_input.get("oldText"))
+        .or_else(|| raw_input.get("old_text"))
+        .and_then(Value::as_str)?;
+    let replaced = current.replacen(before, after, 1);
+    (replaced != current).then_some(replaced)
 }
 
 fn emit_codebuddy_text_content(
@@ -1343,6 +1361,80 @@ mod tests {
     fn diff_conversion_returns_empty_for_unchanged_content() {
         let hunks = diff_to_hunks(Some("alpha\nbeta"), "alpha\nbeta");
         assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn codebuddy_diff_content_preserves_old_text_for_tool_card_stats() {
+        let (tx, rx) = mpsc::channel();
+        let old_text = "# Kodex\n\n## Project Structure\n\nbody\n";
+        let new_text = "# Kodex\n\n## 项目结构\n\nbody\n";
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-edit-1",
+                    "status": "completed",
+                    "content": [{
+                        "type": "diff",
+                        "path": "/workspace/README.md",
+                        "oldText": old_text,
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                id,
+                path,
+                old_text: emitted_old_text,
+                new_text: emitted_new_text,
+            } => {
+                assert_eq!(id, "call-edit-1");
+                assert_eq!(path, "/workspace/README.md");
+                assert_eq!(emitted_old_text.as_deref(), Some(old_text));
+                assert_eq!(emitted_new_text, new_text);
+
+                let hunks = diff_to_hunks(emitted_old_text.as_deref(), &emitted_new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Added)
+                    .map(|line| line.content.as_str())
+                    .collect::<Vec<_>>();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Removed)
+                    .map(|line| line.content.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(added, vec!["## 项目结构"]);
+                assert_eq!(removed, vec!["## Project Structure"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_preview_new_text_can_be_rebuilt_from_raw_input_content() {
+        let raw_input = serde_json::json!({
+            "path": "/workspace/README.md",
+            "before": "## Project Structure\n",
+            "after": "## 项目结构\n",
+            "content": "# Kodex\n\n## Project Structure\n\nbody\n"
+        });
+
+        assert_eq!(
+            edit_preview_new_text_from_raw_input(Some(&raw_input)).as_deref(),
+            Some("# Kodex\n\n## 项目结构\n\nbody\n")
+        );
     }
 
     #[test]

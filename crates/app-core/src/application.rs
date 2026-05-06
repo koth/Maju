@@ -5,7 +5,7 @@ use crate::reducer::apply_event;
 use acp_core::{ClientEvent, PromptTask, SessionConfig, SessionHandle, diff_to_hunks};
 use git_service::GitService;
 use session_store::SessionStore;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use workspace_model::{
     AgentCliId, ChatMessage, DiffHunk, DiffLineKind, MessageRole, SessionConfigSource,
@@ -214,15 +214,21 @@ impl Application {
 
         let store = SessionStore::open(app_paths.root(), workspace_root)?;
 
-        // Read ACP port from settings (used by opencode for TCP transport)
+        // Read ACP port from settings.
         let settings = crate::settings::load_app_settings(&app_paths);
         let acp_port = settings.acp_port;
 
+        let existing_sessions = store.list_sessions().unwrap_or_default();
+        let most_recent_session = existing_sessions.first();
+        let requested_agent_label = crate::settings::agent_label_for_command(&agent_command);
+        let persisted_agent_command = most_recent_session
+            .and_then(|session| session.agent_cli.as_deref())
+            .filter(|label| *label != requested_agent_label)
+            .and_then(crate::settings::command_for_agent_label);
+        let agent_command = persisted_agent_command.unwrap_or(agent_command);
+
         // Check for existing session and its ACP session ID for --resume
-        let resume_session_id = store
-            .list_sessions()
-            .ok()
-            .and_then(|sessions| sessions.first().and_then(|s| s.acp_session_id.clone()));
+        let resume_session_id = most_recent_session.and_then(|s| s.acp_session_id.clone());
 
         // If resuming an existing session, skip replay events from session/load
         let skip_replay = resume_session_id.is_some();
@@ -238,9 +244,9 @@ impl Application {
         })?;
 
         // Try to restore the most recent session, otherwise create a new one
-        let (needs_title, seq_counter, pending_model_restore) = match store.list_sessions() {
-            Ok(sessions) if !sessions.is_empty() => {
-                let recent = &sessions[0]; // list_sessions orders by updated_at DESC
+        let (needs_title, seq_counter, pending_model_restore) = match existing_sessions.as_slice() {
+            [recent, ..] => {
+                // list_sessions orders by updated_at DESC
                 let session_id = &recent.id;
                 if let Ok((messages, tools, timeline)) = store.load_session(session_id) {
                     ui.session.id = uuid::Uuid::parse_str(session_id).unwrap_or(ui.session.id);
@@ -291,13 +297,16 @@ impl Application {
         if ui.session.mode.is_none() {
             ui.session.mode = Some("Build".into());
         }
-        // Determine which agent CLI this session is using
-        let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
-        ui.session.agent_cli = Some(agent_cli_label);
-        let _ = store.update_session_agent_cli(
-            &ui.session.id.to_string(),
-            ui.session.agent_cli.as_deref().unwrap_or("CodeBuddy"),
-        );
+        // Determine which agent CLI this session is using. Preserve the per-session
+        // persisted value when reopening, instead of overwriting it with the global
+        // settings default.
+        let agent_cli_label = store
+            .get_session_agent_cli(&ui.session.id.to_string())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::settings::agent_label_for_command(&agent_command));
+        ui.session.agent_cli = Some(agent_cli_label.clone());
+        let _ = store.update_session_agent_cli(&ui.session.id.to_string(), &agent_cli_label);
         let _ = session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"));
         let _ = store.update_session_model_mode(
             &ui.session.id.to_string(),
@@ -506,28 +515,50 @@ impl Application {
         let workspace_root = self.ui.workspace.root.clone();
         let mut events = events;
         let mut had_file_changes = false;
+        let mut batch_file_versions = HashMap::<String, String>::new();
+
+        // Events are collected in batches. Some agents emit ToolStarted and ToolDiff in
+        // the same batch after the file has already been written. Start recording before
+        // the ToolDiff preprocessing pass so `get_any_baseline_text` can still supply
+        // a baseline instead of letting the card diff against an empty file.
+        for event in &events {
+            if let ClientEvent::ToolStarted { id, .. } = event {
+                self.file_tracker.start_recording(id, Vec::new());
+            }
+        }
+
         for event in events.iter_mut() {
-            if let ClientEvent::ToolDiff { path, old_text, .. } = event {
+            if let ClientEvent::ToolDiff {
+                path,
+                old_text,
+                new_text,
+                ..
+            } = event
+            {
                 had_file_changes = true;
                 // Normalize path to workspace-relative with forward slashes
                 let normalized = normalize_path_for_storage(path, &workspace_root);
                 let abs_path = workspace_root.join(&normalized);
                 if old_text.is_none() {
-                    // 1. file_tracker baseline: content at tool-start time (best for tool card)
-                    if let Some(baseline) = self.file_tracker.get_any_baseline_text(&normalized) {
+                    // 1. For multiple ToolDiffs for the same file in one poll batch,
+                    // use the previous diff's new_text. This keeps each ToolCard scoped
+                    // to this tool's own edit instead of every card comparing against an
+                    // empty/missing base and showing the whole file as added.
+                    if let Some(previous_text) = batch_file_versions.get(&normalized) {
+                        *old_text = Some(previous_text.clone());
+                    }
+                    // 2. file_tracker baseline: content at tool-start time (best when available)
+                    else if let Some(baseline) =
+                        self.file_tracker.get_any_baseline_text(&normalized)
+                    {
                         *old_text = Some(baseline.to_string());
                     }
-                    // 2. session_changes new_text: the result of the previous edit = this edit's base
-                    else if let Some(tracked) = self.ui.session_changes.iter().find(|c| {
-                        normalize_tracked_path(&c.path) == normalize_tracked_path(&normalized)
-                    }) {
-                        *old_text = Some(tracked.new_text.clone());
-                    }
-                    // 3. last resort: read from disk (may be post-modification, but better than None)
+                    // 3. last resort requested by user: read the file directly.
                     else if let Ok(content) = std::fs::read_to_string(&abs_path) {
                         *old_text = Some(content);
                     }
                 }
+                batch_file_versions.insert(normalized.clone(), new_text.clone());
                 *path = normalized;
             }
         }
@@ -577,17 +608,7 @@ impl Application {
     }
 
     fn should_auto_reconnect_after_clean_exit(&self) -> bool {
-        if !self.agent_command.to_ascii_lowercase().contains("opencode") {
-            return false;
-        }
-
-        !self.session.id.is_empty()
-            || self
-                .store
-                .get_acp_session_id(&self.ui.session.id.to_string())
-                .ok()
-                .flatten()
-                .is_some()
+        false
     }
 
     pub fn cancel_prompt(&mut self) -> Result<(), String> {
@@ -734,6 +755,11 @@ impl Application {
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| (self.ui.session.model.clone(), self.ui.session.mode.clone()));
         let mode = mode.or_else(|| Some("Build".into()));
+        let stored_agent_cli = self.store.get_session_agent_cli(id).unwrap_or(None);
+        let session_agent_command = stored_agent_cli
+            .as_deref()
+            .and_then(crate::settings::command_for_agent_label)
+            .unwrap_or_else(|| self.agent_command.clone());
 
         // Get the stored ACP session ID for resume
         let resume_acp_id = self.store.get_acp_session_id(id).unwrap_or(None);
@@ -743,7 +769,7 @@ impl Application {
             workspace_root: self.ui.workspace.root.display().to_string(),
             app_data_root: self.app_paths.root().display().to_string(),
             model: model.clone(),
-            agent_command: self.agent_command.clone(),
+            agent_command: session_agent_command.clone(),
             resume_session_id: resume_acp_id,
             log_id: make_log_id(),
             acp_port: self.acp_port,
@@ -755,15 +781,12 @@ impl Application {
         self.ui.session.id = uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4());
         self.ui.session.model = model;
         self.ui.session.mode = mode;
-        self.ui.session.agent_cli = self
-            .store
-            .get_session_agent_cli(id)
-            .unwrap_or(None)
-            .or_else(|| {
-                Some(crate::settings::agent_label_for_command(
-                    &self.agent_command,
-                ))
-            });
+        self.agent_command = session_agent_command;
+        self.ui.session.agent_cli = stored_agent_cli.or_else(|| {
+            Some(crate::settings::agent_label_for_command(
+                &self.agent_command,
+            ))
+        });
         self.ui.session_config = Default::default();
         self.ui.prompt_capabilities = Default::default();
         self.ui.available_commands.clear();
@@ -1145,12 +1168,15 @@ impl Application {
             } else {
                 diff_to_hunks(effective_old_text.as_deref(), &change.new_text)
             };
+            let exact_edit_hunks = self.exact_edit_hunks_for_tool(call_id, &normalized);
             let tool_hunks = if change.skipped_diff {
                 Vec::new()
+            } else if let Some(hunks) = exact_edit_hunks {
+                hunks
             } else if previous_session_new_text.is_none() && !change.hunks.is_empty() {
                 change.hunks.clone()
             } else {
-                tool_diff_hunks(
+                tool_diff_hunks_for_tracker_change(
                     previous_session_new_text.as_deref(),
                     change.old_text.as_deref(),
                     &change.new_text,
@@ -1210,6 +1236,28 @@ impl Application {
             self.attach_tool_diff_preview(call_id, &change.path, &normalized, tool_hunks);
         }
         changed
+    }
+
+    fn exact_edit_hunks_for_tool(
+        &self,
+        call_id: &str,
+        normalized_path: &str,
+    ) -> Option<Vec<DiffHunk>> {
+        let tool = self.ui.tools.iter().find(|tool| tool.call_id == call_id)?;
+        let input = tool.raw_input.as_deref()?;
+        let json = serde_json::from_str::<serde_json::Value>(input).ok()?;
+        let before = json.get("before")?.as_str()?;
+        let after = json.get("after")?.as_str()?;
+        let input_path = json
+            .get("path")
+            .or_else(|| json.get("file_path"))
+            .or_else(|| json.get("filePath"))
+            .and_then(|value| value.as_str())?;
+        if normalize_path_for_storage(input_path, &self.ui.workspace.root) != normalized_path {
+            return None;
+        }
+        let hunks = diff_to_hunks(Some(before), after);
+        (!hunks.is_empty()).then_some(hunks)
     }
 
     fn attach_tool_diff_preview(
@@ -1338,7 +1386,11 @@ impl Application {
             {
                 let old_text = self.ui.session_changes[index].old_text.clone();
                 let previous_session_new_text = self.ui.session_changes[index].new_text.clone();
-                let tool_hunks = tool_diff_hunks(Some(&previous_session_new_text), None, &new_text);
+                let tool_hunks = tool_diff_hunks_for_detected_write(
+                    Some(&previous_session_new_text),
+                    None,
+                    &new_text,
+                );
                 if old_text.as_deref().unwrap_or_default() == new_text {
                     self.ui.session_changes.remove(index);
                     changed = true;
@@ -1373,6 +1425,44 @@ impl Application {
         }
 
         changed
+    }
+}
+
+fn tool_diff_hunks_for_tracker_change(
+    previous_session_new_text: Option<&str>,
+    tool_old_text: Option<&str>,
+    tool_new_text: &str,
+) -> Vec<DiffHunk> {
+    // Filesystem tracking captures the real on-disk baseline when a tool starts.
+    // Prefer that baseline for the ToolCard diff. Using the cumulative session
+    // new_text here makes the first tracker-confirmed edit diff against itself,
+    // which produces no +/- stats for goose ACP edits.
+    tool_diff_hunks(None, tool_old_text, tool_new_text).or_else_non_empty(|| {
+        tool_diff_hunks(previous_session_new_text, tool_old_text, tool_new_text)
+    })
+}
+
+fn tool_diff_hunks_for_detected_write(
+    previous_session_new_text: Option<&str>,
+    tool_old_text: Option<&str>,
+    tool_new_text: &str,
+) -> Vec<DiffHunk> {
+    tool_diff_hunks(previous_session_new_text, tool_old_text, tool_new_text)
+        .or_else_non_empty(|| tool_diff_hunks(None, tool_old_text, tool_new_text))
+}
+
+trait NonEmptyFallback {
+    fn or_else_non_empty<F>(self, fallback: F) -> Self
+    where
+        F: FnOnce() -> Self;
+}
+
+impl<T> NonEmptyFallback for Vec<T> {
+    fn or_else_non_empty<F>(self, fallback: F) -> Self
+    where
+        F: FnOnce() -> Self,
+    {
+        if self.is_empty() { fallback() } else { self }
     }
 }
 
@@ -1426,12 +1516,36 @@ fn extract_title_from_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_file_write_tool_identity, tool_diff_hunks};
+    use super::{is_file_write_tool_identity, tool_diff_hunks, tool_diff_hunks_for_tracker_change};
     use workspace_model::DiffLineKind;
 
     #[test]
     fn tool_diff_uses_previous_session_new_text_for_repeated_file_edits() {
         let hunks = tool_diff_hunks(Some("one\ntwo\n"), Some("one\n"), "one\nthree\n");
+        let added = hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        let removed = hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(added, vec!["three"]);
+        assert_eq!(removed, vec!["two"]);
+    }
+
+    #[test]
+    fn tracker_tool_diff_prefers_tool_start_baseline_over_session_new_text() {
+        let hunks = tool_diff_hunks_for_tracker_change(
+            Some("one\ntwo\n"),
+            Some("one\ntwo\n"),
+            "one\nthree\n",
+        );
         let added = hunks
             .iter()
             .flat_map(|hunk| &hunk.lines)
@@ -1460,7 +1574,7 @@ mod tests {
             "D:/work/kodex/docs/editor-subsystem-design.md"
         ));
         assert!(is_file_write_tool_identity("edit", "docs/architecture.md"));
-        assert!(is_file_write_tool_identity("tool", "mcp__opencode__write"));
+        assert!(is_file_write_tool_identity("tool", "mcp__codebuddy__write"));
     }
 }
 

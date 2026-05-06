@@ -444,7 +444,7 @@ pub struct SearchResult {
 #[serde(rename_all = "snake_case")]
 pub enum AgentCliId {
     Codebuddy,
-    Opencode,
+    Goose,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -465,8 +465,7 @@ impl Default for AppTheme {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
-    /// TCP port for agents that use TCP transport (e.g. opencode acp).
-    /// Only used when selected_agent is Opencode. Default: 9988.
+    /// Reserved for ACP agents that may require a custom TCP transport.
     #[serde(default = "default_acp_port")]
     pub acp_port: u16,
     #[serde(default)]

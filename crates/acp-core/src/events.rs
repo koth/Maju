@@ -15,7 +15,7 @@ pub struct SessionConfig {
     pub resume_session_id: Option<String>,
     /// Unique identifier for this session's log file (timestamp-based).
     pub log_id: String,
-    /// TCP port for agents that use TCP transport (e.g. opencode acp).
+    /// TCP port for agents that use TCP transport.
     /// When set to 0, stdio transport is used.
     #[serde(default)]
     pub acp_port: u16,

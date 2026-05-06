@@ -80,7 +80,26 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     match agent {
         AgentCliId::Codebuddy => (npm, vec!["install", "-g", "@tencent-ai/codebuddy-code"]),
-        AgentCliId::Opencode => (npm, vec!["install", "-g", "opencode-ai"]),
+        AgentCliId::Goose => {
+            if cfg!(windows) {
+                (
+                    "powershell.exe",
+                    vec![
+                        "-NoProfile",
+                        "-Command",
+                        "Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1\" -OutFile \"download_cli.ps1\"; .\\download_cli.ps1",
+                    ],
+                )
+            } else {
+                (
+                    "sh",
+                    vec![
+                        "-c",
+                        "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash",
+                    ],
+                )
+            }
+        }
     }
 }
 
@@ -90,8 +109,9 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
             "Run `npm install -g @tencent-ai/codebuddy-code`, then ensure `codebuddy` is on PATH."
                 .to_string(),
         ),
-        AgentCliId::Opencode => {
-            Some("Run `npm install -g opencode-ai`, then ensure `opencode` is on PATH.".to_string())
-        }
+        AgentCliId::Goose => Some(
+            "Run `curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash`, then ensure `goose` is on PATH. On Windows PowerShell, download and run `download_cli.ps1` from https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1."
+                .to_string(),
+        ),
     }
 }
