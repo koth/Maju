@@ -3,7 +3,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, InspectorTab, FileEntry } from "../../types";
 import { fsListDir, gitStage } from "../../lib/tauri";
 import { FileTree } from "../filetree/FileTree";
-import { getFileIcon, getFolderIcon } from "../filetree/file-icons";
+import { getFileIcon } from "../filetree/file-icons";
 import "./ReviewPanel.css";
 
 interface TreeNode {
@@ -92,12 +92,13 @@ function buildFileTree(files: ChangedFile[]): TreeNode[] {
 interface Props {
   snapshot: UiSnapshot;
   refreshing: boolean;
+  hydrated: boolean;
   onRefresh: () => void | Promise<void>;
   onFileSelect: (path: string) => void;
   onFileOpen: (path: string) => void;
 }
 
-export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onFileOpen }: Props) {
+export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileSelect, onFileOpen }: Props) {
   const [tab, setTab] = useState<InspectorTab>("Diff");
   const [filter, setFilter] = useState("");
   const [fileTreeRefreshSignal, setFileTreeRefreshSignal] = useState(0);
@@ -140,12 +141,14 @@ export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onF
           className={`review-tab ${tab === "Diff" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Diff")}
         >
+          <GitTabIcon />
           Git
         </button>
         <button
           className={`review-tab ${tab === "Files" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Files")}
         >
+          <FolderTreeIcon className="review-tab-icon" />
           所有文件
         </button>
         <div className="review-tabs-spacer" />
@@ -169,6 +172,13 @@ export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onF
       </div>
 
       <div className="review-tab-panel" hidden={tab !== "Diff"}>
+        {!hydrated ? (
+          <div className="review-loading-state">
+            <span className="review-loading-dot" />
+            <span>正在加载 Git 变更...</span>
+          </div>
+        ) : (
+        <>
           <div className="review-meta">
             {snapshot.repository.changed_files.length} 个变更文件
             {filteredFiles.length > MAX_REVIEW_FILES && (
@@ -201,6 +211,8 @@ export function ReviewPanel({ snapshot, refreshing, onRefresh, onFileSelect, onF
             onFileOpen={onFileOpen}
             onRefresh={onRefresh}
           />
+        </>
+        )}
       </div>
     </div>
   );
@@ -213,6 +225,27 @@ function RefreshIcon() {
       <path d="M4 7V3h4" />
       <path d="M4 13a8 8 0 0 0 14.7 4.4" />
       <path d="M20 17v4h-4" />
+    </svg>
+  );
+}
+
+function GitTabIcon() {
+  return (
+    <svg className="review-tab-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M5.8 3.9v7.4a3 3 0 0 0 3 3h2.4" />
+      <path d="M14.2 5.2a3 3 0 0 1-3 3H5.8" />
+      <circle cx="5.8" cy="3.9" r="1.5" />
+      <circle cx="5.8" cy="16.1" r="1.5" />
+      <circle cx="14.2" cy="5.2" r="1.5" />
+    </svg>
+  );
+}
+
+function FolderTreeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+      <path d="M2.5 8.2h15" />
     </svg>
   );
 }
@@ -316,6 +349,7 @@ function DiffTreeNode({
           <span className="review-tree-arrow">
             {isExpanded ? "\u25bc" : "\u25b6"}
           </span>
+          <FolderTreeIcon className="review-tree-icon review-folder-icon" />
           <span className="review-diff-name">{node.name}</span>
         </div>
         {isExpanded && (
@@ -347,12 +381,8 @@ function DiffTreeNode({
         <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
         <span className="review-diff-name">{node.name}</span>
         <div className="review-diff-stats">
-          {node.stats.added > 0 && (
-            <span className="review-stat-added">+{node.stats.added}</span>
-          )}
-          {node.stats.removed > 0 && (
-            <span className="review-stat-removed">-{node.stats.removed}</span>
-          )}
+          <span className="review-stat-added">+{node.stats.added}</span>
+          <span className="review-stat-removed">-{node.stats.removed}</span>
         </div>
       </div>
     </div>
@@ -473,7 +503,6 @@ function UntrackedTreeNode({
   const isDir = entry.kind === "Directory";
   const isExpanded = expandedDirs.has(entry.path);
   const children = childrenCache.get(entry.path);
-  const icon = isDir ? getFolderIcon(entry.name, isExpanded) : getFileIcon(entry.path);
 
   return (
     <>
@@ -492,7 +521,11 @@ function UntrackedTreeNode({
         <span className="review-tree-arrow">
           {isDir ? (isExpanded ? "v" : ">") : ""}
         </span>
-        <img className="review-tree-icon" src={icon} alt="" />
+        {isDir ? (
+          <FolderTreeIcon className="review-tree-icon review-folder-icon" />
+        ) : (
+          <img className="review-tree-icon" src={getFileIcon(entry.path)} alt="" />
+        )}
         <span className="review-tree-name">{entry.name}</span>
       </div>
       {isDir && isExpanded && children && (

@@ -1,4 +1,3 @@
-use git_service::GitService;
 use std::path::Path;
 use workspace_model::{
     ChatMessage, InspectorTab, MessageRole, RepositorySnapshot, SessionStatus, SessionSummary,
@@ -17,11 +16,11 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         root: workspace_root.to_path_buf(),
     };
 
-    let repository = GitService::open(workspace_root).unwrap_or_else(|_| RepositorySnapshot {
-        branch: "无仓库".into(),
-        head: "无".into(),
+    let repository = RepositorySnapshot {
+        branch: "加载中".into(),
+        head: "待刷新".into(),
         changed_files: Vec::new(),
-    });
+    };
 
     let welcome_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
@@ -38,6 +37,7 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
     };
 
     Ok(UiSnapshot {
+        revision: 1,
         workspace: descriptor.clone(),
         session: SessionSummary {
             id: uuid::Uuid::new_v4(),
@@ -98,4 +98,19 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
         session_changes: Vec::new(),
         thinking_status: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_ui_uses_git_placeholder_without_status_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = build_initial_ui(dir.path()).unwrap();
+
+        assert_eq!(ui.repository.branch, "加载中");
+        assert_eq!(ui.repository.head, "待刷新");
+        assert!(ui.repository.changed_files.is_empty());
+    }
 }

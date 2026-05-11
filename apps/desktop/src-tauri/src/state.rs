@@ -1,5 +1,6 @@
+use crate::lsp::LspService;
 use crate::open_workspaces::{OpenWorkspaceRecord, OpenWorkspaceState};
-use app_core::{Application, normalize_tracked_path};
+use app_core::{Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path};
 use session_store::SessionStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use workspace_model::{
 
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
+    lsp_service: LspService,
 }
 
 #[derive(Default)]
@@ -31,8 +33,12 @@ struct WorkspaceMetadata {
 
 impl AppState {
     pub fn new() -> Self {
+        app_core::startup_perf::mark("state/new", "");
+        let lsp_service =
+            app_core::startup_perf::measure("state/new_lsp_service", "", LspService::new);
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
+            lsp_service,
         }
     }
 
@@ -41,24 +47,35 @@ impl AppState {
         path: PathBuf,
         agent: Option<AgentCliId>,
     ) -> Result<UiSnapshot, String> {
+        app_core::startup_perf::mark("state/open_workspace/start", path.display().to_string());
         let key = workspace_key(&path);
-        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let snapshot = connect_workspace_locked(&mut guard, key.clone(), path, agent)?;
+        let mut guard = app_core::startup_perf::measure("state/open_workspace/lock", &key, || {
+            self.workspaces.lock().map_err(|e| e.to_string())
+        })?;
+        let snapshot =
+            app_core::startup_perf::measure("state/open_workspace/connect", &key, || {
+                connect_workspace_locked(&mut guard, key.clone(), path, agent)
+            })?;
         guard.active_workspace = Some(key);
+        app_core::startup_perf::mark("state/open_workspace/end", "");
         Ok(snapshot)
     }
 
     pub fn restore_dormant_workspace(&self, path: PathBuf) -> Result<(), String> {
+        app_core::startup_perf::mark(
+            "state/restore_dormant_workspace/start",
+            path.display().to_string(),
+        );
         let key = workspace_key(&path);
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         if guard.workspaces.contains_key(&key) {
+            app_core::startup_perf::mark("state/restore_dormant_workspace/end", "already_open");
             return Ok(());
         }
 
-        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-        let store = SessionStore::open(paths.root(), &path).map_err(|e| e.to_string())?;
-        let sessions = store.list_sessions().map_err(|e| e.to_string())?;
         let workspace = workspace_descriptor(&path);
+        let sessions = load_lightweight_sessions(&path).unwrap_or_default();
+        let log_key = key.clone();
         guard.workspaces.insert(
             key,
             WorkspaceEntry::Dormant(WorkspaceMetadata {
@@ -66,6 +83,7 @@ impl AppState {
                 sessions,
             }),
         );
+        app_core::startup_perf::mark("state/restore_dormant_workspace/end", &log_key);
         Ok(())
     }
 
@@ -75,7 +93,11 @@ impl AppState {
             return Ok(());
         };
 
+        let closing_root = guard.workspaces.get(&active_key).and_then(entry_path);
         guard.workspaces.remove(&active_key);
+        if let Some(root) = closing_root {
+            self.lsp_service.shutdown_workspace(&root);
+        }
         let next_key = guard.workspaces.keys().next().cloned();
         guard.active_workspace = next_key.clone();
         if let Some(next_key) = next_key {
@@ -84,6 +106,18 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    pub fn shutdown_all(&self) {
+        if let Ok(mut guard) = self.workspaces.lock() {
+            guard.workspaces.clear();
+            guard.active_workspace = None;
+        }
+        self.lsp_service.shutdown_all();
+    }
+
+    pub fn lsp_service(&self) -> LspService {
+        self.lsp_service.clone()
     }
 
     pub fn list_open_workspaces(&self) -> Result<Vec<OpenWorkspaceItem>, String> {
@@ -126,11 +160,16 @@ impl AppState {
     }
 
     pub fn set_active_workspace(&self, path: String) -> Result<UiSnapshot, String> {
+        app_core::startup_perf::mark("state/set_active_workspace/start", &path);
         let path = PathBuf::from(path);
         let key = workspace_key(&path);
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let snapshot = connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+        let snapshot =
+            app_core::startup_perf::measure("state/set_active_workspace/connect", &key, || {
+                connect_workspace_locked(&mut guard, key.clone(), path, None)
+            })?;
         guard.active_workspace = Some(key);
+        app_core::startup_perf::mark("state/set_active_workspace/end", "");
         Ok(snapshot)
     }
 
@@ -139,19 +178,36 @@ impl AppState {
         Ok(!guard.workspaces.is_empty())
     }
 
-    pub fn poll_all_and_get_active_snapshot(&self) -> Result<UiSnapshot, String> {
+    pub fn poll_active_and_get_snapshot_since(
+        &self,
+        last_revision: u64,
+    ) -> Result<Option<UiSnapshot>, String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        for entry in guard.workspaces.values_mut() {
-            if let WorkspaceEntry::Connected(app) = entry {
-                app.poll_prompt_progress();
-            }
-        }
         let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
-        let app = match guard.workspaces.get(&active_key) {
+        let app = match guard.workspaces.get_mut(&active_key) {
             Some(WorkspaceEntry::Connected(app)) => app,
             _ => return Err("No connected workspace open".into()),
         };
-        Ok(app.ui.clone())
+        app.poll_prompt_progress();
+        if app.ui.revision == last_revision {
+            Ok(None)
+        } else {
+            Ok(Some(app.lightweight_ui_snapshot()))
+        }
+    }
+
+    pub fn poll_active_and_get_update(
+        &self,
+        cursor: &mut UiPatchCursor,
+    ) -> Result<Option<UiSnapshotUpdate>, String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+        let app = match guard.workspaces.get_mut(&active_key) {
+            Some(WorkspaceEntry::Connected(app)) => app,
+            _ => return Err("No connected workspace open".into()),
+        };
+        app.poll_prompt_progress();
+        Ok(app.lightweight_ui_update(cursor))
     }
 
     pub fn with_app<F, R>(&self, f: F) -> Result<R, String>
@@ -186,6 +242,42 @@ impl AppState {
         };
         f(app)
     }
+
+    pub fn delete_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let key = match workspace_root {
+            Some(path) => workspace_key(&PathBuf::from(path)),
+            None => guard.active_workspace.clone().ok_or("No workspace open")?,
+        };
+        let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
+
+        if is_active_workspace {
+            let path = entry_path(guard.workspaces.get(&key).ok_or("Workspace is not open")?)
+                .ok_or("Workspace is not open")?;
+            connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+            let app = match guard.workspaces.get_mut(&key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("Workspace is not connected".into()),
+            };
+            return app.session_delete(id);
+        }
+
+        let entry = guard
+            .workspaces
+            .get_mut(&key)
+            .ok_or("Workspace is not open")?;
+        match entry {
+            WorkspaceEntry::Connected(app) => app.session_delete(id),
+            WorkspaceEntry::Dormant(metadata) => {
+                let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+                let store = SessionStore::open(paths.root(), &metadata.workspace.root)
+                    .map_err(|e| e.to_string())?;
+                store.delete_session(id).map_err(|e| e.to_string())?;
+                metadata.sessions = load_lightweight_sessions(&metadata.workspace.root)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 fn connect_workspace_locked(
@@ -194,22 +286,44 @@ fn connect_workspace_locked(
     path: PathBuf,
     agent: Option<AgentCliId>,
 ) -> Result<UiSnapshot, String> {
+    app_core::startup_perf::mark("state/connect_workspace/start", &key);
     if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
-        return Ok(application.ui.clone());
+        return app_core::startup_perf::measure(
+            "state/connect_workspace/snapshot_existing",
+            &key,
+            || Ok(application.lightweight_ui_snapshot()),
+        );
     }
 
-    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    let agent_command = match agent {
-        Some(agent) => app_core::settings::command_for_agent(agent)
-            .unwrap_or_else(|| app_core::settings::resolve_agent_command_with_settings(&paths)),
-        None => app_core::settings::resolve_agent_command_with_settings(&paths),
-    };
-    let application = Application::bootstrap_with_app_paths(path, agent_command, paths)
-        .map_err(|e| e.to_string())?;
-    let snapshot = application.ui.clone();
+    let paths = app_core::startup_perf::measure("state/connect_workspace/app_paths", &key, || {
+        app_core::AppPaths::resolve().map_err(|e| e.to_string())
+    })?;
+    let agent_command = app_core::startup_perf::measure(
+        "state/connect_workspace/resolve_agent_command",
+        &key,
+        || match agent {
+            Some(agent) => app_core::settings::command_for_agent_with_paths(agent, &paths)
+                .unwrap_or_else(|| app_core::settings::resolve_agent_command_with_settings(&paths)),
+            None => app_core::settings::resolve_agent_command_with_settings(&paths),
+        },
+    );
+    let application = app_core::startup_perf::measure(
+        "state/connect_workspace/application_bootstrap",
+        &key,
+        || {
+            Application::bootstrap_with_app_paths(path, agent_command, paths)
+                .map_err(|e| e.to_string())
+        },
+    )?;
+    let snapshot = app_core::startup_perf::measure(
+        "state/connect_workspace/lightweight_snapshot",
+        &key,
+        || application.lightweight_ui_snapshot(),
+    );
     guard
         .workspaces
         .insert(key, WorkspaceEntry::Connected(application));
+    app_core::startup_perf::mark("state/connect_workspace/end", "");
     Ok(snapshot)
 }
 
@@ -235,6 +349,13 @@ fn workspace_session_list(
         }),
     }
     .map_err(|e| format!("{key}: {e}"))
+}
+
+fn load_lightweight_sessions(path: &Path) -> Result<Vec<SessionListItem>, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    SessionStore::open(paths.root(), path)
+        .and_then(|store| store.list_session_summaries())
+        .map_err(|e| e.to_string())
 }
 
 fn open_workspace_items(guard: &WorkspaceRegistry) -> Vec<OpenWorkspaceItem> {
@@ -274,7 +395,7 @@ fn active_session_id(sessions: &[SessionListItem]) -> uuid::Uuid {
     sessions
         .first()
         .and_then(|session| uuid::Uuid::parse_str(&session.id).ok())
-        .unwrap_or_else(uuid::Uuid::new_v4)
+        .unwrap_or_else(uuid::Uuid::nil)
 }
 
 fn entry_path(entry: &WorkspaceEntry) -> Option<PathBuf> {
@@ -307,4 +428,39 @@ where
 
 fn workspace_key(path: &PathBuf) -> String {
     normalize_tracked_path(&path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dormant_workspace_session_list_exposes_names_without_connection() {
+        let workspace = WorkspaceDescriptor {
+            id: uuid::Uuid::new_v4(),
+            name: "Dormant".into(),
+            root: PathBuf::from("D:/work/Dormant"),
+        };
+        let session = SessionListItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: "Stored session".into(),
+            status: "Idle".into(),
+            created_at: "1".into(),
+            updated_at: "2".into(),
+            message_count: 0,
+            acp_session_id: None,
+            agent_cli: None,
+        };
+        let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
+            workspace,
+            sessions: vec![session.clone()],
+        });
+
+        let list = workspace_session_list("dormant", &entry, false).unwrap();
+
+        assert!(!list.connected);
+        assert_eq!(list.sessions.len(), 1);
+        assert_eq!(list.sessions[0].title, "Stored session");
+        assert_eq!(list.sessions[0].message_count, 0);
+    }
 }

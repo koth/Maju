@@ -1,40 +1,58 @@
 .review-panel {
-  padding: 12px;
+  padding: 10px 8px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  font-family: var(--font-chat);
+  color: var(--text-muted);
 }
 
 .review-tabs {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 18px;
-  background: rgba(215, 225, 223, 0.028);
+  padding: 0 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
 }
 
 .review-tab {
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
+  font-family: var(--font-chat);
   font-size: 12px;
   cursor: pointer;
 }
 
+.review-tab-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
 .review-tab:hover {
   color: var(--text-strong);
+  background: var(--interactive-hover);
 }
 
 .review-tab-active {
   color: var(--text-strong);
-  background:
-    linear-gradient(180deg, rgba(106, 168, 159, 0.16), rgba(106, 168, 159, 0.08));
-  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
+  border-color: transparent;
 }
 
 .review-tabs-spacer {
@@ -47,8 +65,8 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 999px;
-  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -67,7 +85,7 @@
 
 .review-refresh-btn:hover {
   color: var(--text-strong);
-  background: var(--surface-bg);
+  background: var(--interactive-hover);
 }
 
 .review-refresh-btn:disabled {
@@ -92,25 +110,44 @@
   padding: 0 4px;
 }
 
+.review-loading-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.review-loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-soft);
+  box-shadow: none;
+}
+
 .review-filter {
-  padding: 0 4px;
+  padding: 0 2px;
 }
 
 .review-filter-input {
   width: 100%;
   min-height: 34px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: 7px;
   border: 1px solid var(--border-subtle);
-  background: rgba(215, 225, 223, 0.03);
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
+  font-family: var(--font-chat);
   font-size: 12px;
   outline: none;
 }
 
 .review-filter-input:focus {
   border-color: var(--accent-hover);
-  box-shadow: 0 0 0 3px rgba(106, 168, 159, 0.1);
+  box-shadow: none;
 }
 
 .review-filter-input::placeholder {
@@ -118,7 +155,7 @@
 }
 
 .review-group {
-  padding: 0 4px;
+  padding: 0 2px;
 }
 
 .review-group-header {
@@ -137,8 +174,8 @@
 
 .review-group-title {
   font-size: 12px;
-  font-weight: 720;
-  color: var(--text-strong);
+  font-weight: 550;
+  color: var(--text-muted);
 }
 
 .review-file {
@@ -152,12 +189,12 @@
   min-height: 34px;
   padding: 5px 9px;
   cursor: pointer;
-  border-radius: 14px;
+  border-radius: 6px;
 }
 
 .review-file-row:hover {
   background: var(--interactive-hover);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: none;
 }
 
 .review-file-icon {
@@ -205,7 +242,7 @@
   align-items: center;
   min-height: 30px;
   gap: 6px;
-  border-radius: 12px;
+  border-radius: 6px;
   color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
@@ -231,6 +268,15 @@
   flex-shrink: 0;
 }
 
+.review-folder-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+  color: var(--text-soft);
+}
+
 .review-tree-name {
   min-width: 0;
   overflow: hidden;
@@ -243,7 +289,7 @@
   margin: 4px 0;
   padding: 6px 8px;
   border: 1px solid var(--danger-soft);
-  border-radius: 14px;
+  border-radius: 7px;
   background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
@@ -262,7 +308,7 @@
   align-items: center;
   min-height: 30px;
   gap: 6px;
-  border-radius: 12px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
 }
@@ -282,7 +328,7 @@
 
 .review-diff-file:hover {
   background: var(--interactive-hover);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: none;
 }
 
 .review-diff-name {

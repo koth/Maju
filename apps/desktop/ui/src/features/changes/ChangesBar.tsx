@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import type { SessionFileChange, FileChangeType } from "../../types";
+import type { SessionFileChange } from "../../types";
 import "./ChangesBar.css";
 
 interface Props {
@@ -8,7 +8,7 @@ interface Props {
 }
 
 export function ChangesBar({ changes, onFileSelect }: Props) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
 
   const sorted = useMemo(
     () => [...changes].sort((a, b) => a.path.localeCompare(b.path)),
@@ -30,22 +30,32 @@ export function ChangesBar({ changes, onFileSelect }: Props) {
     <div className="changes-bar">
       <div
         className="changes-bar-header"
-        onClick={() => setExpanded((v) => !v)}
       >
-        <span className={`changes-bar-chevron ${expanded ? "open" : ""}`}>
-          ›
-        </span>
         <span className="changes-bar-label">
-          更改：{sorted.length} 个文件
+          {sorted.length} 个文件已更改
         </span>
         <span className="changes-bar-totals">
-          {totalAdded > 0 && (
-            <span className="changes-bar-added">+{totalAdded}</span>
-          )}
-          {totalRemoved > 0 && (
-            <span className="changes-bar-removed">-{totalRemoved}</span>
-          )}
+          <span className="changes-bar-added">+{totalAdded}</span>
+          <span className="changes-bar-removed">-{totalRemoved}</span>
         </span>
+        <button
+          type="button"
+          className="changes-bar-action changes-bar-action-muted"
+          title="撤销功能暂未接入"
+          disabled
+        >
+          撤销 ↶
+        </button>
+        <button
+          type="button"
+          className="changes-bar-action changes-bar-icon-action"
+          title={expanded ? "收起更改列表" : "展开更改列表"}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <span className={`changes-bar-chevron ${expanded ? "open" : ""}`}>
+            ›
+          </span>
+        </button>
       </div>
 
       {expanded && (
@@ -56,35 +66,16 @@ export function ChangesBar({ changes, onFileSelect }: Props) {
               className="changes-bar-row"
               onClick={() => onFileSelect(change.path)}
             >
-              <ChangeTypeBadge type={change.change_type} />
-              <span className="changes-bar-path">{fileName(change.path)}</span>
+              <span className="changes-bar-path">{change.path}</span>
               <span className="changes-bar-stats">
-                {change.added_lines > 0 && (
-                  <span className="changes-bar-added">+{change.added_lines}</span>
-                )}
-                {change.removed_lines > 0 && (
-                  <span className="changes-bar-removed">-{change.removed_lines}</span>
-                )}
+                <span className="changes-bar-added">+{change.added_lines}</span>
+                <span className="changes-bar-removed">-{change.removed_lines}</span>
               </span>
+              <span className="changes-bar-row-chevron">⌄</span>
             </div>
           ))}
         </div>
       )}
     </div>
   );
-}
-
-function ChangeTypeBadge({ type }: { type: FileChangeType }) {
-  const config: Record<FileChangeType, { label: string; className: string }> = {
-    Created: { label: "A", className: "badge-created" },
-    Modified: { label: "M", className: "badge-modified" },
-    Deleted: { label: "D", className: "badge-deleted" },
-  };
-  const { label, className } = config[type];
-  return <span className={`changes-bar-badge ${className}`}>{label}</span>;
-}
-
-function fileName(path: string): string {
-  const parts = path.replace(/\\/g, "/").split("/");
-  return parts[parts.length - 1] || path;
 }

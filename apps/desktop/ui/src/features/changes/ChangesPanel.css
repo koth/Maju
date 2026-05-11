@@ -3,6 +3,8 @@
   flex-direction: column;
   height: 100%;
   padding: 16px;
+  font-family: var(--font-chat);
+  color: var(--text-muted);
 }
 
 .changes-header {
@@ -47,7 +49,7 @@
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   border-radius: var(--radius-sm);
 }
 
@@ -68,7 +70,7 @@
 
 .changes-path {
   flex: 1;
-  font-family: var(--font-mono);
+  font-family: var(--font-chat);
   font-size: 13px;
   color: var(--text-strong);
   overflow: hidden;

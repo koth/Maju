@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { FileEntry } from "../../types";
 import { fsListDir } from "../../lib/tauri";
-import { getFileIcon, getFolderIcon } from "./file-icons";
+import { getFileIcon } from "./file-icons";
 import "./FileTree.css";
 
 interface FileTreeProps {
@@ -39,7 +39,6 @@ function TreeNode({
   const isExpanded = expandedDirs.has(entry.path);
   const isSelected = selectedPath === entry.path;
   const children = childrenCache.get(entry.path);
-  const icon = isDir ? getFolderIcon(entry.name, isExpanded) : getFileIcon(entry.path);
 
   const handleClick = useCallback(() => {
     onSelect(entry);
@@ -61,7 +60,11 @@ function TreeNode({
         <span className="filetree-chevron">
           {isDir ? (isExpanded ? "\u25BE" : "\u25B8") : " "}
         </span>
-        <img className="filetree-icon" src={icon} alt="" />
+        {isDir ? (
+          <FolderTreeIcon className="filetree-icon filetree-folder-icon" />
+        ) : (
+          <img className="filetree-icon" src={getFileIcon(entry.path)} alt="" />
+        )}
         <span className="filetree-name">{entry.name}</span>
       </div>
       {isDir && isExpanded && children && (
@@ -183,4 +186,13 @@ function parentDirectory(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
+}
+
+function FolderTreeIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+      <path d="M2.5 8.2h15" />
+    </svg>
+  );
 }

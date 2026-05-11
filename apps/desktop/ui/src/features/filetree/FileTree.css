@@ -3,14 +3,15 @@
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  font-family: var(--font-chat);
 }
 
 .filetree-header {
   padding: 8px 12px;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 550;
   color: var(--text-muted);
-  letter-spacing: 0.5px;
+  letter-spacing: 0;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -28,7 +29,7 @@
   height: 26px;
   cursor: pointer;
   font-size: 13px;
-  color: var(--text-strong);
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -36,7 +37,7 @@
 }
 
 .filetree-node:hover {
-  background: var(--surface-alt-bg);
+  background: var(--interactive-hover);
 }
 
 .filetree-node.is-selected {
@@ -59,17 +60,27 @@
   object-fit: contain;
 }
 
+.filetree-folder-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+  color: var(--text-soft);
+}
+
 .filetree-name {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .filetree-dir .filetree-name {
-  font-weight: 500;
+  font-weight: 550;
+  color: var(--text-strong);
 }
 
 .filetree-file .filetree-name {
-  color: var(--text-soft);
+  color: var(--text-muted);
 }
 
 .filetree-file.is-selected .filetree-name {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import type { RecentWorkspace } from "../../types";
-import { workspaceOpen, workspaceGetRecent, workspaceRemoveRecent, workspaceRestoreOpen } from "../../lib/tauri";
+import { startupPerfMark, workspaceOpen, workspaceGetRecent, workspaceRemoveRecent, workspaceRestoreOpen } from "../../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { WindowControls } from "./WindowControls";
 import "./WelcomeLauncher.css";
@@ -21,23 +21,46 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
 
     const loadInitialWorkspaces = async () => {
       try {
+        const loadStart = performance.now();
+        void startupPerfMark("welcome/load_initial_start", `performance_now=${loadStart.toFixed(1)}`);
+        const recentStart = performance.now();
         const list = await workspaceGetRecent();
+        void startupPerfMark(
+          "welcome/get_recent_end",
+          `count=${list.length} duration_ms=${(performance.now() - recentStart).toFixed(1)}`,
+        );
         if (disposed) return;
         setRecents(list);
 
         if (!autoOpened) {
           setAutoOpened(true);
           setLoading(true);
+          const restoreStart = performance.now();
+          void startupPerfMark("welcome/restore_open_start", "");
           const restored = await workspaceRestoreOpen();
+          void startupPerfMark(
+            "welcome/restore_open_end",
+            `restored=${Boolean(restored)} duration_ms=${(performance.now() - restoreStart).toFixed(1)}`,
+          );
           if (disposed) return;
           if (restored) {
+            void startupPerfMark(
+              "welcome/on_workspace_opened_restore",
+              `total_duration_ms=${(performance.now() - loadStart).toFixed(1)}`,
+            );
             onWorkspaceOpened();
             return;
           }
 
           const first = list.find((r) => r.exists);
           if (first) {
+            const openStart = performance.now();
+            void startupPerfMark("welcome/open_recent_start", first.path);
             await workspaceOpen(first.path);
+            void startupPerfMark(
+              "welcome/open_recent_end",
+              `duration_ms=${(performance.now() - openStart).toFixed(1)} path=${first.path}`,
+            );
             if (!disposed) onWorkspaceOpened();
           } else {
             setLoading(false);

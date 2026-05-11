@@ -6,8 +6,10 @@ import { WindowControls } from "./WindowControls";
 
 interface Props {
   workspace: WorkspaceDescriptor;
+  sidebarCollapsed: boolean;
   refreshing: boolean;
   rightPanelCollapsed: boolean;
+  onToggleSidebar: () => void;
   onRefreshGit: () => void;
   onToggleRightPanel: () => void;
   onFileOpen: (filePath: string, lineNumber?: number, searchQuery?: string) => void;
@@ -15,8 +17,10 @@ interface Props {
 
 export function GlobalChrome({
   workspace,
+  sidebarCollapsed,
   refreshing,
   rightPanelCollapsed,
+  onToggleSidebar,
   onRefreshGit,
   onToggleRightPanel,
   onFileOpen,
@@ -95,10 +99,22 @@ export function GlobalChrome({
 
   return (
     <header className="global-chrome" data-tauri-drag-region>
-      <div className="global-chrome-identity" data-tauri-drag-region>
-        <span className="global-chrome-dot" />
-        <span className="global-chrome-name">{workspace.name}</span>
-        <span className="global-chrome-root">{workspace.root}</span>
+      <div className="global-chrome-left">
+        <button
+          type="button"
+          className={`chrome-icon-btn chrome-sidebar-toggle ${sidebarCollapsed ? "" : "is-active"}`}
+          onClick={onToggleSidebar}
+          title={sidebarCollapsed ? "显示项目栏" : "隐藏项目栏"}
+          aria-label={sidebarCollapsed ? "显示项目栏" : "隐藏项目栏"}
+          aria-pressed={!sidebarCollapsed}
+        >
+          <LeftSidebarIcon />
+        </button>
+        <div className="global-chrome-identity" data-tauri-drag-region>
+          <span className="global-chrome-dot" />
+          <span className="global-chrome-name">{workspace.name}</span>
+          <span className="global-chrome-root">{workspace.root}</span>
+        </div>
       </div>
       <div className="global-chrome-actions">
         <div className="chrome-search-container" ref={searchContainerRef}>
@@ -163,6 +179,18 @@ function SearchIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="11" cy="11" r="7" />
       <path d="m16 16 5 5" />
+    </svg>
+  );
+}
+
+function LeftSidebarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="M9 5v14" />
+      <path d="M6.5 9h1" />
+      <path d="M6.5 12h1" />
+      <path d="M6.5 15h1" />
     </svg>
   );
 }

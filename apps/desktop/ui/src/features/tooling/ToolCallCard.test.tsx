@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { fireEvent, render } from "@testing-library/react";
 import { ToolCallCard } from "./ToolCallCard";
-import type { ToolInvocation, UiSnapshot, ToolStatus } from "../../types/index";
+import type { ToolInvocation, ToolStatus } from "../../types/index";
 
 function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
   return {
@@ -27,33 +27,6 @@ function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
   };
 }
 
-function makeSnapshot(tools: ToolInvocation[] = []): UiSnapshot {
-  return {
-    workspace: { id: "ws-1", name: "test", root: "/test" },
-    session: {
-      id: "s-1",
-      workspace_id: "ws-1",
-      title: "test",
-      model: "test-model",
-      mode: null,
-      agent_cli: null,
-      status: "Idle",
-    },
-    session_config: { hydrated: false, controls: [] },
-    prompt_capabilities: { image: false, embedded_context: false },
-    available_commands: [],
-    agent_plan: [],
-    messages: [],
-    timeline: [],
-    tools,
-    repository: { branch: "main", head: "abc", changed_files: [] },
-    inspector_tab: "Activity",
-    inspector_sections: [],
-    session_changes: [],
-    thinking_status: null,
-  };
-}
-
 describe("ToolCallCard animation states", () => {
   const runningStatuses: ToolStatus[] = ["Pending", "Running"];
   const terminalStatuses: ToolStatus[] = ["Succeeded", "Failed", "Interrupted"];
@@ -61,9 +34,8 @@ describe("ToolCallCard animation states", () => {
   runningStatuses.forEach((status) => {
     it(`uses tc-bullet-active for ${status} tool`, () => {
       const tool = makeTool({ status });
-      const snapshot = makeSnapshot([tool]);
       const { container } = render(
-        <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+        <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
       );
       const bullet = container.querySelector(".tc-bullet");
       expect(bullet!.classList.contains("tc-bullet-active")).toBe(true);
@@ -73,45 +45,42 @@ describe("ToolCallCard animation states", () => {
   terminalStatuses.forEach((status) => {
     it(`does not use tc-bullet-active for ${status} tool`, () => {
       const tool = makeTool({ status });
-      const snapshot = makeSnapshot([tool]);
       const { container } = render(
-        <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+        <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
       );
       const bullet = container.querySelector(".tc-bullet");
       expect(bullet!.classList.contains("tc-bullet-active")).toBe(false);
     });
   });
 
-  it("shows Editing verb for edit tools with diff_paths", () => {
+  it("shows editing verb for edit tools with diff_paths", () => {
     const tool = makeTool({
       status: "Running",
       kind: "edit",
       name: "Edit",
       diff_paths: ["/test/foo.rs"],
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
-    expect(verb!.textContent).toBe("Editing");
+    expect(verb!.textContent).toBe("编辑中");
   });
 
-  it("shows Explored verb for read tools without diffs", () => {
+  it("shows explored verb for read tools without diffs", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "read",
       name: "Read",
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
-    expect(verb!.textContent).toBe("Explored");
+    expect(verb!.textContent).toBe("已探索");
   });
 
-  it("shows Exploring verb for explore subagent tasks", () => {
+  it("shows exploring verb for explore subagent tasks", () => {
     const tool = makeTool({
       status: "Running",
       kind: "explore",
@@ -119,12 +88,62 @@ describe("ToolCallCard animation states", () => {
       is_subagent: true,
       raw_input: '{"description":"探索项目结构和状态","subagent_type":"explore"}',
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
-    expect(verb!.textContent).toBe("Exploring");
+    expect(verb!.textContent).toBe("探索中");
+  });
+
+  it("shows todo write tools as task plan updates instead of edits", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "tool",
+      name: "todo: todo write",
+      summary: "Updated (107 chars)",
+      raw_input: JSON.stringify({
+        content: "- [ ] 查看当前 ci.yml 文件内容\n- [x] 添加 release 分支判断逻辑",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("任务计划");
+  });
+
+  it("keeps child tool calls collapsed until requested", () => {
+    const parent = makeTool({
+      id: "parent",
+      call_id: "parent-call",
+      name: "Task",
+      kind: "task",
+      summary: "parent detail",
+    });
+    const child = makeTool({
+      id: "child",
+      call_id: "child-call",
+      parent_call_id: "parent-call",
+      name: "Child Read",
+      summary: "child detail",
+    });
+    const childToolsByParent = new Map([["parent-call", [child]]]);
+
+    const { container, getByText } = render(
+      <ToolCallCard
+        tool={parent}
+        childToolsByParent={childToolsByParent}
+        nested={false}
+        onPermissionSelect={() => {}}
+      />,
+    );
+
+    expect(container.textContent).toContain("1 个工具调用");
+    expect(container.textContent).not.toContain("child detail");
+
+    fireEvent.click(getByText("1 个工具调用"));
+    expect(container.textContent).toContain("child detail");
   });
 });
 
@@ -150,13 +169,12 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
         },
       ],
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
     const added = container.querySelector(".tc-diff-added");
-    expect(verb!.textContent).toBe("Explored");
+    expect(verb!.textContent).toBe("已探索");
     expect(added).toBeNull();
   });
 
@@ -179,13 +197,12 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
         },
       ],
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
     const added = container.querySelector(".tc-diff-added");
-    expect(verb!.textContent).toBe("Ran");
+    expect(verb!.textContent).toBe("已运行");
     expect(added).toBeNull();
   });
 
@@ -211,14 +228,135 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
         },
       ],
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const added = container.querySelector(".tc-diff-added");
     const removed = container.querySelector(".tc-diff-removed");
     expect(added).toBeTruthy();
     expect(removed).toBeTruthy();
+  });
+
+  it("shows zero removed count for added-only tracker-confirmed changes", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      diff_paths: ["/test/foo.rs"],
+      diff_previews: [
+        {
+          path: "/test/foo.rs",
+          hunks: [
+            {
+              heading: "@@ -1,1 +1,2 @@",
+              lines: [{ kind: "Added", content: "line1" }],
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+1");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-0");
+  });
+
+  it("shows zero added count for removed-only tracker-confirmed changes", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      diff_paths: ["/test/foo.rs"],
+      diff_previews: [
+        {
+          path: "/test/foo.rs",
+          hunks: [
+            {
+              heading: "@@ -1,2 +1,1 @@",
+              lines: [{ kind: "Removed", content: "old" }],
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+0");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-1");
+  });
+
+  it("does not show bogus whole-file addition stats for edit tools", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      diff_paths: ["/test/app-smoke.spec.ts"],
+      diff_previews: [
+        {
+          path: "/test/app-smoke.spec.ts",
+          hunks: [
+            {
+              heading: "@@ -1,3 +1,904 @@",
+              lines: Array.from({ length: 904 }, (_, index) => ({
+                kind: "Added" as const,
+                content: `line ${index + 1}`,
+              })),
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")).toBeNull();
+    expect(container.querySelector(".tc-diff-removed")).toBeNull();
+    expect(container.querySelector(".tc-diff-preview")).toBeNull();
+  });
+
+  it("falls back to raw_input old_string/new_string when previews are missing", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      raw_input: JSON.stringify({
+        file_path: "/test/app-smoke.spec.ts",
+        old_string:
+          "async function clickCanvasNewMenuItem(page: Page, itemText: string) {\n  await pane.click({ button: 'right' });\n  await page.getByText(itemText, { exact: true }).click();\n}",
+        new_string:
+          "async function clickCanvasNewMenuItem(page: Page, itemText: string) {\n  await page.keyboard.press('Escape');\n  await pane.evaluate((el) => el.dispatchEvent(new MouseEvent('contextmenu')));\n  await page.getByText(itemText, { exact: true }).click({ timeout: 5_000 });\n}",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+3");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-2");
+  });
+
+  it("does not fall back to raw_input when it looks like fragment to whole file", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      raw_input: JSON.stringify({
+        file_path: "/test/app-smoke.spec.ts",
+        old_string: "function target() {\n  return 1;\n}",
+        new_string: Array.from({ length: 904 }, (_, index) => `line ${index + 1}`).join("\n"),
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")).toBeNull();
+    expect(container.querySelector(".tc-diff-removed")).toBeNull();
   });
 
   it("read tool with path containing editor is not classified as editing without diffs", () => {
@@ -228,12 +366,11 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       name: "docs/editor-subsystem-design.md",
       raw_input: '{"file_path":"docs/editor-subsystem-design.md"}',
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
     const verb = container.querySelector(".tc-verb");
-    expect(verb!.textContent).toBe("Explored");
+    expect(verb!.textContent).toBe("已探索");
   });
 
   it("renders detail text and logs when expanded", () => {
@@ -245,9 +382,8 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
         { title: "Agent", body: "searched files" },
       ],
     });
-    const snapshot = makeSnapshot([tool]);
     const { container } = render(
-      <ToolCallCard tool={tool} snapshot={snapshot} nested={false} onPermissionSelect={() => {}} />,
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
     );
 
     fireEvent.click(container.querySelector(".tc-header-line")!);

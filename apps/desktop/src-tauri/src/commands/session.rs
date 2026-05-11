@@ -11,7 +11,7 @@ use workspace_model::{
 pub fn session_get_state(state: State<'_, AppState>) -> Result<UiSnapshot, String> {
     state.with_app(|app| {
         app.poll_prompt_progress();
-        Ok(app.ui.clone())
+        Ok(app.lightweight_ui_snapshot())
     })
 }
 
@@ -90,7 +90,8 @@ pub fn session_delete(
     id: String,
     workspace_root: Option<String>,
 ) -> Result<(), String> {
-    state.with_workspace_app(workspace_root, |app| app.session_delete(&id))
+    state.delete_session(workspace_root, &id)?;
+    save_open_workspace_state(&state)
 }
 
 #[tauri::command]

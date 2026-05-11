@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -28,15 +28,16 @@ struct FileMeta {
 pub(crate) struct ToolRecordingWindow {
     baseline: HashMap<String, FileMeta>,
     baseline_text: HashMap<String, String>,
+    missing_at_start: HashSet<String>,
     /// Candidate paths observed during execution (from watcher hints or tool input).
     candidates: Vec<String>,
 }
 
 /// Session-level tracker that manages per-tool recording windows and a
-/// reusable workspace metadata index.
+/// lazily captured workspace metadata cache.
 pub(crate) struct FileChangeTracker {
     workspace_root: PathBuf,
-    /// Metadata index built from the workspace, reused across tool calls.
+    /// Metadata captured for paths explicitly observed during a tool call.
     index: HashMap<String, FileMeta>,
     /// Currently active recording windows, keyed by call_id.
     active_windows: HashMap<String, ToolRecordingWindow>,
@@ -58,54 +59,36 @@ fn file_fingerprint(path: &Path, len: u64) -> u64 {
 
 impl FileChangeTracker {
     pub(crate) fn new(workspace_root: &Path) -> Self {
-        let mut tracker = Self {
+        Self {
             workspace_root: workspace_root.to_path_buf(),
             index: HashMap::new(),
             active_windows: HashMap::new(),
-        };
-        tracker.rebuild_index();
-        tracker
+        }
     }
 
-    /// Rebuild the workspace metadata index from scratch.
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        let root = self.workspace_root.clone();
-        self.scan_dir(&root, 0);
+    fn read_meta_for_path(&self, path: &str) -> Option<FileMeta> {
+        if self.is_skipped_path(path) {
+            return None;
+        }
+        let full_path = self.workspace_root.join(path);
+        if !full_path.starts_with(&self.workspace_root) {
+            return None;
+        }
+        let Ok(meta) = fs::metadata(&full_path) else {
+            return None;
+        };
+        if !meta.is_file() {
+            return None;
+        }
+        Some(FileMeta {
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            len: meta.len(),
+            fingerprint: file_fingerprint(&full_path, meta.len()),
+        })
     }
 
-    fn scan_dir(&mut self, dir: &Path, depth: usize) {
-        if depth > 10 {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                self.scan_dir(&path, depth + 1);
-            } else if let Ok(meta) = fs::metadata(&path) {
-                let rel = path
-                    .strip_prefix(&self.workspace_root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                self.index.insert(
-                    rel.clone(),
-                    FileMeta {
-                        mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                        len: meta.len(),
-                        fingerprint: file_fingerprint(&path, meta.len()),
-                    },
-                );
-            }
-        }
+    fn is_skipped_path(&self, path: &str) -> bool {
+        path.split('/').any(|part| SKIP_DIRS.contains(&part))
     }
 
     /// Start a recording window for a tool call. Captures current file metadata.
@@ -121,18 +104,18 @@ impl FileChangeTracker {
         let hint_paths = hint_paths
             .into_iter()
             .map(|path| self.normalize_candidate_path(&path))
-            .filter(|path| !path.is_empty())
+            .filter(|path| !path.is_empty() && !self.is_skipped_path(path))
             .collect::<Vec<_>>();
 
         let mut baseline = HashMap::new();
+        let mut missing_at_start = HashSet::new();
         for path in &hint_paths {
-            if let Some(meta) = self.index.get(path) {
-                baseline.insert(path.clone(), meta.clone());
+            if let Some(meta) = self.read_meta_for_path(path) {
+                self.index.insert(path.clone(), meta.clone());
+                baseline.insert(path.clone(), meta);
+            } else {
+                missing_at_start.insert(path.clone());
             }
-        }
-        // If no hint paths, snapshot the full index for broad comparison.
-        if baseline.is_empty() {
-            baseline = self.index.clone();
         }
 
         let baseline_text = self.capture_baseline_text(&baseline);
@@ -141,6 +124,7 @@ impl FileChangeTracker {
             ToolRecordingWindow {
                 baseline,
                 baseline_text,
+                missing_at_start,
                 candidates: hint_paths,
             },
         );
@@ -152,7 +136,28 @@ impl FileChangeTracker {
         if path.is_empty() {
             return;
         }
+        if self.is_skipped_path(&path) {
+            return;
+        }
+
+        let observed_meta = self.read_meta_for_path(&path);
+        if let Some(meta) = observed_meta.clone() {
+            self.index.insert(path.clone(), meta);
+        }
         if let Some(window) = self.active_windows.get_mut(call_id) {
+            if !window.baseline.contains_key(&path) {
+                if let Some(meta) = observed_meta {
+                    if meta.len <= MAX_DIFF_FILE_SIZE {
+                        let full_path = self.workspace_root.join(&path);
+                        if let Ok(text) = fs::read_to_string(full_path) {
+                            window.baseline_text.insert(path.clone(), text);
+                        }
+                    }
+                    window.baseline.insert(path.clone(), meta);
+                } else {
+                    window.missing_at_start.insert(path.clone());
+                }
+            }
             if !window.candidates.contains(&path) {
                 window.candidates.push(path);
             }
@@ -211,30 +216,10 @@ impl FileChangeTracker {
             return Vec::new();
         };
 
-        // Refresh the index to get current state
-        self.rebuild_index();
-
-        // Determine candidate paths: prefer explicit candidates, fall back to index diff
-        let candidates = if !window.candidates.is_empty() {
-            window.candidates
-        } else {
-            // Compare index against baseline to find changed paths
-            let mut changed = Vec::new();
-            for (path, current_meta) in &self.index {
-                if let Some(base_meta) = window.baseline.get(path) {
-                    if current_meta.mtime != base_meta.mtime || current_meta.len != base_meta.len {
-                        changed.push(path.clone());
-                    }
-                }
-            }
-            // Also check for files that existed in baseline but are now gone
-            for path in window.baseline.keys() {
-                if !self.index.contains_key(path) {
-                    changed.push(path.clone());
-                }
-            }
-            changed
-        };
+        let candidates = window.candidates;
+        if candidates.is_empty() {
+            return Vec::new();
+        }
 
         let mut results = Vec::new();
         let limit = candidates.len().min(MAX_CANDIDATES_PER_TOOL);
@@ -242,6 +227,7 @@ impl FileChangeTracker {
         for path in &candidates[..limit] {
             let full_path = self.workspace_root.join(path);
             let base_meta = window.baseline.get(path);
+            let was_missing_at_start = window.missing_at_start.contains(path);
 
             // Check workspace boundary
             if !full_path.starts_with(&self.workspace_root) {
@@ -257,7 +243,7 @@ impl FileChangeTracker {
                         let fingerprint = file_fingerprint(&full_path, len);
                         mtime != base.mtime || len != base.len || fingerprint != base.fingerprint
                     }
-                    (None, Ok(_)) => true, // new file
+                    (None, Ok(_)) => was_missing_at_start,
                     (_, Err(_)) => false,
                 };
 
@@ -421,6 +407,48 @@ mod tests {
         assert_eq!(changes[0].old_text.as_deref(), Some("hello"));
         assert_eq!(changes[0].new_text, "hello world");
         assert!(!changes[0].skipped_diff);
+    }
+
+    #[test]
+    fn hint_paths_restrict_detected_changes_to_candidates() {
+        let dir = tempdir();
+        let hinted_path = dir.path().join("hinted.txt");
+        let other_path = dir.path().join("other.txt");
+        fs::write(&hinted_path, "before hinted").unwrap();
+        fs::write(&other_path, "before other").unwrap();
+
+        let mut tracker = FileChangeTracker::new(dir.path());
+        tracker.start_recording("call-1", vec!["hinted.txt".to_string()]);
+
+        fs::write(&hinted_path, "after hinted").unwrap();
+        fs::write(&other_path, "after other").unwrap();
+
+        let changes = tracker.finish_recording("call-1");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "hinted.txt");
+        assert_eq!(changes[0].new_text, "after hinted");
+    }
+
+    #[test]
+    fn added_candidate_captures_existing_file_baseline() {
+        let dir = tempdir();
+        let hinted_path = dir.path().join("hinted.txt");
+        let late_path = dir.path().join("late.txt");
+        fs::write(&hinted_path, "before hinted").unwrap();
+        fs::write(&late_path, "before late").unwrap();
+
+        let mut tracker = FileChangeTracker::new(dir.path());
+        tracker.start_recording("call-1", vec!["hinted.txt".to_string()]);
+        tracker.add_candidate("call-1", "late.txt".to_string());
+
+        fs::write(&late_path, "after late").unwrap();
+
+        let changes = tracker.finish_recording("call-1");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "late.txt");
+        assert_eq!(changes[0].change_type, FileChangeType::Modified);
+        assert_eq!(changes[0].old_text.as_deref(), Some("before late"));
+        assert_eq!(changes[0].new_text, "after late");
     }
 
     #[test]

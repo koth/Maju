@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -220,6 +221,12 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatMessageDelta {
+    pub id: Uuid,
+    pub append: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TimelineItem {
     Message(Uuid),
     Tool(Uuid),
@@ -395,6 +402,8 @@ pub struct SessionFileChange {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiSnapshot {
+    #[serde(default)]
+    pub revision: u64,
     pub workspace: WorkspaceDescriptor,
     pub session: SessionSummary,
     #[serde(default)]
@@ -411,6 +420,36 @@ pub struct UiSnapshot {
     pub repository: RepositorySnapshot,
     pub inspector_tab: InspectorTab,
     pub inspector_sections: Vec<SidebarSection>,
+    pub session_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub thinking_status: Option<ThinkingStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UiSnapshotPatch {
+    pub revision: u64,
+    pub session: SessionSummary,
+    #[serde(default)]
+    pub session_config: SessionConfigState,
+    #[serde(default)]
+    pub prompt_capabilities: PromptInputCapabilities,
+    #[serde(default)]
+    pub available_commands: Vec<AvailableCommand>,
+    #[serde(default)]
+    pub agent_plan: Vec<AgentPlanEntry>,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub message_deltas: Vec<ChatMessageDelta>,
+    pub timeline_start: usize,
+    #[serde(default)]
+    pub timeline: Vec<TimelineItem>,
+    #[serde(default)]
+    pub tools: Vec<ToolInvocation>,
+    pub inspector_tab: InspectorTab,
+    #[serde(default)]
+    pub inspector_sections: Vec<SidebarSection>,
+    #[serde(default)]
     pub session_changes: Vec<SessionFileChange>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
@@ -445,6 +484,8 @@ pub struct SearchResult {
 pub enum AgentCliId {
     Codebuddy,
     Goose,
+    #[serde(rename = "codex-acp")]
+    CodexAcp,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -454,11 +495,25 @@ pub enum AppTheme {
     Midnight,
     Graphite,
     Forest,
+    Light,
 }
 
 impl Default for AppTheme {
     fn default() -> Self {
-        Self::KodexDark
+        Self::Graphite
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexConnectionMode {
+    Managed,
+    Default,
+}
+
+impl Default for CodexConnectionMode {
+    fn default() -> Self {
+        Self::Managed
     }
 }
 
@@ -470,10 +525,64 @@ pub struct AppSettings {
     pub acp_port: u16,
     #[serde(default)]
     pub theme: AppTheme,
+    #[serde(default)]
+    pub lsp_servers: BTreeMap<String, LspServerSettings>,
+    #[serde(default)]
+    pub codex_connection_mode: CodexConnectionMode,
 }
 
 fn default_acp_port() -> u16 {
     0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LspServerSettings {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LspServerConfigInput {
+    pub language_id: String,
+    pub enabled: bool,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LspProbeResult {
+    pub available: bool,
+    pub resolved_path: Option<PathBuf>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LspServerSettingsEntry {
+    pub language_id: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub command: String,
+    pub args: Vec<String>,
+    pub default_command: String,
+    pub default_args: Vec<String>,
+    pub available: bool,
+    pub resolved_path: Option<PathBuf>,
+    pub running: bool,
+    pub message: Option<String>,
+    pub customized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LspSettingsSnapshot {
+    pub servers: Vec<LspServerSettingsEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -491,6 +600,16 @@ pub struct AgentSettingsSnapshot {
     pub settings: AppSettings,
     pub agents: Vec<AgentCliStatus>,
     pub env_override: Option<String>,
+    pub codex_acp: CodexAcpSettingsStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexAcpSettingsStatus {
+    pub provider: String,
+    pub connection_mode: CodexConnectionMode,
+    pub venus_key_configured: bool,
+    pub deepseek_key_configured: bool,
+    pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

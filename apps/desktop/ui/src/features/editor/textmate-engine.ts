@@ -71,6 +71,7 @@ const SCOPE_TOKEN_MAP: [string, string][] = [
   ["entity.name.type.module", "namespace"],
   ["entity.name.type", "type"],
   ["entity.name.function", "function"],
+  ["entity.name.method", "function"],
   ["entity.name.tag", "tag"],
   ["entity.name.section", "section"],
   ["entity.other.attribute-name", "attribute"],
@@ -79,14 +80,17 @@ const SCOPE_TOKEN_MAP: [string, string][] = [
   ["support.type.builtin", "type"],
   ["support.type", "type"],
   ["support.function", "function"],
+  ["support.method", "function"],
   ["support.class", "type"],
   ["support.constant", "constant"],
+  ["meta.object-literal.key", "string"],
   ["storage.type.function", "keyword"],
   ["storage.type", "storage.type"],
   ["storage.modifier", "storage.modifier"],
+  ["meta.import keyword", "keyword"],
   ["variable.parameter", "variable.parameter"],
   ["variable.language", "variable.language"],
-  ["variable.other.constant", "constant"],
+  ["variable.other.constant", "variable"],
   ["variable.other", "variable"],
   ["variable", "variable"],
   ["constant.numeric", "number"],
@@ -145,13 +149,21 @@ export async function registerTextMateLanguage(
   languageId: string,
 ): Promise<void> {
   if (registeredLanguages.has(languageId)) return;
-  if (initFailed || !registry) return;
+  if (initFailed) return;
+
+  const initialized = registry ? true : await initTextMate();
+  if (!initialized || !registry) return;
 
   const info = getGrammarInfo(languageId);
   if (!info) return;
 
   const grammar = await loadGrammar(info.scopeName);
   if (!grammar) return;
+
+  const languages = typeof monaco.languages.getLanguages === "function" ? monaco.languages.getLanguages() : [];
+  if (!languages.some((language) => language.id === languageId)) {
+    monaco.languages.register({ id: languageId });
+  }
 
   registeredLanguages.add(languageId);
 

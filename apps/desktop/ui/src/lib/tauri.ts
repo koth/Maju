@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult } from "../types";
+
+export async function startupPerfMark(stage: string, detail?: string): Promise<void> {
+  try {
+    await invoke("startup_perf_mark", { stage, detail });
+  } catch {
+    // Startup diagnostics must never block the UI.
+  }
+}
 
 export async function sessionGetState(): Promise<UiSnapshot> {
   return invoke<UiSnapshot>("session_get_state");
@@ -41,16 +49,54 @@ export async function gitCommit(message: string): Promise<void> {
   return invoke("git_commit", { message });
 }
 
-export async function editorOpenFile(path: string): Promise<string> {
-  return invoke<string>("editor_open_file", { path });
+export async function editorOpenFile(path: string): Promise<EditorFileSnapshot> {
+  return invoke<EditorFileSnapshot>("editor_open_file", { path });
 }
 
-export async function editorSaveFile(path: string, content: string): Promise<void> {
-  return invoke("editor_save_file", { path, content });
+export async function editorSaveFile(
+  path: string,
+  content: string,
+  baseVersion?: EditorFileVersion | null,
+  overwrite = false,
+): Promise<EditorFileSnapshot> {
+  return invoke<EditorFileSnapshot>("editor_save_file", {
+    path,
+    content,
+    baseVersion,
+    overwrite,
+  });
 }
 
-export async function editorGetContent(path: string): Promise<string> {
-  return invoke<string>("editor_get_content", { path });
+export async function editorGetContent(path: string): Promise<EditorFileSnapshot> {
+  return invoke<EditorFileSnapshot>("editor_get_content", { path });
+}
+
+export async function editorLspOpenDocument(path: string, languageId: string, content: string): Promise<LspServerStatus> {
+  return invoke<LspServerStatus>("editor_lsp_open_document", { path, languageId, content });
+}
+
+export async function editorLspChangeDocument(path: string, languageId: string, content: string): Promise<number> {
+  return invoke<number>("editor_lsp_change_document", { path, languageId, content });
+}
+
+export async function editorLspSaveDocument(path: string, languageId: string, content: string): Promise<void> {
+  return invoke("editor_lsp_save_document", { path, languageId, content });
+}
+
+export async function editorLspCloseDocument(path: string, languageId: string): Promise<void> {
+  return invoke("editor_lsp_close_document", { path, languageId });
+}
+
+export async function editorLspGetDiagnostics(path: string, languageId: string): Promise<LspDiagnostic[]> {
+  return invoke<LspDiagnostic[]>("editor_lsp_get_diagnostics", { path, languageId });
+}
+
+export async function editorLspRequest<T = unknown>(
+  languageId: string,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<T | null> {
+  return invoke<T | null>("editor_lsp_request", { languageId, method, params });
 }
 
 export async function reviewGetDiff(path: string): Promise<ChangedFile | null> {
@@ -153,6 +199,34 @@ export async function settingsSelectTheme(theme: AppTheme): Promise<AgentSetting
   return invoke<AgentSettingsSnapshot>("settings_select_theme", { theme });
 }
 
+export async function settingsSaveCodexAcpVenusKey(venusKey: string): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_venus_key", { venusKey });
+}
+
+export async function settingsSaveCodexAcpProviderKey(provider: string, apiKey: string): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_provider_key", { provider, apiKey });
+}
+
+export async function settingsSelectCodexDefaultMode(): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode");
+}
+
 export async function settingsInstallAgent(agent: AgentCliId): Promise<AgentInstallResult> {
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
+}
+
+export async function settingsGetLspSnapshot(): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_get_lsp_snapshot");
+}
+
+export async function settingsSaveLspServer(config: LspServerConfigInput): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_save_lsp_server", { config });
+}
+
+export async function settingsResetLspServer(languageId: string): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_reset_lsp_server", { languageId });
+}
+
+export async function settingsProbeLspServer(command: string): Promise<LspProbeResult> {
+  return invoke<LspProbeResult>("settings_probe_lsp_server", { command });
 }

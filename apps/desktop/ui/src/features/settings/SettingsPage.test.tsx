@@ -1,0 +1,224 @@
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SettingsPage } from "./SettingsPage";
+import {
+  settingsGetAgentSnapshot,
+  settingsGetLspSnapshot,
+  settingsProbeLspServer,
+  settingsResetLspServer,
+  settingsSaveCodexAcpProviderKey,
+  settingsSaveCodexAcpVenusKey,
+  settingsSaveLspServer,
+  settingsSelectCodexDefaultMode,
+} from "../../lib/tauri";
+import type { AgentSettingsSnapshot, LspSettingsSnapshot } from "../../types";
+
+vi.mock("../../lib/tauri", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
+  return {
+    ...actual,
+    settingsGetAgentSnapshot: vi.fn(),
+    settingsDetectAgents: vi.fn(),
+    settingsSelectAgent: vi.fn(),
+    settingsSelectTheme: vi.fn(),
+    settingsInstallAgent: vi.fn(),
+    settingsGetLspSnapshot: vi.fn(),
+    settingsProbeLspServer: vi.fn(),
+    settingsSaveCodexAcpProviderKey: vi.fn(),
+    settingsSaveCodexAcpVenusKey: vi.fn(),
+    settingsSelectCodexDefaultMode: vi.fn(),
+    settingsSaveLspServer: vi.fn(),
+    settingsResetLspServer: vi.fn(),
+  };
+});
+
+const agentSnapshot: AgentSettingsSnapshot = {
+  settings: {
+    selected_agent: "codebuddy",
+    acp_port: 0,
+    theme: "graphite",
+    lsp_servers: {},
+    codex_connection_mode: "managed",
+  },
+  agents: [
+    {
+      id: "codebuddy",
+      label: "CodeBuddy",
+      binary: "codebuddy.exe",
+      installed: true,
+      detected_path: "C:\\tools\\codebuddy.exe",
+      selected: true,
+    },
+    {
+      id: "codex-acp",
+      label: "Codex",
+      binary: "codex-acp.exe",
+      installed: true,
+      detected_path: "C:\\tools\\codex-acp.exe",
+      selected: false,
+    },
+  ],
+  env_override: null,
+  codex_acp: {
+    provider: "venus",
+    connection_mode: "managed",
+    venus_key_configured: false,
+    deepseek_key_configured: false,
+    config_path: "C:\\Users\\yvonchen\\.kodex\\config.toml",
+  },
+};
+
+function lspSnapshot(command = "typescript-language-server", enabled = true): LspSettingsSnapshot {
+  return {
+    servers: [
+      {
+        languageId: "typescript",
+        displayName: "TypeScript",
+        enabled,
+        command,
+        args: ["--stdio"],
+        defaultCommand: "typescript-language-server",
+        defaultArgs: ["--stdio"],
+        available: true,
+        resolvedPath: "C:\\tools\\typescript-language-server.cmd",
+        running: false,
+        message: null,
+        customized: command !== "typescript-language-server" || !enabled,
+      },
+    ],
+  };
+}
+
+describe("SettingsPage LSP settings", () => {
+  beforeEach(() => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot);
+    vi.mocked(settingsGetLspSnapshot).mockResolvedValue(lspSnapshot());
+    vi.mocked(settingsProbeLspServer).mockResolvedValue({
+      available: true,
+      resolvedPath: "C:\\tools\\custom-ts-lsp.cmd",
+      message: null,
+    });
+    vi.mocked(settingsSaveLspServer).mockResolvedValue(lspSnapshot("custom-ts-lsp"));
+    vi.mocked(settingsResetLspServer).mockResolvedValue(lspSnapshot());
+    vi.mocked(settingsSaveCodexAcpVenusKey).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        venus_key_configured: true,
+      },
+    });
+    vi.mocked(settingsSaveCodexAcpProviderKey).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "deepseek",
+        deepseek_key_configured: true,
+      },
+    });
+    vi.mocked(settingsSelectCodexDefaultMode).mockResolvedValue({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        codex_connection_mode: "default",
+      },
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "default",
+        connection_mode: "default",
+      },
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("loads, probes, saves, disables, and resets a language server", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "LSP" }));
+    await screen.findByText("TypeScript");
+    const commandInput = screen.getByLabelText("命令") as HTMLInputElement;
+    fireEvent.change(commandInput, { target: { value: "custom-ts-lsp" } });
+    fireEvent.click(screen.getByText("探测"));
+
+    await waitFor(() => expect(settingsProbeLspServer).toHaveBeenCalledWith("custom-ts-lsp"));
+    await screen.findByText("已找到：C:\\tools\\custom-ts-lsp.cmd");
+
+    fireEvent.click(screen.getByText("保存"));
+    await waitFor(() =>
+      expect(settingsSaveLspServer).toHaveBeenCalledWith({
+        languageId: "typescript",
+        enabled: true,
+        command: "custom-ts-lsp",
+        args: ["--stdio"],
+      }),
+    );
+
+    const enableToggle = screen.getByRole("checkbox", { name: "启用" });
+    fireEvent.click(enableToggle);
+    fireEvent.click(screen.getByText("保存"));
+    await waitFor(() =>
+      expect(settingsSaveLspServer).toHaveBeenLastCalledWith({
+        languageId: "typescript",
+        enabled: false,
+        command: "custom-ts-lsp",
+        args: ["--stdio"],
+      }),
+    );
+
+    fireEvent.click(screen.getByText("重置"));
+    await waitFor(() => expect(settingsResetLspServer).toHaveBeenCalledWith("typescript"));
+  });
+
+  it("renders codex-acp configuration and saves Venus key without echoing it", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await screen.findByText("Codex");
+    expect(screen.getAllByText("未配置").length).toBeGreaterThan(0);
+    expect(screen.getByText("C:\\Users\\yvonchen\\.kodex\\config.toml")).toBeInTheDocument();
+
+    const saveButton = screen.getByRole("button", { name: "保存 Venus key" });
+    expect(saveButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("codex_acp_api_key"), { target: { value: "venus-secret" } });
+    expect(saveButton).not.toBeDisabled();
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(settingsSaveCodexAcpVenusKey).toHaveBeenCalledWith("venus-secret"));
+    await screen.findByText("Venus API key 已保存");
+    expect(screen.getByLabelText("codex_acp_api_key")).toHaveValue("");
+    expect(screen.queryByDisplayValue("venus-secret")).not.toBeInTheDocument();
+  });
+
+  it("saves DeepSeek provider key without echoing it", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await screen.findByText("Codex");
+    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
+
+    const saveButton = screen.getByRole("button", { name: "保存 DeepSeek key" });
+    fireEvent.change(screen.getByLabelText("codex_acp_api_key"), { target: { value: "deepseek-secret" } });
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(settingsSaveCodexAcpProviderKey).toHaveBeenCalledWith("deepseek", "deepseek-secret"),
+    );
+    await screen.findByText("DeepSeek API key 已保存");
+    expect(screen.getByLabelText("codex_acp_api_key")).toHaveValue("");
+    expect(screen.queryByDisplayValue("deepseek-secret")).not.toBeInTheDocument();
+  });
+
+  it("selects default Codex mode without requiring an API key", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await screen.findByText("Codex");
+    fireEvent.click(screen.getByRole("button", { name: /默认/ }));
+
+    await waitFor(() => expect(settingsSelectCodexDefaultMode).toHaveBeenCalled());
+    await screen.findByText("已切换为默认 Codex 配置");
+    expect(screen.getByText(/启动时不设置/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("codex_acp_api_key")).not.toBeInTheDocument();
+  });
+});

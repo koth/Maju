@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
-import type { DiffHunk, ToolDiffPreview, ToolInvocation, UiSnapshot, ToolStatus } from "../../types";
+import type { DiffHunk, ToolDiffPreview, ToolInvocation, ToolStatus } from "../../types";
 import "./ToolCallCard.css";
 
 const MAX_OUTPUT_LINES = 5;
@@ -16,19 +16,22 @@ const DIFF_OPTIONS = {
 
 interface Props {
   tool: ToolInvocation;
-  snapshot: UiSnapshot;
+  childToolsByParent?: Map<string, ToolInvocation[]>;
   nested: boolean;
   onPermissionSelect: (requestId: string, optionId: string | null) => void;
 }
 
-export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Props) {
+function ToolCallCardImpl({
+  tool,
+  childToolsByParent,
+  nested,
+  onPermissionSelect,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
 
-  const children = snapshot.tools.filter(
-    (t) => t.parent_call_id === tool.call_id
-  );
+  const children = childToolsByParent?.get(tool.call_id) ?? [];
 
-  const [childrenCollapsed, setChildrenCollapsed] = useState(false);
+  const [childrenCollapsed, setChildrenCollapsed] = useState(true);
 
   const trackedDiffPaths = getTrackedDiffPaths(tool);
   const diffPreviews = getTrackedDiffPreviews(tool);
@@ -75,8 +78,8 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
         <span className="tc-cmd">{headerTitle}</span>
         {category === "editing" && (diffStats.added > 0 || diffStats.removed > 0) && (
           <span className="tc-diff-stats" aria-label={`${diffStats.added} 处添加，${diffStats.removed} 处删除`}>
-            {diffStats.added > 0 && <span className="tc-diff-added">+{diffStats.added}</span>}
-            {diffStats.removed > 0 && <span className="tc-diff-removed">-{diffStats.removed}</span>}
+            <span className="tc-diff-added">+{diffStats.added}</span>
+            <span className="tc-diff-removed">-{diffStats.removed}</span>
           </span>
         )}
         {hasDetail && (
@@ -256,7 +259,7 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
             <ToolCallCard
               key={child.id}
               tool={child}
-              snapshot={snapshot}
+              childToolsByParent={childToolsByParent}
               nested
               onPermissionSelect={onPermissionSelect}
             />
@@ -265,6 +268,121 @@ export function ToolCallCard({ tool, snapshot, nested, onPermissionSelect }: Pro
       )}
     </div>
   );
+}
+
+export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);
+
+function areToolCardPropsEqual(prev: Props, next: Props) {
+  if (prev.nested !== next.nested) return false;
+  if (prev.onPermissionSelect !== next.onPermissionSelect) return false;
+  if (!sameToolForRender(prev.tool, next.tool)) return false;
+  return sameChildToolsForRender(
+    prev.childToolsByParent?.get(prev.tool.call_id) ?? [],
+    next.childToolsByParent?.get(next.tool.call_id) ?? [],
+  );
+}
+
+function sameChildToolsForRender(prev: ToolInvocation[], next: ToolInvocation[]) {
+  if (prev === next) return true;
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i] === next[i]) continue;
+    if (!sameToolForRender(prev[i], next[i])) return false;
+  }
+  return true;
+}
+
+function sameToolForRender(prev: ToolInvocation, next: ToolInvocation) {
+  if (prev === next) return true;
+  return (
+    prev.id === next.id &&
+    prev.call_id === next.call_id &&
+    prev.parent_call_id === next.parent_call_id &&
+    prev.name === next.name &&
+    prev.kind === next.kind &&
+    prev.summary === next.summary &&
+    prev.status === next.status &&
+    prev.is_subagent === next.is_subagent &&
+    prev.detail_text === next.detail_text &&
+    prev.raw_input === next.raw_input &&
+    prev.raw_output === next.raw_output &&
+    prev.error === next.error &&
+    prev.permission_decision === next.permission_decision &&
+    sameStringArray(prev.diff_paths, next.diff_paths) &&
+    sameLogs(prev.logs, next.logs) &&
+    samePermissionOptions(prev.permission_options, next.permission_options) &&
+    sameTerminalOutput(prev.terminal_output, next.terminal_output) &&
+    sameDiffPreviews(prev.diff_previews, next.diff_previews)
+  );
+}
+
+function sameStringArray(prev: string[], next: string[]) {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i] !== next[i]) return false;
+  }
+  return true;
+}
+
+function sameLogs(prev: ToolInvocation["logs"], next: ToolInvocation["logs"]) {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i].title !== next[i].title || prev[i].body !== next[i].body) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function samePermissionOptions(
+  prev: ToolInvocation["permission_options"],
+  next: ToolInvocation["permission_options"],
+) {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (
+      prev[i].id !== next[i].id ||
+      prev[i].label !== next[i].label ||
+      prev[i].kind !== next[i].kind
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameTerminalOutput(
+  prev: ToolInvocation["terminal_output"],
+  next: ToolInvocation["terminal_output"],
+) {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return prev.exit_code === next.exit_code && prev.output === next.output;
+}
+
+function sameDiffPreviews(prev: ToolDiffPreview[], next: ToolDiffPreview[]) {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i].path !== next[i].path) return false;
+    if (!sameDiffHunks(prev[i].hunks, next[i].hunks)) return false;
+  }
+  return true;
+}
+
+function sameDiffHunks(prev: DiffHunk[], next: DiffHunk[]) {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    if (prev[i].heading !== next[i].heading) return false;
+    const prevLines = prev[i].lines;
+    const nextLines = next[i].lines;
+    if (prevLines.length !== nextLines.length) return false;
+    for (let j = 0; j < prevLines.length; j += 1) {
+      if (prevLines[j].kind !== nextLines[j].kind || prevLines[j].content !== nextLines[j].content) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 interface PatchLine {
@@ -399,6 +517,10 @@ function permissionTone(kind: string) {
  * Keeps raw commands in the expanded detail instead of the header.
  */
 function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): string {
+  if (isTodoWriteTool(tool)) {
+    return "任务计划";
+  }
+
   const inputTitle = extractInputTitle(tool);
   if (inputTitle) return truncate(inputTitle, 80);
 
@@ -631,6 +753,10 @@ function classifyTool(tool: ToolInvocation): ToolCategory {
   const identity = `${tool.kind} ${tool.name}`.toLowerCase();
   const subagentType = getSubagentType(tool);
 
+  if (isTodoWriteTool(tool)) {
+    return "executing";
+  }
+
   if (isExplicitEditToolInvocation(tool)) {
     return "editing";
   }
@@ -658,12 +784,132 @@ function isExplicitEditToolInvocation(tool: ToolInvocation): boolean {
   return isExplicitEditTool(`${tool.kind} ${tool.name}`.toLowerCase());
 }
 
+function isTodoWriteTool(tool: ToolInvocation): boolean {
+  const identity = `${tool.kind} ${tool.name}`.toLowerCase();
+  if (
+    identity.includes("todo write") ||
+    identity.includes("todowrite") ||
+    identity.includes("todo: todo write")
+  ) {
+    return true;
+  }
+
+  if (!tool.raw_input) return false;
+  try {
+    const input = JSON.parse(tool.raw_input);
+    return (
+      typeof input.content === "string" &&
+      /(?:^|\n)\s*[-*]\s+\[[^\]]*\]\s+\S/.test(input.content)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function getTrackedDiffPaths(tool: ToolInvocation): string[] {
   return isExplicitEditToolInvocation(tool) ? tool.diff_paths : [];
 }
 
 function getTrackedDiffPreviews(tool: ToolInvocation): ToolDiffPreview[] {
-  return isExplicitEditToolInvocation(tool) ? tool.diff_previews ?? [] : [];
+  if (!isExplicitEditToolInvocation(tool)) return [];
+  const previews = (tool.diff_previews ?? []).filter((preview) => !looksLikeBogusWholeFilePreview(preview));
+  if (previews.length > 0) return previews;
+  const inputPreview = diffPreviewFromRawInput(tool);
+  return inputPreview ? [inputPreview] : [];
+}
+
+function looksLikeBogusWholeFilePreview(preview: ToolDiffPreview): boolean {
+  const stats = getDiffStats([preview]);
+  return stats.added >= 100 && (stats.removed === 0 || stats.added > stats.removed * 4);
+}
+
+function diffPreviewFromRawInput(tool: ToolInvocation): ToolDiffPreview | null {
+  if (!tool.raw_input) return null;
+  try {
+    const input = JSON.parse(tool.raw_input);
+    const oldText = stringField(input, "old_string", "oldString", "before", "oldText");
+    const newText = stringField(input, "new_string", "newString", "after", "newText");
+    const path = stringField(input, "file_path", "filePath", "path") ?? tool.diff_paths[0] ?? tool.name;
+    if (oldText == null || newText == null || oldText === newText) return null;
+    if (looksLikeFragmentToWholeFile(oldText, newText)) return null;
+    return {
+      path,
+      hunks: compactTextDiffToHunks(oldText, newText),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function stringField(input: unknown, ...keys: string[]): string | null {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+function looksLikeFragmentToWholeFile(oldText: string, newText: string): boolean {
+  const oldLines = oldText.split(/\r?\n/).length;
+  const newLines = newText.split(/\r?\n/).length;
+  return oldLines > 0 && newLines >= 100 && oldLines * 4 < newLines;
+}
+
+function compactTextDiffToHunks(oldText: string, newText: string): DiffHunk[] {
+  const oldLines = oldText.split(/\r?\n/);
+  const newLines = newText.split(/\r?\n/);
+  let prefix = 0;
+  while (
+    prefix < oldLines.length &&
+    prefix < newLines.length &&
+    oldLines[prefix] === newLines[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix + prefix < oldLines.length &&
+    suffix + prefix < newLines.length &&
+    oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const start = Math.max(0, prefix - DIFF_CONTEXT_LINES);
+  const oldChangeEnd = oldLines.length - suffix;
+  const newChangeEnd = newLines.length - suffix;
+  const oldEnd = Math.min(oldLines.length, oldChangeEnd + DIFF_CONTEXT_LINES);
+  const newEnd = Math.min(newLines.length, newChangeEnd + DIFF_CONTEXT_LINES);
+  const lines: DiffHunk["lines"] = [];
+
+  for (let i = start; i < prefix; i += 1) {
+    lines.push({ kind: "Context", content: oldLines[i] });
+  }
+  for (let i = prefix; i < oldChangeEnd; i += 1) {
+    lines.push({ kind: "Removed", content: oldLines[i] });
+  }
+  for (let i = prefix; i < newChangeEnd; i += 1) {
+    lines.push({ kind: "Added", content: newLines[i] });
+  }
+  for (let i = Math.max(prefix, oldChangeEnd); i < oldEnd; i += 1) {
+    lines.push({ kind: "Context", content: oldLines[i] });
+  }
+
+  if (!lines.some((line) => line.kind === "Added" || line.kind === "Removed")) {
+    return [];
+  }
+
+  const oldCount = oldEnd - start;
+  const newCount = newEnd - start;
+  return [
+    {
+      heading: `@@ -${formatPatchRange(start + 1, oldCount)} +${formatPatchRange(start + 1, newCount)} @@`,
+      lines,
+    },
+  ];
 }
 
 function getSubagentType(tool: ToolInvocation): string | null {

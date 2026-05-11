@@ -10,6 +10,8 @@ pub struct SessionConfig {
     pub app_data_root: String,
     pub model: String,
     pub agent_command: String,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub agent_env: Vec<(String, String)>,
     /// ACP session ID from a previous session to resume via `--resume <id>`.
     /// When set, the agent command will have `--resume <id>` appended.
     pub resume_session_id: Option<String>,

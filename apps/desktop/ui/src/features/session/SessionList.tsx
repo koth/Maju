@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from "react";
-import type { KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import type { AgentCliId, AgentSettingsSnapshot, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
@@ -19,13 +18,9 @@ interface Props {
   activeSessionId: string;
   activeWorkspaceRoot: string;
   currentSessionStatus: SessionStatus;
+  onOpenSettings: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
-}
-
-interface SessionGroup {
-  label: string;
-  sessions: SessionListItem[];
 }
 
 type AgentModalMode = "workspace" | "session";
@@ -39,6 +34,7 @@ export function SessionList({
   activeSessionId,
   activeWorkspaceRoot,
   currentSessionStatus,
+  onOpenSettings,
   onSessionChanged,
   onWorkspaceChanged,
 }: Props) {
@@ -187,12 +183,13 @@ export function SessionList({
     async (id: string, workspaceRoot: string) => {
       try {
         await sessionDelete(id, workspaceRoot);
+        onSessionChanged();
         refresh();
-      } catch {
-        // ignore
+      } catch (error) {
+        console.error("Failed to delete session", error);
       }
     },
-    [refresh],
+    [onSessionChanged, refresh],
   );
 
   const closeSwitchConfirm = useCallback(() => {
@@ -226,12 +223,9 @@ export function SessionList({
   return (
     <div className="session-list">
       <div className="sl-header">
-        <div className="sl-heading">
-          <span className="sl-kicker">导航</span>
-          <span className="sl-title">工作区</span>
-        </div>
-        <button className="sl-new-btn" type="button" onClick={handleCreateWorkspace}>
-          新建
+        <span className="sl-kicker">项目</span>
+        <button className="sl-new-btn" type="button" onClick={handleCreateWorkspace} title="新建工作区" aria-label="新建工作区">
+          <PlusIcon />
         </button>
       </div>
 
@@ -254,6 +248,13 @@ export function SessionList({
             onDelete={handleDelete}
           />
         ))}
+      </div>
+
+      <div className="sl-footer">
+        <button className="sl-settings-btn" type="button" onClick={onOpenSettings} title="设置" aria-label="打开设置">
+          <SettingsIcon />
+          <span>设置</span>
+        </button>
       </div>
 
       {pendingSwitch && createPortal(
@@ -397,52 +398,39 @@ function WorkspaceSection({
   onSwitch: (id: string, workspaceRoot: string) => void;
   onDelete: (id: string, workspaceRoot: string) => void;
 }) {
-  const groups = groupSessions(item.sessions);
+  const sessions = sortSessions(item.sessions);
   const workspaceRoot = item.workspace.root;
 
   return (
     <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"}`}>
-      <button className="sl-workspace-node" type="button" aria-current={item.is_active ? "true" : undefined} onClick={() => onActivateWorkspace(workspaceRoot)}>
-        <span className="sl-workspace-mark">W</span>
-        <span className="sl-workspace-copy">
-          <span className="sl-workspace-name" title={item.workspace.name}>{item.workspace.name}</span>
-          <span className="sl-workspace-path" title={workspaceRoot}>{workspaceRoot}</span>
-        </span>
-        <span className="sl-workspace-side">
-          <span className="sl-workspace-state">{item.connected ? "已连接" : "未连接"}</span>
-          <span className="sl-workspace-count">{item.sessions.length}</span>
-        </span>
-      </button>
+      <div className="sl-workspace-row">
+        <button className="sl-workspace-node" type="button" aria-current={item.is_active ? "true" : undefined} onClick={() => onActivateWorkspace(workspaceRoot)}>
+          <FolderIcon />
+          <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
+        </button>
+        <button className="sl-workspace-edit" type="button" onClick={() => onCreateSession(workspaceRoot)} title="新建会话" aria-label={`在 ${item.workspace.name} 中新建会话`}>
+          <EditIcon />
+        </button>
+      </div>
 
       <div className="sl-thread-branch">
-        <div className="sl-thread-branch-title">
-          <span>会话</span>
-          <button className="sl-session-add" type="button" onClick={() => onCreateSession(workspaceRoot)} title="新建会话">
-            +
-          </button>
-        </div>
-
         <div className="sl-items">
           {item.sessions.length === 0 && (
             <div className="sl-empty sl-session-empty">
-              <span className="sl-empty-title">暂无会话</span>
-              <span className="sl-empty-copy">在此工作区中开始一个会话。</span>
+              <span className="sl-empty-title">{item.connected ? "暂无会话" : "未加载会话"}</span>
+              <span className="sl-empty-copy">{item.connected ? "在此工作区中开始一个会话。" : "点击工作区后按需加载。"}</span>
             </div>
           )}
 
-          {groups.map((group) => (
-            <section className="sl-section" key={group.label}>
-              <div className="sl-section-title">{group.label}</div>
-              {group.sessions.map((session) => (
-                <ThreadRow
-                  key={session.id}
-                  session={session}
-                  active={session.id === activeSessionId && item.is_active}
-                  onSwitch={(id) => onSwitch(id, workspaceRoot)}
-                  onDelete={(id) => onDelete(id, workspaceRoot)}
-                />
-              ))}
-            </section>
+          {sessions.map((session) => (
+            <ThreadRow
+              key={session.id}
+              session={session}
+              active={session.id === activeSessionId && item.is_active}
+              connected={session.id === activeSessionId && item.is_active && item.connected}
+              onSwitch={(id) => onSwitch(id, workspaceRoot)}
+              onDelete={(id) => onDelete(id, workspaceRoot)}
+            />
           ))}
         </div>
       </div>
@@ -453,85 +441,62 @@ function WorkspaceSection({
 function ThreadRow({
   session,
   active,
+  connected,
   onSwitch,
   onDelete,
 }: {
   session: SessionListItem;
   active: boolean;
+  connected: boolean;
   onSwitch: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      onSwitch(session.id);
-    }
-  };
+  const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
 
   return (
-    <div
-      className={`sl-item ${active ? "sl-active" : ""}`}
-      onClick={() => onSwitch(session.id)}
-      onKeyDown={handleKeyDown}
-      role="button"
-      tabIndex={0}
-      aria-current={active ? "page" : undefined}
-    >
-      <div className="sl-item-main">
-        <div className="sl-item-title" title={session.title}>{session.title}</div>
-        <div className="sl-item-meta">
-          <span>{formatRelativeTime(session.updated_at || session.created_at)}</span>
-          <span>{session.message_count} 条消息</span>
-          {session.agent_cli && <span>{session.agent_cli}</span>}
-        </div>
-      </div>
-      <div className="sl-item-side">
-        <span className={`sl-status-dot sl-status-${session.status.toLowerCase()}`} />
-        {!active && (
-          <button
-            className="sl-delete-btn"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onDelete(session.id);
-            }}
-            title="删除会话"
-          >
-            x
-          </button>
-        )}
-      </div>
+    <div className={`sl-item ${active ? "sl-active" : ""}`}>
+      <button
+        className="sl-item-button"
+        type="button"
+        onClick={() => onSwitch(session.id)}
+        aria-current={active ? "page" : undefined}
+      >
+        <span className={`sl-session-online ${connected ? "is-visible" : ""}`} title={connected ? "Agent 已连接" : undefined} aria-label={connected ? "Agent 已连接" : undefined} />
+        <span className="sl-item-main">
+          <span className="sl-item-title" title={session.title}>{session.title}</span>
+        </span>
+        {timeLabel && <span className="sl-item-time">{timeLabel}</span>}
+      </button>
+      <button
+        className="sl-delete-btn"
+        type="button"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onDelete(session.id);
+        }}
+        title="删除会话"
+        aria-label={`删除会话 ${session.title}`}
+      >
+        <TrashIcon />
+      </button>
     </div>
   );
 }
 
-function groupSessions(sessions: SessionListItem[]): SessionGroup[] {
-  const sorted = [...sessions].sort((a, b) => {
+function sortSessions(sessions: SessionListItem[]): SessionListItem[] {
+  return [...sessions].sort((a, b) => {
     return getTimestamp(b.updated_at || b.created_at) - getTimestamp(a.updated_at || a.created_at);
   });
-  const buckets: SessionGroup[] = [
-    { label: "今天", sessions: [] },
-    { label: "过去 7 天", sessions: [] },
-    { label: "更早", sessions: [] },
-  ];
-
-  sorted.forEach((session) => {
-    const days = daysSince(session.updated_at || session.created_at);
-    if (days < 1) {
-      buckets[0].sessions.push(session);
-    } else if (days <= 7) {
-      buckets[1].sessions.push(session);
-    } else {
-      buckets[2].sessions.push(session);
-    }
-  });
-
-  return buckets.filter((bucket) => bucket.sessions.length > 0);
 }
 
-function formatRelativeTime(value: string) {
+function formatRelativeTime(value: string): string | null {
   const timestamp = getTimestamp(value);
-  if (!timestamp) return "最近";
+  if (!timestamp) return null;
 
   const diffMs = Date.now() - timestamp;
   const minutes = Math.max(0, Math.floor(diffMs / 60000));
@@ -548,13 +513,65 @@ function formatRelativeTime(value: string) {
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function daysSince(value: string) {
-  const timestamp = getTimestamp(value);
-  if (!timestamp) return 0;
-  return Math.floor((Date.now() - timestamp) / 86400000);
+function getTimestamp(value: string) {
+  if (!value) return 0;
+
+  const numericValue = Number(value);
+  if (Number.isFinite(numericValue) && numericValue > 0) {
+    return numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue;
+  }
+
+  const normalizedValue = value.includes("T") || /[zZ]|[+-]\d{2}:?\d{2}$/.test(value)
+    ? value
+    : value.replace(" ", "T");
+  const timestamp = new Date(normalizedValue).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function getTimestamp(value: string) {
-  const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) ? timestamp : 0;
+function FolderIcon() {
+  return (
+    <svg className="sl-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+      <path d="M2.5 8.2h15" />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M11.9 4.2 15.8 8 8.1 15.7l-4.2.7.7-4.2 7.3-8Z" />
+      <path d="m11.1 5 3.9 3.9" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M4.4 6.2h11.2" />
+      <path d="M8.1 6.2V4.8c0-.6.5-1.1 1.1-1.1h1.6c.6 0 1.1.5 1.1 1.1v1.4" />
+      <path d="m6.2 6.2.6 9.1c0 .6.5 1 1.1 1h4.2c.6 0 1.1-.4 1.1-1l.6-9.1" />
+      <path d="M8.8 9.1v4.1" />
+      <path d="M11.2 9.1v4.1" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 4.5v11" />
+      <path d="M4.5 10h11" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="2.6" />
+      <path d="M16.4 11.5a1.4 1.4 0 0 0 .3 1.5l.1.1a1.7 1.7 0 1 1-2.4 2.4l-.1-.1a1.4 1.4 0 0 0-1.5-.3 1.4 1.4 0 0 0-.8 1.3v.2a1.7 1.7 0 1 1-3.4 0v-.2a1.4 1.4 0 0 0-.8-1.3 1.4 1.4 0 0 0-1.5.3l-.1.1a1.7 1.7 0 1 1-2.4-2.4l.1-.1a1.4 1.4 0 0 0 .3-1.5 1.4 1.4 0 0 0-1.3-.8h-.2a1.7 1.7 0 1 1 0-3.4h.2a1.4 1.4 0 0 0 1.3-.8 1.4 1.4 0 0 0-.3-1.5l-.1-.1a1.7 1.7 0 1 1 2.4-2.4l.1.1a1.4 1.4 0 0 0 1.5.3 1.4 1.4 0 0 0 .8-1.3v-.2a1.7 1.7 0 1 1 3.4 0v.2a1.4 1.4 0 0 0 .8 1.3 1.4 1.4 0 0 0 1.5-.3l.1-.1a1.7 1.7 0 1 1 2.4 2.4l-.1.1a1.4 1.4 0 0 0-.3 1.5 1.4 1.4 0 0 0 1.3.8h.2a1.7 1.7 0 1 1 0 3.4h-.2a1.4 1.4 0 0 0-1.3.8Z" />
+    </svg>
+  );
 }

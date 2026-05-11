@@ -1,11 +1,13 @@
 use crate::events::{ClientEvent, SessionConfig};
-use crate::runtime::{PermissionBroker, RuntimeCommand, run_session};
+use crate::runtime::{PermissionBroker, RuntimeCommand, ShutdownSignal, run_session};
 use anyhow::anyhow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use workspace_model::UserPromptContent;
+
+const MAX_READY_EVENTS_PER_COLLECT: usize = 32;
 
 pub struct PromptTask {
     events: Vec<ClientEvent>,
@@ -21,6 +23,7 @@ pub struct SessionHandle {
     is_alive: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
     permission_broker: PermissionBroker,
+    shutdown_signal: ShutdownSignal,
 }
 
 impl SessionHandle {
@@ -31,12 +34,20 @@ impl SessionHandle {
         let is_alive = Arc::new(AtomicBool::new(true));
         let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let permission_broker = PermissionBroker::default();
+        let shutdown_signal = ShutdownSignal::default();
 
         let worker_alive = is_alive.clone();
         let worker_error = last_error.clone();
         let worker_permission_broker = permission_broker.clone();
+        let worker_shutdown_signal = shutdown_signal.clone();
         let worker = thread::spawn(move || {
-            let result = run_session(config, event_tx, command_rx, worker_permission_broker);
+            let result = run_session(
+                config,
+                event_tx,
+                command_rx,
+                worker_permission_broker,
+                worker_shutdown_signal,
+            );
             worker_alive.store(false, Ordering::Release);
             if let Err(ref err) = result {
                 if let Ok(mut guard) = worker_error.lock() {
@@ -54,7 +65,15 @@ impl SessionHandle {
             is_alive,
             last_error,
             permission_broker,
+            shutdown_signal,
         })
+    }
+
+    pub fn shutdown(&mut self) {
+        let _ = self.command_tx.send(RuntimeCommand::Shutdown);
+        self.permission_broker.cancel_all().ok();
+        self.shutdown_signal.request_shutdown();
+        let _ = self.worker.take();
     }
 
     pub fn is_alive(&self) -> bool {
@@ -239,7 +258,10 @@ impl PromptTask {
             }
         }
 
-        while let Ok(event) = session.try_recv_event() {
+        while self.events.len() < MAX_READY_EVENTS_PER_COLLECT {
+            let Ok(event) = session.try_recv_event() else {
+                break;
+            };
             self.finished = self.finished
                 || matches!(
                     event,
@@ -252,7 +274,7 @@ impl PromptTask {
 
         let mut ready = Vec::new();
         std::mem::swap(&mut ready, &mut self.events);
-        Ok(ready)
+        Ok(coalesce_ready_events(ready))
     }
 
     pub fn is_finished(&self) -> bool {
@@ -264,12 +286,56 @@ impl PromptTask {
     }
 }
 
+fn coalesce_ready_events(events: Vec<ClientEvent>) -> Vec<ClientEvent> {
+    let mut coalesced: Vec<ClientEvent> = Vec::with_capacity(events.len());
+
+    for event in events {
+        match event {
+            ClientEvent::MessageChunk { role, content } => {
+                if let Some(ClientEvent::MessageChunk {
+                    role: previous_role,
+                    content: previous_content,
+                }) = coalesced.last_mut()
+                    && *previous_role == role
+                {
+                    previous_content.push_str(&content);
+                    continue;
+                }
+                coalesced.push(ClientEvent::MessageChunk { role, content });
+            }
+            ClientEvent::ToolMessageChunk { id, content } => {
+                if let Some(ClientEvent::ToolMessageChunk {
+                    id: previous_id,
+                    content: previous_content,
+                }) = coalesced.last_mut()
+                    && *previous_id == id
+                {
+                    previous_content.push_str(&content);
+                    continue;
+                }
+                coalesced.push(ClientEvent::ToolMessageChunk { id, content });
+            }
+            ClientEvent::ToolProgress { id, content } => {
+                if let Some(ClientEvent::ToolProgress {
+                    id: previous_id,
+                    content: previous_content,
+                }) = coalesced.last_mut()
+                    && *previous_id == id
+                {
+                    previous_content.push_str(&content);
+                    continue;
+                }
+                coalesced.push(ClientEvent::ToolProgress { id, content });
+            }
+            other => coalesced.push(other),
+        }
+    }
+
+    coalesced
+}
+
 impl Drop for SessionHandle {
     fn drop(&mut self) {
-        let _ = self.command_tx.send(RuntimeCommand::Shutdown);
-
-        // Do not block UI teardown on the ACP worker. If a prompt is in flight, the runtime can
-        // still be awaiting `read_update()`, and joining here freezes window close.
-        let _ = self.worker.take();
+        self.shutdown();
     }
 }

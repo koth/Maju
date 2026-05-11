@@ -1,7 +1,10 @@
 import React, { Component, type ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import { Workbench } from "./features/workbench/Workbench";
+import { startupPerfMark } from "./lib/tauri";
 import "./theme.css";
+
+void startupPerfMark("main_loaded", `performance_now=${performance.now().toFixed(1)}`);
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   constructor(props: { children: ReactNode }) {
@@ -31,6 +34,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+void startupPerfMark("react_render_start", `performance_now=${performance.now().toFixed(1)}`);
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
@@ -38,3 +42,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </ErrorBoundary>
   </React.StrictMode>
 );
+requestAnimationFrame(() => {
+  void startupPerfMark("first_animation_frame", `performance_now=${performance.now().toFixed(1)}`);
+});

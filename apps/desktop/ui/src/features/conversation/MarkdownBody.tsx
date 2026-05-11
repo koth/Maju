@@ -1,5 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { memo } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 
@@ -7,7 +8,7 @@ interface Props {
   content: string;
 }
 
-export default function MarkdownBody({ content }: Props) {
+function MarkdownBody({ content }: Props) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -34,6 +35,7 @@ export default function MarkdownBody({ content }: Props) {
                     fontSize: "13px",
                     lineHeight: "1.5",
                     background: "var(--app-bg)",
+                    backgroundColor: "var(--app-bg)",
                   }}
                 >
                   {codeString}
@@ -71,6 +73,9 @@ export default function MarkdownBody({ content }: Props) {
         },
         blockquote({ children }) {
           return <blockquote className="md-blockquote">{children}</blockquote>;
+        },
+        hr() {
+          return <hr className="md-hr" />;
         },
         a({ href, children }) {
           return (
@@ -113,6 +118,8 @@ export default function MarkdownBody({ content }: Props) {
     </ReactMarkdown>
   );
 }
+
+export default memo(MarkdownBody);
 
 function safeMarkdownUrl(url: string) {
   if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) {

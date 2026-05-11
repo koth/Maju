@@ -1,9 +1,11 @@
 mod client;
+mod codex_api_proxy;
 mod events;
 mod mapping;
 mod runtime;
 
 pub use client::{PromptTask, SessionHandle};
+pub use codex_api_proxy::codex_api_proxy_base_url;
 pub use events::{ClientEvent, SessionConfig};
 pub use mapping::diff_to_hunks;
 

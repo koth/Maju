@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
 session-store = { path = "../session-store" }
+toml_edit.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const FILE_NAME: &str = "open-workspaces.json";
 
@@ -33,18 +33,7 @@ impl OpenWorkspaces {
             Ok(content) => content,
             Err(_) => return OpenWorkspaceState::default(),
         };
-        let mut state: OpenWorkspaceState = serde_json::from_str(&content).unwrap_or_default();
-        state
-            .workspaces
-            .retain(|workspace| Path::new(&workspace.path).is_dir());
-        if state
-            .active_path
-            .as_ref()
-            .is_some_and(|active_path| !Path::new(active_path).is_dir())
-        {
-            state.active_path = None;
-        }
-        state
+        serde_json::from_str(&content).unwrap_or_default()
     }
 
     pub fn save(&self, state: &OpenWorkspaceState) {

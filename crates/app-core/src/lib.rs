@@ -4,20 +4,24 @@ mod file_tracker;
 mod paths;
 mod reducer;
 pub mod settings;
+pub mod startup_perf;
 
-pub use application::{Application, normalize_path_for_storage, normalize_tracked_path};
+pub use application::{
+    Application, UiPatchCursor, UiSnapshotUpdate, normalize_path_for_storage,
+    normalize_tracked_path,
+};
 pub use paths::AppPaths;
 
 #[cfg(test)]
 mod tests {
-    use super::{AppPaths, Application};
+    use super::{AppPaths, Application, UiPatchCursor, UiSnapshotUpdate};
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, MessageRole,
-        SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
-        SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus,
-        UserPromptContent,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, FileChangeType,
+        MessageRole, SessionConfigCategory, SessionConfigChoice, SessionConfigControl,
+        SessionConfigSource, SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem,
+        ToolStatus, UserPromptContent,
     };
 
     use tempfile::tempdir;
@@ -61,6 +65,60 @@ mod tests {
             );
             poll.join().unwrap();
         });
+    }
+
+    #[test]
+    fn lightweight_ui_update_emits_full_then_incremental_patches() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+        let mut cursor = UiPatchCursor::default();
+
+        let initial = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("first update should seed the patch cursor with a full snapshot");
+        let initial_timeline_len = match initial {
+            UiSnapshotUpdate::Full(snapshot) => snapshot.timeline.len(),
+            UiSnapshotUpdate::Patch(_) => panic!("first update must be full"),
+        };
+        assert!(app.lightweight_ui_update(&mut cursor).is_none());
+
+        app.send_prompt_background("hello from patch cursor")
+            .unwrap();
+
+        let next = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("new user prompt should produce a patch");
+        let patch = match next {
+            UiSnapshotUpdate::Patch(patch) => patch,
+            UiSnapshotUpdate::Full(_) => panic!("same session should not re-emit full snapshots"),
+        };
+
+        assert_eq!(patch.timeline_start, initial_timeline_len);
+        assert_eq!(patch.timeline.len(), 1);
+        assert_eq!(patch.messages.len(), 1);
+        assert!(patch.message_deltas.is_empty());
+        assert_eq!(patch.messages[0].role, MessageRole::User);
+        assert!(patch.messages[0].body.contains("hello from patch cursor"));
+        assert!(app.lightweight_ui_update(&mut cursor).is_none());
+
+        app.ui
+            .messages
+            .last_mut()
+            .expect("prompt should create a message")
+            .body
+            .push_str(" with appended text");
+        app.ui.revision += 1;
+
+        let append_update = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("appended body should produce a delta patch");
+        let append_patch = match append_update {
+            UiSnapshotUpdate::Patch(patch) => patch,
+            UiSnapshotUpdate::Full(_) => panic!("append should stay incremental"),
+        };
+        assert!(append_patch.messages.is_empty());
+        assert_eq!(append_patch.message_deltas.len(), 1);
+        assert_eq!(append_patch.message_deltas[0].append, " with appended text");
     }
 
     #[test]
@@ -467,6 +525,58 @@ mod tests {
     }
 
     #[test]
+    fn reducer_projects_codebuddy_todo_write_into_agent_plan() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "todo-1".into(),
+                parent_id: None,
+                name: "todo: todo write".into(),
+                kind: "tool".into(),
+                summary: "todo: todo write".into(),
+                is_subagent: false,
+                raw_input: Some(
+                    serde_json::json!({
+                        "content": "- [ ] 查看当前 ci.yml 文件内容\n- [ ] 理解现有部署流程（测试服务器配置）\n- [x] 添加 release 分支判断逻辑"
+                    })
+                    .to_string(),
+                ),
+            },
+        );
+
+        assert_eq!(ui.agent_plan.len(), 3);
+        assert_eq!(ui.agent_plan[0].content, "查看当前 ci.yml 文件内容");
+        assert_eq!(ui.agent_plan[0].status, AgentPlanEntryStatus::Pending);
+        assert_eq!(ui.agent_plan[2].content, "添加 release 分支判断逻辑");
+        assert_eq!(ui.agent_plan[2].status, AgentPlanEntryStatus::Completed);
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolUpdated {
+                id: "todo-1".into(),
+                parent_id: None,
+                name: None,
+                kind: None,
+                summary: Some("Updated (107 chars)".into()),
+                is_subagent: false,
+                raw_input: None,
+                raw_output: None,
+                terminal_output: None,
+                is_partial: false,
+            },
+        );
+
+        assert_eq!(ui.agent_plan.len(), 3);
+        assert_eq!(
+            ui.agent_plan[1].content,
+            "理解现有部署流程（测试服务器配置）"
+        );
+    }
+
+    #[test]
     fn reducer_caps_large_tool_payloads_kept_in_ui_state() {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
@@ -604,6 +714,316 @@ mod tests {
             ui.session_changes[0].new_text,
             "before\nnew section\nfinal\n"
         );
+    }
+
+    #[test]
+    fn manual_editor_save_updates_existing_session_change_against_original_base() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.record_manual_editor_save(
+            "src/main.ts",
+            Some("before\n".into()),
+            "agent edit\n".into(),
+        );
+        app.record_manual_editor_save(
+            "src/main.ts",
+            Some("agent edit\n".into()),
+            "manual edit\n".into(),
+        );
+
+        assert_eq!(app.ui.session_changes.len(), 1);
+        let change = &app.ui.session_changes[0];
+        assert_eq!(change.old_text.as_deref(), Some("before\n"));
+        assert_eq!(change.new_text, "manual edit\n");
+        assert_eq!(change.change_type, FileChangeType::Modified);
+        assert_eq!(change.added_lines, 1);
+        assert_eq!(change.removed_lines, 1);
+    }
+
+    #[test]
+    fn manual_editor_save_creates_session_change_from_editor_before_content() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.record_manual_editor_save(
+            "src/new.ts",
+            Some("before\n".into()),
+            "before\nextra\n".into(),
+        );
+
+        assert_eq!(app.ui.session_changes.len(), 1);
+        let change = &app.ui.session_changes[0];
+        assert_eq!(change.path, "src/new.ts");
+        assert_eq!(change.old_text.as_deref(), Some("before\n"));
+        assert_eq!(change.new_text, "before\nextra\n");
+        assert_eq!(change.added_lines, 1);
+        assert_eq!(change.removed_lines, 0);
+    }
+
+    #[test]
+    fn manual_editor_save_removes_session_change_when_reverted_to_base() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.record_manual_editor_save("src/main.ts", Some("before\n".into()), "after\n".into());
+        app.record_manual_editor_save("src/main.ts", Some("after\n".into()), "before\n".into());
+
+        assert!(app.ui.session_changes.is_empty());
+    }
+
+    #[test]
+    fn manual_editor_save_removes_session_change_for_line_ending_only_diff() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.record_manual_editor_save(
+            "src/main.ts",
+            Some("alpha\nbeta\n".into()),
+            "alpha\nchanged\n".into(),
+        );
+        app.record_manual_editor_save(
+            "src/main.ts",
+            Some("alpha\nchanged\n".into()),
+            "alpha\r\nbeta\r\n".into(),
+        );
+
+        assert!(app.ui.session_changes.is_empty());
+    }
+
+    #[test]
+    fn reducer_skips_tool_diff_preview_when_old_text_is_missing() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-missing-old".into(),
+                path: "d:/work/kodex/storyboard.ts".into(),
+                old_text: None,
+                new_text: "line 1\nline 2\n".into(),
+            },
+        );
+
+        let tool = ui.tools.first().expect("tool should exist");
+        assert_eq!(tool.call_id, "tool-edit-missing-old");
+        assert_eq!(tool.diff_paths.len(), 0);
+        assert_eq!(tool.diff_previews.len(), 0);
+    }
+
+    #[test]
+    fn reducer_does_not_replace_good_preview_with_fragment_old_text() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        let old_text = (0..60)
+            .map(|line| {
+                if line == 30 {
+                    "expect(page.locator('.chat')).toBeVisible();".to_string()
+                } else {
+                    format!("line {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new_text = old_text.replace(
+            "expect(page.locator('.chat')).toBeVisible();",
+            "expect(page.locator('#bottom-chat-panel')).toBeVisible();",
+        );
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-fragment".into(),
+                path: "app-smoke.spec.ts".into(),
+                old_text: Some(old_text),
+                new_text: new_text.clone(),
+            },
+        );
+
+        let initial_hunks = ui.tools[0].diff_previews[0].hunks.clone();
+        let initial_added = initial_hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .count();
+        assert_eq!(initial_added, 1);
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-fragment".into(),
+                path: "app-smoke.spec.ts".into(),
+                old_text: Some("toBeVisible();".into()),
+                new_text,
+            },
+        );
+
+        assert_eq!(ui.tools[0].diff_previews[0].hunks, initial_hunks);
+    }
+
+    #[test]
+    fn reducer_does_not_replace_good_preview_with_synthetic_full_file_addition() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-exact".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: Some("const first = 1;\nconst second = 2;\n".into()),
+                new_text: "const first = 1;\nconst second = 2;\nconst third = 3;\n".into(),
+            },
+        );
+
+        let initial_hunks = ui.tools[0].diff_previews[0].hunks.clone();
+        let initial_added = initial_hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .count();
+        assert_eq!(initial_added, 1);
+
+        let whole_file_text = (1..=870)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "fs_write:smokeTest/tests/app-smoke.spec.ts".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: None,
+                new_text: whole_file_text,
+            },
+        );
+
+        assert_eq!(ui.tools[0].diff_previews[0].hunks, initial_hunks);
+        assert!(
+            ui.session_changes.is_empty(),
+            "synthetic full-file fallback should not create a bogus +870 session change"
+        );
+    }
+
+    #[test]
+    fn reducer_does_not_replace_good_preview_with_synthetic_fragment_to_full_file_diff() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        let fragment_old =
+            "async function openPromptPanel(page: Page) {\n  await openPromptPanel(page);\n}\n";
+        let fragment_new = "\
+async function openPromptPanel(page: Page) {
+  await openPromptPanel(page);
+}
+
+async function clickCanvasNewMenuItem(page: Page, itemText: string) {
+  await page.getByText(itemText, { exact: true }).click();
+}
+";
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-fragment-to-fragment".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: Some(fragment_old.into()),
+                new_text: fragment_new.into(),
+            },
+        );
+
+        let initial_hunks = ui.tools[0].diff_previews[0].hunks.clone();
+        let initial_added = initial_hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .count();
+        assert_eq!(initial_added, 4);
+
+        let whole_file_text = (1..=890)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "fs_write:smokeTest/tests/app-smoke.spec.ts".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: Some(fragment_new.into()),
+                new_text: whole_file_text,
+            },
+        );
+
+        assert_eq!(ui.tools[0].diff_previews[0].hunks, initial_hunks);
+        assert!(
+            ui.session_changes.is_empty(),
+            "synthetic fragment-to-full-file diff should not create a bogus +890 session change"
+        );
+    }
+
+    #[test]
+    fn reducer_uses_trustworthy_synthetic_fs_write_to_restore_tool_card_preview() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-edit-exact".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: Some("line a\nline b\n".into()),
+                new_text: "line a\nline b\nline c\n".into(),
+            },
+        );
+        let initial_hunks = ui.tools[0].diff_previews[0].hunks.clone();
+
+        let whole_old_text = (1..=904)
+            .map(|line| {
+                if line == 120 {
+                    "old target".to_string()
+                } else {
+                    format!("line {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let whole_new_text = whole_old_text.replace("old target", "new target\nextra target");
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "fs_write:smokeTest/tests/app-smoke.spec.ts".into(),
+                path: "smokeTest/tests/app-smoke.spec.ts".into(),
+                old_text: Some(whole_old_text),
+                new_text: whole_new_text,
+            },
+        );
+
+        assert_ne!(ui.tools[0].diff_previews[0].hunks, initial_hunks);
+        let added = ui.tools[0].diff_previews[0]
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .count();
+        let removed = ui.tools[0].diff_previews[0]
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .count();
+        assert_eq!(added, 2);
+        assert_eq!(removed, 1);
     }
 
     #[test]

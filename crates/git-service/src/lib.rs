@@ -10,23 +10,25 @@ use workspace_model::{
 pub struct GitService;
 
 impl GitService {
+    pub fn open_metadata(path: impl AsRef<Path>) -> anyhow::Result<RepositorySnapshot> {
+        let repo = Repository::discover(path).context("failed to discover git repository")?;
+        let (branch, head) = repository_identity(&repo);
+        Ok(RepositorySnapshot {
+            branch,
+            head,
+            changed_files: Vec::new(),
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<RepositorySnapshot> {
         let repo = Repository::discover(path).context("failed to discover git repository")?;
-        let head = repo.head().ok();
-        let branch = head
-            .as_ref()
-            .and_then(|reference| reference.shorthand())
-            .unwrap_or("分离头指针")
-            .to_string();
-        let head_id = head
-            .and_then(|reference| reference.target())
-            .map(|oid| oid.to_string())
-            .unwrap_or_else(|| "未诞生".into());
+        let (branch, head_id) = repository_identity(&repo);
 
         let mut options = StatusOptions::new();
         options
             .include_untracked(true)
-            .recurse_untracked_dirs(false);
+            .recurse_untracked_dirs(false)
+            .update_index(true);
 
         let statuses = repo.statuses(Some(&mut options))?;
         let mut changed_files = Vec::new();
@@ -40,6 +42,9 @@ impl GitService {
             let section = classify(status);
             let stats =
                 compute_diff_stats(&repo, &entry, &section).unwrap_or_else(|_| infer_stats(status));
+            if !has_effective_change(&repo, &entry, &section).unwrap_or(true) {
+                continue;
+            }
 
             changed_files.push(ChangedFile {
                 path: PathBuf::from(path),
@@ -104,6 +109,20 @@ fn sanitize_relative_path(path: &str) -> anyhow::Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+fn repository_identity(repo: &Repository) -> (String, String) {
+    let head = repo.head().ok();
+    let branch = head
+        .as_ref()
+        .and_then(|reference| reference.shorthand())
+        .unwrap_or("分离头指针")
+        .to_string();
+    let head_id = head
+        .and_then(|reference| reference.target())
+        .map(|oid| oid.to_string())
+        .unwrap_or_else(|| "未诞生".into());
+    (branch, head_id)
 }
 
 fn classify(status: Status) -> ChangeSection {
@@ -183,6 +202,89 @@ fn compute_diff_stats(
     };
 
     Ok(DiffStats { added, removed })
+}
+
+fn has_effective_change(
+    repo: &Repository,
+    entry: &git2::StatusEntry,
+    section: &ChangeSection,
+) -> anyhow::Result<bool> {
+    let path = entry.path().context("entry has no path")?;
+    let status = entry.status();
+
+    if matches!(section, ChangeSection::Untracked) {
+        return Ok(true);
+    }
+
+    if status.is_index_new()
+        || status.is_index_deleted()
+        || status.is_wt_new()
+        || status.is_wt_deleted()
+    {
+        return Ok(true);
+    }
+
+    let old_text = match section {
+        ChangeSection::Staged => head_text_for_path(repo, path)?,
+        ChangeSection::Unstaged => index_text_for_path(repo, path)?
+            .or_else(|| head_text_for_path(repo, path).ok().flatten()),
+        ChangeSection::Untracked => None,
+    };
+    let new_text = match section {
+        ChangeSection::Staged => index_text_for_path(repo, path)?,
+        ChangeSection::Unstaged => workdir_text_for_path(repo, path)?,
+        ChangeSection::Untracked => None,
+    };
+
+    let Some(old_text) = old_text else {
+        return Ok(true);
+    };
+    let Some(new_text) = new_text else {
+        return Ok(true);
+    };
+
+    Ok(normalize_line_endings(&old_text) != normalize_line_endings(&new_text))
+}
+
+fn head_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+    let tree = match repo.head().ok().and_then(|head| head.peel_to_tree().ok()) {
+        Some(tree) => tree,
+        None => return Ok(None),
+    };
+    let entry = match tree.get_path(Path::new(path)) {
+        Ok(entry) => entry,
+        Err(_) => return Ok(None),
+    };
+    read_blob_text(repo, entry.id())
+}
+
+fn index_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+    let index = repo.index().context("failed to open git index")?;
+    let Some(entry) = index.get_path(Path::new(path), 0) else {
+        return Ok(None);
+    };
+    read_blob_text(repo, entry.id)
+}
+
+fn workdir_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+    let workdir = repo.workdir().context("no workdir")?;
+    let full_path = workdir.join(path);
+    if !full_path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(full_path)?;
+    Ok(String::from_utf8(bytes).ok())
+}
+
+fn read_blob_text(repo: &Repository, oid: git2::Oid) -> anyhow::Result<Option<String>> {
+    let blob = repo.find_blob(oid)?;
+    Ok(std::str::from_utf8(blob.content())
+        .ok()
+        .map(ToString::to_string))
+}
+
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn count_diff_stats(diff: &git2::Diff) -> (usize, usize) {
@@ -309,6 +411,22 @@ mod tests {
     }
 
     #[test]
+    fn line_ending_only_worktree_change_is_not_reported() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "alpha\nbeta\n");
+
+        fs::write(dir.path().join("main.rs"), "alpha\r\nbeta\r\n").unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(
+            snapshot
+                .changed_files
+                .iter()
+                .all(|file| !file.path.ends_with("main.rs"))
+        );
+    }
+
+    #[test]
     fn staged_new_file_shows_all_lines_as_additions() {
         let (dir, repo) = setup_repo();
         fs::write(dir.path().join("staged_file.rs"), "fn main() {}\n").unwrap();
@@ -340,5 +458,17 @@ mod tests {
             .filter(|f| matches!(f.section, ChangeSection::Untracked))
             .collect();
         assert_eq!(untracked.len(), 3);
+    }
+
+    #[test]
+    fn metadata_snapshot_does_not_scan_changed_files() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "tracked.txt", "one\n");
+        fs::write(dir.path().join("tracked.txt"), "one\ntwo\n").unwrap();
+        fs::write(dir.path().join("untracked.txt"), "new\n").unwrap();
+
+        let snapshot = GitService::open_metadata(dir.path()).unwrap();
+        assert_eq!(snapshot.branch, "master");
+        assert!(snapshot.changed_files.is_empty());
     }
 }

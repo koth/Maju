@@ -1,3 +1,4 @@
+use crate::codex_api_proxy::ensure_codex_api_proxy;
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{
     append_notification_log, append_runtime_event_log, append_typed_notification_log,
@@ -30,7 +31,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread;
 use workspace_model::{PermissionOption, PromptInputCapabilities, UserPromptContent};
 
@@ -41,6 +42,51 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub(crate) struct PermissionBroker {
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Option<String>>>>>,
     mode: Arc<Mutex<PermissionPolicyMode>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ShutdownSignal {
+    inner: Arc<ShutdownState>,
+}
+
+#[derive(Debug, Default)]
+struct ShutdownState {
+    requested: AtomicBool,
+    agent_children: Mutex<Vec<Weak<Mutex<Option<Child>>>>>,
+}
+
+impl ShutdownSignal {
+    pub(crate) fn request_shutdown(&self) {
+        self.inner.requested.store(true, Ordering::Release);
+        self.kill_registered_agent_children();
+    }
+
+    fn is_requested(&self) -> bool {
+        self.inner.requested.load(Ordering::Acquire)
+    }
+
+    fn register_agent_child(&self, child: &Arc<Mutex<Option<Child>>>) {
+        let Ok(mut guard) = self.inner.agent_children.lock() else {
+            return;
+        };
+        guard.retain(|entry| entry.strong_count() > 0);
+        guard.push(Arc::downgrade(child));
+    }
+
+    fn kill_registered_agent_children(&self) {
+        let children = {
+            let Ok(mut guard) = self.inner.agent_children.lock() else {
+                return;
+            };
+            let children = guard.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+            guard.retain(|entry| entry.strong_count() > 0);
+            children
+        };
+
+        for child in children {
+            let _ = kill_child_handle(&child);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -479,6 +525,16 @@ impl TerminalManager {
     }
 }
 
+impl Drop for TerminalManager {
+    fn drop(&mut self) {
+        if let Ok(terminals) = self.terminals.lock() {
+            for terminal in terminals.values() {
+                let _ = terminal.kill();
+            }
+        }
+    }
+}
+
 impl ManagedTerminal {
     fn current_exit_status(&self) -> anyhow::Result<Option<TerminalExitStatus>> {
         Ok(self
@@ -594,6 +650,12 @@ impl ManagedTerminal {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for ManagedTerminal {
+    fn drop(&mut self) {
+        let _ = self.kill();
     }
 }
 
@@ -736,11 +798,30 @@ struct HiddenAgentProcess {
     env: Vec<(String, String)>,
     current_dir: PathBuf,
     log_config: Option<SessionConfig>,
+    shutdown_signal: ShutdownSignal,
 }
 
 impl HiddenAgentProcess {
     fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
         let mut process = Self::from_command(&config.agent_command, &config.workspace_root)?;
+        process.env.extend(config.agent_env.clone());
+        if config
+            .agent_command
+            .to_ascii_lowercase()
+            .contains("codex-acp")
+        {
+            if let Some((_, api_key)) = process
+                .env
+                .iter()
+                .find(|(name, _)| name == "DEEPSEEK_API_KEY")
+            {
+                ensure_codex_api_proxy("deepseek", api_key);
+            } else if let Some((_, api_key)) =
+                process.env.iter().find(|(name, _)| name == "VENUS_API_KEY")
+            {
+                ensure_codex_api_proxy("venus", api_key);
+            }
+        }
         process.log_config = Some(config.clone());
         Ok(process)
     }
@@ -772,7 +853,13 @@ impl HiddenAgentProcess {
             env,
             current_dir: current_dir.into(),
             log_config: None,
+            shutdown_signal: ShutdownSignal::default(),
         })
+    }
+
+    fn shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = shutdown_signal;
+        self
     }
 }
 
@@ -846,7 +933,9 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         thread::spawn(move || write_agent_stdin(shared_stdin, stdin_rx));
 
         let log_config = self.log_config.clone();
-        let child_monitor = monitor_hidden_agent_child(child, stderr_rx, log_config.clone());
+        let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
+        let child_monitor =
+            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, log_config.clone());
         let outgoing_sink = futures::sink::unfold(stdin_tx, |tx, line: String| async move {
             tx.send(line).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stdin closed")
@@ -862,6 +951,7 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         // Hold stdin_keepalive_tx for the entire duration of the select! so the
         // keepalive thread doesn't drop the stdin handle prematurely.
         let _keepalive = stdin_keepalive_tx;
+        let _child_guard = child_guard;
 
         tokio::pin!(protocol);
         tokio::pin!(child_monitor);
@@ -896,6 +986,7 @@ struct TcpAgentProcess {
     current_dir: PathBuf,
     port: u16,
     log_config: SessionConfig,
+    shutdown_signal: ShutdownSignal,
 }
 
 impl TcpAgentProcess {
@@ -909,7 +1000,13 @@ impl TcpAgentProcess {
             current_dir: parsed.current_dir,
             port: config.acp_port,
             log_config: config.clone(),
+            shutdown_signal: ShutdownSignal::default(),
         })
+    }
+
+    fn shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = shutdown_signal;
+        self
     }
 }
 
@@ -978,7 +1075,9 @@ impl ConnectTo<Client> for TcpAgentProcess {
         thread::spawn(move || read_agent_stderr(child_stderr, stderr_tx));
 
         let log_config = self.log_config.clone();
-        let child_monitor = monitor_hidden_agent_child(child, stderr_rx, Some(log_config.clone()));
+        let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
+        let child_monitor =
+            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, Some(log_config.clone()));
 
         // Wait for the agent to start listening on the port.
         let addr: std::net::SocketAddr =
@@ -1057,6 +1156,8 @@ impl ConnectTo<Client> for TcpAgentProcess {
             Lines::new(outgoing_sink, incoming_lines),
             client,
         );
+
+        let _child_guard = child_guard;
 
         tokio::pin!(protocol);
         tokio::pin!(child_monitor);
@@ -1152,15 +1253,95 @@ fn trim_line_ending(line: &mut String) {
     }
 }
 
+struct AgentChildGuard {
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl AgentChildGuard {
+    fn new(child: Child, shutdown_signal: ShutdownSignal) -> Self {
+        let guard = Self {
+            child: Arc::new(Mutex::new(Some(child))),
+        };
+        shutdown_signal.register_agent_child(&guard.child);
+        if shutdown_signal.is_requested() {
+            let _ = kill_child_handle(&guard.child);
+        }
+        guard
+    }
+
+    fn handle(&self) -> Arc<Mutex<Option<Child>>> {
+        self.child.clone()
+    }
+}
+
+impl Drop for AgentChildGuard {
+    fn drop(&mut self) {
+        let _ = kill_child_handle(&self.child);
+    }
+}
+
+fn kill_child_handle(child: &Arc<Mutex<Option<Child>>>) -> anyhow::Result<()> {
+    let Ok(mut guard) = child.lock() else {
+        return Ok(());
+    };
+    let Some(mut child) = guard.take() else {
+        return Ok(());
+    };
+
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    Ok(())
+}
+
 async fn monitor_hidden_agent_child(
-    mut child: Child,
+    child: Arc<Mutex<Option<Child>>>,
     stderr_rx: mpsc::Receiver<String>,
     log_config: Option<SessionConfig>,
 ) -> agent_client_protocol::Result<()> {
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     thread::spawn(move || {
-        let result = child.wait();
-        let _ = exit_tx.send(result);
+        loop {
+            let result = {
+                let mut guard = match child.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let _ =
+                            exit_tx.send(Err(std::io::Error::other("agent child lock poisoned")));
+                        return;
+                    }
+                };
+                let Some(child) = guard.as_mut() else {
+                    let _ = exit_tx.send(Err(std::io::Error::other("agent child handle closed")));
+                    return;
+                };
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        guard.take();
+                        Some(Ok(status))
+                    }
+                    Ok(None) => None,
+                    Err(error) => {
+                        guard.take();
+                        Some(Err(error))
+                    }
+                }
+            };
+
+            if let Some(result) = result {
+                let _ = exit_tx.send(result);
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
     });
 
     let status = exit_rx
@@ -1262,6 +1443,7 @@ pub(crate) fn run_session(
     tx_events: mpsc::Sender<ClientEvent>,
     rx_commands: mpsc::Receiver<RuntimeCommand>,
     permission_broker: PermissionBroker,
+    shutdown_signal: ShutdownSignal,
 ) -> anyhow::Result<()> {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1284,9 +1466,13 @@ pub(crate) fn run_session(
     let log_config = config.clone();
     let result: anyhow::Result<()> = runtime.block_on(async move {
         let agent = if config.acp_port > 0 {
-            AgentTransport::Tcp(TcpAgentProcess::from_config(&config)?)
+            AgentTransport::Tcp(
+                TcpAgentProcess::from_config(&config)?.shutdown_signal(shutdown_signal.clone()),
+            )
         } else {
-            AgentTransport::Stdio(HiddenAgentProcess::from_config(&config)?)
+            AgentTransport::Stdio(
+                HiddenAgentProcess::from_config(&config)?.shutdown_signal(shutdown_signal.clone()),
+            )
         };
         let tx_permissions = tx_events.clone();
         let permission_log_config = config.clone();
@@ -1882,7 +2068,10 @@ pub(crate) fn run_session(
                                                 );
                                                 let _ = reply_tx.send(result);
                                             }
-                                            RuntimeCommand::Shutdown => return Ok(()),
+                                            RuntimeCommand::Shutdown => {
+                                                shutdown_signal.request_shutdown();
+                                                return Ok(());
+                                            }
                                             RuntimeCommand::SendPrompt(_)
                                             | RuntimeCommand::SetConfigOption { .. }
                                             | RuntimeCommand::SetMode { .. }
@@ -2043,7 +2232,10 @@ pub(crate) fn run_session(
                                 let _ = permission_broker.cancel_all();
                                 let _ = reply_tx.send(Ok(()));
                             }
-                            RuntimeCommand::Shutdown => break,
+                            RuntimeCommand::Shutdown => {
+                                shutdown_signal.request_shutdown();
+                                break;
+                            }
                         }
                     }
 

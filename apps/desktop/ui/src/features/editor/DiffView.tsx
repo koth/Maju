@@ -25,7 +25,7 @@ export function DiffView({ path, appTheme }: Props) {
     setError(null);
 
     Promise.all([
-      editorOpenFile(path).catch(() => ""),
+      editorOpenFile(path).then((snapshot) => snapshot.content).catch(() => ""),
       reviewGetDiff(path),
     ])
       .then(([fileContent, diffData]) => {
@@ -73,6 +73,8 @@ export function DiffView({ path, appTheme }: Props) {
     ts: "typescript",
     tsx: "typescriptreact",
     js: "javascript",
+    cjs: "javascript",
+    mjs: "javascript",
     jsx: "javascriptreact",
     rs: "rust",
     json: "json",
@@ -99,6 +101,8 @@ export function DiffView({ path, appTheme }: Props) {
           options={{
             readOnly: true,
             renderSideBySide: true,
+            ignoreTrimWhitespace: false,
+            renderWhitespace: "all",
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             fontSize: 13,

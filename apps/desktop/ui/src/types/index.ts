@@ -92,6 +92,11 @@ export interface ChatMessage {
   body: string;
 }
 
+export interface ChatMessageDelta {
+  id: string;
+  append: string;
+}
+
 export interface ToolLogEntry {
   title: string;
   body: string;
@@ -169,6 +174,7 @@ export interface SidebarSection {
 }
 
 export interface UiSnapshot {
+  revision: number;
   workspace: WorkspaceDescriptor;
   session: SessionSummary;
   session_config: SessionConfigState;
@@ -179,6 +185,24 @@ export interface UiSnapshot {
   timeline: TimelineItem[];
   tools: ToolInvocation[];
   repository: RepositorySnapshot;
+  inspector_tab: InspectorTab;
+  inspector_sections: SidebarSection[];
+  session_changes: SessionFileChange[];
+  thinking_status: ThinkingStatus | null;
+}
+
+export interface UiSnapshotPatch {
+  revision: number;
+  session: SessionSummary;
+  session_config: SessionConfigState;
+  prompt_capabilities: PromptInputCapabilities;
+  available_commands: AvailableCommand[];
+  agent_plan: AgentPlanEntry[];
+  messages: ChatMessage[];
+  message_deltas: ChatMessageDelta[];
+  timeline_start: number;
+  timeline: TimelineItem[];
+  tools: ToolInvocation[];
   inspector_tab: InspectorTab;
   inspector_sections: SidebarSection[];
   session_changes: SessionFileChange[];
@@ -233,7 +257,9 @@ export interface TabDescriptor {
   id: string;
   type: "conversation" | "changes" | "diff" | "editor";
   label: string;
+  dirty?: boolean;
   filePath?: string;
+  diffSource?: "session" | "git";
   lineNumber?: number;
   searchQuery?: string;
   /** Incrementing counter to force navigation even when lineNumber is the same */
@@ -244,6 +270,39 @@ export interface FileEntry {
   name: string;
   kind: "File" | "Directory";
   path: string;
+}
+
+export interface EditorFileVersion {
+  content_hash: string;
+  modified_ms: number | null;
+  size: number;
+}
+
+export interface EditorFileSnapshot {
+  path: string;
+  content: string;
+  version: EditorFileVersion;
+  kind?: "text" | "image";
+  mime_type?: string | null;
+}
+
+export interface LspServerStatus {
+  languageId: string;
+  configured: boolean;
+  enabled: boolean;
+  available: boolean;
+  running: boolean;
+  message: string | null;
+}
+
+export interface LspDiagnostic {
+  path: string;
+  message: string;
+  severity: number;
+  startLine: number;
+  startCharacter: number;
+  endLine: number;
+  endCharacter: number;
 }
 
 // Search types
@@ -267,13 +326,54 @@ export interface SearchResult {
 
 // App settings types
 
-export type AgentCliId = "codebuddy" | "goose";
-export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest";
+export type AgentCliId = "codebuddy" | "goose" | "codex-acp";
+export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest" | "light";
+export type CodexConnectionMode = "managed" | "default";
 
 export interface AppSettings {
   selected_agent: AgentCliId;
   acp_port: number;
   theme: AppTheme;
+  lsp_servers: Record<string, LspServerSettings>;
+  codex_connection_mode: CodexConnectionMode;
+}
+
+export interface LspServerSettings {
+  enabled?: boolean | null;
+  command?: string | null;
+  args?: string[] | null;
+}
+
+export interface LspServerConfigInput {
+  languageId: string;
+  enabled: boolean;
+  command: string;
+  args: string[];
+}
+
+export interface LspProbeResult {
+  available: boolean;
+  resolvedPath: string | null;
+  message: string | null;
+}
+
+export interface LspServerSettingsEntry {
+  languageId: string;
+  displayName: string;
+  enabled: boolean;
+  command: string;
+  args: string[];
+  defaultCommand: string;
+  defaultArgs: string[];
+  available: boolean;
+  resolvedPath: string | null;
+  running: boolean;
+  message: string | null;
+  customized: boolean;
+}
+
+export interface LspSettingsSnapshot {
+  servers: LspServerSettingsEntry[];
 }
 
 export interface AgentCliStatus {
@@ -289,6 +389,15 @@ export interface AgentSettingsSnapshot {
   settings: AppSettings;
   agents: AgentCliStatus[];
   env_override: string | null;
+  codex_acp: CodexAcpSettingsStatus;
+}
+
+export interface CodexAcpSettingsStatus {
+  provider: "default" | "venus" | "deepseek" | string;
+  connection_mode: CodexConnectionMode;
+  venus_key_configured: boolean;
+  deepseek_key_configured: boolean;
+  config_path: string;
 }
 
 export interface AgentInstallResult {

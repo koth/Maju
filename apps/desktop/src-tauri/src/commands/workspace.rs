@@ -16,8 +16,14 @@ fn open_store() -> Result<OpenWorkspaces, String> {
 }
 
 pub fn save_open_workspace_state(state: &AppState) -> Result<(), String> {
-    let open_state = state.open_workspace_state()?;
-    open_store()?.save(&open_state);
+    let open_state =
+        app_core::startup_perf::measure("workspace/save_open_state/build", "", || {
+            state.open_workspace_state()
+        })?;
+    app_core::startup_perf::measure("workspace/save_open_state/write", "", || {
+        open_store()?.save(&open_state);
+        Ok::<(), String>(())
+    })?;
     Ok(())
 }
 
@@ -55,42 +61,92 @@ pub fn workspace_has_open(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSnapshot>, String> {
-    let saved = open_store()?.load();
+    app_core::startup_perf::mark("workspace_restore_open/start", "");
+    let saved = app_core::startup_perf::measure("workspace_restore_open/load_saved", "", || {
+        open_store().map(|store| store.load())
+    })?;
+    app_core::startup_perf::mark(
+        "workspace_restore_open/saved",
+        format!(
+            "workspace_count={} active_path={}",
+            saved.workspaces.len(),
+            saved.active_path.as_deref().unwrap_or("<none>")
+        ),
+    );
     if saved.workspaces.is_empty() {
+        app_core::startup_perf::mark("workspace_restore_open/end", "empty");
         return Ok(None);
     }
 
-    let active_path = saved
+    let workspaces = saved.workspaces;
+    let preferred_active = saved
         .active_path
         .clone()
-        .filter(|path| PathBuf::from(path).is_dir());
-    let fallback_active = active_path.clone().or_else(|| {
-        saved
-            .workspaces
-            .first()
-            .map(|workspace| workspace.path.clone())
-    });
+        .or_else(|| workspaces.first().map(|workspace| workspace.path.clone()));
     let mut snapshot = None;
+    let mut opened_active_path: Option<String> = None;
 
-    for workspace in saved.workspaces {
-        let dir = PathBuf::from(&workspace.path);
-        if !dir.is_dir() {
-            continue;
-        }
-        if Some(workspace.path.as_str()) == fallback_active.as_deref() {
-            snapshot = Some(state.open_workspace(dir, None)?);
+    if let Some(active_path) = preferred_active {
+        let dir = PathBuf::from(&active_path);
+        let exists = app_core::startup_perf::measure(
+            "workspace_restore_open/active_is_dir",
+            &active_path,
+            || dir.is_dir(),
+        );
+        if exists {
+            snapshot = Some(app_core::startup_perf::measure(
+                "workspace_restore_open/open_active",
+                &active_path,
+                || state.open_workspace(dir, None),
+            )?);
+            opened_active_path = Some(active_path);
         } else {
-            state.restore_dormant_workspace(dir)?;
+            app_core::startup_perf::mark("workspace_restore_open/active_missing", active_path);
         }
     }
 
-    if let Some(active_path) = active_path {
-        if let Ok(active_snapshot) = state.set_active_workspace(active_path) {
-            snapshot = Some(active_snapshot);
+    if snapshot.is_none() {
+        for workspace in &workspaces {
+            let dir = PathBuf::from(&workspace.path);
+            let exists = app_core::startup_perf::measure(
+                "workspace_restore_open/fallback_is_dir",
+                &workspace.path,
+                || dir.is_dir(),
+            );
+            if exists {
+                snapshot = Some(app_core::startup_perf::measure(
+                    "workspace_restore_open/open_fallback",
+                    &workspace.path,
+                    || state.open_workspace(dir, None),
+                )?);
+                opened_active_path = Some(workspace.path.clone());
+                break;
+            }
         }
     }
 
-    save_open_workspace_state(&state)?;
+    for workspace in workspaces {
+        if Some(workspace.path.as_str()) != opened_active_path.as_deref() {
+            let path = workspace.path;
+            let dormant_path = path.clone();
+            app_core::startup_perf::measure(
+                "workspace_restore_open/register_dormant",
+                &path,
+                || state.restore_dormant_workspace(PathBuf::from(dormant_path)),
+            )?;
+        }
+    }
+
+    app_core::startup_perf::measure("workspace_restore_open/save_state", "", || {
+        save_open_workspace_state(&state)
+    })?;
+    app_core::startup_perf::mark(
+        "workspace_restore_open/end",
+        format!(
+            "opened={}",
+            opened_active_path.as_deref().unwrap_or("<none>")
+        ),
+    );
     Ok(snapshot)
 }
 
@@ -106,7 +162,9 @@ pub fn workspace_set_active(
 
 #[tauri::command]
 pub fn workspace_get_recent() -> Vec<RecentEntry> {
-    recent_store().map(|store| store.load()).unwrap_or_default()
+    app_core::startup_perf::measure("workspace_get_recent", "", || {
+        recent_store().map(|store| store.load()).unwrap_or_default()
+    })
 }
 
 #[tauri::command]

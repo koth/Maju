@@ -1,6 +1,8 @@
 pub mod editor;
 pub mod fs;
 pub mod git;
+pub mod lsp;
+pub mod perf;
 pub mod review;
 pub mod search;
 pub mod session;

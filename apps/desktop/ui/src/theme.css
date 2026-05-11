@@ -2,30 +2,31 @@
   /* Low-glare slate theme */
   --agent-primary: #6aa89f;
   --agent-primary-hover: #8fc7bd;
-  --agent-cream: #d7e1df;
+  --agent-cream: #cbd3d2;
   --agent-ink: #151b22;
   --agent-success: #8fbc8f;
   --agent-warning: #c8a86a;
   --agent-danger: #d08770;
-  --agent-charcoal-980: #0f1419;
-  --agent-charcoal-950: #121820;
-  --agent-charcoal-900: #151d26;
-  --agent-charcoal-850: #19222c;
-  --agent-charcoal-800: #202b35;
-  --agent-charcoal-700: #2f3a44;
+  --agent-charcoal-980: #0d1117;
+  --agent-charcoal-950: #10151b;
+  --agent-charcoal-900: #151a21;
+  --agent-charcoal-850: #1a2028;
+  --agent-charcoal-800: #202731;
+  --agent-charcoal-700: #2d3540;
   --agent-warm-500: #76848a;
-  --agent-warm-300: #aebdc2;
+  --agent-warm-300: #a4afb2;
 
   /* Surfaces */
   --app-bg: var(--agent-charcoal-980);
   --panel-bg: var(--agent-charcoal-900);
   --surface-bg: var(--agent-charcoal-850);
   --surface-alt-bg: var(--agent-charcoal-800);
-  --surface-muted-bg: #121820;
-  --shell-rail-bg: #0c1117;
-  --shell-sidebar-bg: #111821;
-  --shell-center-bg: #151c25;
-  --shell-review-bg: #10161d;
+  --surface-muted-bg: #171c23;
+  --shell-rail-bg: #0b0f14;
+  --shell-sidebar-bg: #11161d;
+  --shell-center-bg: #151a21;
+  --shell-review-bg: #11161d;
+  --shell-titlebar-bg: #0b0f14;
   --surface-hover: rgba(215, 225, 223, 0.045);
   --surface-active: rgba(215, 225, 223, 0.075);
   --surface-selected: rgba(106, 168, 159, 0.14);
@@ -46,6 +47,11 @@
   --accent: var(--agent-primary);
   --accent-hover: var(--agent-primary-hover);
   --accent-soft: rgba(106, 168, 159, 0.14);
+  --sidebar-accent: #8fcaff;
+  --sidebar-accent-hover: #addbff;
+  --sidebar-accent-soft: rgba(143, 202, 255, 0.13);
+  --sidebar-accent-strong: rgba(143, 202, 255, 0.24);
+  --sidebar-accent-border: rgba(143, 202, 255, 0.34);
   --success: #9fca9f;
   --success-soft: rgba(143, 188, 143, 0.14);
   --warning: #d6b36f;
@@ -61,14 +67,15 @@
   --radius-pill: 255px;
 
   /* Typography */
-  --font-display: 'IBM Plex Sans', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-sans: 'IBM Plex Sans', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace;
-  --font-size-shell-label: 11px;
-  --font-size-shell-meta: 12px;
-  --font-size-thread-row: 13px;
-  --font-size-thread-title: 20px;
-  --letter-spacing-shell: 0.045em;
+  --font-display: 'SF Pro Display', 'SF Pro Text', 'Segoe UI Variable Display', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-sans: 'SF Pro Text', 'Segoe UI Variable Text', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-chat: 'Noto Sans SC', 'SF Pro Text', 'Segoe UI Variable Text', BlinkMacSystemFont, -apple-system, ui-sans-serif, 'Segoe UI', 'Helvetica Neue', Arial, 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'SFMono-Regular', 'Cascadia Mono', 'JetBrains Mono', 'Consolas', monospace;
+  --font-size-shell-label: 10px;
+  --font-size-shell-meta: 11px;
+  --font-size-thread-row: 12px;
+  --font-size-thread-title: 18px;
+  --letter-spacing-shell: 0;
 
   /* Shell layout */
   --shell-rail-width: 72px;
@@ -155,9 +162,10 @@
   --surface-alt-bg: var(--agent-charcoal-800);
   --surface-muted-bg: #151619;
   --shell-rail-bg: #0c0d0e;
-  --shell-sidebar-bg: #151619;
+  --shell-sidebar-bg: #1f1f1f;
   --shell-center-bg: #1a1b1f;
   --shell-review-bg: #111214;
+  --shell-titlebar-bg: #1f1f1f;
   --surface-hover: rgba(226, 229, 233, 0.05);
   --surface-active: rgba(226, 229, 233, 0.08);
   --surface-selected: rgba(154, 164, 178, 0.15);
@@ -215,6 +223,66 @@
   --interactive-selected-border: rgba(162, 212, 157, 0.34);
 }
 
+:root[data-theme="light"] {
+  --agent-primary: #5e6875;
+  --agent-primary-hover: #252a31;
+  --agent-cream: #202124;
+  --agent-ink: #f7f7f5;
+  --agent-success: #16804a;
+  --agent-warning: #8f620f;
+  --agent-danger: #c03c33;
+  --agent-charcoal-980: #ffffff;
+  --agent-charcoal-950: #f7f7f5;
+  --agent-charcoal-900: #f1f1ef;
+  --agent-charcoal-850: #e8e8e5;
+  --agent-charcoal-800: #dededb;
+  --agent-charcoal-700: #c9cbc6;
+  --agent-warm-500: #6f747b;
+  --agent-warm-300: #3f454d;
+  --app-bg: #ffffff;
+  --panel-bg: #f7f7f5;
+  --surface-bg: #f1f1ef;
+  --surface-alt-bg: #e8e8e5;
+  --surface-muted-bg: #f6f6f4;
+  --shell-rail-bg: #ffffff;
+  --shell-sidebar-bg: #f7f7f5;
+  --shell-center-bg: #ffffff;
+  --shell-review-bg: #fbfbfa;
+  --shell-titlebar-bg: #ffffff;
+  --surface-hover: rgba(32, 33, 36, 0.045);
+  --surface-active: rgba(32, 33, 36, 0.075);
+  --surface-selected: rgba(32, 33, 36, 0.075);
+  --surface-selected-strong: rgba(32, 33, 36, 0.12);
+  --border: rgba(32, 33, 36, 0.11);
+  --border-strong: rgba(32, 33, 36, 0.17);
+  --border-subtle: rgba(32, 33, 36, 0.07);
+  --border-focus: #5e6875;
+  --text-strong: #202124;
+  --text-muted: #3f454d;
+  --text-soft: #6f747b;
+  --accent: #5e6875;
+  --accent-hover: #252a31;
+  --accent-soft: rgba(94, 104, 117, 0.12);
+  --sidebar-accent: #5e6875;
+  --sidebar-accent-hover: #252a31;
+  --sidebar-accent-soft: rgba(94, 104, 117, 0.11);
+  --sidebar-accent-strong: rgba(94, 104, 117, 0.18);
+  --sidebar-accent-border: rgba(94, 104, 117, 0.28);
+  --success: #16804a;
+  --success-soft: rgba(22, 128, 74, 0.11);
+  --warning: #8f620f;
+  --warning-soft: rgba(143, 98, 15, 0.11);
+  --danger: #c03c33;
+  --danger-soft: rgba(192, 60, 51, 0.11);
+  --interactive-hover: rgba(32, 33, 36, 0.055);
+  --interactive-active: rgba(32, 33, 36, 0.085);
+  --interactive-selected: rgba(32, 33, 36, 0.075);
+  --interactive-selected-border: rgba(32, 33, 36, 0.18);
+  --shadow-selected: none;
+  --shadow-shell: none;
+  --shadow-agent-glow: none;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -228,8 +296,11 @@ html, body, #root {
   background: var(--app-bg);
   color: var(--text-strong);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-weight: 400;
+  font-size: 13px;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   -webkit-user-select: text;
   user-select: text;
 }

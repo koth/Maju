@@ -30,10 +30,17 @@ impl RecentWorkspaces {
             Err(_) => return Vec::new(),
         };
         let paths: Vec<String> = serde_json::from_str(&content).unwrap_or_default();
+        app_core::startup_perf::mark(
+            "recent_workspaces/load_paths",
+            format!("count={}", paths.len()),
+        );
         paths
             .into_iter()
             .map(|p| {
-                let exists = Path::new(&p).is_dir();
+                let exists =
+                    app_core::startup_perf::measure("recent_workspaces/is_dir", &p, || {
+                        Path::new(&p).is_dir()
+                    });
                 RecentEntry { path: p, exists }
             })
             .collect()

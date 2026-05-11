@@ -1,8 +1,8 @@
 use acp_core::{ClientEvent, diff_to_hunks};
 use serde_json::Value;
 use workspace_model::{
-    AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffLineKind,
-    FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
+    AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
+    DiffLineKind, FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
     ThinkingStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus,
     UiSnapshot,
 };
@@ -74,6 +74,11 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             } else {
                 None
             };
+            let todo_write_raw_input = if is_codebuddy_todo_write_tool(&name) {
+                raw_input.clone()
+            } else {
+                None
+            };
             if let Some(parent_id) = parent_id.as_deref() {
                 finalize_running_children(ui, parent_id, Some(&id));
             }
@@ -89,6 +94,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.error = None;
             push_tool_log(tool, "Requested", summary);
             apply_codebuddy_task_update(ui, task_update_raw_input.as_deref());
+            apply_codebuddy_todo_write(ui, todo_write_raw_input.as_deref());
             ui.session.status = SessionStatus::WaitingForTool;
         }
         ClientEvent::ToolUpdated {
@@ -141,6 +147,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             };
             if updated_tool_name == "TaskUpdate" {
                 apply_codebuddy_task_update(ui, updated_raw_input.as_deref());
+            }
+            if is_codebuddy_todo_write_tool(&updated_tool_name) {
+                apply_codebuddy_todo_write(ui, updated_raw_input.as_deref());
             }
             if !is_partial {
                 ui.session.status = SessionStatus::WaitingForTool;
@@ -265,7 +274,22 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         } => {
             let is_synthetic_write = id.starts_with("fs_write:");
             let normalized_path = normalize_change_path(&path);
-            let diff_hunks = diff_to_hunks(old_text.as_deref(), &new_text);
+            let has_trustworthy_old_text = old_text.as_deref().map_or(false, |text| {
+                !text.is_empty() && !looks_like_fragment_old_text(text, &new_text)
+            });
+            let diff_hunks = if is_synthetic_write || has_trustworthy_old_text {
+                diff_to_hunks(old_text.as_deref(), &new_text)
+            } else {
+                Vec::new()
+            };
+            let has_existing_preview_for_path = ui_has_tool_preview_for_path(ui, &normalized_path);
+            let is_bogus_whole_file_diff = looks_like_full_file_or_fragment_expansion(&diff_hunks);
+            let is_synthetic_full_file_fallback = is_synthetic_write
+                && old_text.as_deref().map_or(true, |text| {
+                    text.is_empty() || looks_like_fragment_old_text(text, &new_text)
+                })
+                && has_existing_preview_for_path
+                && is_bogus_whole_file_diff;
 
             if let Some(tool) = if is_synthetic_write {
                 find_recent_tool_for_path(ui, &normalized_path)
@@ -273,7 +297,10 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 Some(ensure_tool(ui, &id, None, "Edit", "edit", false))
             } {
                 let path_buf = std::path::PathBuf::from(&path);
-                if !diff_hunks.is_empty() {
+                let should_attach_diff = !diff_hunks.is_empty()
+                    && (!is_synthetic_write
+                        || (has_trustworthy_old_text && !is_bogus_whole_file_diff));
+                if should_attach_diff {
                     if !tool.diff_paths.iter().any(|existing| {
                         normalize_change_path(&existing.display().to_string()) == normalized_path
                     }) {
@@ -312,7 +339,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 changed_file.hunks = diff_hunks.clone();
             }
 
-            if is_synthetic_write {
+            if is_synthetic_write && !is_synthetic_full_file_fallback {
                 upsert_session_change(ui, path, old_text, new_text);
             }
         }
@@ -377,6 +404,36 @@ fn find_recent_tool_for_path<'a>(
     })
 }
 
+fn tool_has_preview_for_path(tool: &ToolInvocation, normalized_path: &str) -> bool {
+    tool.diff_previews.iter().any(|preview| {
+        normalize_change_path(&preview.path.display().to_string()) == normalized_path
+            && preview.hunks.iter().any(|hunk| {
+                hunk.lines
+                    .iter()
+                    .any(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
+            })
+    })
+}
+
+fn ui_has_tool_preview_for_path(ui: &UiSnapshot, normalized_path: &str) -> bool {
+    ui.tools
+        .iter()
+        .any(|tool| tool_has_preview_for_path(tool, normalized_path))
+}
+
+fn looks_like_full_file_or_fragment_expansion(hunks: &[DiffHunk]) -> bool {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in hunks.iter().flat_map(|hunk| &hunk.lines) {
+        match line.kind {
+            DiffLineKind::Added => added += 1,
+            DiffLineKind::Removed => removed += 1,
+            DiffLineKind::Context => {}
+        }
+    }
+    added >= 20 && (removed == 0 || added > removed * 4)
+}
+
 fn upsert_session_change(
     ui: &mut UiSnapshot,
     path: String,
@@ -384,6 +441,10 @@ fn upsert_session_change(
     new_text: String,
 ) {
     let normalized_path = normalize_change_path(&path);
+    let normalized_old_text = old_text
+        .as_deref()
+        .map(normalize_diff_text_for_session_change);
+    let normalized_new_text = normalize_diff_text_for_session_change(&new_text);
     let incoming_change_type = if old_text.is_none() {
         FileChangeType::Created
     } else {
@@ -398,34 +459,38 @@ fn upsert_session_change(
         let baseline = ui.session_changes[index]
             .old_text
             .as_deref()
-            .or(old_text.as_deref())
+            .map(normalize_diff_text_for_session_change)
+            .or_else(|| normalized_old_text.clone())
             .unwrap_or_default();
-        if baseline == new_text {
+        if baseline == normalized_new_text {
             ui.session_changes.remove(index);
             return;
         }
 
         let existing = &mut ui.session_changes[index];
-        if existing.old_text.is_none() && old_text.is_some() {
-            existing.old_text = old_text;
+        if existing.old_text.is_none() && normalized_old_text.is_some() {
+            existing.old_text = normalized_old_text;
             existing.change_type = incoming_change_type;
         }
-        existing.new_text = new_text;
+        existing.new_text = normalized_new_text;
         existing.path = normalized_path;
         existing.timestamp = chrono_now_iso();
         refresh_change_stats(existing);
+        if existing.added_lines == 0 && existing.removed_lines == 0 {
+            ui.session_changes.remove(index);
+        }
         return;
     }
 
-    if old_text.as_deref().unwrap_or_default() == new_text {
+    if normalized_old_text.as_deref().unwrap_or_default() == normalized_new_text {
         return;
     }
 
     let mut change = SessionFileChange {
         path: normalized_path,
         change_type: incoming_change_type,
-        old_text,
-        new_text,
+        old_text: normalized_old_text,
+        new_text: normalized_new_text,
         added_lines: 0,
         removed_lines: 0,
         timestamp: chrono_now_iso(),
@@ -448,6 +513,10 @@ fn refresh_change_stats(change: &mut SessionFileChange) {
         .flat_map(|hunk| &hunk.lines)
         .filter(|line| line.kind == DiffLineKind::Removed)
         .count();
+}
+
+fn normalize_diff_text_for_session_change(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn normalize_change_path(path: &str) -> String {
@@ -526,6 +595,64 @@ fn apply_codebuddy_task_update(ui: &mut UiSnapshot, raw_input: Option<&str>) {
         });
     entry.status = status;
     upsert_plan_entry(ui, entry);
+}
+
+fn is_codebuddy_todo_write_tool(name: &str) -> bool {
+    let normalized = name.trim().to_ascii_lowercase();
+    normalized == "todowrite"
+        || normalized == "todo write"
+        || normalized == "todo: todo write"
+        || normalized.contains("todo write")
+}
+
+fn apply_codebuddy_todo_write(ui: &mut UiSnapshot, raw_input: Option<&str>) {
+    let Some(input) = raw_input.and_then(parse_json) else {
+        return;
+    };
+    let Some(content) = json_string(&input, "content") else {
+        return;
+    };
+    let entries = parse_markdown_todo_entries(&content);
+    if !entries.is_empty() {
+        ui.agent_plan = entries;
+    }
+}
+
+fn parse_markdown_todo_entries(content: &str) -> Vec<AgentPlanEntry> {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| parse_markdown_todo_entry(index, line))
+        .collect()
+}
+
+fn parse_markdown_todo_entry(index: usize, line: &str) -> Option<AgentPlanEntry> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("- [")
+        .or_else(|| trimmed.strip_prefix("* ["))?;
+    let (marker, text) = rest.split_once(']')?;
+    let text = text
+        .trim_start_matches(|ch: char| ch == ' ' || ch == '\t' || ch == '-' || ch == ':')
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let status = match marker.trim().to_ascii_lowercase().as_str() {
+        "" | " " => AgentPlanEntryStatus::Pending,
+        "x" | "✓" | "done" | "completed" => AgentPlanEntryStatus::Completed,
+        "-" | "~" | "/" | ">" | "in_progress" | "running" => AgentPlanEntryStatus::InProgress,
+        "cancelled" | "canceled" => AgentPlanEntryStatus::Cancelled,
+        _ => AgentPlanEntryStatus::Pending,
+    };
+
+    Some(AgentPlanEntry {
+        id: Some(format!("todo-{index}")),
+        content: text.to_string(),
+        priority: AgentPlanEntryPriority::Medium,
+        status,
+    })
 }
 
 fn find_created_task_entry(ui: &UiSnapshot, task_id: &str) -> Option<AgentPlanEntry> {
@@ -835,6 +962,12 @@ fn summarize_completion(outcome: &str) -> String {
 
 fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn looks_like_fragment_old_text(old_text: &str, new_text: &str) -> bool {
+    let old_lines = old_text.lines().count();
+    let new_lines = new_text.lines().count();
+    old_lines > 0 && new_lines >= 20 && old_lines * 4 < new_lines
 }
 
 fn push_tool_log(tool: &mut ToolInvocation, title: impl Into<String>, body: impl Into<String>) {

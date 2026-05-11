@@ -21,13 +21,19 @@ agent-client-protocol-tokio = "0.11.1"
 anyhow = "1.0"
 futures = "0.3"
 git2 = "0.20"
+bytes = "1.11"
+http-body-util = "0.1"
+hyper = { version = "1.9", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.13", features = ["stream"] }
 shell-words = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["rt", "sync", "time"] }
+tokio = { version = "1.48", features = ["rt", "sync", "time", "net"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+toml_edit = "0.22"
 rusqlite = { version = "0.34", features = ["bundled"] }
 similar = "2.7"
 uuid = { version = "1.18", features = ["v4", "serde"] }

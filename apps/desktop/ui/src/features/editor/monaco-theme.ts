@@ -3,6 +3,7 @@ import type { AppTheme } from "../../types";
 import { DEFAULT_APP_THEME, resolveAppTheme } from "../../theme";
 
 interface MonacoPalette {
+  base: "vs" | "vs-dark";
   foreground: string;
   comment: string;
   keyword: string;
@@ -26,31 +27,37 @@ interface MonacoPalette {
   remove: string;
 }
 
+type KodexMonacoThemeData = editor.IStandaloneThemeData & {
+  semanticHighlighting?: boolean;
+};
+
 const palettes: Record<AppTheme, MonacoPalette> = {
   kodex_dark: {
-    foreground: "e9effa",
-    comment: "627088",
-    keyword: "6289ff",
-    string: "5ed68f",
-    number: "f2c15c",
-    type: "56c4cc",
-    function: "dcdcaa",
-    parameter: "9cdcfe",
-    operator: "8b99b2",
-    background: "080c14",
-    lineHighlight: "101623",
-    selection: "233c5c",
-    inactiveSelection: "1a2840",
-    cursor: "6289ff",
-    guide: "242e42",
-    activeGuide: "374868",
-    widget: "0c111c",
-    border: "242e42",
-    hover: "151c2b",
+    base: "vs-dark",
+    foreground: "d9d9d9",
+    comment: "858585",
+    keyword: "ff7bf0",
+    string: "a6ff5f",
+    number: "a6ff5f",
+    type: "ff806f",
+    function: "8fd7ff",
+    parameter: "d8d6ff",
+    operator: "d9d9d9",
+    background: "030303",
+    lineHighlight: "0f0f0f",
+    selection: "2b3f58",
+    inactiveSelection: "1d2a3a",
+    cursor: "c7d3e0",
+    guide: "272c32",
+    activeGuide: "3a424c",
+    widget: "111315",
+    border: "282d33",
+    hover: "191d21",
     insert: "1fc16b",
     remove: "ff4d5e",
   },
   midnight: {
+    base: "vs-dark",
     foreground: "dce7ff",
     comment: "657898",
     keyword: "7fa2ff",
@@ -74,6 +81,7 @@ const palettes: Record<AppTheme, MonacoPalette> = {
     remove: "ff6470",
   },
   graphite: {
+    base: "vs-dark",
     foreground: "e2e5e9",
     comment: "747b85",
     keyword: "b7c4d8",
@@ -97,6 +105,7 @@ const palettes: Record<AppTheme, MonacoPalette> = {
     remove: "d78175",
   },
   forest: {
+    base: "vs-dark",
     foreground: "dce9dc",
     comment: "6c7f70",
     keyword: "99c985",
@@ -119,17 +128,43 @@ const palettes: Record<AppTheme, MonacoPalette> = {
     insert: "2fbe74",
     remove: "df796c",
   },
+  light: {
+    base: "vs",
+    foreground: "232528",
+    comment: "7a7d82",
+    keyword: "6f4eb7",
+    string: "23754a",
+    number: "8a5f1c",
+    type: "2f6d7b",
+    function: "4e608c",
+    parameter: "4d5158",
+    operator: "5f6670",
+    background: "f7f7f5",
+    lineHighlight: "ececea",
+    selection: "d9e1ea",
+    inactiveSelection: "e6e8ea",
+    cursor: "30343a",
+    guide: "d6d7d4",
+    activeGuide: "b8bbb7",
+    widget: "ffffff",
+    border: "d6d7d4",
+    hover: "ececea",
+    insert: "4fb36d",
+    remove: "d56a62",
+  },
 };
 
-function createTheme(palette: MonacoPalette): editor.IStandaloneThemeData {
+function createTheme(palette: MonacoPalette): KodexMonacoThemeData {
   return {
-    base: "vs-dark",
+    base: palette.base,
     inherit: true,
+    semanticHighlighting: true,
     rules: [
       { token: "", foreground: palette.foreground },
       { token: "comment", foreground: palette.comment, fontStyle: "italic" },
       { token: "comment.doc", foreground: palette.comment, fontStyle: "italic" },
       { token: "keyword", foreground: palette.keyword },
+      { token: "modifier", foreground: palette.keyword },
       { token: "storage.type", foreground: palette.keyword },
       { token: "storage.modifier", foreground: palette.keyword, fontStyle: "italic" },
       { token: "string", foreground: palette.string },
@@ -138,10 +173,24 @@ function createTheme(palette: MonacoPalette): editor.IStandaloneThemeData {
       { token: "number", foreground: palette.number },
       { token: "constant", foreground: palette.number },
       { token: "type", foreground: palette.type },
+      { token: "class", foreground: palette.type },
+      { token: "enum", foreground: palette.type },
+      { token: "interface", foreground: palette.type },
+      { token: "struct", foreground: palette.type },
+      { token: "typeParameter", foreground: palette.type },
       { token: "namespace", foreground: palette.type },
       { token: "function", foreground: palette.function },
+      { token: "method", foreground: palette.function },
       { token: "variable", foreground: palette.foreground },
+      { token: "variable.readonly", foreground: palette.foreground },
+      { token: "variable.static", foreground: palette.foreground },
+      { token: "variable.defaultLibrary", foreground: palette.foreground },
+      { token: "property", foreground: palette.foreground },
+      { token: "property.readonly", foreground: palette.foreground },
+      { token: "enumMember", foreground: palette.number },
       { token: "variable.parameter", foreground: palette.parameter },
+      { token: "parameter", foreground: palette.parameter },
+      { token: "parameter.declaration", foreground: palette.parameter },
       { token: "variable.language", foreground: palette.keyword, fontStyle: "italic" },
       { token: "operator", foreground: palette.operator },
       { token: "delimiter", foreground: palette.operator },
@@ -204,6 +253,7 @@ export const KODEX_MONACO_THEMES: Record<AppTheme, editor.IStandaloneThemeData> 
   midnight: createTheme(palettes.midnight),
   graphite: createTheme(palettes.graphite),
   forest: createTheme(palettes.forest),
+  light: createTheme(palettes.light),
 };
 
 const MONACO_THEME_NAMES: Record<AppTheme, string> = {
@@ -211,6 +261,7 @@ const MONACO_THEME_NAMES: Record<AppTheme, string> = {
   midnight: "kodex-midnight",
   graphite: "kodex-graphite",
   forest: "kodex-forest",
+  light: "kodex-light",
 };
 
 let registered = false;

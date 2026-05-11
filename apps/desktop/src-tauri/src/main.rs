@@ -2,24 +2,46 @@
 
 mod commands;
 mod events;
+mod lsp;
 mod open_workspaces;
 mod recent_workspaces;
 mod state;
 
+use app_core::{UiPatchCursor, UiSnapshotUpdate};
 use state::AppState;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::Manager;
 
 fn main() {
+    app_core::startup_perf::start_run("kodex-desktop");
+    app_core::startup_perf::mark("desktop/main_enter", "");
     install_panic_logger();
+    let snapshot_bridge_running = Arc::new(AtomicBool::new(true));
 
+    app_core::startup_perf::mark("desktop/builder_start", "");
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
-        .setup(|app| {
-            start_snapshot_bridge(app.handle().clone());
-            Ok(())
+        .setup({
+            let snapshot_bridge_running = snapshot_bridge_running.clone();
+            move |app| {
+                app_core::startup_perf::mark("desktop/setup_start", "");
+                start_snapshot_bridge(app.handle().clone(), snapshot_bridge_running);
+                app_core::startup_perf::mark("desktop/setup_end", "");
+                Ok(())
+            }
+        })
+        .on_window_event({
+            let snapshot_bridge_running = snapshot_bridge_running.clone();
+            move |window, event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                    snapshot_bridge_running.store(false, Ordering::Release);
+                    window.state::<AppState>().shutdown_all();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::session::session_get_state,
@@ -42,13 +64,27 @@ fn main() {
             commands::editor::editor_open_file,
             commands::editor::editor_save_file,
             commands::editor::editor_get_content,
+            commands::lsp::editor_lsp_open_document,
+            commands::lsp::editor_lsp_change_document,
+            commands::lsp::editor_lsp_save_document,
+            commands::lsp::editor_lsp_close_document,
+            commands::lsp::editor_lsp_get_diagnostics,
+            commands::lsp::editor_lsp_request,
+            commands::perf::startup_perf_mark,
             commands::fs::fs_list_dir,
             commands::search::fs_search,
             commands::settings::settings_get_agent_snapshot,
             commands::settings::settings_detect_agents,
             commands::settings::settings_select_agent,
             commands::settings::settings_select_theme,
+            commands::settings::settings_save_codex_acp_venus_key,
+            commands::settings::settings_save_codex_acp_provider_key,
+            commands::settings::settings_select_codex_default_mode,
             commands::settings::settings_install_agent,
+            commands::settings::settings_get_lsp_snapshot,
+            commands::settings::settings_save_lsp_server,
+            commands::settings::settings_reset_lsp_server,
+            commands::settings::settings_probe_lsp_server,
             commands::review::review_get_diff,
             commands::review::review_get_git_diff_content,
             commands::review::review_apply_patch,
@@ -62,37 +98,49 @@ fn main() {
             commands::workspace::workspace_get_recent,
             commands::workspace::workspace_remove_recent,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kodex");
+        .build(tauri::generate_context!())
+        .expect("error while building Kodex")
+        .run({
+            let snapshot_bridge_running = snapshot_bridge_running.clone();
+            move |app, event| {
+                if matches!(event, tauri::RunEvent::Ready) {
+                    app_core::startup_perf::mark("desktop/run_ready", "");
+                }
+                if let tauri::RunEvent::ExitRequested { .. } = event {
+                    app_core::startup_perf::mark("desktop/exit_requested", "");
+                    snapshot_bridge_running.store(false, Ordering::Release);
+                    app.state::<AppState>().shutdown_all();
+                }
+            }
+        });
 }
 
-fn start_snapshot_bridge(app: tauri::AppHandle) {
+fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
+    app_core::startup_perf::mark("desktop/snapshot_bridge_spawn", "");
     std::thread::spawn(move || {
-        let mut last_snapshot_json = String::new();
+        app_core::startup_perf::mark("desktop/snapshot_bridge_thread_start", "");
+        let mut cursor = UiPatchCursor::default();
 
-        loop {
-            let next_snapshot = app
+        while running.load(Ordering::Acquire) {
+            let next_update = app
                 .state::<AppState>()
-                .poll_all_and_get_active_snapshot()
+                .poll_active_and_get_update(&mut cursor)
                 .ok();
 
-            match next_snapshot {
-                Some(snapshot) => {
-                    if let Ok(json) = serde_json::to_string(&snapshot) {
-                        if json != last_snapshot_json {
-                            last_snapshot_json = json;
-                            events::emit_ui_snapshot(&app, &snapshot);
-                        }
-                    } else {
-                        events::emit_ui_snapshot(&app, &snapshot);
-                    }
+            match next_update {
+                Some(Some(UiSnapshotUpdate::Full(snapshot))) => {
+                    events::emit_ui_snapshot(&app, &snapshot);
                 }
+                Some(Some(UiSnapshotUpdate::Patch(patch))) => {
+                    events::emit_ui_snapshot_patch(&app, &patch);
+                }
+                Some(None) => {}
                 None => {
-                    last_snapshot_json.clear();
+                    cursor = UiPatchCursor::default();
                 }
             }
 
-            std::thread::sleep(Duration::from_millis(120));
+            std::thread::sleep(Duration::from_millis(220));
         }
     });
 }

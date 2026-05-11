@@ -3,7 +3,7 @@ use app_core::normalize_tracked_path;
 use git2::Repository;
 use std::path::Path;
 use tauri::State;
-use workspace_model::{ChangedFile, FileChangeType, SessionFileChange};
+use workspace_model::{ChangedFile, DiffStats, FileChangeType, SessionFileChange};
 
 fn normalize_to_ws_relative(path: &str, ws_root: &str) -> String {
     let normalized = normalize_tracked_path(path);
@@ -83,6 +83,20 @@ pub fn review_get_git_diff_content(
             .unwrap_or(&normalized)
             .to_string()
     };
+    let snapshot_stats = state
+        .with_app(|app| {
+            Ok(app
+                .ui
+                .repository
+                .changed_files
+                .iter()
+                .find(|file| {
+                    normalize_tracked_path(&file.path.display().to_string())
+                        == normalize_tracked_path(&rel_path)
+                })
+                .map(|file| file.stats.clone()))
+        })
+        .unwrap_or(None);
 
     let full_path = workdir.join(&rel_path);
 
@@ -109,16 +123,61 @@ pub fn review_get_git_diff_content(
         FileChangeType::Modified
     };
 
-    let added = new_text.lines().count();
-    let removed = old_text.as_deref().map(|t| t.lines().count()).unwrap_or(0);
+    let stats =
+        snapshot_stats.unwrap_or_else(|| diff_stats_from_text(old_text.as_deref(), &new_text));
 
     Ok(Some(SessionFileChange {
         path: rel_path,
         change_type,
         old_text,
         new_text,
-        added_lines: added,
-        removed_lines: removed,
+        added_lines: stats.added,
+        removed_lines: stats.removed,
         timestamp: String::new(),
     }))
+}
+
+fn diff_stats_from_text(old_text: Option<&str>, new_text: &str) -> DiffStats {
+    let hunks = acp_core::diff_to_hunks(old_text, new_text);
+    DiffStats {
+        added: hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| matches!(line.kind, workspace_model::DiffLineKind::Added))
+            .count(),
+        removed: hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| matches!(line.kind, workspace_model::DiffLineKind::Removed))
+            .count(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_stats_from_text;
+
+    #[test]
+    fn diff_stats_count_changed_lines_not_file_lengths() {
+        let old_text = (1..=890)
+            .map(|line| {
+                if line == 10 {
+                    "old a".to_string()
+                } else if line == 20 {
+                    "old b".to_string()
+                } else {
+                    format!("same {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new_text = old_text
+            .replace("old a", "new a")
+            .replace("old b", "new b\nnew c\nnew d");
+
+        let stats = diff_stats_from_text(Some(&old_text), &new_text);
+
+        assert_eq!(stats.added, 4);
+        assert_eq!(stats.removed, 2);
+    }
 }

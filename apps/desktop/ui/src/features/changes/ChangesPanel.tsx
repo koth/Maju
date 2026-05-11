@@ -34,12 +34,8 @@ export function ChangesPanel({ changes, onFileSelect }: Props) {
               <ChangeTypeBadge type={change.change_type} />
               <span className="changes-path">{fileName(change.path)}</span>
               <div className="changes-stats">
-                {change.added_lines > 0 && (
-                  <span className="changes-stat-added">+{change.added_lines}</span>
-                )}
-                {change.removed_lines > 0 && (
-                  <span className="changes-stat-removed">-{change.removed_lines}</span>
-                )}
+                <span className="changes-stat-added">+{change.added_lines}</span>
+                <span className="changes-stat-removed">-{change.removed_lines}</span>
               </div>
             </div>
           ))}

@@ -1,13 +1,11 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
-import { sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl, workspaceOpen } from "../../lib/tauri";
-import { open } from "@tauri-apps/plugin-dialog";
+import { sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
 import "./Composer.css";
 
 interface Props {
   snapshot: UiSnapshot;
   onStateChange: () => void;
-  onWorkspaceChanged: (snapshot: UiSnapshot) => void;
 }
 
 interface Attachment {
@@ -21,13 +19,10 @@ interface Attachment {
   thumbnailMimeType: string | null;
 }
 
-export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props) {
+export function Composer({ snapshot, onStateChange }: Props) {
   const [input, setInput] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
-  const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-  const [utilityOpen, setUtilityOpen] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
   const [pendingControlId, setPendingControlId] = useState<string | null>(null);
   const [openControlId, setOpenControlId] = useState<string | null>(null);
@@ -213,23 +208,6 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
     }
   }, [onStateChange]);
 
-  const handleSwitchWorkspace = useCallback(async () => {
-    try {
-      const selected = await open({ directory: true, multiple: false });
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (!path) return;
-      setSwitchingWorkspace(true);
-      setWorkspaceError(null);
-      const nextSnapshot = await workspaceOpen(path);
-      onWorkspaceChanged(nextSnapshot);
-      setUtilityOpen(false);
-    } catch (error) {
-      setWorkspaceError(String(error));
-    } finally {
-      setSwitchingWorkspace(false);
-    }
-  }, [onWorkspaceChanged]);
-
   const handleControlChange = useCallback(
     async (control: SessionConfigControl, valueId: string) => {
       if (!controlsEnabled || control.current_value_id === valueId) return;
@@ -367,35 +345,6 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
           >
             +
           </button>
-          <div className="composer-utility">
-            <button
-              className="composer-utility-btn"
-              type="button"
-              onClick={() => setUtilityOpen((open) => !open)}
-              aria-expanded={utilityOpen}
-              title={snapshot.workspace.root}
-            >
-              <span className="composer-utility-mark" aria-hidden="true">
-                <svg viewBox="0 0 20 20" focusable="false">
-                  <path d="M4 6h9.5l-2-2L13 2.5 17.5 7 13 11.5 11.5 10l2-2H4V6Z" />
-                  <path d="M16 14H6.5l2 2L7 17.5 2.5 13 7 8.5 8.5 10l-2 2H16v2Z" />
-                </svg>
-              </span>
-              <span>{snapshot.workspace.name}</span>
-            </button>
-            {utilityOpen && (
-              <div className="composer-utility-menu">
-                <button
-                  type="button"
-                  onClick={handleSwitchWorkspace}
-                  disabled={switchingWorkspace || snapshot.session.status !== "Idle"}
-                >
-                  {switchingWorkspace ? "正在切换..." : "切换工作区"}
-                </button>
-              </div>
-            )}
-          </div>
-
           {modelControl ? (
             <SessionControlSelect
               control={modelControl}
@@ -432,8 +381,8 @@ export function Composer({ snapshot, onStateChange, onWorkspaceChanged }: Props)
           <span className="composer-rail-spacer" />
           <span className="composer-session-state">{snapshot.session.status}</span>
         </div>
-        {(workspaceError || controlError) && (
-          <div className="composer-error">{workspaceError ?? controlError}</div>
+        {controlError && (
+          <div className="composer-error">{controlError}</div>
         )}
       </div>
     </div>

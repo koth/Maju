@@ -14,6 +14,8 @@ const LANG_MAP: Record<string, string> = {
   ts: "typescript",
   tsx: "typescriptreact",
   js: "javascript",
+  cjs: "javascript",
+  mjs: "javascript",
   jsx: "javascriptreact",
   rs: "rust",
   json: "json",
@@ -97,12 +99,8 @@ export function DiffTab({ change, appTheme }: Props) {
           </button>
           <span className="dt-path">{change.path}</span>
           <div className="dt-stats">
-            {change.added_lines > 0 && (
-              <span className="dt-stat-added">+{change.added_lines}</span>
-            )}
-            {change.removed_lines > 0 && (
-              <span className="dt-stat-removed">-{change.removed_lines}</span>
-            )}
+            <span className="dt-stat-added">+{change.added_lines}</span>
+            <span className="dt-stat-removed">-{change.removed_lines}</span>
           </div>
         </div>
       </div>
@@ -119,6 +117,8 @@ export function DiffTab({ change, appTheme }: Props) {
             options={{
               readOnly: true,
               renderSideBySide: sideBySide,
+              ignoreTrimWhitespace: false,
+              renderWhitespace: "all",
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               fontSize: 13,

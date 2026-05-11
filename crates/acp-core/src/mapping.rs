@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, AvailableCommand, DiffHunk,
     DiffLine, DiffLineKind, MessageRole, PermissionOption, SessionConfigCategory,
@@ -22,6 +22,15 @@ use workspace_model::{
 
 const PLAN_MODE_ID: &str = "plan";
 const BUILD_MODE_ID: &str = "build";
+const NOTIFICATION_LOG_CHANNEL_SIZE: usize = 1024;
+
+struct NotificationLogRecord {
+    log_path: PathBuf,
+    method: String,
+    payload: Value,
+}
+
+static NOTIFICATION_LOG_TX: OnceLock<mpsc::SyncSender<NotificationLogRecord>> = OnceLock::new();
 
 pub(crate) fn emit_notification(
     tx: &mpsc::Sender<ClientEvent>,
@@ -372,22 +381,7 @@ pub(crate) fn append_notification_log(
     method: &str,
     payload: &Value,
 ) -> anyhow::Result<()> {
-    let log_path = notification_log_path(config);
-    if let Some(parent) = log_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
-
-    writeln!(file, "=== {method} ===")?;
-    writeln!(file, "{}", format_json(payload))?;
-    writeln!(file)?;
-    Ok(())
+    append_notification_log_owned(config, method, payload.clone())
 }
 
 pub(crate) fn append_typed_notification_log(
@@ -395,7 +389,7 @@ pub(crate) fn append_typed_notification_log(
     notification: &SessionNotification,
 ) -> anyhow::Result<()> {
     let payload = serde_json::to_value(notification).map_err(|err| anyhow!(err.to_string()))?;
-    append_notification_log(config, "session/update", &payload)
+    append_notification_log_owned(config, "session/update", payload)
 }
 
 pub(crate) fn append_runtime_event_log(
@@ -412,6 +406,56 @@ pub fn notification_log_path(config: &SessionConfig) -> PathBuf {
         .join(format!("acp-notifications-{}.log", config.log_id))
 }
 
+fn append_notification_log_owned(
+    config: &SessionConfig,
+    method: &str,
+    payload: Value,
+) -> anyhow::Result<()> {
+    let record = NotificationLogRecord {
+        log_path: notification_log_path(config),
+        method: method.to_string(),
+        payload,
+    };
+
+    match notification_log_tx().try_send(record) {
+        Ok(()) => Ok(()),
+        Err(mpsc::TrySendError::Full(_)) => Ok(()),
+        Err(mpsc::TrySendError::Disconnected(record)) => write_notification_log_record(record),
+    }
+}
+
+fn notification_log_tx() -> &'static mpsc::SyncSender<NotificationLogRecord> {
+    NOTIFICATION_LOG_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<NotificationLogRecord>(NOTIFICATION_LOG_CHANNEL_SIZE);
+        let _ = std::thread::Builder::new()
+            .name("kodex-acp-log-writer".into())
+            .spawn(move || {
+                while let Ok(record) = rx.recv() {
+                    let _ = write_notification_log_record(record);
+                }
+            });
+        tx
+    })
+}
+
+fn write_notification_log_record(record: NotificationLogRecord) -> anyhow::Result<()> {
+    if let Some(parent) = record.log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&record.log_path)
+        .with_context(|| format!("failed to open log file {}", record.log_path.display()))?;
+
+    writeln!(file, "=== {} ===", record.method)?;
+    writeln!(file, "{}", format_json(&record.payload))?;
+    writeln!(file)?;
+    Ok(())
+}
+
 pub(crate) fn format_stop_reason(reason: StopReason) -> String {
     match reason {
         StopReason::EndTurn => "end_turn".into(),
@@ -426,8 +470,9 @@ pub(crate) fn format_stop_reason(reason: StopReason) -> String {
 pub fn diff_to_hunks(old_text: Option<&str>, new_text: &str) -> Vec<DiffHunk> {
     use similar::{ChangeTag, TextDiff};
 
-    let old = old_text.unwrap_or_default();
-    let diff = TextDiff::from_lines(old, new_text);
+    let old = normalize_diff_line_endings(old_text.unwrap_or_default());
+    let new = normalize_diff_line_endings(new_text);
+    let diff = TextDiff::from_lines(&old, &new);
     let mut lines = Vec::new();
 
     let mut has_changes = false;
@@ -452,6 +497,10 @@ pub fn diff_to_hunks(old_text: Option<&str>, new_text: &str) -> Vec<DiffHunk> {
         heading: "ACP diff".into(),
         lines,
     }]
+}
+
+fn normalize_diff_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn emit_content(
@@ -707,10 +756,6 @@ fn emit_codebuddy_diff_content(
         let Some(path) = item.get("path").and_then(Value::as_str) else {
             continue;
         };
-        let old_text = item
-            .get("oldText")
-            .and_then(Value::as_str)
-            .map(str::to_string);
         let new_text = item
             .get("newText")
             .and_then(Value::as_str)
@@ -719,6 +764,14 @@ fn emit_codebuddy_diff_content(
         let Some(new_text) = new_text else {
             continue;
         };
+        let fallback_old_text = item
+            .get("oldText")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
+        let old_text =
+            edit_preview_old_text_from_raw_input(update.get("rawInput"), Some(&new_text))
+                .or(fallback_old_text);
 
         tx.send(ClientEvent::ToolDiff {
             id: id.to_string(),
@@ -734,15 +787,52 @@ fn emit_codebuddy_diff_content(
 
 fn edit_preview_new_text_from_raw_input(raw_input: Option<&Value>) -> Option<String> {
     let raw_input = raw_input?;
-    let before = raw_input.get("before")?.as_str()?;
-    let after = raw_input.get("after")?.as_str()?;
-    let current = raw_input
+    let before = edit_preview_before_text(raw_input)?;
+    let after = edit_preview_after_text(raw_input)?;
+    let current = edit_preview_input_content(raw_input)?;
+    let replaced = current.replacen(before, after, 1);
+    (replaced != current).then_some(replaced)
+}
+
+fn edit_preview_old_text_from_raw_input(
+    raw_input: Option<&Value>,
+    new_text: Option<&str>,
+) -> Option<String> {
+    let raw_input = raw_input?;
+    if let Some(content) = edit_preview_input_content(raw_input) {
+        return Some(content);
+    }
+
+    let before = edit_preview_before_text(raw_input)?;
+    let after = edit_preview_after_text(raw_input)?;
+    let new_text = new_text?;
+    let replaced = new_text.replacen(after, before, 1);
+    (replaced != new_text).then_some(replaced)
+}
+
+fn edit_preview_before_text(raw_input: &Value) -> Option<&str> {
+    raw_input
+        .get("before")
+        .or_else(|| raw_input.get("old_string"))
+        .or_else(|| raw_input.get("oldString"))
+        .and_then(Value::as_str)
+}
+
+fn edit_preview_after_text(raw_input: &Value) -> Option<&str> {
+    raw_input
+        .get("after")
+        .or_else(|| raw_input.get("new_string"))
+        .or_else(|| raw_input.get("newString"))
+        .and_then(Value::as_str)
+}
+
+fn edit_preview_input_content(raw_input: &Value) -> Option<String> {
+    raw_input
         .get("content")
         .or_else(|| raw_input.get("oldText"))
         .or_else(|| raw_input.get("old_text"))
-        .and_then(Value::as_str)?;
-    let replaced = current.replacen(before, after, 1);
-    (replaced != current).then_some(replaced)
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn emit_codebuddy_text_content(
@@ -1364,6 +1454,12 @@ mod tests {
     }
 
     #[test]
+    fn diff_conversion_ignores_line_ending_only_changes() {
+        let hunks = diff_to_hunks(Some("alpha\r\nbeta\r\n"), "alpha\nbeta\n");
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
     fn codebuddy_diff_content_preserves_old_text_for_tool_card_stats() {
         let (tx, rx) = mpsc::channel();
         let old_text = "# Kodex\n\n## Project Structure\n\nbody\n";
@@ -1435,6 +1531,232 @@ mod tests {
             edit_preview_new_text_from_raw_input(Some(&raw_input)).as_deref(),
             Some("# Kodex\n\n## 项目结构\n\nbody\n")
         );
+    }
+
+    #[test]
+    fn codebuddy_empty_old_text_uses_raw_input_content_for_tool_card_stats() {
+        let (tx, rx) = mpsc::channel();
+        let old_text = "# Kodex\n\n## Project Structure\n\nbody\n";
+        let new_text = "# Kodex\n\n## 项目结构\n\nbody\n";
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-edit-1",
+                    "status": "completed",
+                    "rawInput": {
+                        "path": "/workspace/README.md",
+                        "before": "## Project Structure\n",
+                        "after": "## 项目结构\n",
+                        "content": old_text
+                    },
+                    "content": [{
+                        "type": "diff",
+                        "path": "/workspace/README.md",
+                        "oldText": "",
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                old_text: emitted_old_text,
+                new_text: emitted_new_text,
+                ..
+            } => {
+                assert_eq!(emitted_old_text.as_deref(), Some(old_text));
+
+                let hunks = diff_to_hunks(emitted_old_text.as_deref(), &emitted_new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Added)
+                    .count();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Removed)
+                    .count();
+                assert_eq!((added, removed), (1, 1));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codebuddy_empty_old_text_can_be_reversed_from_raw_input_replacement() {
+        let (tx, rx) = mpsc::channel();
+        let old_text = "const value = 'old';\nconsole.log(value);\n";
+        let new_text = "const value = 'new';\nconsole.log(value);\n";
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-edit-2",
+                    "status": "completed",
+                    "rawInput": {
+                        "path": "/workspace/storyboard.ts",
+                        "before": "const value = 'old';",
+                        "after": "const value = 'new';"
+                    },
+                    "content": [{
+                        "type": "diff",
+                        "path": "/workspace/storyboard.ts",
+                        "oldText": "",
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                old_text: emitted_old_text,
+                new_text: emitted_new_text,
+                ..
+            } => {
+                assert_eq!(emitted_old_text.as_deref(), Some(old_text));
+
+                let hunks = diff_to_hunks(emitted_old_text.as_deref(), &emitted_new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Added)
+                    .count();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Removed)
+                    .count();
+                assert_eq!((added, removed), (1, 1));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codebuddy_old_new_string_can_reconstruct_full_old_text() {
+        let (tx, rx) = mpsc::channel();
+        let old_fragment = "async function openCanvas(page: Page) {\n  await page.goto('/');\n  await expect(page.locator('body')).toBeVisible();\n  await page.evaluate(buildTestIdInjector());\n  await expect(page.getByTestId('prompt-shell')).toBeVisible({ timeout: 10_000 });\n}";
+        let new_fragment = "async function openCanvas(page: Page) {\n  await page.goto('/');\n  await expect(page.locator('body')).toBeVisible();\n  await page.evaluate(buildTestIdInjector());\n  await page.waitForFunction(() => {\n    const win = window as Window & { __smokeTagElements?: () => void };\n    win.__smokeTagElements?.();\n    return Boolean(document.querySelector('[data-testid=\"prompt-shell\"]'));\n  }, undefined, { timeout: 10_000 });\n  await expect(page.getByTestId('prompt-shell')).toBeVisible({ timeout: 10_000 });\n}";
+        let old_text = format!("header\n\n{old_fragment}\n\nfooter\n");
+        let new_text = format!("header\n\n{new_fragment}\n\nfooter\n");
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-edit-old-string",
+                    "status": "completed",
+                    "rawInput": {
+                        "file_path": "/workspace/smokeTest/tests/app-smoke.spec.ts",
+                        "old_string": old_fragment,
+                        "new_string": new_fragment
+                    },
+                    "content": [{
+                        "type": "diff",
+                        "path": "/workspace/smokeTest/tests/app-smoke.spec.ts",
+                        "oldText": "",
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                old_text: emitted_old_text,
+                new_text: emitted_new_text,
+                ..
+            } => {
+                assert_eq!(emitted_old_text.as_deref(), Some(old_text.as_str()));
+
+                let hunks = diff_to_hunks(emitted_old_text.as_deref(), &emitted_new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Added)
+                    .count();
+                assert!(added < 20, "should not render the whole file as added");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codebuddy_fragment_old_text_prefers_reconstructed_full_old_text() {
+        let (tx, rx) = mpsc::channel();
+        let old_text = "def helper():\n    return _UA\n\nprint(helper())\n";
+        let new_text = "def helper():\n    return _ua()\n\nprint(helper())\n";
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-edit-3",
+                    "status": "completed",
+                    "rawInput": {
+                        "path": "/workspace/inspiration.py",
+                        "before": "_UA",
+                        "after": "_ua()"
+                    },
+                    "content": [{
+                        "type": "diff",
+                        "path": "/workspace/inspiration.py",
+                        "oldText": "_UA",
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                old_text: emitted_old_text,
+                new_text: emitted_new_text,
+                ..
+            } => {
+                assert_eq!(emitted_old_text.as_deref(), Some(old_text));
+
+                let hunks = diff_to_hunks(emitted_old_text.as_deref(), &emitted_new_text);
+                let added = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Added)
+                    .count();
+                let removed = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Removed)
+                    .count();
+                assert_eq!((added, removed), (1, 1));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

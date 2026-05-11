@@ -1,6 +1,6 @@
 import type { AppTheme } from "./types";
 
-export const DEFAULT_APP_THEME: AppTheme = "kodex_dark";
+export const DEFAULT_APP_THEME: AppTheme = "graphite";
 
 export interface AppThemeDefinition {
   id: AppTheme;
@@ -11,34 +11,24 @@ export interface AppThemeDefinition {
 
 export const APP_THEMES: AppThemeDefinition[] = [
   {
-    id: "kodex_dark",
-    label: "墨绿低光",
-    description: "默认的低眩光石板绿配色。",
-    swatches: ["#0f1419", "#151d26", "#6aa89f"],
-  },
-  {
-    id: "midnight",
-    label: "午夜蓝",
-    description: "深蓝背景搭配冷蓝强调色。",
-    swatches: ["#080d18", "#101a2c", "#6f96ff"],
-  },
-  {
     id: "graphite",
-    label: "石墨灰",
-    description: "中性暗灰，适合长时间阅读。",
+    label: "深色",
+    description: "中性石墨灰，适合长时间阅读。",
     swatches: ["#101112", "#1c1d20", "#9aa4b2"],
   },
   {
-    id: "forest",
-    label: "夜林绿",
-    description: "深森林绿背景和柔和苔绿色。",
-    swatches: ["#07120f", "#102019", "#80b97a"],
+    id: "light",
+    label: "浅色",
+    description: "明亮低噪的白灰界面。",
+    swatches: ["#f7f7f5", "#ececea", "#5f6670"],
   },
 ];
 
 const THEME_IDS = new Set<AppTheme>(APP_THEMES.map((theme) => theme.id));
+const LEGACY_DARK_THEMES = new Set(["kodex_dark", "midnight", "forest"]);
 
 export function resolveAppTheme(theme: string | null | undefined): AppTheme {
+  if (LEGACY_DARK_THEMES.has(theme ?? "")) return "graphite";
   return THEME_IDS.has(theme as AppTheme) ? (theme as AppTheme) : DEFAULT_APP_THEME;
 }
 

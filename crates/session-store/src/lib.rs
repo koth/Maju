@@ -382,9 +382,13 @@ impl SessionStore {
     pub fn list_sessions(&self) -> Result<Vec<SessionListItem>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.title, s.status, s.created_at, s.updated_at,
-                    (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) as msg_count,
+                    COUNT(m.id) as msg_count,
                     s.acp_session_id, s.agent_cli
-             FROM sessions s WHERE s.workspace_root = ?1 ORDER BY s.updated_at DESC",
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id
+             WHERE s.workspace_root = ?1
+             GROUP BY s.id
+             ORDER BY s.updated_at DESC",
         )?;
 
         let rows = stmt.query_map(params![&self.workspace_root], |row| {
@@ -397,6 +401,34 @@ impl SessionStore {
                 message_count: row.get(5)?,
                 acp_session_id: row.get(6)?,
                 agent_cli: row.get(7)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    pub fn list_session_summaries(&self) -> Result<Vec<SessionListItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, status, created_at, updated_at, acp_session_id, agent_cli
+             FROM sessions
+             WHERE workspace_root = ?1
+             ORDER BY updated_at DESC",
+        )?;
+
+        let rows = stmt.query_map(params![&self.workspace_root], |row| {
+            Ok(SessionListItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                message_count: 0,
+                acp_session_id: row.get(5)?,
+                agent_cli: row.get(6)?,
             })
         })?;
 
@@ -757,6 +789,34 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Replace all file changes for a session with the current in-memory snapshot.
+    /// This keeps SQLite from resurrecting stale changes after a file is reverted.
+    pub fn replace_file_changes(
+        &self,
+        session_id: &str,
+        changes: &[SessionFileChange],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM session_file_changes WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        for change in changes {
+            let change_type = format!("{:?}", change.change_type);
+            self.upsert_file_change(
+                session_id,
+                &change.path,
+                &change_type,
+                change.old_text.as_deref(),
+                &change.new_text,
+                change.added_lines,
+                change.removed_lines,
+            )?;
+        }
+
+        Ok(())
+    }
+
     /// Load all file changes for a session, ordered by path.
     pub fn load_file_changes(&self, session_id: &str) -> Result<Vec<SessionFileChange>> {
         let mut stmt = self.conn.prepare(
@@ -839,7 +899,11 @@ fn cap_string(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         s.to_string()
     } else {
-        s[..max_bytes].to_string()
+        let boundary = (0..=max_bytes)
+            .rev()
+            .find(|index| s.is_char_boundary(*index))
+            .unwrap_or(0);
+        s[..boundary].to_string()
     }
 }
 
@@ -878,6 +942,40 @@ mod tests {
 
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions[0].title, "Fix login bug");
+    }
+
+    #[test]
+    fn test_list_session_summaries_omits_message_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+        store.create_session("s1", "gpt-4").unwrap();
+        store
+            .update_session_title("s1", "Lightweight title")
+            .unwrap();
+        store
+            .insert_message("s1", "m1", "User", "hello", 1)
+            .unwrap();
+        store
+            .insert_message("s1", "m2", "Assistant", "hi", 2)
+            .unwrap();
+
+        let full = store.list_sessions().unwrap();
+        assert_eq!(full[0].message_count, 2);
+
+        let summaries = store.list_session_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title, "Lightweight title");
+        assert_eq!(summaries[0].message_count, 0);
+    }
+
+    #[test]
+    fn cap_string_does_not_split_utf8_characters() {
+        let value = format!("{}试", "a".repeat(32_767));
+        let capped = cap_string(&value, 32_768);
+
+        assert_eq!(capped.len(), 32_767);
+        assert!(capped.ends_with('a'));
     }
 
     #[test]
@@ -1184,5 +1282,42 @@ mod tests {
 
         let changes = store.load_file_changes("s1").unwrap();
         assert_eq!(changes.len(), 0);
+    }
+
+    #[test]
+    fn test_replace_file_changes_removes_stale_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+        store.create_session("s1", "gpt-4").unwrap();
+
+        store
+            .upsert_file_change("s1", "/a.rs", "Modified", Some("old"), "new", 1, 1)
+            .unwrap();
+        store
+            .upsert_file_change("s1", "/b.rs", "Modified", Some("old"), "new", 1, 1)
+            .unwrap();
+
+        store
+            .replace_file_changes(
+                "s1",
+                &[SessionFileChange {
+                    path: "/b.rs".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("old".into()),
+                    new_text: "newer".into(),
+                    added_lines: 2,
+                    removed_lines: 1,
+                    timestamp: "now".into(),
+                }],
+            )
+            .unwrap();
+
+        let changes = store.load_file_changes("s1").unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "/b.rs");
+        assert_eq!(changes[0].new_text, "newer");
+
+        store.replace_file_changes("s1", &[]).unwrap();
+        assert!(store.load_file_changes("s1").unwrap().is_empty());
     }
 }
