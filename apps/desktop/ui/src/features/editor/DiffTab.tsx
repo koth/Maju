@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useMemo, useState, useRef } from "react";
-import type { SessionFileChange, FileChangeType, AppTheme } from "../../types";
+import type { SessionFileChange, FileChangeRecord, FileChangeType, AppTheme, DiffQuality } from "../../types";
 import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
 import "./DiffTab.css";
@@ -29,7 +29,7 @@ const LANG_MAP: Record<string, string> = {
 };
 
 interface Props {
-  change: SessionFileChange;
+  change: SessionFileChange | FileChangeRecord;
   appTheme: AppTheme;
 }
 
@@ -80,6 +80,9 @@ export function DiffTab({ change, appTheme }: Props) {
   const badge = badgeConfig[change.change_type];
 
   const fileName = change.path.replace(/\\/g, "/").split("/").pop() || change.path;
+  const quality = "quality" in change ? change.quality : "Exact";
+  const unavailableReason = diffUnavailableReason(quality);
+  const modifiedText = change.new_text ?? "";
 
   return (
     <div className="diff-tab">
@@ -105,32 +108,48 @@ export function DiffTab({ change, appTheme }: Props) {
         </div>
       </div>
       <div className="dt-editor">
-        <Suspense fallback={<div className="dt-loading">正在加载差异编辑器...</div>}>
-          <MonacoDiffEditor
-            height="100%"
-            language={language}
-            original={change.old_text ?? ""}
-            modified={change.new_text}
-            theme={monacoThemeForAppTheme(appTheme)}
-            beforeMount={handleBeforeMount}
-            onMount={handleMount}
-            options={{
-              readOnly: true,
-              renderSideBySide: sideBySide,
-              ignoreTrimWhitespace: false,
-              renderWhitespace: "all",
-              minimap: { enabled: false },
-              scrollBeyondLastLine: false,
-              fontSize: 13,
-              fontFamily: "'Consolas', 'JetBrains Mono', 'Courier New', monospace",
-              lineHeight: 20,
-              smoothScrolling: true,
-              padding: { top: 12, bottom: 12 },
-              automaticLayout: true,
-            }}
-          />
-        </Suspense>
+        {unavailableReason ? (
+          <div className="dt-unavailable">{unavailableReason}</div>
+        ) : (
+          <Suspense fallback={<div className="dt-loading">正在加载差异编辑器...</div>}>
+            <MonacoDiffEditor
+              height="100%"
+              language={language}
+              original={change.old_text ?? ""}
+              modified={modifiedText}
+              theme={monacoThemeForAppTheme(appTheme)}
+              beforeMount={handleBeforeMount}
+              onMount={handleMount}
+              options={{
+                readOnly: true,
+                renderSideBySide: sideBySide,
+                ignoreTrimWhitespace: false,
+                renderWhitespace: "all",
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                fontFamily: "'Consolas', 'JetBrains Mono', 'Courier New', monospace",
+                lineHeight: 20,
+                smoothScrolling: true,
+                padding: { top: 12, bottom: 12 },
+                automaticLayout: true,
+              }}
+            />
+          </Suspense>
+        )}
       </div>
     </div>
   );
+}
+
+function diffUnavailableReason(quality: DiffQuality) {
+  const labels: Record<DiffQuality, string | null> = {
+    Exact: null,
+    LargeFileSkipped: "文件太大，已跳过内联差异预览。",
+    BinarySkipped: "二进制或不可读取文件，无法展示文本差异。",
+    MissingBaseline: "缺少可比较的基线内容，无法展示可靠差异。",
+    FragmentRejected: "只捕获到了片段级改动，已拒绝渲染为完整文件差异。",
+    LegacyIncomplete: "旧历史记录缺少完整快照，无法展示可靠差异。",
+  };
+  return labels[quality] ?? null;
 }

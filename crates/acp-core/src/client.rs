@@ -162,8 +162,31 @@ impl SessionHandle {
         &self,
         request_id: &str,
         option_id: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         self.permission_broker.resolve(request_id, option_id)
+    }
+
+    pub fn resolve_codebuddy_interruption(
+        &self,
+        tool_call_id: &str,
+        decision: &str,
+    ) -> anyhow::Result<()> {
+        if self.id.is_empty() {
+            return Err(anyhow!("ACP session id is not available yet"));
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RuntimeCommand::ResolveCodeBuddyInterruption {
+                session_id: self.id.clone(),
+                tool_call_id: tool_call_id.to_string(),
+                decision: decision.to_string(),
+                reply_tx,
+            })
+            .map_err(|_| anyhow!("ACP command channel closed"))?;
+        reply_rx
+            .recv()
+            .map_err(|_| anyhow!("ACP command reply channel closed"))?
     }
 
     pub fn cancel_prompt(&self) -> anyhow::Result<()> {

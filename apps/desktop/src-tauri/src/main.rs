@@ -29,6 +29,11 @@ fn main() {
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
                 app_core::startup_perf::mark("desktop/setup_start", "");
+                let terminal_app = app.handle().clone();
+                app.state::<AppState>()
+                    .set_terminal_event_sink(Arc::new(move |event| {
+                        events::emit_terminal_event(&terminal_app, event);
+                    }));
                 start_snapshot_bridge(app.handle().clone(), snapshot_bridge_running);
                 app_core::startup_perf::mark("desktop/setup_end", "");
                 Ok(())
@@ -54,6 +59,9 @@ fn main() {
             commands::session::session_create,
             commands::session::session_delete,
             commands::session::session_get_changes,
+            commands::session::session_list_change_sets,
+            commands::session::session_list_change_set_files,
+            commands::session::session_get_change_set_file_diff,
             commands::session::session_get_file_diff,
             commands::session::session_reconnect,
             commands::git::git_status,
@@ -72,6 +80,8 @@ fn main() {
             commands::lsp::editor_lsp_request,
             commands::perf::startup_perf_mark,
             commands::fs::fs_list_dir,
+            commands::fs::fs_rename,
+            commands::fs::fs_reveal,
             commands::search::fs_search,
             commands::settings::settings_get_agent_snapshot,
             commands::settings::settings_detect_agents,
@@ -79,6 +89,7 @@ fn main() {
             commands::settings::settings_select_theme,
             commands::settings::settings_save_codex_acp_venus_key,
             commands::settings::settings_save_codex_acp_provider_key,
+            commands::settings::settings_select_codex_acp_provider,
             commands::settings::settings_select_codex_default_mode,
             commands::settings::settings_install_agent,
             commands::settings::settings_get_lsp_snapshot,
@@ -97,6 +108,12 @@ fn main() {
             commands::workspace::workspace_set_active,
             commands::workspace::workspace_get_recent,
             commands::workspace::workspace_remove_recent,
+            commands::terminal::terminal_open,
+            commands::terminal::terminal_write,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_terminate,
+            commands::terminal::terminal_restart,
+            commands::terminal::terminal_list,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Kodex")

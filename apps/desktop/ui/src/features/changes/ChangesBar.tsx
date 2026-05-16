@@ -1,13 +1,14 @@
 import { useState, useMemo } from "react";
-import type { SessionFileChange } from "../../types";
+import type { FileChangeSummary } from "../../types";
 import "./ChangesBar.css";
 
 interface Props {
-  changes: SessionFileChange[];
-  onFileSelect: (path: string) => void;
+  changeSetId: string;
+  changes: FileChangeSummary[];
+  onFileSelect: (path: string, changeSetId: string) => void;
 }
 
-export function ChangesBar({ changes, onFileSelect }: Props) {
+export function ChangesBar({ changeSetId, changes, onFileSelect }: Props) {
   const [expanded, setExpanded] = useState(true);
 
   const sorted = useMemo(
@@ -64,7 +65,7 @@ export function ChangesBar({ changes, onFileSelect }: Props) {
             <div
               key={change.path}
               className="changes-bar-row"
-              onClick={() => onFileSelect(change.path)}
+              onClick={() => onFileSelect(change.path, changeSetId)}
             >
               <span className="changes-bar-path">{change.path}</span>
               <span className="changes-bar-stats">

@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
 import type { DiffHunk, ToolDiffPreview, ToolInvocation, ToolStatus } from "../../types";
+import { deriveToolPresentation, type ToolPresentation } from "./tool-presentation";
 import "./ToolCallCard.css";
 
 const MAX_OUTPUT_LINES = 5;
@@ -28,17 +29,33 @@ function ToolCallCardImpl({
   onPermissionSelect,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [rawDetailsOpen, setRawDetailsOpen] = useState(false);
 
   const children = childToolsByParent?.get(tool.call_id) ?? [];
 
   const [childrenCollapsed, setChildrenCollapsed] = useState(true);
 
-  const trackedDiffPaths = getTrackedDiffPaths(tool);
-  const diffPreviews = getTrackedDiffPreviews(tool);
-  const category = classifyTool(tool);
+  const presentation = deriveToolPresentation(tool);
+  const commandEditPaths =
+    presentation.presentationKind === "command"
+      ? getCommandMutationDiffPaths(tool, presentation.command)
+      : [];
+  const trackedDiffPaths = getTrackedDiffPaths(tool, commandEditPaths);
+  const diffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
+  const category: ToolCategory =
+    rawInputHasEditPayload(tool) || commandEditPaths.length > 0
+      ? "editing"
+      : presentation.presentationKind === "command"
+      ? classifyCommandPresentation(presentation.command)
+      : classifyTool(tool);
   const bullet = statusBullet(tool.status);
   const verb = toolVerb(tool.status, category);
-  const headerTitle = extractHeaderTitle(tool, trackedDiffPaths);
+  const headerTitle =
+    category === "editing"
+      ? extractHeaderTitle(tool, trackedDiffPaths)
+      : presentation.presentationKind === "command"
+      ? commandHeaderTitle(presentation.command, category, tool)
+      : extractHeaderTitle(tool, trackedDiffPaths);
   const cmdDetail = extractCommandDetail(tool, trackedDiffPaths);
   const outputLines = getOutputLines(tool);
   const detailLines = getDetailLines(tool);
@@ -49,6 +66,10 @@ function ToolCallCardImpl({
 
   // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
   const rawOutputLines = getRawOutputLines(tool);
+  const explorationResult =
+    presentation.presentationKind !== "command" && category === "exploring"
+      ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
+      : null;
   const needsPermission =
     tool.kind === "permission" &&
     tool.status === "Running" &&
@@ -63,15 +84,21 @@ function ToolCallCardImpl({
     logEntries.entries.length > 0 ||
     outputLines.lines.length > 0 ||
     rawOutputLines.lines.length > 0 ||
+    presentation.command != null ||
+    presentation.primaryOutput != null ||
+    presentation.rawDetails.length > 0 ||
     diffPreviews.length > 0 ||
     trackedDiffPaths.length > 0;
 
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>
       {/* Header line: bullet + verb + title + expand chevron on hover */}
-      <div
+      <button
+        type="button"
         className={`tc-line tc-header-line ${hasDetail ? "tc-expandable" : ""}`}
         onClick={hasDetail ? () => setExpanded((v) => !v) : undefined}
+        aria-expanded={hasDetail ? expanded : undefined}
+        disabled={!hasDetail}
       >
         <span className={`tc-bullet ${bullet.className}`}>{bullet.char}</span>
         <span className="tc-verb">{verb}</span>
@@ -87,7 +114,7 @@ function ToolCallCardImpl({
             ›
           </span>
         )}
-      </div>
+      </button>
 
       {needsPermission && (
         <div className="tc-permission-panel">
@@ -113,8 +140,20 @@ function ToolCallCardImpl({
       {/* Expandable detail — only visible when expanded */}
       {expanded && (
         <>
+          {presentation.presentationKind === "command" && category !== "editing" && (
+            <ShellToolPanel
+              presentation={presentation}
+              rawDetailsOpen={rawDetailsOpen}
+              onRawDetailsToggle={() => setRawDetailsOpen((value) => !value)}
+            />
+          )}
+
+          {explorationResult && (
+            <ExplorationResultPanel result={explorationResult} />
+          )}
+
           {/* Command detail (actual command or file path) */}
-          {cmdDetail && (
+          {(presentation.presentationKind !== "command" || category === "editing") && !explorationResult && cmdDetail && (
             <div className="tc-output-block">
               <div className="tc-output-line">
                 <span className="tc-output-prefix">└ </span>
@@ -123,7 +162,7 @@ function ToolCallCardImpl({
             </div>
           )}
 
-          {detailLines.lines.length > 0 && (
+          {presentation.presentationKind !== "command" && !explorationResult && detailLines.lines.length > 0 && (
             <div className="tc-output-block">
               {detailLines.lines.map((line, i) => (
                 <div key={i} className="tc-output-line">
@@ -142,7 +181,7 @@ function ToolCallCardImpl({
             </div>
           )}
 
-          {logEntries.entries.length > 0 && (
+          {presentation.presentationKind !== "command" && !explorationResult && logEntries.entries.length > 0 && (
             <div className="tc-output-block">
               {logEntries.entries.map((entry, i) => (
                 <div key={`${entry.title}-${i}`} className="tc-output-line tc-log-line">
@@ -163,7 +202,7 @@ function ToolCallCardImpl({
           )}
 
           {/* Error line */}
-          {errorLine && (
+          {presentation.presentationKind !== "command" && errorLine && (
             <div className="tc-output-block">
               <div className="tc-output-line tc-output-error">
                 <span className="tc-output-prefix">└ </span>
@@ -173,7 +212,7 @@ function ToolCallCardImpl({
           )}
 
           {/* Output lines (max 5, only for terminal/command tools) */}
-          {!errorLine && outputLines.lines.length > 0 && (
+          {presentation.presentationKind !== "command" && !explorationResult && !errorLine && outputLines.lines.length > 0 && (
             <div className="tc-output-block">
               {outputLines.lines.map((line, i) => (
                 <div key={i} className="tc-output-line">
@@ -193,7 +232,7 @@ function ToolCallCardImpl({
           )}
 
           {/* Raw output for non-terminal tools (Read, Search, etc.) */}
-          {!errorLine && outputLines.lines.length === 0 && rawOutputLines.lines.length > 0 && (
+          {presentation.presentationKind !== "command" && !explorationResult && !errorLine && outputLines.lines.length === 0 && rawOutputLines.lines.length > 0 && (
             <div className="tc-output-block">
               {rawOutputLines.lines.map((line, i) => (
                 <div key={i} className="tc-output-line">
@@ -265,6 +304,90 @@ function ToolCallCardImpl({
             />
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+interface ShellToolPanelProps {
+  presentation: ToolPresentation;
+  rawDetailsOpen: boolean;
+  onRawDetailsToggle: () => void;
+}
+
+interface ExplorationResult {
+  root: string | null;
+  items: string[];
+  omitted: number;
+}
+
+function ShellToolPanel({
+  presentation,
+  rawDetailsOpen,
+  onRawDetailsToggle,
+}: ShellToolPanelProps) {
+  const hasRawDetails = presentation.rawDetails.length > 0;
+  return (
+    <div className="tc-shell-panel">
+      <div className="tc-shell-label">{presentation.toolLabel}</div>
+      {presentation.command && (
+        <pre className="tc-shell-command">
+          <span className="tc-shell-prompt">$ </span>
+          {presentation.command}
+        </pre>
+      )}
+      {presentation.primaryOutput && (
+        <pre className="tc-shell-output">{presentation.primaryOutput}</pre>
+      )}
+      {!presentation.primaryOutput && !presentation.command && (
+        <div className="tc-shell-empty">没有可显示的输出</div>
+      )}
+      <div className="tc-shell-footer">
+        {hasRawDetails && (
+          <button
+            className="tc-raw-toggle"
+            type="button"
+            onClick={onRawDetailsToggle}
+            aria-expanded={rawDetailsOpen}
+          >
+            原始详情
+          </button>
+        )}
+        <span className={`tc-shell-status tc-shell-status-${presentation.footerStatus.tone}`}>
+          {presentation.footerStatus.tone === "success" ? "✓ " : ""}
+          {presentation.footerStatus.label}
+        </span>
+      </div>
+      {hasRawDetails && rawDetailsOpen && (
+        <div className="tc-raw-details">
+          {presentation.rawDetails.map((detail) => (
+            <div className="tc-raw-detail" key={detail.title}>
+              <div className="tc-raw-title">{detail.title}</div>
+              <pre className="tc-raw-body">{detail.body}</pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExplorationResultPanel({ result }: { result: ExplorationResult }) {
+  return (
+    <div className="tc-explore-panel">
+      <div className="tc-explore-label">探索结果</div>
+      {result.root && <div className="tc-explore-root">{result.root}</div>}
+      {result.items.length > 0 && (
+        <div className="tc-explore-list">
+          {result.items.map((item) => (
+            <div className="tc-explore-item" key={item}>
+              {item}
+            </div>
+          ))}
+        </div>
+      )}
+      {result.omitted > 0 && (
+        <div className="tc-explore-more">另有 {result.omitted} 项</div>
       )}
     </div>
   );
@@ -531,7 +654,7 @@ function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): s
 
   const namePath = extractPathFromToolName(tool.name);
   if (namePath) {
-    return shortPath(namePath);
+    return displayPath(namePath);
   }
 
   // Use summary only if it looks like a real description, not output or file content.
@@ -586,16 +709,16 @@ function extractInputTitle(tool: ToolInvocation): string | null {
       return input.description;
     }
 
-    // File path: show filename only for header
+    // File path: keep the path in the header so exploration has useful context.
     if (input.file_path || input.filePath || input.path) {
       const p = String(input.file_path || input.filePath || input.path);
-      return shortPath(p);
+      return displayPath(p);
     }
 
     // Pattern (grep/glob)
     if (input.pattern && typeof input.pattern === "string") {
       const path = input.path || input.include;
-      return path ? `${input.pattern} in ${shortPath(String(path))}` : input.pattern;
+      return path ? `${input.pattern} in ${displayPath(String(path))}` : input.pattern;
     }
 
     // URL, prompt, query
@@ -605,12 +728,16 @@ function extractInputTitle(tool: ToolInvocation): string | null {
 
     // Commands belong in the expanded detail, not the header.
   } catch {
+    const path = rawInputFilePath(tool);
+    if (path) {
+      return displayPath(path);
+    }
     if (
       tool.raw_input &&
       looksLikePath(tool.raw_input) &&
       !looksLikeCommand(tool.raw_input)
     ) {
-      return shortPath(tool.raw_input);
+      return displayPath(tool.raw_input);
     }
     if (
       tool.raw_input &&
@@ -719,6 +846,8 @@ function extractCommandDetail(tool: ToolInvocation, trackedDiffPaths: string[]):
       if (input.url) return String(input.url);
       if (input.query) return String(input.query);
     } catch {
+      const path = rawInputFilePath(tool);
+      if (path) return path;
       return tool.raw_input;
     }
   }
@@ -731,11 +860,105 @@ function extractCommandDetail(tool: ToolInvocation, trackedDiffPaths: string[]):
   return null;
 }
 
-/** Extract filename from a full path */
-function shortPath(fullPath: string): string {
-  const cleaned = fullPath.trim().replace(/^[`'"]+|[`'"]+$/g, "");
-  const parts = cleaned.replace(/\\/g, "/").split("/");
-  return parts[parts.length - 1] || cleaned;
+function displayPath(path: string): string {
+  return path.trim().replace(/^[`'"]+|[`'"]+$/g, "").replace(/\\/g, "/");
+}
+
+function getExplorationResult(
+  tool: ToolInvocation,
+  cmdDetail: string | null,
+  detailLines: string[],
+  outputLines: string[],
+  rawOutputLines: string[],
+): ExplorationResult | null {
+  const root = firstDisplayPath(cmdDetail ?? tool.summary ?? detailLines[0] ?? null);
+  const items = uniqueStrings([
+    ...pathsFromRawPayload(tool.raw_output),
+    ...pathsFromRawPayload(tool.detail_text),
+    ...pathsFromRawPayload(tool.summary),
+    ...outputLines.flatMap(pathsFromText),
+    ...rawOutputLines.flatMap(pathsFromText),
+    ...detailLines.slice(root ? 1 : 0).flatMap(pathsFromText),
+  ])
+    .map(displayPath)
+    .filter((path) => path && path !== root);
+
+  if (!root && items.length === 0) return null;
+
+  const visibleLimit = 8;
+  return {
+    root,
+    items: items.slice(0, visibleLimit),
+    omitted: Math.max(0, items.length - visibleLimit),
+  };
+}
+
+function pathsFromRawPayload(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  const parsed = parseJsonValue(raw);
+  if (Array.isArray(parsed)) {
+    return parsed.filter((item): item is string => typeof item === "string" && looksLikePath(item));
+  }
+  if (parsed && typeof parsed === "object") {
+    const record = parsed as Record<string, unknown>;
+    return [
+      ...pathsFromUnknown(record.path),
+      ...pathsFromUnknown(record.file_path),
+      ...pathsFromUnknown(record.filePath),
+      ...pathsFromUnknown(record.paths),
+      ...pathsFromUnknown(record.files),
+      ...pathsFromUnknown(record.matches),
+      ...pathsFromText(String(record.output ?? record.formatted_output ?? "")),
+    ];
+  }
+  return pathsFromText(raw);
+}
+
+function pathsFromUnknown(value: unknown): string[] {
+  if (typeof value === "string") return looksLikePath(value) ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap(pathsFromUnknown);
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).flatMap(pathsFromUnknown);
+  }
+  return [];
+}
+
+function pathsFromText(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed || looksLikeDisplayPayload(trimmed)) return [];
+  const parsed = parseJsonValue(trimmed);
+  if (parsed !== null) return pathsFromUnknown(parsed);
+  return trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => looksLikePath(line) && !looksLikeCommand(line));
+}
+
+function firstDisplayPath(value: string | null): string | null {
+  if (!value) return null;
+  const paths = pathsFromText(value);
+  const path = paths[0] ?? (looksLikePath(value) ? value : null);
+  return path ? displayPath(path) : null;
+}
+
+function parseJsonValue(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }
 
 /** Truncate to max chars, single line */
@@ -749,12 +972,131 @@ function truncate(text: string, max: number): string {
 
 type ToolCategory = "exploring" | "editing" | "executing";
 
+function commandHeaderTitle(
+  command: string | null,
+  category: ToolCategory,
+  tool: ToolInvocation,
+): string {
+  if (command && category === "exploring") {
+    const target = extractExplorationCommandTarget(command);
+    if (target) return truncate(displayPath(target), 96);
+  }
+  return truncate(command ?? commandToolLabel(tool), 96);
+}
+
+function classifyCommandPresentation(command: string | null): ToolCategory {
+  if (!command) return "executing";
+  return isExplorationCommand(command) ? "exploring" : "executing";
+}
+
+function isExplorationCommand(command: string): boolean {
+  const commandName = firstCommandName(command);
+  return (
+    commandName === "get-content" ||
+    commandName === "gc" ||
+    commandName === "cat" ||
+    commandName === "type" ||
+    commandName === "get-childitem" ||
+    commandName === "gci" ||
+    commandName === "ls" ||
+    commandName === "dir" ||
+    commandName === "test-path"
+  );
+}
+
+function extractExplorationCommandTarget(command: string): string | null {
+  const tokens = tokenizeCommandLine(command);
+  if (tokens.length === 0) return null;
+
+  for (let i = 1; i < tokens.length - 1; i += 1) {
+    const lower = tokens[i].toLowerCase();
+    if (lower === "-path" || lower === "-literalpath") {
+      return tokens[i + 1];
+    }
+  }
+
+  for (let i = 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === "|" || token === ";" || token === "&&" || token === "||") break;
+    if (token.startsWith("-")) {
+      i += powershellSwitchLooksValued(token) ? 1 : 0;
+      continue;
+    }
+    return token;
+  }
+
+  return null;
+}
+
+function firstCommandName(command: string): string {
+  const first = tokenizeCommandLine(command)[0] ?? "";
+  return first.toLowerCase();
+}
+
+function powershellSwitchLooksValued(token: string): boolean {
+  const lower = token.toLowerCase();
+  return [
+    "-depth",
+    "-erroraction",
+    "-exclude",
+    "-filter",
+    "-first",
+    "-include",
+    "-totalcount",
+  ].includes(lower);
+}
+
+function tokenizeCommandLine(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i];
+    const next = command[i + 1];
+
+    if (char === "\\" && quote === '"' && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      if (quote === char) {
+        quote = null;
+        continue;
+      }
+      if (!quote) {
+        quote = char;
+        continue;
+      }
+    }
+
+    if (!quote && /\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) tokens.push(current);
+  return tokens;
+}
+
 function classifyTool(tool: ToolInvocation): ToolCategory {
   const identity = `${tool.kind} ${tool.name}`.toLowerCase();
   const subagentType = getSubagentType(tool);
 
   if (isTodoWriteTool(tool)) {
     return "executing";
+  }
+
+  if (rawInputHasEditPayload(tool)) {
+    return "editing";
   }
 
   if (isExplicitEditToolInvocation(tool)) {
@@ -784,6 +1126,48 @@ function isExplicitEditToolInvocation(tool: ToolInvocation): boolean {
   return isExplicitEditTool(`${tool.kind} ${tool.name}`.toLowerCase());
 }
 
+function rawInputHasEditPayload(tool: ToolInvocation): boolean {
+  if (!tool.raw_input) return false;
+  const input = parseJsonValue(tool.raw_input);
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    const path = rawInputFilePath(tool);
+    if (!path) return false;
+    return rawTextHasAnyKey(
+      tool.raw_input,
+      "old_string",
+      "oldString",
+      "before",
+      "oldText",
+      "new_string",
+      "newString",
+      "after",
+      "newText",
+      "content",
+      "new_content",
+      "newContent",
+      "replacement",
+    );
+  }
+
+  const path = rawInputFilePath(tool);
+  if (!path) return false;
+
+  return (
+    stringField(input, "old_string", "oldString", "before", "oldText") != null ||
+    stringField(input, "new_string", "newString", "after", "newText") != null ||
+    stringField(input, "content", "new_content", "newContent", "replacement") != null
+  );
+}
+
+function rawInputFilePath(tool: ToolInvocation): string | null {
+  if (!tool.raw_input) return null;
+  const input = parseJsonValue(tool.raw_input);
+  return (
+    stringField(input, "file_path", "filePath", "path") ??
+    stringFieldFromRawText(tool.raw_input, "file_path", "filePath", "path")
+  );
+}
+
 function isTodoWriteTool(tool: ToolInvocation): boolean {
   const identity = `${tool.kind} ${tool.name}`.toLowerCase();
   if (
@@ -806,16 +1190,297 @@ function isTodoWriteTool(tool: ToolInvocation): boolean {
   }
 }
 
-function getTrackedDiffPaths(tool: ToolInvocation): string[] {
-  return isExplicitEditToolInvocation(tool) ? tool.diff_paths : [];
+function getTrackedDiffPaths(tool: ToolInvocation, commandEditPaths: string[] = []): string[] {
+  if (
+    !isExplicitEditToolInvocation(tool) &&
+    !rawInputHasEditPayload(tool) &&
+    commandEditPaths.length === 0
+  ) {
+    return [];
+  }
+  return uniqueStrings([
+    ...commandEditPaths,
+    ...tool.diff_paths,
+    ...(rawInputFilePath(tool) ? [rawInputFilePath(tool)!] : []),
+  ]);
 }
 
-function getTrackedDiffPreviews(tool: ToolInvocation): ToolDiffPreview[] {
-  if (!isExplicitEditToolInvocation(tool)) return [];
+function getTrackedDiffPreviews(tool: ToolInvocation, commandEditPaths: string[] = []): ToolDiffPreview[] {
+  if (
+    !isExplicitEditToolInvocation(tool) &&
+    !rawInputHasEditPayload(tool) &&
+    commandEditPaths.length === 0
+  ) return [];
   const previews = (tool.diff_previews ?? []).filter((preview) => !looksLikeBogusWholeFilePreview(preview));
+  if (commandEditPaths.length > 0) {
+    const matched = previews.filter((preview) =>
+      commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
+    );
+    if (matched.length > 0) return matched;
+  }
   if (previews.length > 0) return previews;
   const inputPreview = diffPreviewFromRawInput(tool);
   return inputPreview ? [inputPreview] : [];
+}
+
+function getCommandMutationDiffPaths(tool: ToolInvocation, command: string | null): string[] {
+  if (!command) return [];
+  const writePaths = commandWritePaths(command);
+  if (writePaths.length > 0) {
+    return writePaths.map(displayPath);
+  }
+
+  const pathspecs = gitWorkingTreeMutationPathspecs(command);
+  if (pathspecs.length === 0) return [];
+
+  const changedPaths = uniqueStrings([
+    ...tool.diff_paths.map(String),
+    ...(tool.diff_previews ?? []).map((preview) => preview.path),
+  ]);
+  if (changedPaths.length === 0) return [];
+
+  return changedPaths.filter((changedPath) =>
+    pathspecs.some((pathspec) => sameOrNestedPath(pathspec, changedPath)),
+  );
+}
+
+function commandWritePaths(command: string): string[] {
+  const stripped = stripPowerShellHereStrings(command);
+  const paths: string[] = [];
+  for (const segment of stripped.split(/[;\n]/)) {
+    const lower = segment.toLowerCase();
+    if (containsCommandToken(lower, "set-content") || containsCommandToken(lower, "add-content")) {
+      paths.push(...extractParamValues(segment, ["-literalpath", "-filepath", "-path"]));
+    } else if (containsCommandToken(lower, "out-file")) {
+      paths.push(...extractParamValues(segment, ["-filepath", "-path"]));
+    } else if (
+      containsCommandToken(lower, "new-item") &&
+      hasParamValue(lower, "-itemtype", "file")
+    ) {
+      paths.push(...extractParamValues(segment, ["-literalpath", "-path"]));
+    }
+  }
+  collectShellRedirectionPaths(stripped, paths);
+  return uniqueStrings(paths.filter(isUsableWritePath));
+}
+
+function stripPowerShellHereStrings(command: string): string {
+  let output = "";
+  let index = 0;
+  while (index < command.length) {
+    const marker = command.startsWith('@"', index)
+      ? '"'
+      : command.startsWith("@'", index)
+        ? "'"
+        : null;
+    if (!marker) {
+      output += command[index];
+      index += 1;
+      continue;
+    }
+
+    index += 2;
+    const lfMarker = `\n${marker}@`;
+    const crlfMarker = `\r\n${marker}@`;
+    const lfIndex = command.indexOf(lfMarker, index);
+    const crlfIndex = command.indexOf(crlfMarker, index);
+    const end =
+      lfIndex >= 0 && crlfIndex >= 0
+        ? Math.min(lfIndex, crlfIndex)
+        : lfIndex >= 0
+          ? lfIndex
+          : crlfIndex >= 0
+            ? crlfIndex
+            : -1;
+    if (end < 0) break;
+    index = end;
+    if (command.startsWith(crlfMarker, index)) {
+      index += crlfMarker.length;
+    } else {
+      index += lfMarker.length;
+    }
+    output += " ";
+  }
+  return output;
+}
+
+function containsCommandToken(text: string, token: string): boolean {
+  let offset = 0;
+  while (offset < text.length) {
+    const index = text.indexOf(token, offset);
+    if (index < 0) return false;
+    const before = text[index - 1];
+    const after = text[index + token.length];
+    const beforeOk = !before || !isCommandWordChar(before);
+    const afterOk = !after || !isCommandWordChar(after);
+    if (beforeOk && afterOk) return true;
+    offset = index + token.length;
+  }
+  return false;
+}
+
+function isCommandWordChar(char: string): boolean {
+  return /[a-z0-9_-]/i.test(char);
+}
+
+function hasParamValue(segmentLower: string, param: string, expected: string): boolean {
+  return extractParamValues(segmentLower, [param]).some(
+    (value) => value.toLowerCase() === expected.toLowerCase(),
+  );
+}
+
+function extractParamValues(segment: string, params: string[]): string[] {
+  const lower = segment.toLowerCase();
+  const values: string[] = [];
+  for (const param of params) {
+    let offset = 0;
+    while (offset < lower.length) {
+      const index = lower.indexOf(param, offset);
+      if (index < 0) break;
+      const before = lower[index - 1];
+      const after = lower[index + param.length];
+      const beforeOk = !before || /\s|\|/.test(before);
+      const afterOk = !after || /\s|:/.test(after);
+      if (beforeOk && afterOk) {
+        const value = parseCommandValueAt(segment, index + param.length);
+        if (value) values.push(value);
+      }
+      offset = index + param.length;
+    }
+  }
+  return values;
+}
+
+function parseCommandValueAt(text: string, start: number): string | null {
+  let index = start;
+  while (index < text.length && (/[\s:]/.test(text[index]))) {
+    index += 1;
+  }
+  if (index >= text.length) return null;
+
+  const quote = text[index];
+  if (quote === '"' || quote === "'") {
+    const end = text.indexOf(quote, index + 1);
+    return end >= 0 ? text.slice(index + 1, end) : text.slice(index + 1);
+  }
+
+  let end = index;
+  while (end < text.length && !/[\s;|)]/.test(text[end])) {
+    end += 1;
+  }
+  return text.slice(index, end);
+}
+
+function collectShellRedirectionPaths(command: string, paths: string[]) {
+  for (let i = 0; i < command.length; i += 1) {
+    if (command[i] !== ">") continue;
+    if (i > 0 && /\d/.test(command[i - 1])) continue;
+    if (command[i + 1] === ">") i += 1;
+    const value = parseCommandValueAt(command, i + 1);
+    if (value && looksLikePath(value)) paths.push(value);
+  }
+}
+
+function isUsableWritePath(path: string): boolean {
+  const trimmed = path.trim();
+  if (!trimmed || /[\r\n]/.test(trimmed)) return false;
+  if (/^[$({]/.test(trimmed)) return false;
+  return !["$null", "null", "nul", "/dev/null"].includes(trimmed.toLowerCase());
+}
+
+function gitWorkingTreeMutationPathspecs(command: string): string[] {
+  const tokens = tokenizeCommandLine(command);
+  const segments = splitCommandSegments(tokens);
+  const pathspecs: string[] = [];
+
+  for (const segment of segments) {
+    const gitIndex = segment.findIndex(isGitExecutableToken);
+    if (gitIndex < 0) continue;
+    const subcommand = segment[gitIndex + 1]?.toLowerCase();
+    const args = segment.slice(gitIndex + 2);
+
+    if (subcommand === "checkout") {
+      pathspecs.push(...pathspecsAfterDoubleDash(args));
+    } else if (subcommand === "restore") {
+      pathspecs.push(...restorePathspecs(args));
+    }
+  }
+
+  return uniqueStrings(pathspecs.map(displayPath).filter(Boolean));
+}
+
+function splitCommandSegments(tokens: string[]): string[][] {
+  const segments: string[][] = [];
+  let current: string[] = [];
+  for (const token of tokens) {
+    if (token === "&&" || token === "||" || token === ";" || token === "|") {
+      if (current.length > 0) segments.push(current);
+      current = [];
+      continue;
+    }
+    current.push(token);
+  }
+  if (current.length > 0) segments.push(current);
+  return segments;
+}
+
+function isGitExecutableToken(token: string): boolean {
+  const base = displayPath(token).split("/").pop()?.toLowerCase() ?? token.toLowerCase();
+  return base === "git" || base === "git.exe";
+}
+
+function pathspecsAfterDoubleDash(args: string[]): string[] {
+  const separatorIndex = args.indexOf("--");
+  if (separatorIndex < 0) return [];
+  return args.slice(separatorIndex + 1).filter(isLikelyPathspec);
+}
+
+function restorePathspecs(args: string[]): string[] {
+  const afterSeparator = pathspecsAfterDoubleDash(args);
+  if (afterSeparator.length > 0) return afterSeparator;
+
+  const pathspecs: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i];
+    if (token.startsWith("-")) {
+      if (gitRestoreOptionTakesValue(token) && i + 1 < args.length) {
+        i += 1;
+      }
+      continue;
+    }
+    if (isLikelyPathspec(token)) {
+      pathspecs.push(token);
+    }
+  }
+  return pathspecs;
+}
+
+function gitRestoreOptionTakesValue(token: string): boolean {
+  const lower = token.toLowerCase();
+  return lower === "-s" || lower === "--source" || lower === "--pathspec-from-file";
+}
+
+function isLikelyPathspec(token: string): boolean {
+  const path = displayPath(token);
+  return !!path && path !== "--" && !path.startsWith("-");
+}
+
+function sameOrNestedPath(pathspec: string, changedPath: string): boolean {
+  const spec = normalizePathForCompare(pathspec);
+  const changed = normalizePathForCompare(changedPath);
+  if (!spec || !changed) return false;
+  if (spec === "." || spec === "*") return true;
+  if (changed === spec) return true;
+  if (changed.endsWith(`/${spec}`)) return true;
+  return spec.endsWith("/") && (changed.startsWith(spec) || changed.endsWith(`/${spec}`));
+}
+
+function normalizePathForCompare(path: string): string {
+  return displayPath(path)
+    .replace(/^[a-zA-Z]:\//, "")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
 }
 
 function looksLikeBogusWholeFilePreview(preview: ToolDiffPreview): boolean {
@@ -849,6 +1514,39 @@ function stringField(input: unknown, ...keys: string[]): string | null {
     if (typeof value === "string") return value;
   }
   return null;
+}
+
+function stringFieldFromRawText(raw: string, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const escapedKey = escapeRegExp(key);
+    const match = raw.match(new RegExp(`"(${escapedKey})"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`));
+    if (!match) continue;
+    return decodeJsonStringFragment(match[2]);
+  }
+  return null;
+}
+
+function rawTextHasAnyKey(raw: string, ...keys: string[]): boolean {
+  return keys.some((key) =>
+    new RegExp(`"${escapeRegExp(key)}"\\s*:`).test(raw),
+  );
+}
+
+function decodeJsonStringFragment(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return value
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\")
+      .replace(/\\r\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\n");
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function looksLikeFragmentToWholeFile(oldText: string, newText: string): boolean {

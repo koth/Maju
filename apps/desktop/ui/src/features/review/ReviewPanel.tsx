@@ -1,10 +1,25 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
+import { MultiFileDiff } from "@pierre/diffs/react";
+import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, InspectorTab, FileEntry } from "../../types";
-import { fsListDir, gitStage } from "../../lib/tauri";
+import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
+import { fsListDir, gitStage, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import "./ReviewPanel.css";
+
+type ReviewPanelTab = "Review" | "Diff" | "Files";
+type ReviewScope = "last" | "manual";
+
+export interface InlineDiffLine {
+  id: string;
+  kind: "context" | "added" | "removed" | "gap";
+  direction?: "up" | "down" | "middle";
+  gapKey?: string;
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
 
 interface TreeNode {
   name: string;
@@ -16,6 +31,64 @@ interface TreeNode {
 }
 
 const MAX_REVIEW_FILES = 300;
+const REVIEW_DIFF_MAX_MATRIX_CELLS = 250_000;
+const REVIEW_DIFF_OPTIONS_BASE = {
+  diffStyle: "unified",
+  disableFileHeader: true,
+  hunkSeparators: "line-info",
+  collapsedContextThreshold: 6,
+  expansionLineCount: 80,
+  lineDiffType: "none",
+  overflow: "wrap",
+  unsafeCSS: `
+    :host {
+      --diffs-bg: var(--app-bg) !important;
+      --diffs-dark-bg: var(--app-bg) !important;
+      --diffs-light-bg: var(--app-bg) !important;
+      --diffs-bg-context: var(--app-bg) !important;
+      --diffs-bg-buffer: var(--app-bg) !important;
+      background-color: var(--app-bg) !important;
+    }
+
+    pre,
+    code,
+    [data-code],
+    [data-diff],
+    [data-file],
+    [data-gutter],
+    [data-content] {
+      background-color: var(--diffs-bg) !important;
+    }
+
+    :where([data-background]) [data-line-type="context"],
+    :where([data-background]) [data-line-type="context-expanded"],
+    :where([data-background]) [data-gutter-buffer],
+    :where([data-background]) [data-column-number]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]),
+    :where([data-background]) [data-line]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]),
+    :where([data-background]) [data-no-newline]:not([data-line-type="change-addition"]):not([data-line-type="change-deletion"]) {
+      --diffs-computed-decoration-bg: var(--diffs-bg) !important;
+      --diffs-computed-diff-line-bg: var(--diffs-bg) !important;
+      --diffs-computed-selected-line-bg: var(--diffs-bg) !important;
+      --diffs-line-bg: var(--diffs-bg) !important;
+      background-color: var(--diffs-bg) !important;
+    }
+
+    [data-line-type="context"],
+    [data-line-type="context-expanded"],
+    [data-line-annotation],
+    [data-gutter-buffer="annotation"] {
+      --diffs-line-bg: var(--diffs-bg) !important;
+      background-color: var(--diffs-bg) !important;
+    }
+
+    [data-content-buffer],
+    [data-gutter-buffer="buffer"] {
+      --diffs-line-bg: var(--diffs-bg) !important;
+      background-color: var(--diffs-bg) !important;
+      background-image: none !important;
+    }
+  `,
+} as const;
 
 function buildFileTree(files: ChangedFile[]): TreeNode[] {
   interface DirEntry {
@@ -93,15 +166,30 @@ interface Props {
   snapshot: UiSnapshot;
   refreshing: boolean;
   hydrated: boolean;
+  appTheme?: AppTheme;
   onRefresh: () => void | Promise<void>;
-  onFileSelect: (path: string) => void;
+  onFileSelect: (path: string, changeSetId: string) => void;
   onFileOpen: (path: string) => void;
+  onAddComposerReference?: (path: string) => void;
 }
 
-export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileSelect, onFileOpen }: Props) {
-  const [tab, setTab] = useState<InspectorTab>("Diff");
+export function ReviewPanel({
+  snapshot,
+  refreshing,
+  hydrated,
+  appTheme = "graphite",
+  onRefresh,
+  onFileSelect,
+  onFileOpen,
+  onAddComposerReference,
+}: Props) {
+  const [tab, setTab] = useState<ReviewPanelTab>("Review");
   const [filter, setFilter] = useState("");
   const [fileTreeRefreshSignal, setFileTreeRefreshSignal] = useState(0);
+  const [changeSetState, setChangeSetState] = useState<{
+    summaries: ChangeSetSummary[];
+    filesById: Record<string, FileChangeSummary[]>;
+  }>({ summaries: [], filesById: {} });
 
   const handleRefresh = useCallback(() => {
     if (tab === "Diff") {
@@ -134,9 +222,53 @@ export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileS
     return groups;
   }, [visibleFiles]);
 
+  useEffect(() => {
+    let cancelled = false;
+    sessionListChangeSets({
+      session_id: snapshot.session.id,
+      workspace_root: snapshot.workspace.root,
+    })
+      .then(async (summaries) => {
+        const relevant = summaries.filter((summary) =>
+          summary.source === "AgentTurn" || summary.source === "ManualEdit"
+        );
+        const fileEntries = await Promise.all(
+          relevant.map(async (summary) => {
+            try {
+              const response = await sessionListChangeSetFiles({
+                change_set_id: summary.id,
+              });
+              return [summary.id, response.files] as const;
+            } catch {
+              return [summary.id, []] as const;
+            }
+          }),
+        );
+        if (cancelled) return;
+        setChangeSetState({
+          summaries: relevant,
+          filesById: Object.fromEntries(fileEntries),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setChangeSetState({ summaries: [], filesById: {} });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot.session.id, snapshot.workspace.root, snapshot.revision]);
+
   return (
     <div className="review-panel">
       <div className="review-tabs">
+        <button
+          className={`review-tab ${tab === "Review" ? "review-tab-active" : ""}`}
+          onClick={() => setTab("Review")}
+        >
+          <ReviewTabIcon />
+          审查
+        </button>
         <button
           className={`review-tab ${tab === "Diff" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Diff")}
@@ -152,26 +284,37 @@ export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileS
           所有文件
         </button>
         <div className="review-tabs-spacer" />
-        <button
-          type="button"
-          className="review-refresh-btn"
-          onClick={handleRefresh}
-          disabled={tab === "Diff" && refreshing}
-          title={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
-          aria-label={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
-        >
-          <RefreshIcon />
-        </button>
+        {tab !== "Review" && (
+          <button
+            type="button"
+            className="review-refresh-btn"
+            onClick={handleRefresh}
+            disabled={tab === "Diff" && refreshing}
+            title={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+            aria-label={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+          >
+            <RefreshIcon />
+          </button>
+        )}
       </div>
 
-      <div className="review-tab-panel" hidden={tab !== "Files"}>
-        <FileTree
-          onFileOpen={onFileOpen}
-          refreshSignal={fileTreeRefreshSignal}
+      <div className="review-tab-panel review-tab-panel-review" hidden={tab !== "Review"}>
+        <ReviewChangesView
+          changeSetState={changeSetState}
+          appTheme={appTheme}
         />
       </div>
 
-      <div className="review-tab-panel" hidden={tab !== "Diff"}>
+      <div className="review-tab-panel review-tab-panel-files" hidden={tab !== "Files"}>
+        <FileTree
+          onFileOpen={onFileOpen}
+          refreshSignal={fileTreeRefreshSignal}
+          onAddComposerReference={onAddComposerReference}
+          composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+        />
+      </div>
+
+      <div className="review-tab-panel review-tab-panel-git" hidden={tab !== "Diff"}>
         {!hydrated ? (
           <div className="review-loading-state">
             <span className="review-loading-dot" />
@@ -199,16 +342,18 @@ export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileS
           <FileGroup
             title="未暂存"
             files={grouped.Unstaged}
+            changeSetId="git-worktree:unstaged"
             onFileSelect={onFileSelect}
           />
           <FileGroup
             title="已暂存"
             files={grouped.Staged}
+            changeSetId="git-worktree:staged"
             onFileSelect={onFileSelect}
           />
           <UntrackedTree
             files={grouped.Untracked}
-            onFileOpen={onFileOpen}
+            onFileSelect={onFileSelect}
             onRefresh={onRefresh}
           />
         </>
@@ -216,6 +361,584 @@ export function ReviewPanel({ snapshot, refreshing, hydrated, onRefresh, onFileS
       </div>
     </div>
   );
+}
+
+function ReviewTabIcon() {
+  return (
+    <svg className="review-tab-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="4" y="3.5" width="12" height="13" rx="2" />
+      <path d="M7.2 7.2h5.6" />
+      <path d="M10 10v4" />
+      <path d="M8 12h4" />
+    </svg>
+  );
+}
+
+function ReviewChangesView({
+  changeSetState,
+  appTheme,
+}: {
+  changeSetState: {
+    summaries: ChangeSetSummary[];
+    filesById: Record<string, FileChangeSummary[]>;
+  };
+  appTheme: AppTheme;
+}) {
+  const [scope, setScope] = useState<ReviewScope>("last");
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const selectedChangeSet = useMemo(
+    () => selectReviewChangeSet(changeSetState.summaries, scope),
+    [changeSetState.summaries, scope],
+  );
+  const scopedFiles = selectedChangeSet
+    ? changeSetState.filesById[selectedChangeSet.id] ?? []
+    : [];
+  const activeChangeSetId = selectedChangeSet?.id;
+  const sorted = useMemo(
+    () => [...scopedFiles].sort((a, b) => a.path.localeCompare(b.path)),
+    [scopedFiles],
+  );
+  const totals = useMemo(
+    () =>
+      sorted.reduce(
+        (acc, change) => ({
+          added: acc.added + change.added_lines,
+          removed: acc.removed + change.removed_lines,
+        }),
+        { added: 0, removed: 0 },
+      ),
+    [sorted],
+  );
+
+  return (
+    <div className="review-session-changes">
+      <div className="review-scope-row">
+        <div className="review-scope-menu">
+          <button
+            type="button"
+            className="review-scope-trigger"
+            onClick={() => setScopeMenuOpen((open) => !open)}
+            aria-haspopup="menu"
+            aria-expanded={scopeMenuOpen}
+          >
+            {scope === "last" ? "上轮对话" : "手工修改"}
+            <span className="review-scope-chevron">⌄</span>
+          </button>
+          {scopeMenuOpen && (
+            <div className="review-scope-popover" role="menu">
+              <button
+                type="button"
+                className={`review-scope-option ${scope === "last" ? "is-active" : ""}`}
+                onClick={() => {
+                  setScope("last");
+                  setScopeMenuOpen(false);
+                }}
+                role="menuitem"
+              >
+                上轮对话
+              </button>
+              <button
+                type="button"
+                className={`review-scope-option ${scope === "manual" ? "is-active" : ""}`}
+                onClick={() => {
+                  setScope("manual");
+                  setScopeMenuOpen(false);
+                }}
+                role="menuitem"
+              >
+                手工修改
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="review-scope-stats" aria-label="变更统计">
+          <span className="review-stat-added">+{totals.added}</span>
+          <span className="review-stat-removed">-{totals.removed}</span>
+        </div>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div className="review-empty-state">
+          {scope === "last" ? "上轮对话暂无文件变化" : "手工修改暂无文件变化"}
+        </div>
+      ) : (
+        <div className="review-session-list">
+          {sorted.map((change) => (
+            <ReviewChangeCard
+              key={change.path}
+              change={change}
+              changeSetId={activeChangeSetId ?? change.change_set_id}
+              appTheme={appTheme}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReviewChangeCard({
+  change,
+  changeSetId,
+  appTheme,
+}: {
+  change: FileChangeSummary;
+  changeSetId: string;
+  appTheme: AppTheme;
+}) {
+  const [hydratedChange, setHydratedChange] = useState<FileChangeRecord | null>(null);
+  const [hydrationFailed, setHydrationFailed] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const displayChange = hydratedChange ?? change;
+  const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
+  const diffPreview = useMemo(
+    () =>
+      hydrationFailed
+        ? { kind: "message" as const, text: "这个差异记录暂时无法加载" }
+        : buildReviewDiff(displayChange),
+    [displayChange, hydrationFailed],
+  );
+  const diffOptions = useMemo(
+    () => ({
+      ...REVIEW_DIFF_OPTIONS_BASE,
+      theme: appTheme === "light" ? "pierre-light" : "pierre-dark",
+      themeType: appTheme === "light" ? "light" : "dark",
+    } as const),
+    [appTheme],
+  );
+
+  useEffect(() => {
+    if (!needsHydration) {
+      setHydratedChange(null);
+      setHydrationFailed(false);
+      return;
+    }
+
+    let cancelled = false;
+    setHydrationFailed(false);
+    sessionGetChangeSetFileDiff({ change_set_id: changeSetId, path: change.path })
+      .then((nextChange) => {
+        if (!cancelled) setHydratedChange(nextChange);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHydratedChange(null);
+          setHydrationFailed(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    change.added_lines,
+    change.path,
+    change.removed_lines,
+    change.updated_at,
+    changeSetId,
+    needsHydration,
+  ]);
+
+  return (
+    <article className={`review-change-card ${collapsed ? "is-collapsed" : ""}`}>
+      <div className="review-change-header" title={change.path}>
+        <span className="review-change-path">
+          {change.path}
+        </span>
+        <span className="review-change-stats">
+          <span className="review-stat-added">+{displayChange.added_lines}</span>
+          <span className="review-stat-removed">-{displayChange.removed_lines}</span>
+        </span>
+        <button
+          type="button"
+          className="review-change-toggle"
+          onClick={() => setCollapsed((value) => !value)}
+          aria-label={collapsed ? "展开差异" : "收起差异"}
+          title={collapsed ? "展开差异" : "收起差异"}
+        >
+          {collapsed ? "⌄" : "⌃"}
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="review-inline-diff" aria-label={`${change.path} 差异预览`}>
+          {diffPreview.kind === "patch" ? (
+            <MultiFileDiff
+              oldFile={diffPreview.oldFile}
+              newFile={diffPreview.newFile}
+              className="review-pierre-diff"
+              options={diffOptions}
+              disableWorkerPool
+            />
+          ) : (
+            <div className="review-inline-message">{diffPreview.text}</div>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function selectReviewChangeSet(summaries: ChangeSetSummary[], scope: ReviewScope) {
+  const source = scope === "last" ? "AgentTurn" : "ManualEdit";
+  return summaries
+    .filter((summary) => summary.source === source)
+    .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at))[0];
+}
+
+function timestampValue(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) return parsed;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function diffQualityMessage(quality: DiffQuality) {
+  const messages: Record<DiffQuality, string | null> = {
+    Exact: null,
+    LargeFileSkipped: "文件太大，已跳过内联差异预览",
+    BinarySkipped: "二进制或不可读取文件，无法展示文本差异",
+    MissingBaseline: "缺少可比较的基线内容，无法展示可靠差异",
+    FragmentRejected: "只捕获到了片段级改动，已拒绝渲染为完整文件差异",
+    LegacyIncomplete: "旧历史记录缺少完整快照，无法展示可靠差异",
+  };
+  return messages[quality] ?? null;
+}
+
+type ReviewDiffChange = FileChangeSummary | FileChangeRecord;
+
+function needsDiffHydration(change: ReviewDiffChange) {
+  if (!("old_text" in change)) return true;
+  const oldText = change.old_text ?? "";
+  const newText = change.new_text ?? "";
+  return oldText.length === 0 && newText.length === 0 && (
+    change.added_lines > 0 ||
+    change.removed_lines > 0
+  );
+}
+
+type ReviewPatchPreview =
+  | { kind: "patch"; oldFile: FileContents; newFile: FileContents }
+  | { kind: "message"; text: string };
+
+function buildReviewDiff(change: ReviewDiffChange): ReviewPatchPreview {
+  const quality = "quality" in change ? change.quality : "Exact";
+  const unavailable = diffQualityMessage(quality);
+  if (unavailable) {
+    return { kind: "message", text: unavailable };
+  }
+  if (!("old_text" in change) || !("new_text" in change)) {
+    return { kind: "message", text: "正在加载差异..." };
+  }
+  const oldText = change.old_text ?? "";
+  const newText = change.new_text ?? "";
+
+  if (oldText === newText) {
+    return { kind: "message", text: "暂无可预览的文本差异" };
+  }
+
+  return {
+    kind: "patch",
+    oldFile: {
+      name: change.path,
+      contents: oldText,
+      cacheKey: `${change.path}:old:${oldText.length}:${change.updated_at ?? ""}`,
+    },
+    newFile: {
+      name: change.path,
+      contents: newText,
+      cacheKey: `${change.path}:new:${newText.length}:${change.updated_at ?? ""}`,
+    },
+  };
+}
+
+export function buildLineDiffRows(oldLines: string[], newLines: string[]): InlineDiffLine[] {
+  return buildLineDiffRowsSegment(
+    oldLines,
+    0,
+    oldLines.length,
+    newLines,
+    0,
+    newLines.length,
+    0,
+  );
+}
+
+function buildLineDiffRowsSegment(
+  oldLines: string[],
+  oldStart: number,
+  oldEnd: number,
+  newLines: string[],
+  newStart: number,
+  newEnd: number,
+  depth: number,
+): InlineDiffLine[] {
+  const oldLength = oldEnd - oldStart;
+  const newLength = newEnd - newStart;
+
+  if (oldLength === 0) {
+    return newLines
+      .slice(newStart, newEnd)
+      .map((line, index) => makeDiffLine("added", null, newStart + index + 1, line));
+  }
+  if (newLength === 0) {
+    return oldLines
+      .slice(oldStart, oldEnd)
+      .map((line, index) => makeDiffLine("removed", oldStart + index + 1, null, line));
+  }
+
+  if ((oldLength + 1) * (newLength + 1) <= REVIEW_DIFF_MAX_MATRIX_CELLS) {
+    return buildLcsDiffRows(oldLines, oldStart, oldEnd, newLines, newStart, newEnd);
+  }
+
+  const rows: InlineDiffLine[] = [];
+  while (
+    oldStart < oldEnd &&
+    newStart < newEnd &&
+    oldLines[oldStart] === newLines[newStart]
+  ) {
+    rows.push(makeDiffLine("context", oldStart + 1, newStart + 1, oldLines[oldStart] ?? ""));
+    oldStart += 1;
+    newStart += 1;
+  }
+
+  let suffix = 0;
+  while (
+    oldStart + suffix < oldEnd &&
+    newStart + suffix < newEnd &&
+    oldLines[oldEnd - suffix - 1] === newLines[newEnd - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+
+  const middleOldEnd = oldEnd - suffix;
+  const middleNewEnd = newEnd - suffix;
+  const anchors = depth > 16
+    ? []
+    : findUniqueOrderedLineAnchors(
+      oldLines,
+      oldStart,
+      middleOldEnd,
+      newLines,
+      newStart,
+      middleNewEnd,
+    );
+
+  if (anchors.length === 0) {
+    rows.push(...buildContiguousFallbackRows(oldLines, oldStart, middleOldEnd, newLines, newStart, middleNewEnd));
+  } else {
+    let previousOld = oldStart;
+    let previousNew = newStart;
+    for (const anchor of anchors) {
+      rows.push(
+        ...buildLineDiffRowsSegment(
+          oldLines,
+          previousOld,
+          anchor.oldIndex,
+          newLines,
+          previousNew,
+          anchor.newIndex,
+          depth + 1,
+        ),
+      );
+      rows.push(
+        makeDiffLine(
+          "context",
+          anchor.oldIndex + 1,
+          anchor.newIndex + 1,
+          oldLines[anchor.oldIndex] ?? "",
+        ),
+      );
+      previousOld = anchor.oldIndex + 1;
+      previousNew = anchor.newIndex + 1;
+    }
+    rows.push(
+      ...buildLineDiffRowsSegment(
+        oldLines,
+        previousOld,
+        middleOldEnd,
+        newLines,
+        previousNew,
+        middleNewEnd,
+        depth + 1,
+      ),
+    );
+  }
+
+  for (let index = suffix; index > 0; index -= 1) {
+    const oldIndex = oldEnd - index;
+    const newIndex = newEnd - index;
+    rows.push(makeDiffLine("context", oldIndex + 1, newIndex + 1, oldLines[oldIndex] ?? ""));
+  }
+
+  return rows;
+}
+
+function buildLcsDiffRows(
+  oldLines: string[],
+  oldStart: number,
+  oldEnd: number,
+  newLines: string[],
+  newStart: number,
+  newEnd: number,
+): InlineDiffLine[] {
+  const oldLength = oldEnd - oldStart;
+  const newLength = newEnd - newStart;
+  const lcs = Array.from(
+    { length: oldLength + 1 },
+    () => new Uint32Array(newLength + 1),
+  );
+
+  for (let oldOffset = oldLength - 1; oldOffset >= 0; oldOffset -= 1) {
+    for (let newOffset = newLength - 1; newOffset >= 0; newOffset -= 1) {
+      lcs[oldOffset][newOffset] =
+        oldLines[oldStart + oldOffset] === newLines[newStart + newOffset]
+          ? lcs[oldOffset + 1][newOffset + 1] + 1
+          : Math.max(lcs[oldOffset + 1][newOffset], lcs[oldOffset][newOffset + 1]);
+    }
+  }
+
+  const rows: InlineDiffLine[] = [];
+  let oldOffset = 0;
+  let newOffset = 0;
+  while (oldOffset < oldLength && newOffset < newLength) {
+    const oldIndex = oldStart + oldOffset;
+    const newIndex = newStart + newOffset;
+    if (oldLines[oldIndex] === newLines[newIndex]) {
+      rows.push(makeDiffLine("context", oldIndex + 1, newIndex + 1, oldLines[oldIndex] ?? ""));
+      oldOffset += 1;
+      newOffset += 1;
+    } else if (lcs[oldOffset + 1][newOffset] >= lcs[oldOffset][newOffset + 1]) {
+      rows.push(makeDiffLine("removed", oldIndex + 1, null, oldLines[oldIndex] ?? ""));
+      oldOffset += 1;
+    } else {
+      rows.push(makeDiffLine("added", null, newIndex + 1, newLines[newIndex] ?? ""));
+      newOffset += 1;
+    }
+  }
+  while (oldOffset < oldLength) {
+    const oldIndex = oldStart + oldOffset;
+    rows.push(makeDiffLine("removed", oldIndex + 1, null, oldLines[oldIndex] ?? ""));
+    oldOffset += 1;
+  }
+  while (newOffset < newLength) {
+    const newIndex = newStart + newOffset;
+    rows.push(makeDiffLine("added", null, newIndex + 1, newLines[newIndex] ?? ""));
+    newOffset += 1;
+  }
+  return rows;
+}
+
+function buildContiguousFallbackRows(
+  oldLines: string[],
+  oldStart: number,
+  oldEnd: number,
+  newLines: string[],
+  newStart: number,
+  newEnd: number,
+) {
+  const rows: InlineDiffLine[] = [];
+  for (let index = oldStart; index < oldEnd; index += 1) {
+    rows.push(makeDiffLine("removed", index + 1, null, oldLines[index] ?? ""));
+  }
+  for (let index = newStart; index < newEnd; index += 1) {
+    rows.push(makeDiffLine("added", null, index + 1, newLines[index] ?? ""));
+  }
+  return rows;
+}
+
+function findUniqueOrderedLineAnchors(
+  oldLines: string[],
+  oldStart: number,
+  oldEnd: number,
+  newLines: string[],
+  newStart: number,
+  newEnd: number,
+) {
+  const oldUnique = collectUniqueLineIndexes(oldLines, oldStart, oldEnd);
+  const newUnique = collectUniqueLineIndexes(newLines, newStart, newEnd);
+  const candidates: Array<{ oldIndex: number; newIndex: number }> = [];
+
+  for (const [line, oldIndex] of oldUnique) {
+    const newIndex = newUnique.get(line);
+    if (newIndex !== undefined) {
+      candidates.push({ oldIndex, newIndex });
+    }
+  }
+
+  candidates.sort((a, b) => a.oldIndex - b.oldIndex || a.newIndex - b.newIndex);
+  return longestIncreasingNewLineSubsequence(candidates);
+}
+
+function collectUniqueLineIndexes(lines: string[], start: number, end: number) {
+  const seen = new Map<string, number>();
+  const repeated = new Set<string>();
+
+  for (let index = start; index < end; index += 1) {
+    const line = lines[index] ?? "";
+    if (repeated.has(line)) continue;
+    if (seen.has(line)) {
+      seen.delete(line);
+      repeated.add(line);
+    } else {
+      seen.set(line, index);
+    }
+  }
+
+  return seen;
+}
+
+function longestIncreasingNewLineSubsequence(
+  candidates: Array<{ oldIndex: number; newIndex: number }>,
+) {
+  if (candidates.length <= 1) return candidates;
+
+  const previous = new Array<number>(candidates.length).fill(-1);
+  const tailCandidateIndexes: number[] = [];
+  const tailNewIndexes: number[] = [];
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const value = candidates[index].newIndex;
+    let low = 0;
+    let high = tailNewIndexes.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (tailNewIndexes[mid] < value) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    if (low > 0) {
+      previous[index] = tailCandidateIndexes[low - 1];
+    }
+    tailNewIndexes[low] = value;
+    tailCandidateIndexes[low] = index;
+  }
+
+  const result: Array<{ oldIndex: number; newIndex: number }> = [];
+  let cursor = tailCandidateIndexes[tailCandidateIndexes.length - 1];
+  while (cursor !== undefined && cursor >= 0) {
+    result.push(candidates[cursor]);
+    cursor = previous[cursor];
+  }
+  result.reverse();
+  return result;
+}
+
+function makeDiffLine(
+  kind: InlineDiffLine["kind"],
+  oldLine: number | null,
+  newLine: number | null,
+  text: string,
+): InlineDiffLine {
+  return {
+    id: "",
+    kind,
+    oldLine,
+    newLine,
+    text,
+  };
 }
 
 function RefreshIcon() {
@@ -253,11 +976,13 @@ function FolderTreeIcon({ className }: { className?: string }) {
 function FileGroup({
   title,
   files,
+  changeSetId,
   onFileSelect,
 }: {
   title: string;
   files: ChangedFile[];
-  onFileSelect: (path: string) => void;
+  changeSetId: string;
+  onFileSelect: (path: string, changeSetId: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
@@ -314,6 +1039,7 @@ function FileGroup({
               expandedDirs={expandedDirs}
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
+              changeSetId={changeSetId}
             />
           ))}
         </div>
@@ -328,12 +1054,14 @@ function DiffTreeNode({
   expandedDirs,
   onToggleDir,
   onFileSelect,
+  changeSetId,
 }: {
   node: TreeNode;
   depth: number;
   expandedDirs: Set<string>;
   onToggleDir: (path: string) => void;
-  onFileSelect: (path: string) => void;
+  onFileSelect: (path: string, changeSetId: string) => void;
+  changeSetId: string;
 }) {
   const isDir = node.kind === "directory";
   const isExpanded = expandedDirs.has(node.path);
@@ -362,6 +1090,7 @@ function DiffTreeNode({
                 expandedDirs={expandedDirs}
                 onToggleDir={onToggleDir}
                 onFileSelect={onFileSelect}
+                changeSetId={changeSetId}
               />
             ))}
           </div>
@@ -375,7 +1104,7 @@ function DiffTreeNode({
       <div
         className="review-diff-row review-diff-file"
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
-        onClick={() => onFileSelect(node.path)}
+        onClick={() => onFileSelect(node.path, changeSetId)}
       >
         <span className="review-tree-arrow" />
         <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
@@ -391,11 +1120,11 @@ function DiffTreeNode({
 
 function UntrackedTree({
   files,
-  onFileOpen,
+  onFileSelect,
   onRefresh,
 }: {
   files: ChangedFile[];
-  onFileOpen: (path: string) => void;
+  onFileSelect: (path: string, changeSetId: string) => void;
   onRefresh: () => void | Promise<void>;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -473,7 +1202,7 @@ function UntrackedTree({
               expandedDirs={expandedDirs}
               childrenCache={childrenCache}
               onToggleDir={handleToggleDir}
-              onFileOpen={onFileOpen}
+              onFileSelect={onFileSelect}
               onTrackFile={handleTrackFile}
             />
           ))}
@@ -489,7 +1218,7 @@ function UntrackedTreeNode({
   expandedDirs,
   childrenCache,
   onToggleDir,
-  onFileOpen,
+  onFileSelect,
   onTrackFile,
 }: {
   entry: FileEntry;
@@ -497,7 +1226,7 @@ function UntrackedTreeNode({
   expandedDirs: Set<string>;
   childrenCache: Map<string, FileEntry[]>;
   onToggleDir: (path: string) => void;
-  onFileOpen: (path: string) => void;
+  onFileSelect: (path: string, changeSetId: string) => void;
   onTrackFile: (path: string) => void;
 }) {
   const isDir = entry.kind === "Directory";
@@ -509,7 +1238,11 @@ function UntrackedTreeNode({
       <div
         className={`review-untracked-row ${isDir ? "review-untracked-dir" : "review-untracked-file"}`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
-        onClick={() => (isDir ? onToggleDir(entry.path) : onFileOpen(entry.path))}
+        onClick={() =>
+          isDir
+            ? onToggleDir(entry.path)
+            : onFileSelect(entry.path, "git-worktree:untracked")
+        }
         onContextMenu={(event) => {
           if (isDir) return;
           event.preventDefault();
@@ -538,7 +1271,7 @@ function UntrackedTreeNode({
               expandedDirs={expandedDirs}
               childrenCache={childrenCache}
               onToggleDir={onToggleDir}
-              onFileOpen={onFileOpen}
+              onFileSelect={onFileSelect}
               onTrackFile={onTrackFile}
             />
           ))}

@@ -43,26 +43,53 @@ pub fn settings_select_theme(theme: AppTheme) -> Result<AgentSettingsSnapshot, S
 
 #[tauri::command]
 pub fn settings_save_codex_acp_venus_key(
+    state: State<'_, AppState>,
     venus_key: String,
 ) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::save_codex_acp_venus_key(&paths, &venus_key).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn settings_save_codex_acp_provider_key(
+    state: State<'_, AppState>,
     provider: String,
     api_key: String,
 ) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::save_codex_acp_provider_key(&paths, &provider, &api_key)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn settings_select_codex_default_mode() -> Result<AgentSettingsSnapshot, String> {
+pub fn settings_select_codex_acp_provider(
+    state: State<'_, AppState>,
+    provider: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::select_codex_acp_provider(&paths, &provider).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_select_codex_default_mode(
+    state: State<'_, AppState>,
+) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::select_codex_default_mode(&paths).map_err(|e| e.to_string())
+}
+
+fn ensure_no_running_codex_acp_session(state: &State<'_, AppState>) -> Result<(), String> {
+    if state.has_running_codex_acp_session()? {
+        return Err(
+            "已有当前配置codex启动，不能切换，请把对应codex会话删除先，确保没有对应的codex-acp启动了再写新配置。"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]

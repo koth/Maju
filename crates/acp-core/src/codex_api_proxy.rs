@@ -9,7 +9,8 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
@@ -17,7 +18,7 @@ type ProxyBody = BoxBody<Bytes, Infallible>;
 const VENUS_CHAT_COMPLETIONS_URL: &str =
     "https://v2.open.venus.woa.com/llmproxy/v1/chat/completions";
 const DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/v1/chat/completions";
-const CODEX_API_PROXY_PORT: u16 = 17851;
+const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
 const DEEPSEEK_REASONING_PLACEHOLDER: &str = "[previous reasoning unavailable]";
 
 #[derive(Debug, Clone)]
@@ -27,7 +28,8 @@ struct CodexApiProxyConfig {
 }
 
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
-static CODEX_API_PROXY_STARTED: OnceLock<()> = OnceLock::new();
+static CODEX_API_PROXY_RUNNING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static CODEX_API_PROXY_PORT: OnceLock<Arc<RwLock<u16>>> = OnceLock::new();
 static DEEPSEEK_REASONING_HISTORY: OnceLock<Arc<RwLock<Vec<ReasoningHistoryEntry>>>> =
     OnceLock::new();
 
@@ -38,10 +40,14 @@ struct ReasoningHistoryEntry {
 }
 
 pub fn codex_api_proxy_base_url() -> String {
-    format!("http://127.0.0.1:{CODEX_API_PROXY_PORT}/v1")
+    let port = CODEX_API_PROXY_PORT
+        .get()
+        .and_then(|port| port.read().ok().map(|port| *port))
+        .unwrap_or(CODEX_API_PROXY_PORTS[0]);
+    format!("http://127.0.0.1:{port}/v1")
 }
 
-pub(crate) fn ensure_codex_api_proxy(provider: &str, api_key: &str) {
+pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
     let config = CODEX_API_PROXY_CONFIG
         .get_or_init(|| {
             Arc::new(RwLock::new(CodexApiProxyConfig {
@@ -55,29 +61,90 @@ pub(crate) fn ensure_codex_api_proxy(provider: &str, api_key: &str) {
         current.api_key = api_key.to_string();
     }
 
-    CODEX_API_PROXY_STARTED.get_or_init(|| {
-        std::thread::spawn(move || run_codex_api_proxy(config));
-    });
+    let running = CODEX_API_PROXY_RUNNING
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    if running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        match bind_codex_api_proxy_listener() {
+            Ok((listener, port)) => {
+                set_codex_api_proxy_port(port);
+                std::thread::spawn(move || {
+                    run_codex_api_proxy(config, listener, port);
+                    running.store(false, Ordering::SeqCst);
+                });
+            }
+            Err(error) => {
+                append_codex_api_proxy_log(&format!("proxy_bind_failed_all error={error}"));
+                running.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+    codex_api_proxy_base_url()
 }
 
-fn run_codex_api_proxy(config: Arc<RwLock<CodexApiProxyConfig>>) {
+fn set_codex_api_proxy_port(port: u16) {
+    let current = CODEX_API_PROXY_PORT
+        .get_or_init(|| Arc::new(RwLock::new(CODEX_API_PROXY_PORTS[0])))
+        .clone();
+    if let Ok(mut current) = current.write() {
+        *current = port;
+    }
+}
+
+fn bind_codex_api_proxy_listener() -> anyhow::Result<(TcpListener, u16)> {
+    let mut last_error = None;
+    for port in CODEX_API_PROXY_PORTS {
+        let addr = SocketAddr::from(([127, 0, 0, 1], *port));
+        match TcpListener::bind(addr) {
+            Ok(listener) => {
+                listener.set_nonblocking(true)?;
+                return Ok((listener, *port));
+            }
+            Err(error) => {
+                append_codex_api_proxy_log(&format!("proxy_bind_failed addr={addr} error={error}"));
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(anyhow!(
+        "failed to bind Codex API proxy on ports {:?}: {}",
+        CODEX_API_PROXY_PORTS,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no ports configured".to_string())
+    ))
+}
+
+fn run_codex_api_proxy(config: Arc<RwLock<CodexApiProxyConfig>>, listener: TcpListener, port: u16) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
     {
         Ok(runtime) => runtime,
-        Err(_) => return,
+        Err(error) => {
+            append_codex_api_proxy_log(&format!("proxy_runtime_failed error={error}"));
+            return;
+        }
     };
 
     runtime.block_on(async move {
-        let addr = SocketAddr::from(([127, 0, 0, 1], CODEX_API_PROXY_PORT));
-        let Ok(listener) = tokio::net::TcpListener::bind(addr).await else {
-            return;
+        let listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(listener) => listener,
+            Err(error) => {
+                append_codex_api_proxy_log(&format!("proxy_listener_failed error={error}"));
+                return;
+            }
         };
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        append_codex_api_proxy_log(&format!("proxy_listening addr={addr}"));
 
         loop {
             let Ok((stream, _)) = listener.accept().await else {
+                append_codex_api_proxy_log("proxy_accept_failed");
                 continue;
             };
             let config = config.clone();

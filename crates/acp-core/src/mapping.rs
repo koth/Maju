@@ -9,9 +9,9 @@ use agent_client_protocol::schema::{
 };
 use anyhow::{Context, anyhow};
 use serde_json::Value;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, mpsc};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, AvailableCommand, DiffHunk,
@@ -744,7 +744,7 @@ fn emit_codebuddy_tool_call_update(
 
 fn emit_codebuddy_diff_content(
     tx: &mpsc::Sender<ClientEvent>,
-    _workspace_root: &str,
+    workspace_root: &str,
     id: &str,
     update: &Value,
 ) -> anyhow::Result<()> {
@@ -753,14 +753,10 @@ fn emit_codebuddy_diff_content(
     };
 
     for item in items {
-        let Some(path) = item.get("path").and_then(Value::as_str) else {
+        let Some(path) = codebuddy_content_path(item) else {
             continue;
         };
-        let new_text = item
-            .get("newText")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| edit_preview_new_text_from_raw_input(update.get("rawInput")));
+        let new_text = codebuddy_content_new_text(workspace_root, path, item, update);
         let Some(new_text) = new_text else {
             continue;
         };
@@ -783,6 +779,63 @@ fn emit_codebuddy_diff_content(
     }
 
     Ok(())
+}
+
+fn codebuddy_content_path(item: &Value) -> Option<&str> {
+    codebuddy_content_path_from_value(item).or_else(|| {
+        item.get("content")
+            .and_then(codebuddy_content_path_from_value)
+    })
+}
+
+fn codebuddy_content_path_from_value(value: &Value) -> Option<&str> {
+    value
+        .get("path")
+        .or_else(|| value.get("file_path"))
+        .or_else(|| value.get("filePath"))
+        .and_then(Value::as_str)
+}
+
+fn codebuddy_content_new_text(
+    workspace_root: &str,
+    path: &str,
+    item: &Value,
+    update: &Value,
+) -> Option<String> {
+    codebuddy_content_new_text_from_value(item)
+        .or_else(|| {
+            item.get("content")
+                .and_then(codebuddy_content_new_text_from_value)
+        })
+        .or_else(|| edit_preview_new_text_from_raw_input(update.get("rawInput")))
+        .or_else(|| read_codebuddy_workspace_text(workspace_root, path))
+}
+
+fn codebuddy_content_new_text_from_value(value: &Value) -> Option<String> {
+    value
+        .get("newText")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn read_codebuddy_workspace_text(workspace_root: &str, path: &str) -> Option<String> {
+    if workspace_root.trim().is_empty() || path.trim().is_empty() {
+        return None;
+    }
+
+    let root = PathBuf::from(workspace_root).canonicalize().ok()?;
+    let candidate = PathBuf::from(path);
+    let candidate = if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(Path::new(path))
+    };
+    let candidate = candidate.canonicalize().ok()?;
+    if !candidate.starts_with(&root) || !candidate.is_file() {
+        return None;
+    }
+
+    fs::read_to_string(candidate).ok()
 }
 
 fn edit_preview_new_text_from_raw_input(raw_input: Option<&Value>) -> Option<String> {
@@ -1428,6 +1481,38 @@ fn emit_tool_content(
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{PlanEntry, SessionNotification};
+    use std::path::PathBuf;
+
+    struct TestWorkspace {
+        root: PathBuf,
+    }
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("kodex-acp-core-mapping-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn write(&self, relative_path: &str, contents: &str) {
+            let path = self.root.join(relative_path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
+        }
+
+        fn root_str(&self) -> &str {
+            self.root.to_str().unwrap()
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
     fn diff_conversion_marks_added_and_removed_lines() {
@@ -1516,6 +1601,75 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn codebuddy_path_only_content_reads_workspace_files_for_diff() {
+        let workspace = TestWorkspace::new();
+        workspace.write(
+            "openspec/changes/support-import-without-filename/design.md",
+            "## Design\n\nUse offline CSV maps.\n",
+        );
+        workspace.write(
+            "openspec/changes/support-import-without-filename/tasks.md",
+            "## Tasks\n\n- [ ] Add parser\n",
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let handled = emit_codebuddy_notification(
+            &tx,
+            workspace.root_str(),
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-write-openspec",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "openspec/changes/support-import-without-filename/design.md"
+                        },
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "diff",
+                                "filePath": "openspec/changes/support-import-without-filename/tasks.md"
+                            }
+                        }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let diffs = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                ClientEvent::ToolDiff {
+                    id,
+                    path,
+                    old_text,
+                    new_text,
+                } => Some((id, path, old_text, new_text)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].0, "call-write-openspec");
+        assert_eq!(
+            diffs[0].1,
+            "openspec/changes/support-import-without-filename/design.md"
+        );
+        assert_eq!(diffs[0].2, None);
+        assert_eq!(diffs[0].3, "## Design\n\nUse offline CSV maps.\n");
+        assert_eq!(
+            diffs[1].1,
+            "openspec/changes/support-import-without-filename/tasks.md"
+        );
+        assert_eq!(diffs[1].2, None);
+        assert_eq!(diffs[1].3, "## Tasks\n\n- [ ] Add parser\n");
     }
 
     #[test]

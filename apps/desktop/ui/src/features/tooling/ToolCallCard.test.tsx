@@ -206,6 +206,200 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(added).toBeNull();
   });
 
+  it("classifies git checkout pathspec commands as editing when tracked files changed", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command:
+          'cd "d:/work/InfiniteCanvasOL" && git checkout -- frontend/src/components/InfiniteCanvas.tsx',
+      }),
+      terminal_output: { exit_code: 0, output: "Revert InfiniteCanvas.tsx changes" },
+      diff_paths: ["frontend/src/components/InfiniteCanvas.tsx"],
+      diff_previews: [
+        {
+          path: "frontend/src/components/InfiniteCanvas.tsx",
+          hunks: [
+            {
+              heading: "@@ -1,1 +1,1 @@",
+              lines: [
+                { kind: "Removed", content: "old" },
+                { kind: "Added", content: "new" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "frontend/src/components/InfiniteCanvas.tsx",
+    );
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+1");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-1");
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
+  });
+
+  it("keeps git checkout pathspec commands as executed when no tracked file changed", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command:
+          'cd "d:/work/InfiniteCanvasOL" && git checkout -- frontend/src/components/InfiniteCanvas.tsx',
+      }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+  });
+
+  it("shows exploration path for Get-ChildItem command headers", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command: "Get-ChildItem -Path D:\\work\\kodex\\apps\\desktop\\ui -Depth 1",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("D:/work/kodex/apps/desktop/ui");
+  });
+
+  it("classifies PowerShell exploration command wrappers as explored paths", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command:
+          '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command "Get-ChildItem \\"D:\\work\\kodex\\frontend\\node_modules\\" -Directory -ErrorAction SilentlyContinue"',
+      }),
+      terminal_output: { exit_code: 0, output: "node_modules NOT found" },
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "D:/work/kodex/frontend/node_modules",
+    );
+  });
+
+  it("classifies Codex PowerShell Set-Content command wrappers as edited paths", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command: [
+          "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "-Command",
+          'if (-not (Test-Path "docs")) { New-Item -ItemType Directory -Path "docs" -Force | Out-Null }; $guideContent = @"\n# Guide\n\nSet-Content -Path "fake.md"\n"@; Set-Content -Path "docs/windows-guide.md" -Value $guideContent -Encoding UTF8',
+        ],
+      }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("docs/windows-guide.md");
+  });
+
+  it("classifies Get-Content and Test-Path commands as exploration", () => {
+    const cases = [
+      {
+        command: "Get-Content -Path apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+        title: "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+      },
+      {
+        command: 'Test-Path "D:\\work\\kodex\\apps\\desktop\\ui\\package.json"',
+        title: "D:/work/kodex/apps/desktop/ui/package.json",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const tool = makeTool({
+        status: "Succeeded",
+        kind: "execute",
+        name: "tool",
+        raw_input: JSON.stringify({ command: testCase.command }),
+      });
+      const { container, unmount } = render(
+        <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+      );
+
+      expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+      expect(container.querySelector(".tc-cmd")!.textContent).toBe(testCase.title);
+      unmount();
+    }
+  });
+
+  it("shows exploration path in read tool headers", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "read",
+      name: "Read",
+      raw_input: JSON.stringify({ file_path: "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx" }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+    );
+  });
+
+  it("renders CodeBuddy exploration arrays as a compact result panel", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "read",
+      name: "List",
+      summary: "d:/work/InfiniteCanvasOL",
+      detail_text: "/work/InfiniteCanvasOL",
+      raw_output: JSON.stringify([
+        "d:\\work\\InfiniteCanvasOL\\frontend\\node_modules\\listenercount\\circle.yml",
+        "d:\\work\\InfiniteCanvasOL\\frontend\\node_modules\\reusify\\.github\\workflows\\ci.yml",
+      ]),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-explore-panel")).toBeTruthy();
+    expect(container.querySelector(".tc-explore-root")?.textContent).toBe(
+      "d:/work/InfiniteCanvasOL",
+    );
+    expect(container.textContent).toContain(
+      "d:/work/InfiniteCanvasOL/frontend/node_modules/listenercount/circle.yml",
+    );
+    expect(container.textContent).not.toContain('["d:\\\\work');
+  });
+
   it("shows diff stats for tracker-confirmed changes", () => {
     const tool = makeTool({
       status: "Succeeded",
@@ -261,6 +455,7 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
 
     expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+1");
     expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-0");
+    expect(container.querySelector(".tc-cmd")?.textContent).toBe("/test/foo.rs");
   });
 
   it("shows zero added count for removed-only tracker-confirmed changes", () => {
@@ -340,6 +535,61 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-2");
   });
 
+  it("classifies CodeBuddy file replacement payloads as editing even when presented as a command", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "{",
+      summary: "{",
+      raw_input: JSON.stringify({
+        file_path: "d:\\work\\InfiniteCanvasOL\\.ci\\scripts\\deploy_remote_prd.py",
+        new_string: "def upload_tree_atomic():\n    return uploaded_files",
+      }),
+      raw_output: JSON.stringify({ ok: true }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "d:/work/InfiniteCanvasOL/.ci/scripts/deploy_remote_prd.py",
+    );
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.textContent).toContain(
+      "d:\\work\\InfiniteCanvasOL\\.ci\\scripts\\deploy_remote_prd.py",
+    );
+    expect(container.textContent).not.toContain("def upload_tree_atomic");
+  });
+
+  it("classifies persisted truncated CodeBuddy replacement payloads as editing", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "{",
+      summary: "{",
+      raw_input:
+        '{\n  "file_path": "d:\\\\work\\\\InfiniteCanvasOL\\\\.ci\\\\scripts\\\\deploy_remote_prd.py",\n  "new_string": "def upload_tree_atomic():\\n    return uploaded_files',
+      raw_output: JSON.stringify({ ok: true }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "d:/work/InfiniteCanvasOL/.ci/scripts/deploy_remote_prd.py",
+    );
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.textContent).not.toContain("def upload_tree_atomic");
+  });
+
   it("does not fall back to raw_input when it looks like fragment to whole file", () => {
     const tool = makeTool({
       status: "Succeeded",
@@ -392,5 +642,57 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.textContent).toContain("step two");
     expect(container.textContent).toContain("Requested");
     expect(container.textContent).toContain("searched files");
+  });
+
+  it("renders command tools as a shell panel when expanded", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command: "Get-ChildItem -Path ." }),
+      terminal_output: { exit_code: 0, output: "Name\n----\nindex.ts\n" },
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    const header = container.querySelector(".tc-header-line") as HTMLButtonElement;
+    expect(header).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(header);
+
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
+    expect(container.textContent).toContain("Shell");
+    expect(container.textContent).toContain("$ Get-ChildItem -Path .");
+    expect(container.textContent).toContain("Name");
+    expect(container.textContent).toContain("成功");
+  });
+
+  it("hides raw JSON from primary command output when terminal output exists", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "bash",
+      name: "Bash",
+      raw_input: JSON.stringify({ command: "pwsh -Command Get-ChildItem" }),
+      terminal_output: { exit_code: 0, output: "loop.py\nruntime_status.py\n" },
+      raw_output: JSON.stringify({
+        aggregated_output: "loop.py\\nruntime_status.py\\n",
+        call_id: "call-1",
+        command: ["pwsh", "-Command", "Get-ChildItem"],
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    const header = container.querySelector(".tc-header-line") as HTMLButtonElement;
+    fireEvent.click(header);
+
+    expect(container.textContent).toContain("loop.py");
+    expect(container.textContent).not.toContain("aggregated_output");
+
+    fireEvent.click(container.querySelector(".tc-raw-toggle")!);
+    expect(container.textContent).toContain("aggregated_output");
   });
 });

@@ -17,6 +17,7 @@ import {
   settingsSaveCodexAcpProviderKey,
   settingsSaveCodexAcpVenusKey,
   settingsSaveLspServer,
+  settingsSelectCodexAcpProvider,
   settingsSelectCodexDefaultMode,
   settingsSelectAgent,
   settingsSelectTheme,
@@ -191,6 +192,36 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setBusyCodexAcp(false);
     }
   }, []);
+
+  const handleSelectCodexAcpProvider = useCallback(async (provider: Exclude<CodexAcpProvider, "default">) => {
+    setError(null);
+    setCodexAcpMessage(null);
+    setCodexAcpProvider(provider);
+
+    const configured =
+      provider === "venus"
+        ? !!snapshot?.codex_acp.venus_key_configured
+        : !!snapshot?.codex_acp.deepseek_key_configured;
+    if (!configured || snapshot?.codex_acp.provider === provider) {
+      return;
+    }
+
+    setBusyCodexAcp(true);
+    try {
+      const nextSnapshot = await settingsSelectCodexAcpProvider(provider);
+      setSnapshot(nextSnapshot);
+      setCodexAcpApiKey("");
+      setCodexAcpMessage(`已切换为 ${provider === "venus" ? "Venus" : "DeepSeek"} 配置`);
+    } catch (e) {
+      const currentProvider = snapshot?.codex_acp.provider;
+      if (currentProvider === "default" || currentProvider === "venus" || currentProvider === "deepseek") {
+        setCodexAcpProvider(currentProvider);
+      }
+      setError(String(e));
+    } finally {
+      setBusyCodexAcp(false);
+    }
+  }, [snapshot?.codex_acp.deepseek_key_configured, snapshot?.codex_acp.provider, snapshot?.codex_acp.venus_key_configured]);
 
   const updateLspDraft = useCallback((
     languageId: string,
@@ -418,10 +449,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                       <button
                         type="button"
                         className={`settings-provider-option ${codexAcpProvider === "venus" ? "is-selected" : ""}`}
-                        onClick={() => {
-                          setCodexAcpProvider("venus");
-                          setCodexAcpMessage(null);
-                        }}
+                        onClick={() => handleSelectCodexAcpProvider("venus")}
                         aria-pressed={codexAcpProvider === "venus"}
                         disabled={busyCodexAcp}
                       >
@@ -438,10 +466,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                       <button
                         type="button"
                         className={`settings-provider-option ${codexAcpProvider === "deepseek" ? "is-selected" : ""}`}
-                        onClick={() => {
-                          setCodexAcpProvider("deepseek");
-                          setCodexAcpMessage(null);
-                        }}
+                        onClick={() => handleSelectCodexAcpProvider("deepseek")}
                         aria-pressed={codexAcpProvider === "deepseek"}
                         disabled={busyCodexAcp}
                       >

@@ -1,6 +1,8 @@
 /* ── Codex-style Tool Call ── */
 
 .tc {
+  --tc-strong: color-mix(in srgb, var(--text-strong) 62%, var(--text-muted));
+  --tc-command: color-mix(in srgb, var(--text-strong) 58%, var(--text-muted));
   padding: 6px 10px 6px 0;
   border-radius: 12px;
   background: var(--app-bg);
@@ -21,6 +23,11 @@
   align-items: baseline;
   gap: 6px;
   line-height: 1.72;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
 }
 
 /* Expandable header — clickable with hover chevron */
@@ -33,6 +40,16 @@
 
 .tc-expandable:hover {
   background: var(--surface-hover);
+}
+
+.tc-header-line:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.tc-expandable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Chevron: hidden by default, visible on hover */
@@ -102,8 +119,8 @@
 }
 
 .tc-verb {
-  font-weight: 600;
-  color: var(--text-strong);
+  font-weight: 580;
+  color: var(--tc-strong);
 }
 
 .tc-cmd {
@@ -130,6 +147,207 @@
 
 .tc-diff-removed {
   color: var(--danger);
+}
+
+/* ── Shell panel for expanded command tools ── */
+.tc-shell-panel {
+  margin: 8px 0 8px 18px;
+  overflow: hidden;
+  max-width: min(100%, 760px);
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-alt-bg) 84%, var(--app-bg));
+  color: var(--text-muted);
+}
+
+.tc-shell-label {
+  padding: 9px 12px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 580;
+}
+
+.tc-shell-command,
+.tc-shell-output,
+.tc-raw-body {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tc-shell-command {
+  padding: 16px 12px 10px;
+  color: var(--tc-command);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.55;
+}
+
+.tc-shell-prompt {
+  color: var(--tc-command);
+}
+
+.tc-shell-output {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 1.48;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.tc-shell-empty {
+  padding: 12px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.tc-shell-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 12px 9px;
+}
+
+.tc-shell-status {
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.tc-shell-status-success {
+  color: var(--text-muted);
+}
+
+.tc-shell-status-danger {
+  color: var(--danger);
+}
+
+.tc-shell-status-warning,
+.tc-shell-status-running {
+  color: var(--warning);
+}
+
+.tc-raw-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+.tc-raw-toggle:hover,
+.tc-raw-toggle:focus-visible {
+  color: var(--text-muted);
+}
+
+.tc-raw-details {
+  border-top: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--app-bg) 62%, transparent);
+}
+
+.tc-raw-detail + .tc-raw-detail {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tc-raw-title {
+  padding: 9px 12px 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tc-raw-body {
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 12px 12px;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  line-height: 1.45;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+:root[data-theme="light"] .tc-shell-panel {
+  background: #f4f4f2;
+  border-color: #e1e1de;
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .tc-shell-command {
+  color: #202124;
+}
+
+:root[data-theme="light"] .tc-shell-output {
+  color: #3f454d;
+}
+
+:root[data-theme="light"] .tc-raw-details {
+  background: #f8f8f6;
+}
+
+/* ── Exploration panel for read/search/list style tools ── */
+.tc-explore-panel {
+  margin: 6px 0 6px 18px;
+  max-width: min(100%, 760px);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-alt-bg) 72%, var(--app-bg));
+}
+
+.tc-explore-label {
+  padding: 8px 11px 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.tc-explore-root,
+.tc-explore-item,
+.tc-explore-more {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tc-explore-root {
+  padding: 5px 11px 7px;
+  color: var(--text-muted);
+  font-weight: 580;
+  overflow-wrap: anywhere;
+}
+
+.tc-explore-list {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tc-explore-item {
+  padding: 5px 11px;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.tc-explore-item + .tc-explore-item {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 58%, transparent);
+}
+
+.tc-explore-more {
+  padding: 6px 11px 8px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-soft);
+}
+
+:root[data-theme="light"] .tc-explore-panel {
+  background: #f6f6f4;
+  border-color: #e2e2df;
 }
 
 /* ── Output block (└ indented, dim) ── */
@@ -166,8 +384,8 @@
 }
 
 .tc-log-title {
-  color: var(--text-strong);
-  font-weight: 600;
+  color: var(--tc-strong);
+  font-weight: 580;
   margin-right: 6px;
 }
 
@@ -212,6 +430,10 @@
 }
 
 .tc-pierre-diff {
+  --diffs-addition-color-override: var(--success);
+  --diffs-fg-number-addition-override: var(--success);
+  --diffs-bg-addition-number-override: var(--success);
+  --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--success) 28%, transparent);
   display: block;
   max-height: 360px;
   overflow: auto;

@@ -6,6 +6,7 @@ use workspace_model::{
 };
 
 pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapshot> {
+    let created_at = current_timestamp();
     let descriptor = WorkspaceDescriptor {
         id: uuid::Uuid::new_v4(),
         name: workspace_root
@@ -29,11 +30,13 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             "已在 {} 中就绪。描述您想要处理的变更、问题或任务。",
             descriptor.name
         ),
+        created_at: created_at.clone(),
     };
     let system_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role: MessageRole::System,
         body: "CodeBuddy 将保持空闲，直到您从下方编辑器提交提示。".into(),
+        created_at: created_at.clone(),
     };
 
     Ok(UiSnapshot {
@@ -96,8 +99,19 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             },
         ],
         session_changes: Vec::new(),
+        review_changes: Vec::new(),
+        turn_changes: Vec::new(),
         thinking_status: None,
     })
+}
+
+fn current_timestamp() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{secs}")
 }
 
 #[cfg(test)]

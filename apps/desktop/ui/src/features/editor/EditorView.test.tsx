@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "./EditorView";
-import { getModelBaseVersion } from "./monaco-model-registry";
+import { disposeAllModels, getModelBaseVersion } from "./monaco-model-registry";
 import {
   editorOpenFile,
   editorSaveFile,
@@ -22,6 +22,7 @@ class FakeRange {
 class FakeModel {
   private value: string;
   private version = 1;
+  private disposed = false;
 
   constructor(value: string) {
     this.value = value;
@@ -41,11 +42,19 @@ class FakeModel {
   }
 
   isDisposed() {
-    return false;
+    return this.disposed;
+  }
+
+  dispose() {
+    this.disposed = true;
   }
 
   findMatches() {
     return [];
+  }
+
+  getValueInRange() {
+    return this.value;
   }
 }
 
@@ -82,22 +91,34 @@ const fakeMonaco = {
   },
 };
 
-const fakeEditor = {
-  setModel: vi.fn(),
-  getModel: () => null,
-  hasTextFocus: () => true,
-  onDidDispose: vi.fn(),
-  saveViewState: vi.fn(() => null),
-  restoreViewState: vi.fn(),
-  revealLineNearTop: vi.fn(),
-  setPosition: vi.fn(),
-  focus: vi.fn(),
-  createDecorationsCollection: () => ({ clear: vi.fn() }),
-};
+let currentModel: FakeModel | null = null;
+
+function createFakeEditor() {
+  return {
+    setModel: vi.fn((model: FakeModel) => {
+      currentModel = model;
+    }),
+    getModel: () => currentModel,
+    getSelection: () => ({ isEmpty: () => true }),
+    hasTextFocus: () => true,
+    onDidDispose: vi.fn(),
+    onDidChangeCursorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+    saveViewState: vi.fn(() => null),
+    restoreViewState: vi.fn(),
+    revealLineNearTop: vi.fn(),
+    setPosition: vi.fn(),
+    focus: vi.fn(),
+    layout: vi.fn(),
+    createDecorationsCollection: () => ({ clear: vi.fn() }),
+  };
+}
+
+let fakeEditor = createFakeEditor();
 
 vi.mock("@monaco-editor/react", () => ({
   default: function MockMonacoEditor(props: {
     value: string;
+    keepCurrentModel?: boolean;
     beforeMount: (monaco: typeof fakeMonaco) => void;
     onMount: (editor: typeof fakeEditor, monaco: typeof fakeMonaco) => void;
     onChange: (value?: string) => void;
@@ -105,12 +126,21 @@ vi.mock("@monaco-editor/react", () => ({
     useEffect(() => {
       props.beforeMount(fakeMonaco);
       props.onMount(fakeEditor, fakeMonaco);
+      return () => {
+        if (!props.keepCurrentModel) {
+          fakeEditor.getModel()?.dispose();
+        }
+        currentModel = null;
+      };
     }, []);
     return (
       <textarea
         aria-label="mock editor"
         value={props.value}
-        onChange={(event) => props.onChange(event.currentTarget.value)}
+        onChange={(event) => {
+          currentModel?.setValue(event.currentTarget.value);
+          props.onChange(event.currentTarget.value);
+        }}
       />
     );
   },
@@ -155,11 +185,14 @@ const version = { content_hash: "hash", modified_ms: 1, size: 4 };
 describe("EditorView editable state", () => {
   afterEach(() => {
     cleanup();
+    disposeAllModels();
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
     modelStore.clear();
+    currentModel = null;
+    fakeEditor = createFakeEditor();
     vi.mocked(editorOpenFile).mockResolvedValue({
       path: "src/main.ts",
       content: "base",
@@ -201,6 +234,67 @@ describe("EditorView editable state", () => {
     await screen.findByLabelText("mock editor");
 
     await waitFor(() => expect(getModelBaseVersion("src/main.ts")).toEqual(version));
+  });
+
+  it("does not reopen the same file when parent callbacks refresh", async () => {
+    const firstDirtyChange = vi.fn();
+    const { rerender } = render(
+      <EditorView
+        path="src/main.ts"
+        appTheme="kodex_dark"
+        onDirtyChange={firstDirtyChange}
+      />,
+    );
+
+    await screen.findByLabelText("mock editor");
+    expect(editorOpenFile).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <EditorView
+        path="src/main.ts"
+        appTheme="kodex_dark"
+        onDirtyChange={vi.fn()}
+      />,
+    );
+
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+    expect(editorOpenFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps unsaved edits when switching away from the editor and reopening the same tab", async () => {
+    const { unmount } = render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    const editor = await screen.findByLabelText("mock editor");
+    fireEvent.change(editor, { target: { value: "dirty local edit" } });
+
+    await waitFor(() => expect(editor).toHaveValue("dirty local edit"));
+    unmount();
+
+    render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mock editor")).toHaveValue("dirty local edit");
+    });
+  });
+
+  it("keeps each file's dirty model when switching between file tabs", async () => {
+    vi.mocked(editorOpenFile).mockImplementation(async (filePath: string) => ({
+      path: filePath,
+      content: filePath === "src/other.ts" ? "other base" : "base",
+      version,
+      kind: "text",
+    }));
+    const { rerender } = render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    const editor = await screen.findByLabelText("mock editor");
+    fireEvent.change(editor, { target: { value: "dirty main edit" } });
+    await waitFor(() => expect(editor).toHaveValue("dirty main edit"));
+
+    rerender(<EditorView path="src/other.ts" appTheme="kodex_dark" />);
+    await waitFor(() => expect(screen.getByLabelText("mock editor")).toHaveValue("other base"));
+
+    rerender(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+    await waitFor(() => expect(screen.getByLabelText("mock editor")).toHaveValue("dirty main edit"));
   });
 
   it("does not show an unavailable badge for unsupported languages", async () => {
@@ -311,5 +405,28 @@ describe("EditorView editable state", () => {
     fireEvent.click(screen.getByText("编辑原文"));
 
     expect(await screen.findByLabelText("mock editor")).toBeInTheDocument();
+  });
+
+  it("shows file context and an explicit exit control in fullscreen", async () => {
+    vi.mocked(editorOpenFile).mockResolvedValueOnce({
+      path: "README.md",
+      content: "# Title\n\nBody",
+      version,
+      kind: "text",
+    });
+
+    render(<EditorView path="README.md" appTheme="kodex_dark" />);
+
+    expect(await screen.findByRole("heading", { name: "Title" })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("全屏编辑"));
+
+    expect(screen.getByText("全屏编辑")).toBeInTheDocument();
+    expect(screen.getByTitle("README.md")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "退出全屏" })).toBeInTheDocument();
+    expect(screen.getByText("Esc")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByRole("button", { name: "退出全屏" })).not.toBeInTheDocument();
   });
 });

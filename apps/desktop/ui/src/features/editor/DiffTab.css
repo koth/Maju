@@ -125,3 +125,15 @@
   color: var(--text-muted);
   font-size: 13px;
 }
+
+.dt-unavailable {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}

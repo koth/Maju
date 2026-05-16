@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render } from "@testing-library/react";
-import { ConversationTimeline } from "./ConversationTimeline";
+import { fireEvent, render, waitFor } from "@testing-library/react";
+import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import { appendStreamingMessageDelta } from "./streaming-message-store";
-import type { UiSnapshot, TimelineItem } from "../../types/index";
+import type { FileChangeSummary, UiSnapshot, TimelineItem } from "../../types/index";
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
   return {
@@ -28,8 +28,38 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
     inspector_tab: "Activity",
     inspector_sections: [],
     session_changes: [],
+    review_changes: [],
+    turn_changes: [],
     thinking_status: null,
     ...overrides,
+  };
+}
+
+function makeFileSummary(
+  path: string,
+  addedLines: number,
+  removedLines: number,
+  changeSetId = "cs-1",
+): FileChangeSummary {
+  return {
+    change_set_id: changeSetId,
+    path,
+    change_type: "Modified",
+    added_lines: addedLines,
+    removed_lines: removedLines,
+    quality: "Exact",
+    updated_at: "2026-05-12T00:00:00Z",
+  };
+}
+
+function makeTurnChangeSet(
+  changeSetId: string,
+  files: FileChangeSummary[],
+): TimelineTurnChangeSet {
+  return {
+    changeSetId,
+    files,
+    updatedAt: "2026-05-12T00:00:00Z",
   };
 }
 
@@ -41,7 +71,10 @@ describe("ThinkingIndicator", () => {
       thinking_status: "Active",
     });
     const { container } = render(
-      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
     );
     const indicator = container.querySelector(".thinking-indicator");
     expect(indicator).toBeTruthy();
@@ -56,7 +89,10 @@ describe("ThinkingIndicator", () => {
       thinking_status: "Completed",
     });
     const { container } = render(
-      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
     );
     expect(container.querySelector(".thinking-indicator")).toBeNull();
   });
@@ -69,7 +105,10 @@ describe("ThinkingIndicator", () => {
       thinking_status: "Active",
     });
     const { container } = render(
-      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
     );
     expect(container.querySelectorAll(".thinking-indicator")).toHaveLength(1);
   });
@@ -86,7 +125,7 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".thinking-indicator")).toBeNull();
   });
 
-  it("renders the active streaming assistant message without markdown parsing", () => {
+  it("renders the active streaming assistant message as markdown", async () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -102,11 +141,44 @@ describe("ThinkingIndicator", () => {
     });
 
     const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
+        "live",
+      );
+    });
+    expect(container.querySelector(".msg-streaming-markdown")?.textContent).toBe("live output");
+    expect(container.querySelector(".streaming-cursor")).toBeTruthy();
+  });
+
+  it("marks adjacent image-only user paragraphs so attachments can flow in one row", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "User",
+          body:
+            "看看这两张图\n\n![图1](data:image/png;base64,aaaa)\n\n![图2](data:image/png;base64,bbbb)",
+        },
+      ],
+    });
+
+    const { container } = render(
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelector(".msg-streaming-text")?.textContent).toBe("**live** output");
-    expect(container.querySelector(".streaming-cursor")).toBeTruthy();
+    const userMessage = container.querySelector(".msg-user");
+    expect(userMessage?.querySelectorAll(".md-image")).toHaveLength(2);
+    expect(userMessage?.querySelectorAll(".md-image-paragraph")).toHaveLength(2);
+    expect(userMessage?.querySelector(".md-paragraph:not(.md-image-paragraph)")?.textContent).toBe(
+      "看看这两张图",
+    );
   });
 
   it("windows long timelines so initial render only mounts the latest entries", () => {
@@ -146,6 +218,209 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".timeline-items .test-plan-panel")?.textContent).toBe(
       "plan lives here",
     );
+  });
+
+  it("renders per-turn changes under the matching assistant message", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "done" }],
+      session_changes: [
+        {
+          path: "apps/desktop/ui/src/features/workbench/Workbench.tsx",
+          change_type: "Modified",
+          old_text: null,
+          new_text: "",
+          added_lines: 50,
+          removed_lines: 20,
+          timestamp: "2026-05-12T00:00:00Z",
+        },
+      ],
+      turn_changes: [
+        {
+          message_id: "msg-1",
+          changes: [
+            {
+              path: "apps/desktop/ui/src/features/conversation/ConversationTimeline.tsx",
+              change_type: "Modified",
+              old_text: null,
+              new_text: "",
+              added_lines: 3,
+              removed_lines: 1,
+              timestamp: "2026-05-12T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary(
+              "apps/desktop/ui/src/features/conversation/ConversationTimeline.tsx",
+              3,
+              1,
+              "turn-msg-1",
+            ),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelector(".timeline-items .changes-bar")).toBeTruthy();
+    expect(container.textContent?.indexOf("done")).toBeLessThan(
+      container.textContent?.indexOf("1 个文件已更改") ?? -1,
+    );
+    expect(container.textContent).toContain("1 个文件已更改");
+    expect(container.textContent).toContain(
+      "apps/desktop/ui/src/features/conversation/ConversationTimeline.tsx",
+    );
+    expect(container.textContent).not.toContain(
+      "apps/desktop/ui/src/features/workbench/Workbench.tsx",
+    );
+  });
+
+  it("does not render transient review changes at the end of the timeline", () => {
+    const snapshot = makeSnapshot({
+      review_changes: [
+        {
+          path: "apps/desktop/ui/src/features/conversation/ConversationTimeline.tsx",
+          change_type: "Modified",
+          old_text: null,
+          new_text: "",
+          added_lines: 3,
+          removed_lines: 1,
+          timestamp: "2026-05-12T00:00:00Z",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".changes-bar")).toBeNull();
+  });
+
+  it("keeps separate changes with each historical turn", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "first turn" },
+        { id: "msg-2", role: "Assistant", body: "second turn" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("first.ts", 1, 0, "turn-msg-1"),
+          ]),
+          "msg-2": makeTurnChangeSet("turn-msg-2", [
+            makeFileSummary("second.ts", 2, 1, "turn-msg-2"),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(2);
+    const text = container.textContent ?? "";
+    expect(text.indexOf("first turn")).toBeLessThan(text.indexOf("first.ts"));
+    expect(text.indexOf("first.ts")).toBeLessThan(text.indexOf("second turn"));
+    expect(text.indexOf("second turn")).toBeLessThan(text.indexOf("second.ts"));
+  });
+
+  it("does not repeat a previous turn change set under a later assistant message", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "changed files" },
+        { id: "msg-2", role: "Assistant", body: "answered only" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("changed.ts", 5, 3, "turn-msg-1"),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
+    const text = container.textContent ?? "";
+    expect(text.indexOf("changed.ts")).toBeLessThan(text.indexOf("answered only"));
+    expect(text.lastIndexOf("changed.ts")).toBe(text.indexOf("changed.ts"));
+  });
+
+  it("opens timeline changes with the producing change set id", () => {
+    const onReviewFileSelect = vi.fn();
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "done" }],
+    });
+
+    const { getByText } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onReviewFileSelect={onReviewFileSelect}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("src/file.ts", 1, 1, "turn-msg-1"),
+          ]),
+        }}
+      />,
+    );
+
+    fireEvent.click(getByText("src/file.ts"));
+    expect(onReviewFileSelect).toHaveBeenCalledWith("src/file.ts", "turn-msg-1");
   });
 
   it("follows plan updates to the bottom when already near bottom", async () => {
@@ -204,11 +479,14 @@ describe("ThinkingIndicator", () => {
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 790 });
 
-    appendStreamingMessageDelta("streaming-msg", " world");
+    appendStreamingMessageDelta("streaming-msg", " **world**");
     await new Promise((resolve) => window.setTimeout(resolve, 100));
     await new Promise((resolve) => requestAnimationFrame(resolve));
 
     expect(scrollIntoView).toHaveBeenCalled();
+    expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
+      "world",
+    );
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 

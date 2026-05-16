@@ -6,18 +6,18 @@ use crate::mapping::{
     session_config_from_parts,
 };
 use agent_client_protocol::schema::{
-    BlobResourceContents, CancelNotification, ClientCapabilities, ContentBlock,
+    BlobResourceContents, CancelNotification, ClientCapabilities, ClientRequest, ContentBlock,
     CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
-    FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, PermissionOptionKind, PromptRequest, PromptResponse, ProtocolVersion,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, TextContent,
-    ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    ExtRequest, FileSystemCapabilities, ImageContent, Implementation, InitializeRequest,
+    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest,
+    NewSessionRequest, NewSessionResponse, PermissionOptionKind, PromptRequest, PromptResponse,
+    ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest,
+    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
+    TextContent, TextResourceContents, ToolKind, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Dispatch, Lines, Role};
 use anyhow::{Context, anyhow};
@@ -26,6 +26,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -37,11 +39,18 @@ use workspace_model::{PermissionOption, PromptInputCapabilities, UserPromptConte
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const TITLE_SYNC_RETRY_DELAYS_MS: [u64; 3] = [120, 400, 900];
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PermissionBroker {
-    pending: Arc<Mutex<HashMap<String, mpsc::Sender<Option<String>>>>>,
+    state: Arc<Mutex<PermissionBrokerState>>,
     mode: Arc<Mutex<PermissionPolicyMode>>,
+}
+
+#[derive(Debug, Default)]
+struct PermissionBrokerState {
+    pending: HashMap<String, mpsc::Sender<Option<String>>>,
+    early_resolutions: HashMap<String, Option<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -102,10 +111,25 @@ impl PermissionBroker {
         request_id: String,
     ) -> anyhow::Result<mpsc::Receiver<Option<String>>> {
         let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .map_err(|_| anyhow!("permission broker lock poisoned"))?
-            .insert(request_id, tx);
+
+        let early_resolution = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("permission broker lock poisoned"))?;
+            if let Some(option_id) = state.early_resolutions.remove(&request_id) {
+                Some(option_id)
+            } else {
+                state.pending.insert(request_id, tx.clone());
+                None
+            }
+        };
+
+        if let Some(option_id) = early_resolution {
+            tx.send(option_id)
+                .map_err(|_| anyhow!("permission request already closed"))?;
+        }
+
         Ok(rx)
     }
 
@@ -113,16 +137,39 @@ impl PermissionBroker {
         &self,
         request_id: &str,
         option_id: Option<String>,
-    ) -> anyhow::Result<()> {
-        let sender = self
-            .pending
-            .lock()
-            .map_err(|_| anyhow!("permission broker lock poisoned"))?
-            .remove(request_id)
-            .ok_or_else(|| anyhow!("No pending permission request: {request_id}"))?;
+    ) -> anyhow::Result<bool> {
+        let sender = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("permission broker lock poisoned"))?;
+            if let Some(sender) = state.pending.remove(request_id) {
+                Some(sender)
+            } else {
+                state
+                    .early_resolutions
+                    .insert(request_id.to_string(), option_id.clone());
+                None
+            }
+        };
+
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
+
         sender
             .send(option_id)
-            .map_err(|_| anyhow!("permission request already closed"))
+            .map_err(|_| anyhow!("permission request already closed"))?;
+        Ok(true)
+    }
+
+    pub(crate) fn clear_early_resolution(&self, request_id: &str) -> anyhow::Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| anyhow!("permission broker lock poisoned"))?
+            .early_resolutions
+            .remove(request_id);
+        Ok(())
     }
 
     pub(crate) fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
@@ -143,12 +190,14 @@ impl PermissionBroker {
     }
 
     pub(crate) fn cancel_all(&self) -> anyhow::Result<()> {
-        let pending = std::mem::take(
-            &mut *self
-                .pending
+        let pending = {
+            let mut state = self
+                .state
                 .lock()
-                .map_err(|_| anyhow!("permission broker lock poisoned"))?,
-        );
+                .map_err(|_| anyhow!("permission broker lock poisoned"))?;
+            state.early_resolutions.clear();
+            std::mem::take(&mut state.pending)
+        };
         for (_, sender) in pending {
             let _ = sender.send(None);
         }
@@ -317,6 +366,12 @@ pub(crate) enum RuntimeCommand {
         model_id: String,
         reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
+    ResolveCodeBuddyInterruption {
+        session_id: String,
+        tool_call_id: String,
+        decision: String,
+        reply_tx: mpsc::Sender<anyhow::Result<()>>,
+    },
     CancelPrompt {
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
     },
@@ -338,13 +393,28 @@ fn prompt_content_to_acp(content: UserPromptContent) -> Option<ContentBlock> {
         } => Some(ContentBlock::Image(ImageContent::new(data, mime_type))),
         UserPromptContent::File {
             data,
+            text,
             mime_type,
             name,
-        } => Some(ContentBlock::Resource(EmbeddedResource::new(
-            EmbeddedResourceResource::BlobResourceContents(
-                BlobResourceContents::new(data, attachment_uri(&name)).mime_type(mime_type),
-            ),
-        ))),
+            uri,
+        } => {
+            let uri = uri.unwrap_or_else(|| attachment_uri(&name));
+            if let Some(text) = text {
+                Some(ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::TextResourceContents(
+                        TextResourceContents::new(text, uri).mime_type(mime_type),
+                    ),
+                )))
+            } else if let Some(data) = data {
+                Some(ContentBlock::Resource(EmbeddedResource::new(
+                    EmbeddedResourceResource::BlobResourceContents(
+                        BlobResourceContents::new(data, uri).mime_type(mime_type),
+                    ),
+                )))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -408,6 +478,7 @@ struct ManagedTerminal {
 impl TerminalManager {
     fn create_terminal(
         &self,
+        workspace_root: &str,
         request: &CreateTerminalRequest,
     ) -> anyhow::Result<CreateTerminalResponse> {
         let terminal_id = format!(
@@ -421,13 +492,13 @@ impl TerminalManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        if let Some(cwd) = &request.cwd {
-            command.current_dir(cwd);
-        }
+        let cwd = process_cwd(workspace_root, request.cwd.as_deref());
+        apply_process_cwd_and_pwd(&mut command, &cwd);
 
         for env_var in &request.env {
             command.env(&env_var.name, &env_var.value);
         }
+        command.env("PWD", cwd.as_os_str());
 
         let mut child = command.spawn().with_context(|| {
             format!(
@@ -725,6 +796,21 @@ fn build_shell_command(command_text: &str) -> Command {
     }
 }
 
+fn process_cwd(workspace_root: &str, requested_cwd: Option<&Path>) -> PathBuf {
+    let workspace_root = PathBuf::from(workspace_root);
+    let cwd = match requested_cwd {
+        Some(cwd) if cwd.is_absolute() => cwd.to_path_buf(),
+        Some(cwd) => workspace_root.join(cwd),
+        None => workspace_root,
+    };
+    normalize_path(cwd)
+}
+
+fn apply_process_cwd_and_pwd(command: &mut Command, cwd: &Path) {
+    command.current_dir(cwd);
+    command.env("PWD", cwd.as_os_str());
+}
+
 #[cfg(windows)]
 fn hide_console_window(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
@@ -869,10 +955,11 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         client: impl ConnectTo<<Client as Role>::Counterpart>,
     ) -> agent_client_protocol::Result<()> {
         let mut command = agent_spawn_command(&self.command, &self.args);
-        command.current_dir(&self.current_dir);
+        apply_process_cwd_and_pwd(&mut command, &self.current_dir);
         for (name, value) in &self.env {
             command.env(name, value);
         }
+        command.env("PWD", self.current_dir.as_os_str());
         // Ensure PATH includes common directories for CLI tools (e.g. node, python)
         // GUI apps on macOS may not inherit the shell's PATH.
         let path = std::env::var_os("PATH").unwrap_or_default();
@@ -1036,10 +1123,11 @@ impl ConnectTo<Client> for TcpAgentProcess {
         // Build the command, appending --port <port>
         let mut command = agent_spawn_command(&self.command, &self.args);
         command.args(["--port", &self.port.to_string()]);
-        command.current_dir(&self.current_dir);
+        apply_process_cwd_and_pwd(&mut command, &self.current_dir);
         for (name, value) in &self.env {
             command.env(name, value);
         }
+        command.env("PWD", self.current_dir.as_os_str());
         // Ensure PATH includes common directories
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
@@ -1255,12 +1343,18 @@ fn trim_line_ending(line: &mut String) {
 
 struct AgentChildGuard {
     child: Arc<Mutex<Option<Child>>>,
+    #[cfg(windows)]
+    _job: Option<WindowsKillOnDropJob>,
 }
 
 impl AgentChildGuard {
     fn new(child: Child, shutdown_signal: ShutdownSignal) -> Self {
+        #[cfg(windows)]
+        let job = WindowsKillOnDropJob::for_child(&child).ok();
         let guard = Self {
             child: Arc::new(Mutex::new(Some(child))),
+            #[cfg(windows)]
+            _job: job,
         };
         shutdown_signal.register_agent_child(&guard.child);
         if shutdown_signal.is_requested() {
@@ -1271,6 +1365,63 @@ impl AgentChildGuard {
 
     fn handle(&self) -> Arc<Mutex<Option<Child>>> {
         self.child.clone()
+    }
+}
+
+#[cfg(windows)]
+struct WindowsKillOnDropJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for WindowsKillOnDropJob {}
+
+#[cfg(windows)]
+impl WindowsKillOnDropJob {
+    fn for_child(child: &Child) -> anyhow::Result<Self> {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                anyhow::bail!("CreateJobObjectW failed");
+            }
+
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set_ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut _,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set_ok == 0 {
+                CloseHandle(job);
+                anyhow::bail!("SetInformationJobObject failed");
+            }
+
+            let process = child.as_raw_handle() as HANDLE;
+            let assign_ok = AssignProcessToJobObject(job, process);
+            if assign_ok == 0 {
+                CloseHandle(job);
+                anyhow::bail!("AssignProcessToJobObject failed");
+            }
+
+            Ok(Self(job))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsKillOnDropJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
     }
 }
 
@@ -1677,7 +1828,8 @@ pub(crate) fn run_session(
                         &request_payload,
                     )?;
 
-                    let response = terminal_create_manager.create_terminal(&request)?;
+                    let response = terminal_create_manager
+                        .create_terminal(&terminal_create_log_config.workspace_root, &request)?;
                     let response_payload =
                         serde_json::to_value(&response).map_err(|err| anyhow!(err.to_string()))?;
                     append_runtime_event_log(
@@ -1926,7 +2078,7 @@ pub(crate) fn run_session(
                         session_id: session.session_id().0.to_string(),
                     });
                     if supports_session_list {
-                        sync_session_title_from_list(
+                        let _ = sync_session_title_from_list(
                             &config,
                             &tx_events,
                             &connection,
@@ -2071,6 +2223,28 @@ pub(crate) fn run_session(
                                             RuntimeCommand::Shutdown => {
                                                 shutdown_signal.request_shutdown();
                                                 return Ok(());
+                                            }
+                                            RuntimeCommand::ResolveCodeBuddyInterruption {
+                                                session_id,
+                                                tool_call_id,
+                                                decision,
+                                                reply_tx,
+                                            } => {
+                                                let connection = session.connection();
+                                                let result =
+                                                    send_codebuddy_interruption_resolution(
+                                                        &config,
+                                                        &connection,
+                                                        &session_id,
+                                                        &tool_call_id,
+                                                        &decision,
+                                                    )
+                                                    .await;
+                                                if result.is_ok() {
+                                                    let _ = permission_broker
+                                                        .clear_early_resolution(&tool_call_id);
+                                                }
+                                                let _ = reply_tx.send(result);
                                             }
                                             RuntimeCommand::SendPrompt(_)
                                             | RuntimeCommand::SetConfigOption { .. }
@@ -2228,6 +2402,26 @@ pub(crate) fn run_session(
                                 .await;
                                 let _ = reply_tx.send(result);
                             }
+                            RuntimeCommand::ResolveCodeBuddyInterruption {
+                                session_id,
+                                tool_call_id,
+                                decision,
+                                reply_tx,
+                            } => {
+                                let connection = session.connection();
+                                let result = send_codebuddy_interruption_resolution(
+                                    &config,
+                                    &connection,
+                                    &session_id,
+                                    &tool_call_id,
+                                    &decision,
+                                )
+                                .await;
+                                if result.is_ok() {
+                                    let _ = permission_broker.clear_early_resolution(&tool_call_id);
+                                }
+                                let _ = reply_tx.send(result);
+                            }
                             RuntimeCommand::CancelPrompt { reply_tx } => {
                                 let _ = permission_broker.cancel_all();
                                 let _ = reply_tx.send(Ok(()));
@@ -2257,6 +2451,36 @@ pub(crate) fn run_session(
     result
 }
 
+async fn send_codebuddy_interruption_resolution(
+    config: &SessionConfig,
+    connection: &ConnectionTo<Agent>,
+    session_id: &str,
+    tool_call_id: &str,
+    decision: &str,
+) -> anyhow::Result<()> {
+    let payload = json!({
+        "sessionId": session_id,
+        "toolCallId": tool_call_id,
+        "decision": decision,
+    });
+    append_runtime_event_log(config, "codebuddy/resolve_interruption", &payload)?;
+
+    let params: Arc<serde_json::value::RawValue> =
+        serde_json::value::RawValue::from_string(payload.to_string())?.into();
+    let request = ClientRequest::ExtMethodRequest(ExtRequest::new(
+        "_codebuddy.ai/resolveInterruption",
+        params,
+    ));
+
+    connection
+        .send_request_to(Agent, request)
+        .block_task()
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+
+    Ok(())
+}
+
 async fn emit_turn_finished(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
@@ -2272,11 +2496,10 @@ async fn emit_turn_finished(
         &json!({ "stopReason": stop_reason.clone() }),
     )?;
 
-    if supports_session_list {
-        sync_session_title_from_list(config, tx_events, connection, session_id).await?;
-    }
-
     let _ = tx_events.send(ClientEvent::TurnFinished { stop_reason });
+    if supports_session_list {
+        sync_session_title_from_list_after_turn(config, tx_events, connection, session_id).await;
+    }
     Ok(())
 }
 
@@ -2285,7 +2508,7 @@ async fn sync_session_title_from_list(
     tx_events: &mpsc::Sender<ClientEvent>,
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let request = ListSessionsRequest::new().cwd(PathBuf::from(&config.workspace_root));
     let response = connection
         .send_request_to(Agent, request)
@@ -2314,10 +2537,43 @@ async fn sync_session_title_from_list(
             let _ = tx_events.send(ClientEvent::SessionTitleUpdated {
                 title: trimmed.to_string(),
             });
+            return Ok(true);
         }
     }
 
-    Ok(())
+    Ok(false)
+}
+
+async fn sync_session_title_from_list_after_turn(
+    config: &SessionConfig,
+    tx_events: &mpsc::Sender<ClientEvent>,
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+) {
+    if let Err(error) =
+        sync_session_title_from_list(config, tx_events, connection, session_id).await
+    {
+        let _ = append_runtime_event_log(
+            config,
+            "session/list_title_sync_failed",
+            &json!({ "error": error.to_string() }),
+        );
+        return;
+    }
+
+    for delay_ms in TITLE_SYNC_RETRY_DELAYS_MS {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        if let Err(error) =
+            sync_session_title_from_list(config, tx_events, connection, session_id).await
+        {
+            let _ = append_runtime_event_log(
+                config,
+                "session/list_title_sync_retry_failed",
+                &json!({ "delayMs": delay_ms, "error": error.to_string() }),
+            );
+            return;
+        }
+    }
 }
 
 async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Option<StopReason> {
@@ -2453,6 +2709,7 @@ fn select_lines(content: &str, start_line: Option<u32>, limit: Option<u32>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn hidden_agent_process_uses_workspace_as_current_dir() {
@@ -2466,5 +2723,77 @@ mod tests {
         assert_eq!(process.args, vec!["--acp"]);
         assert_eq!(process.env, vec![("CODEBUDDY_TEST".into(), "1".into())]);
         assert_eq!(process.current_dir, PathBuf::from("D:/work/kodex"));
+    }
+
+    #[test]
+    fn process_cwd_defaults_to_workspace_root() {
+        assert_eq!(
+            process_cwd("workspace-root", None),
+            PathBuf::from("workspace-root")
+        );
+    }
+
+    #[test]
+    fn process_cwd_resolves_relative_request_from_workspace_root() {
+        assert_eq!(
+            process_cwd("workspace-root", Some(Path::new("backend"))),
+            PathBuf::from("workspace-root/backend")
+        );
+    }
+
+    #[test]
+    fn process_context_sets_current_dir_and_pwd() {
+        let cwd = PathBuf::from("workspace-root");
+        let mut command = Command::new("codebuddy.exe");
+
+        apply_process_cwd_and_pwd(&mut command, &cwd);
+
+        assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
+        let pwd = command
+            .get_envs()
+            .find(|(name, _)| name.to_string_lossy() == "PWD")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string());
+        assert_eq!(pwd.as_deref(), Some("workspace-root"));
+    }
+
+    #[test]
+    fn permission_broker_delivers_pending_resolution() {
+        let broker = PermissionBroker::default();
+        let rx = broker.register("call-1".into()).unwrap();
+
+        let delivered = broker.resolve("call-1", Some("allow".into())).unwrap();
+
+        assert!(delivered);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)).unwrap(),
+            Some("allow".into())
+        );
+    }
+
+    #[test]
+    fn permission_broker_replays_early_resolution() {
+        let broker = PermissionBroker::default();
+
+        let delivered = broker.resolve("call-1", Some("allowAll".into())).unwrap();
+        let rx = broker.register("call-1".into()).unwrap();
+
+        assert!(!delivered);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)).unwrap(),
+            Some("allowAll".into())
+        );
+    }
+
+    #[test]
+    fn permission_broker_cancel_clears_early_resolutions() {
+        let broker = PermissionBroker::default();
+
+        let delivered = broker.resolve("call-1", Some("allow".into())).unwrap();
+        broker.cancel_all().unwrap();
+        let rx = broker.register("call-1".into()).unwrap();
+
+        assert!(!delivered);
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
     }
 }

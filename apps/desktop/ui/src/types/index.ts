@@ -77,7 +77,14 @@ export type UserPromptContent =
       thumbnail_data: string | null;
       thumbnail_mime_type: string | null;
     }
-  | { type: "file"; data: string; mime_type: string | null; name: string };
+  | {
+      type: "file";
+      data?: string | null;
+      text?: string | null;
+      uri?: string | null;
+      mime_type: string | null;
+      name: string;
+    };
 
 export interface AgentPlanEntry {
   id?: string | null;
@@ -90,6 +97,7 @@ export interface ChatMessage {
   id: string;
   role: MessageRole;
   body: string;
+  created_at?: string;
 }
 
 export interface ChatMessageDelta {
@@ -105,6 +113,63 @@ export interface ToolLogEntry {
 export interface TerminalOutput {
   exit_code: number | null;
   output: string;
+}
+
+export type TerminalSessionStatus = "running" | "exited";
+
+export interface TerminalSession {
+  terminal_id: string;
+  workspace_root: string;
+  cwd: string;
+  shell: string;
+  status: TerminalSessionStatus;
+  exit_code: number | null;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalOpenRequest {
+  workspace_root?: string | null;
+  force_new?: boolean;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalWriteRequest {
+  terminal_id: string;
+  data: string;
+}
+
+export interface TerminalResizeRequest {
+  terminal_id: string;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalIdRequest {
+  terminal_id: string;
+}
+
+export interface TerminalOutputEvent {
+  terminal_id: string;
+  workspace_root: string;
+  seq: number;
+  data: string;
+}
+
+export interface TerminalStatusEvent {
+  terminal_id: string;
+  workspace_root: string;
+  status: TerminalSessionStatus;
+  cwd: string;
+  shell: string;
+  exit_code: number | null;
+}
+
+export interface TerminalExitEvent {
+  terminal_id: string;
+  workspace_root: string;
+  exit_code: number | null;
 }
 
 export interface PermissionOption {
@@ -188,6 +253,8 @@ export interface UiSnapshot {
   inspector_tab: InspectorTab;
   inspector_sections: SidebarSection[];
   session_changes: SessionFileChange[];
+  review_changes: SessionFileChange[];
+  turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
 }
 
@@ -206,7 +273,14 @@ export interface UiSnapshotPatch {
   inspector_tab: InspectorTab;
   inspector_sections: SidebarSection[];
   session_changes: SessionFileChange[];
+  review_changes: SessionFileChange[];
+  turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
+}
+
+export interface TurnFileChanges {
+  message_id: string;
+  changes: SessionFileChange[];
 }
 
 export interface RecentWorkspace {
@@ -242,6 +316,78 @@ export interface WorkspaceSessionList {
 }
 
 export type FileChangeType = "Created" | "Modified" | "Deleted";
+export type ChangeSetSource =
+  | "AgentTurn"
+  | "AgentConversation"
+  | "ManualEdit"
+  | "GitWorktree"
+  | "ToolPreview";
+export type ChangeSetStatus = "Pending" | "Complete" | "Live" | "LegacyIncomplete";
+export type DiffQuality =
+  | "Exact"
+  | "LargeFileSkipped"
+  | "BinarySkipped"
+  | "MissingBaseline"
+  | "FragmentRejected"
+  | "LegacyIncomplete";
+
+export interface ChangeSetSummary {
+  id: string;
+  source: ChangeSetSource;
+  session_id: string | null;
+  workspace_root: string;
+  message_id: string | null;
+  tool_call_id: string | null;
+  owner_key: string | null;
+  label: string;
+  added_lines: number;
+  removed_lines: number;
+  file_count: number;
+  updated_at: string;
+  status: ChangeSetStatus;
+}
+
+export interface FileChangeSummary {
+  change_set_id: string;
+  path: string;
+  change_type: FileChangeType;
+  added_lines: number;
+  removed_lines: number;
+  quality: DiffQuality;
+  updated_at: string;
+}
+
+export interface FileChangeRecord {
+  change_set_id: string;
+  path: string;
+  change_type: FileChangeType;
+  old_text: string | null;
+  new_text: string | null;
+  added_lines: number;
+  removed_lines: number;
+  quality: DiffQuality;
+  updated_at: string;
+}
+
+export interface ListChangeSetsRequest {
+  source?: ChangeSetSource | null;
+  session_id?: string | null;
+  workspace_root?: string | null;
+}
+
+export interface ListChangeSetFilesRequest {
+  change_set_id: string;
+}
+
+export interface GetChangeSetFileDiffRequest {
+  change_set_id: string;
+  path: string;
+}
+
+export interface ChangeSetFilesResponse {
+  change_set_id: string;
+  files: FileChangeSummary[];
+}
 
 export interface SessionFileChange {
   path: string;
@@ -259,7 +405,10 @@ export interface TabDescriptor {
   label: string;
   dirty?: boolean;
   filePath?: string;
-  diffSource?: "session" | "git";
+  diffSource?: "session" | "git" | "change-set";
+  changeSetId?: string;
+  diffChange?: SessionFileChange;
+  diffRecord?: FileChangeRecord;
   lineNumber?: number;
   searchQuery?: string;
   /** Incrementing counter to force navigation even when lineNumber is the same */

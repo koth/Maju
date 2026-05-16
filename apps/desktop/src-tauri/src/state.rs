@@ -5,14 +5,16 @@ use session_store::SessionStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use terminal_service::{TerminalEventSink, TerminalService};
 use workspace_model::{
-    AgentCliId, OpenWorkspaceItem, SessionListItem, UiSnapshot, WorkspaceDescriptor,
-    WorkspaceSessionList,
+    AgentCliId, OpenWorkspaceItem, SessionListItem, TerminalOpenRequest, TerminalResizeRequest,
+    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceSessionList,
 };
 
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
     lsp_service: LspService,
+    terminal_service: TerminalService,
 }
 
 #[derive(Default)]
@@ -36,10 +38,16 @@ impl AppState {
         app_core::startup_perf::mark("state/new", "");
         let lsp_service =
             app_core::startup_perf::measure("state/new_lsp_service", "", LspService::new);
+        let terminal_service = TerminalService::new();
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
             lsp_service,
+            terminal_service,
         }
+    }
+
+    pub fn set_terminal_event_sink(&self, sink: TerminalEventSink) {
+        self.terminal_service.set_event_sink(sink);
     }
 
     pub fn open_workspace(
@@ -97,6 +105,7 @@ impl AppState {
         guard.workspaces.remove(&active_key);
         if let Some(root) = closing_root {
             self.lsp_service.shutdown_workspace(&root);
+            self.terminal_service.shutdown_workspace(&root);
         }
         let next_key = guard.workspaces.keys().next().cloned();
         guard.active_workspace = next_key.clone();
@@ -114,10 +123,85 @@ impl AppState {
             guard.active_workspace = None;
         }
         self.lsp_service.shutdown_all();
+        self.terminal_service.shutdown_all();
     }
 
     pub fn lsp_service(&self) -> LspService {
         self.lsp_service.clone()
+    }
+
+    pub fn terminal_open(&self, request: TerminalOpenRequest) -> Result<TerminalSession, String> {
+        let path = self.resolve_terminal_workspace(request.workspace_root)?;
+        if request.force_new {
+            self.terminal_service
+                .open_workspace_new(path, request.cols, request.rows)
+                .map_err(|e| e.to_string())
+        } else {
+            self.terminal_service
+                .open_workspace(path, request.cols, request.rows)
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    pub fn terminal_write(&self, request: TerminalWriteRequest) -> Result<(), String> {
+        self.terminal_service
+            .write(&request.terminal_id, &request.data)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn terminal_resize(
+        &self,
+        request: TerminalResizeRequest,
+    ) -> Result<TerminalSession, String> {
+        self.terminal_service
+            .resize(&request.terminal_id, request.cols, request.rows)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn terminal_terminate(&self, terminal_id: &str) -> Result<(), String> {
+        self.terminal_service
+            .terminate(terminal_id)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn terminal_restart(
+        &self,
+        request: TerminalResizeRequest,
+    ) -> Result<TerminalSession, String> {
+        self.terminal_service
+            .restart(&request.terminal_id, request.cols, request.rows)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn terminal_list(
+        &self,
+        workspace_root: Option<String>,
+    ) -> Result<Vec<TerminalSession>, String> {
+        let path = self.resolve_terminal_workspace(workspace_root)?;
+        self.terminal_service
+            .list_workspace(path)
+            .map_err(|e| e.to_string())
+    }
+
+    fn resolve_terminal_workspace(
+        &self,
+        workspace_root: Option<String>,
+    ) -> Result<PathBuf, String> {
+        if let Some(path) = workspace_root {
+            return Ok(PathBuf::from(path));
+        }
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active_key = guard
+            .active_workspace
+            .as_deref()
+            .ok_or("No workspace open")?;
+        entry_path(
+            guard
+                .workspaces
+                .get(active_key)
+                .ok_or("Workspace is not open")?,
+        )
+        .ok_or_else(|| "Workspace is not open".into())
     }
 
     pub fn list_open_workspaces(&self) -> Result<Vec<OpenWorkspaceItem>, String> {
@@ -176,6 +260,14 @@ impl AppState {
     pub fn has_open_workspaces(&self) -> Result<bool, String> {
         let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         Ok(!guard.workspaces.is_empty())
+    }
+
+    pub fn has_running_codex_acp_session(&self) -> Result<bool, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        Ok(guard.workspaces.values().any(|entry| match entry {
+            WorkspaceEntry::Connected(app) => app.has_running_codex_acp_session(),
+            WorkspaceEntry::Dormant(_) => false,
+        }))
     }
 
     pub fn poll_active_and_get_snapshot_since(

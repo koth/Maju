@@ -3,8 +3,9 @@ use crate::state::AppState;
 use app_core::normalize_tracked_path;
 use tauri::{AppHandle, State};
 use workspace_model::{
-    AgentCliId, SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent,
-    WorkspaceSessionList,
+    AgentCliId, ChangeSetFilesResponse, ChangeSetSummary, FileChangeRecord,
+    GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
+    SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -97,6 +98,30 @@ pub fn session_delete(
 #[tauri::command]
 pub fn session_get_changes(state: State<'_, AppState>) -> Result<Vec<SessionFileChange>, String> {
     state.with_app(|app| Ok(app.ui.session_changes.clone()))
+}
+
+#[tauri::command]
+pub fn session_list_change_sets(
+    state: State<'_, AppState>,
+    request: Option<ListChangeSetsRequest>,
+) -> Result<Vec<ChangeSetSummary>, String> {
+    state.with_app(|app| Ok(app.list_change_sets(request.unwrap_or_default())))
+}
+
+#[tauri::command]
+pub fn session_list_change_set_files(
+    state: State<'_, AppState>,
+    request: ListChangeSetFilesRequest,
+) -> Result<ChangeSetFilesResponse, String> {
+    state.with_app(|app| Ok(app.list_change_set_files(request)))
+}
+
+#[tauri::command]
+pub fn session_get_change_set_file_diff(
+    state: State<'_, AppState>,
+    request: GetChangeSetFileDiffRequest,
+) -> Result<Option<FileChangeRecord>, String> {
+    state.with_app(|app| Ok(app.get_change_set_file_diff(request)))
 }
 
 fn normalize_to_ws_relative(path: &str, ws_root: &str) -> String {

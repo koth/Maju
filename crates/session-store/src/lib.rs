@@ -1,14 +1,18 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
 use workspace_model::{
-    ChatMessage, FileChangeType, MessageRole, SessionFileChange, SessionListItem, TimelineItem,
-    ToolDiffPreview, ToolInvocation, ToolStatus,
+    ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage, DiffQuality, FileChangeRecord,
+    FileChangeSummary, FileChangeType, MessageRole, SessionFileChange, SessionListItem,
+    TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
+const LEGACY_AGENT_CONVERSATION_PREFIX: &str = "legacy:agent-conversation:";
+const LEGACY_AGENT_RECENT_PREFIX: &str = "legacy:agent-recent:";
+const LEGACY_AGENT_TURN_PREFIX: &str = "legacy:agent-turn:";
 
 pub struct SessionStore {
     conn: Connection,
@@ -89,9 +93,69 @@ impl SessionStore {
                 UNIQUE(session_id, path)
             );
 
+            CREATE TABLE IF NOT EXISTS session_review_file_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                base_text TEXT,
+                new_text TEXT NOT NULL,
+                added_lines INTEGER NOT NULL DEFAULT 0,
+                removed_lines INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(session_id, path)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_turn_file_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                base_text TEXT,
+                new_text TEXT NOT NULL,
+                added_lines INTEGER NOT NULL DEFAULT 0,
+                removed_lines INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(session_id, message_id, path)
+            );
+
+            CREATE TABLE IF NOT EXISTS change_sets (
+                id TEXT PRIMARY KEY,
+                session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+                workspace_root TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message_id TEXT,
+                tool_call_id TEXT,
+                owner_key TEXT,
+                label TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS change_set_files (
+                change_set_id TEXT NOT NULL REFERENCES change_sets(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                base_text TEXT,
+                target_text TEXT,
+                added_lines INTEGER NOT NULL DEFAULT 0,
+                removed_lines INTEGER NOT NULL DEFAULT 0,
+                quality TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (change_set_id, path)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_tools_session ON tool_invocations(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_file_changes_session ON session_file_changes(session_id);
+            CREATE INDEX IF NOT EXISTS idx_review_file_changes_session ON session_review_file_changes(session_id);
+            CREATE INDEX IF NOT EXISTS idx_turn_file_changes_session_message ON session_turn_file_changes(session_id, message_id);
+            CREATE INDEX IF NOT EXISTS idx_change_sets_workspace_source ON change_sets(workspace_root, source, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_change_sets_session_source ON change_sets(session_id, source, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_change_sets_message ON change_sets(message_id);
+            CREATE INDEX IF NOT EXISTS idx_change_set_files_change_set ON change_set_files(change_set_id);
             ",
         )?;
 
@@ -162,6 +226,17 @@ impl SessionStore {
         if !has_agent_col {
             self.conn
                 .execute_batch("ALTER TABLE sessions ADD COLUMN agent_cli TEXT;")?;
+        }
+
+        let has_codex_provider_col: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'codex_provider'",
+            )?
+            .query_row([], |row| row.get(0))?;
+        if !has_codex_provider_col {
+            self.conn
+                .execute_batch("ALTER TABLE sessions ADD COLUMN codex_provider TEXT;")?;
         }
 
         Ok(())
@@ -379,6 +454,26 @@ impl SessionStore {
             .flatten())
     }
 
+    pub fn update_session_codex_provider(&self, id: &str, provider: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET codex_provider = ?1, updated_at = ?2 WHERE id = ?3",
+            params![provider, now_iso(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session_codex_provider(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT codex_provider FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionListItem>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.title, s.status, s.created_at, s.updated_at,
@@ -548,7 +643,7 @@ impl SessionStore {
                 id: Uuid,
                 role: String,
                 body: String,
-                seq: i64,
+                created_at: String,
             },
             Tool {
                 id: Uuid,
@@ -563,7 +658,6 @@ impl SessionStore {
                 error: Option<String>,
                 diff_paths: Vec<std::path::PathBuf>,
                 diff_previews: Vec<ToolDiffPreview>,
-                seq: i64,
             },
         }
 
@@ -572,7 +666,7 @@ impl SessionStore {
         // Load messages
         {
             let mut stmt = self.conn.prepare(
-                "SELECT id, role, body, seq FROM messages WHERE session_id = ?1 ORDER BY seq",
+                "SELECT id, role, body, seq, created_at FROM messages WHERE session_id = ?1 ORDER BY seq",
             )?;
             let rows = stmt.query_map(params![id], |row| {
                 let id_str: String = row.get(0)?;
@@ -582,7 +676,7 @@ impl SessionStore {
                         id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4()),
                         role: row.get(1)?,
                         body: row.get(2)?,
-                        seq: row.get(3)?,
+                        created_at: row.get(4)?,
                     },
                 ))
             })?;
@@ -616,7 +710,6 @@ impl SessionStore {
                         error: row.get(9)?,
                         diff_paths: decode_json_vec(diff_paths_json.as_deref()),
                         diff_previews: decode_json_vec(diff_previews_json.as_deref()),
-                        seq: row.get(12)?,
                     },
                 ))
             })?;
@@ -631,13 +724,24 @@ impl SessionStore {
         let mut timeline = Vec::new();
         for (_seq, entry) in entries {
             match entry {
-                Entry::Message { id, role, body, .. } => {
+                Entry::Message {
+                    id,
+                    role,
+                    body,
+                    created_at,
+                    ..
+                } => {
                     let role = match role.as_str() {
                         "User" => MessageRole::User,
                         "Assistant" => MessageRole::Assistant,
                         _ => MessageRole::System,
                     };
-                    messages.push(ChatMessage { id, role, body });
+                    messages.push(ChatMessage {
+                        id,
+                        role,
+                        body,
+                        created_at,
+                    });
                     timeline.push(TimelineItem::Message(id));
                 }
                 Entry::Tool {
@@ -817,12 +921,616 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn replace_review_file_changes(
+        &self,
+        session_id: &str,
+        changes: &[SessionFileChange],
+    ) -> Result<()> {
+        self.replace_changes_in_table("session_review_file_changes", session_id, changes)
+    }
+
     /// Load all file changes for a session, ordered by path.
     pub fn load_file_changes(&self, session_id: &str) -> Result<Vec<SessionFileChange>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, change_type, base_text, new_text, added_lines, removed_lines, updated_at
-             FROM session_file_changes WHERE session_id = ?1 ORDER BY path",
+        self.load_changes_from_table("session_file_changes", session_id)
+    }
+
+    pub fn load_review_file_changes(&self, session_id: &str) -> Result<Vec<SessionFileChange>> {
+        self.load_changes_from_table("session_review_file_changes", session_id)
+    }
+
+    pub fn replace_turn_file_changes(
+        &self,
+        session_id: &str,
+        message_id: &Uuid,
+        changes: &[SessionFileChange],
+    ) -> Result<()> {
+        let message_id = message_id.to_string();
+        self.conn.execute(
+            "DELETE FROM session_turn_file_changes WHERE session_id = ?1 AND message_id = ?2",
+            params![session_id, &message_id],
         )?;
+
+        for change in changes {
+            self.insert_turn_file_change(session_id, &message_id, change)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn replace_all_turn_file_changes(
+        &self,
+        session_id: &str,
+        turn_changes: &[TurnFileChanges],
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM session_turn_file_changes WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        for entry in turn_changes {
+            let message_id = entry.message_id.to_string();
+            for change in &entry.changes {
+                self.insert_turn_file_change(session_id, &message_id, change)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn load_turn_file_changes(&self, session_id: &str) -> Result<Vec<TurnFileChanges>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.message_id, c.path, c.change_type, c.base_text, c.new_text, c.added_lines, c.removed_lines, c.updated_at
+             FROM session_turn_file_changes c
+             LEFT JOIN messages m ON m.id = c.message_id AND m.session_id = c.session_id
+             WHERE c.session_id = ?1
+             ORDER BY COALESCE(m.seq, 9223372036854775807), c.message_id, c.path",
+        )?;
+
+        let rows = stmt.query_map(params![session_id], |row| {
+            let change_type_str: String = row.get(2)?;
+            let change_type = match change_type_str.as_str() {
+                "Created" => FileChangeType::Created,
+                "Deleted" => FileChangeType::Deleted,
+                _ => FileChangeType::Modified,
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                SessionFileChange {
+                    path: row.get(1)?,
+                    change_type,
+                    old_text: row.get(3)?,
+                    new_text: row.get(4)?,
+                    added_lines: row.get::<_, i64>(5)? as usize,
+                    removed_lines: row.get::<_, i64>(6)? as usize,
+                    timestamp: row.get(7)?,
+                },
+            ))
+        })?;
+
+        let mut items: Vec<TurnFileChanges> = Vec::new();
+        for row in rows {
+            let (message_id, mut change) = row?;
+            let Ok(message_id) = Uuid::parse_str(&message_id) else {
+                continue;
+            };
+            change.path = normalize_change_path(&change.path);
+            if let Some(entry) = items
+                .iter_mut()
+                .find(|entry| entry.message_id == message_id)
+            {
+                upsert_loaded_change(&mut entry.changes, change);
+            } else {
+                items.push(TurnFileChanges {
+                    message_id,
+                    changes: vec![change],
+                });
+            }
+        }
+
+        Ok(items)
+    }
+
+    fn insert_turn_file_change(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        change: &SessionFileChange,
+    ) -> Result<()> {
+        let change_type = format!("{:?}", change.change_type);
+        let normalized_path = normalize_change_path(&change.path);
+        self.conn.execute(
+            "INSERT INTO session_turn_file_changes (session_id, message_id, path, change_type, base_text, new_text, added_lines, removed_lines, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(session_id, message_id, path) DO UPDATE SET
+                 change_type = excluded.change_type,
+                 base_text = excluded.base_text,
+                 new_text = excluded.new_text,
+                 added_lines = excluded.added_lines,
+                 removed_lines = excluded.removed_lines,
+                 updated_at = excluded.updated_at",
+            params![
+                session_id,
+                message_id,
+                normalized_path,
+                change_type,
+                change.old_text.as_deref(),
+                &change.new_text,
+                change.added_lines as i64,
+                change.removed_lines as i64,
+                now_iso(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_change_set(&self, summary: &ChangeSetSummary) -> Result<()> {
+        let session_id = summary.session_id.map(|id| id.to_string());
+        let message_id = summary.message_id.map(|id| id.to_string());
+        let source = change_set_source_to_str(&summary.source);
+        let status = change_set_status_to_str(&summary.status);
+        let now = now_iso();
+        let updated_at = if summary.updated_at.is_empty() {
+            now.clone()
+        } else {
+            summary.updated_at.clone()
+        };
+
+        self.conn.execute(
+            "INSERT INTO change_sets
+             (id, session_id, workspace_root, source, message_id, tool_call_id, owner_key, label, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                 session_id = excluded.session_id,
+                 workspace_root = excluded.workspace_root,
+                 source = excluded.source,
+                 message_id = excluded.message_id,
+                 tool_call_id = excluded.tool_call_id,
+                 owner_key = excluded.owner_key,
+                 label = excluded.label,
+                 status = excluded.status,
+                 updated_at = excluded.updated_at",
+            params![
+                &summary.id,
+                session_id.as_deref(),
+                &summary.workspace_root,
+                source,
+                message_id.as_deref(),
+                summary.tool_call_id.as_deref(),
+                summary.owner_key.as_deref(),
+                &summary.label,
+                status,
+                now,
+                updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn replace_change_set(
+        &self,
+        summary: &ChangeSetSummary,
+        files: &[FileChangeRecord],
+    ) -> Result<()> {
+        if files.is_empty() {
+            self.conn.execute(
+                "DELETE FROM change_set_files WHERE change_set_id = ?1",
+                params![&summary.id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM change_sets WHERE id = ?1",
+                params![&summary.id],
+            )?;
+            return Ok(());
+        }
+
+        self.upsert_change_set(summary)?;
+        self.conn.execute(
+            "DELETE FROM change_set_files WHERE change_set_id = ?1",
+            params![&summary.id],
+        )?;
+        for file in files {
+            self.upsert_change_set_file(file)?;
+        }
+        Ok(())
+    }
+
+    pub fn upsert_change_set_file(&self, file: &FileChangeRecord) -> Result<()> {
+        let change_type = format!("{:?}", file.change_type);
+        let quality = diff_quality_to_str(&file.quality);
+        let path = normalize_change_path(&file.path);
+        let updated_at = if file.updated_at.is_empty() {
+            now_iso()
+        } else {
+            file.updated_at.clone()
+        };
+        self.conn.execute(
+            "INSERT INTO change_set_files
+             (change_set_id, path, change_type, base_text, target_text, added_lines, removed_lines, quality, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(change_set_id, path) DO UPDATE SET
+                 change_type = excluded.change_type,
+                 base_text = excluded.base_text,
+                 target_text = excluded.target_text,
+                 added_lines = excluded.added_lines,
+                 removed_lines = excluded.removed_lines,
+                 quality = excluded.quality,
+                 updated_at = excluded.updated_at",
+            params![
+                &file.change_set_id,
+                path,
+                change_type,
+                file.old_text.as_deref(),
+                file.new_text.as_deref(),
+                file.added_lines as i64,
+                file.removed_lines as i64,
+                quality,
+                updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_change_sets(
+        &self,
+        session_id: Option<&str>,
+        source: Option<ChangeSetSource>,
+    ) -> Result<Vec<ChangeSetSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                 cs.id,
+                 cs.source,
+                 cs.session_id,
+                 cs.workspace_root,
+                 cs.message_id,
+                 cs.tool_call_id,
+                 cs.owner_key,
+                 cs.label,
+                 COALESCE(SUM(f.added_lines), 0) AS added_lines,
+                 COALESCE(SUM(f.removed_lines), 0) AS removed_lines,
+                 COUNT(f.path) AS file_count,
+                 cs.updated_at,
+                 cs.status
+             FROM change_sets cs
+             LEFT JOIN change_set_files f ON f.change_set_id = cs.id
+             WHERE cs.workspace_root = ?1
+             GROUP BY cs.id
+             ORDER BY cs.updated_at DESC",
+        )?;
+
+        let rows = stmt.query_map(params![&self.workspace_root], |row| {
+            let source_str: String = row.get(1)?;
+            let status_str: String = row.get(12)?;
+            let session_id_str: Option<String> = row.get(2)?;
+            let message_id_str: Option<String> = row.get(4)?;
+            Ok(ChangeSetSummary {
+                id: row.get(0)?,
+                source: change_set_source_from_str(&source_str),
+                session_id: session_id_str
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok()),
+                workspace_root: row.get(3)?,
+                message_id: message_id_str
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok()),
+                tool_call_id: row.get(5)?,
+                owner_key: row.get(6)?,
+                label: row.get(7)?,
+                added_lines: row.get::<_, i64>(8)? as usize,
+                removed_lines: row.get::<_, i64>(9)? as usize,
+                file_count: row.get::<_, i64>(10)? as usize,
+                updated_at: row.get(11)?,
+                status: change_set_status_from_str(&status_str),
+            })
+        })?;
+
+        let mut summaries = Vec::new();
+        for row in rows {
+            let summary = row?;
+            let session_matches = session_id.is_none_or(|expected| {
+                summary.session_id.map(|id| id.to_string()).as_deref() == Some(expected)
+                    || self
+                        .change_set_session_id(&summary.id)
+                        .ok()
+                        .flatten()
+                        .as_deref()
+                        == Some(expected)
+            });
+            let source_matches = source
+                .as_ref()
+                .is_none_or(|expected| &summary.source == expected);
+            if session_matches && source_matches {
+                summaries.push(summary);
+            }
+        }
+        Ok(summaries)
+    }
+
+    pub fn list_change_sets_with_legacy(
+        &self,
+        session_id: &str,
+        source: Option<ChangeSetSource>,
+    ) -> Result<Vec<ChangeSetSummary>> {
+        let mut summaries = self.list_change_sets(Some(session_id), source.clone())?;
+        let mut legacy = self.load_legacy_change_set_summaries(session_id)?;
+        if let Some(source) = source {
+            legacy.retain(|summary| summary.source == source);
+        }
+        summaries.extend(legacy);
+        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+        Ok(summaries)
+    }
+
+    pub fn list_change_set_files(&self, change_set_id: &str) -> Result<Vec<FileChangeSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT change_set_id, path, change_type, added_lines, removed_lines, quality, updated_at
+             FROM change_set_files
+             WHERE change_set_id = ?1
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![change_set_id], |row| {
+            let change_type_str: String = row.get(2)?;
+            let quality_str: String = row.get(5)?;
+            Ok(FileChangeSummary {
+                change_set_id: row.get(0)?,
+                path: normalize_change_path(&row.get::<_, String>(1)?),
+                change_type: file_change_type_from_str(&change_type_str),
+                added_lines: row.get::<_, i64>(3)? as usize,
+                removed_lines: row.get::<_, i64>(4)? as usize,
+                quality: diff_quality_from_str(&quality_str),
+                updated_at: row.get(6)?,
+            })
+        })?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(row?);
+        }
+        Ok(files)
+    }
+
+    pub fn list_change_set_files_with_legacy(
+        &self,
+        change_set_id: &str,
+    ) -> Result<Vec<FileChangeSummary>> {
+        if let Some(records) = self.load_legacy_change_set_records(change_set_id)? {
+            return Ok(records.iter().map(file_summary_from_record).collect());
+        }
+        self.list_change_set_files(change_set_id)
+    }
+
+    pub fn load_change_set_file_diff(
+        &self,
+        change_set_id: &str,
+        path: &str,
+    ) -> Result<Option<FileChangeRecord>> {
+        let normalized_path = normalize_change_path(path);
+        self.conn
+            .query_row(
+                "SELECT change_set_id, path, change_type, base_text, target_text, added_lines, removed_lines, quality, updated_at
+                 FROM change_set_files
+                 WHERE change_set_id = ?1 AND path = ?2",
+                params![change_set_id, normalized_path],
+                |row| {
+                    let change_type_str: String = row.get(2)?;
+                    let quality_str: String = row.get(7)?;
+                    Ok(FileChangeRecord {
+                        change_set_id: row.get(0)?,
+                        path: normalize_change_path(&row.get::<_, String>(1)?),
+                        change_type: file_change_type_from_str(&change_type_str),
+                        old_text: row.get(3)?,
+                        new_text: row.get(4)?,
+                        added_lines: row.get::<_, i64>(5)? as usize,
+                        removed_lines: row.get::<_, i64>(6)? as usize,
+                        quality: diff_quality_from_str(&quality_str),
+                        updated_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn load_change_set_file_diff_with_legacy(
+        &self,
+        change_set_id: &str,
+        path: &str,
+    ) -> Result<Option<FileChangeRecord>> {
+        if let Some(records) = self.load_legacy_change_set_records(change_set_id)? {
+            let normalized = normalize_change_path(path);
+            return Ok(records
+                .into_iter()
+                .find(|record| normalize_change_path(&record.path) == normalized));
+        }
+        self.load_change_set_file_diff(change_set_id, path)
+    }
+
+    fn change_set_session_id(&self, change_set_id: &str) -> Result<Option<String>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT session_id FROM change_sets WHERE id = ?1",
+                params![change_set_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.flatten())
+    }
+
+    fn load_legacy_change_set_summaries(&self, session_id: &str) -> Result<Vec<ChangeSetSummary>> {
+        let mut summaries = Vec::new();
+
+        let conversation = self.load_file_changes(session_id)?;
+        if !conversation.is_empty() {
+            let id = legacy_agent_conversation_id(session_id);
+            let records = legacy_records_from_session_changes(&id, conversation);
+            summaries.push(summarize_change_records(
+                id,
+                ChangeSetSource::AgentConversation,
+                session_id,
+                None,
+                "整体对话（旧数据）",
+                ChangeSetStatus::LegacyIncomplete,
+                &self.workspace_root,
+                &records,
+            ));
+        }
+
+        let recent = self.load_review_file_changes(session_id)?;
+        if !recent.is_empty() {
+            let id = legacy_agent_recent_id(session_id);
+            let records = legacy_records_from_session_changes(&id, recent);
+            summaries.push(summarize_change_records(
+                id,
+                ChangeSetSource::AgentTurn,
+                session_id,
+                None,
+                "最近对话（旧数据）",
+                ChangeSetStatus::LegacyIncomplete,
+                &self.workspace_root,
+                &records,
+            ));
+        }
+
+        for entry in self.load_turn_file_changes(session_id)? {
+            if entry.changes.is_empty() {
+                continue;
+            }
+            let id = legacy_agent_turn_id(session_id, &entry.message_id);
+            let records = legacy_records_from_session_changes(&id, entry.changes);
+            summaries.push(summarize_change_records(
+                id,
+                ChangeSetSource::AgentTurn,
+                session_id,
+                Some(entry.message_id),
+                "历史对话（旧数据）",
+                ChangeSetStatus::LegacyIncomplete,
+                &self.workspace_root,
+                &records,
+            ));
+        }
+
+        Ok(summaries)
+    }
+
+    fn load_legacy_change_set_records(
+        &self,
+        change_set_id: &str,
+    ) -> Result<Option<Vec<FileChangeRecord>>> {
+        if let Some(session_id) = change_set_id.strip_prefix(LEGACY_AGENT_CONVERSATION_PREFIX) {
+            let records = legacy_records_from_session_changes(
+                change_set_id,
+                self.load_file_changes(session_id)?,
+            );
+            return Ok(Some(records));
+        }
+        if let Some(session_id) = change_set_id.strip_prefix(LEGACY_AGENT_RECENT_PREFIX) {
+            let records = legacy_records_from_session_changes(
+                change_set_id,
+                self.load_review_file_changes(session_id)?,
+            );
+            return Ok(Some(records));
+        }
+        if let Some(rest) = change_set_id.strip_prefix(LEGACY_AGENT_TURN_PREFIX)
+            && let Some((session_id, message_id)) = rest.split_once(':')
+            && let Ok(message_id) = Uuid::parse_str(message_id)
+        {
+            let records = self
+                .load_turn_file_changes(session_id)?
+                .into_iter()
+                .find(|entry| entry.message_id == message_id)
+                .map(|entry| legacy_records_from_session_changes(change_set_id, entry.changes))
+                .unwrap_or_default();
+            return Ok(Some(records));
+        }
+        Ok(None)
+    }
+
+    fn replace_changes_in_table(
+        &self,
+        table: &str,
+        session_id: &str,
+        changes: &[SessionFileChange],
+    ) -> Result<()> {
+        let delete_sql = format!("DELETE FROM {table} WHERE session_id = ?1");
+        self.conn.execute(&delete_sql, params![session_id])?;
+
+        for change in changes {
+            let change_type = format!("{:?}", change.change_type);
+            self.upsert_change_in_table(
+                table,
+                session_id,
+                &change.path,
+                &change_type,
+                change.old_text.as_deref(),
+                &change.new_text,
+                change.added_lines,
+                change.removed_lines,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn upsert_change_in_table(
+        &self,
+        table: &str,
+        session_id: &str,
+        path: &str,
+        change_type: &str,
+        base_text: Option<&str>,
+        new_text: &str,
+        added_lines: usize,
+        removed_lines: usize,
+    ) -> Result<()> {
+        let normalized_path = normalize_change_path(path);
+        let existing_sql =
+            format!("SELECT base_text FROM {table} WHERE session_id = ?1 AND path = ?2");
+        let existing_base: Option<String> = self
+            .conn
+            .query_row(
+                &existing_sql,
+                params![session_id, &normalized_path],
+                |row| row.get(0),
+            )
+            .ok();
+        let effective_base = existing_base.as_deref().or(base_text);
+        let insert_sql = format!(
+            "INSERT INTO {table} (session_id, path, change_type, base_text, new_text, added_lines, removed_lines, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(session_id, path) DO UPDATE SET
+                 change_type = excluded.change_type,
+                 base_text = COALESCE({table}.base_text, excluded.base_text),
+                 new_text = excluded.new_text,
+                 added_lines = excluded.added_lines,
+                 removed_lines = excluded.removed_lines,
+                 updated_at = excluded.updated_at"
+        );
+        self.conn.execute(
+            &insert_sql,
+            params![
+                session_id,
+                normalized_path,
+                change_type,
+                effective_base,
+                new_text,
+                added_lines as i64,
+                removed_lines as i64,
+                now_iso(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_changes_from_table(
+        &self,
+        table: &str,
+        session_id: &str,
+    ) -> Result<Vec<SessionFileChange>> {
+        let sql = format!(
+            "SELECT path, change_type, base_text, new_text, added_lines, removed_lines, updated_at
+             FROM {table} WHERE session_id = ?1 ORDER BY path"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
 
         let rows = stmt.query_map(params![session_id], |row| {
             let change_type_str: String = row.get(1)?;
@@ -861,6 +1569,173 @@ impl SessionStore {
             }
         }
         Ok(items)
+    }
+}
+
+fn upsert_loaded_change(items: &mut Vec<SessionFileChange>, item: SessionFileChange) {
+    let normalized = normalize_change_path(&item.path);
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|change| normalize_change_path(&change.path) == normalized)
+    {
+        if item.new_text.len() >= existing.new_text.len() || item.timestamp >= existing.timestamp {
+            *existing = item;
+        }
+    } else {
+        items.push(item);
+    }
+}
+
+fn change_set_source_to_str(source: &ChangeSetSource) -> &'static str {
+    match source {
+        ChangeSetSource::AgentTurn => "AgentTurn",
+        ChangeSetSource::AgentConversation => "AgentConversation",
+        ChangeSetSource::ManualEdit => "ManualEdit",
+        ChangeSetSource::GitWorktree => "GitWorktree",
+        ChangeSetSource::ToolPreview => "ToolPreview",
+    }
+}
+
+fn change_set_source_from_str(source: &str) -> ChangeSetSource {
+    match source {
+        "AgentConversation" => ChangeSetSource::AgentConversation,
+        "ManualEdit" => ChangeSetSource::ManualEdit,
+        "GitWorktree" => ChangeSetSource::GitWorktree,
+        "ToolPreview" => ChangeSetSource::ToolPreview,
+        _ => ChangeSetSource::AgentTurn,
+    }
+}
+
+fn change_set_status_to_str(status: &ChangeSetStatus) -> &'static str {
+    match status {
+        ChangeSetStatus::Pending => "Pending",
+        ChangeSetStatus::Complete => "Complete",
+        ChangeSetStatus::Live => "Live",
+        ChangeSetStatus::LegacyIncomplete => "LegacyIncomplete",
+    }
+}
+
+fn change_set_status_from_str(status: &str) -> ChangeSetStatus {
+    match status {
+        "Pending" => ChangeSetStatus::Pending,
+        "Live" => ChangeSetStatus::Live,
+        "LegacyIncomplete" => ChangeSetStatus::LegacyIncomplete,
+        _ => ChangeSetStatus::Complete,
+    }
+}
+
+fn diff_quality_to_str(quality: &DiffQuality) -> &'static str {
+    match quality {
+        DiffQuality::Exact => "Exact",
+        DiffQuality::LargeFileSkipped => "LargeFileSkipped",
+        DiffQuality::BinarySkipped => "BinarySkipped",
+        DiffQuality::MissingBaseline => "MissingBaseline",
+        DiffQuality::FragmentRejected => "FragmentRejected",
+        DiffQuality::LegacyIncomplete => "LegacyIncomplete",
+    }
+}
+
+fn diff_quality_from_str(quality: &str) -> DiffQuality {
+    match quality {
+        "LargeFileSkipped" => DiffQuality::LargeFileSkipped,
+        "BinarySkipped" => DiffQuality::BinarySkipped,
+        "MissingBaseline" => DiffQuality::MissingBaseline,
+        "FragmentRejected" => DiffQuality::FragmentRejected,
+        "LegacyIncomplete" => DiffQuality::LegacyIncomplete,
+        _ => DiffQuality::Exact,
+    }
+}
+
+fn file_change_type_from_str(change_type: &str) -> FileChangeType {
+    match change_type {
+        "Created" => FileChangeType::Created,
+        "Deleted" => FileChangeType::Deleted,
+        _ => FileChangeType::Modified,
+    }
+}
+
+fn legacy_agent_conversation_id(session_id: &str) -> String {
+    format!("{LEGACY_AGENT_CONVERSATION_PREFIX}{session_id}")
+}
+
+fn legacy_agent_recent_id(session_id: &str) -> String {
+    format!("{LEGACY_AGENT_RECENT_PREFIX}{session_id}")
+}
+
+fn legacy_agent_turn_id(session_id: &str, message_id: &Uuid) -> String {
+    format!("{LEGACY_AGENT_TURN_PREFIX}{session_id}:{message_id}")
+}
+
+fn legacy_records_from_session_changes(
+    change_set_id: &str,
+    changes: Vec<SessionFileChange>,
+) -> Vec<FileChangeRecord> {
+    changes
+        .into_iter()
+        .map(|change| {
+            let quality = if change.old_text.is_some()
+                || matches!(change.change_type, FileChangeType::Created)
+            {
+                DiffQuality::Exact
+            } else {
+                DiffQuality::LegacyIncomplete
+            };
+            FileChangeRecord {
+                change_set_id: change_set_id.to_string(),
+                path: normalize_change_path(&change.path),
+                change_type: change.change_type,
+                old_text: change.old_text,
+                new_text: Some(change.new_text),
+                added_lines: change.added_lines,
+                removed_lines: change.removed_lines,
+                quality,
+                updated_at: change.timestamp,
+            }
+        })
+        .collect()
+}
+
+fn summarize_change_records(
+    id: String,
+    source: ChangeSetSource,
+    session_id: &str,
+    message_id: Option<Uuid>,
+    label: &str,
+    status: ChangeSetStatus,
+    workspace_root: &str,
+    records: &[FileChangeRecord],
+) -> ChangeSetSummary {
+    ChangeSetSummary {
+        id,
+        source,
+        session_id: Uuid::parse_str(session_id).ok(),
+        workspace_root: workspace_root.to_string(),
+        message_id,
+        tool_call_id: None,
+        owner_key: None,
+        label: label.to_string(),
+        added_lines: records.iter().map(|record| record.added_lines).sum(),
+        removed_lines: records.iter().map(|record| record.removed_lines).sum(),
+        file_count: records.len(),
+        updated_at: records
+            .iter()
+            .map(|record| record.updated_at.as_str())
+            .max()
+            .unwrap_or_default()
+            .to_string(),
+        status,
+    }
+}
+
+fn file_summary_from_record(record: &FileChangeRecord) -> FileChangeSummary {
+    FileChangeSummary {
+        change_set_id: record.change_set_id.clone(),
+        path: record.path.clone(),
+        change_type: record.change_type.clone(),
+        added_lines: record.added_lines,
+        removed_lines: record.removed_lines,
+        quality: record.quality.clone(),
+        updated_at: record.updated_at.clone(),
     }
 }
 
@@ -918,6 +1793,58 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_change_set_summary(
+        store: &SessionStore,
+        id: &str,
+        session_id: &str,
+        source: ChangeSetSource,
+        message_id: Option<Uuid>,
+        label: &str,
+    ) -> ChangeSetSummary {
+        ChangeSetSummary {
+            id: id.to_string(),
+            source,
+            session_id: Uuid::parse_str(session_id).ok(),
+            workspace_root: store.workspace_root().to_string(),
+            message_id,
+            tool_call_id: None,
+            owner_key: Some(format!("test:{id}")),
+            label: label.to_string(),
+            added_lines: 0,
+            removed_lines: 0,
+            file_count: 0,
+            updated_at: "10".to_string(),
+            status: ChangeSetStatus::Complete,
+        }
+    }
+
+    fn make_file_record(
+        change_set_id: &str,
+        path: &str,
+        old_text: Option<&str>,
+        new_text: Option<&str>,
+        added_lines: usize,
+        removed_lines: usize,
+    ) -> FileChangeRecord {
+        FileChangeRecord {
+            change_set_id: change_set_id.to_string(),
+            path: path.to_string(),
+            change_type: if old_text.is_none() {
+                FileChangeType::Created
+            } else if new_text.is_none() {
+                FileChangeType::Deleted
+            } else {
+                FileChangeType::Modified
+            },
+            old_text: old_text.map(str::to_string),
+            new_text: new_text.map(str::to_string),
+            added_lines,
+            removed_lines,
+            quality: DiffQuality::Exact,
+            updated_at: "20".to_string(),
+        }
+    }
 
     #[test]
     fn test_create_and_list_sessions() {
@@ -996,6 +1923,67 @@ mod tests {
         assert_eq!(messages[0].body, "hello");
         assert_eq!(messages[1].body, "hi there");
         assert_eq!(timeline.len(), 2);
+    }
+
+    #[test]
+    fn test_replace_and_load_turn_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+        let first_message = Uuid::new_v4();
+        let second_message = Uuid::new_v4();
+
+        store.create_session("s1", "gpt-4").unwrap();
+        store
+            .insert_message("s1", &first_message.to_string(), "Assistant", "first", 1)
+            .unwrap();
+        store
+            .insert_message("s1", &second_message.to_string(), "Assistant", "second", 2)
+            .unwrap();
+
+        store
+            .replace_turn_file_changes(
+                "s1",
+                &first_message,
+                &[SessionFileChange {
+                    path: "src\\first.ts".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("old".into()),
+                    new_text: "new".into(),
+                    added_lines: 1,
+                    removed_lines: 1,
+                    timestamp: "1".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .replace_turn_file_changes(
+                "s1",
+                &second_message,
+                &[SessionFileChange {
+                    path: "src/second.ts".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("before".into()),
+                    new_text: "after".into(),
+                    added_lines: 2,
+                    removed_lines: 0,
+                    timestamp: "2".into(),
+                }],
+            )
+            .unwrap();
+
+        let loaded = store.load_turn_file_changes("s1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].message_id, first_message);
+        assert_eq!(loaded[0].changes[0].path, "src/first.ts");
+        assert_eq!(loaded[1].message_id, second_message);
+        assert_eq!(loaded[1].changes[0].added_lines, 2);
+
+        store
+            .replace_turn_file_changes("s1", &first_message, &[])
+            .unwrap();
+        let loaded = store.load_turn_file_changes("s1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].message_id, second_message);
     }
 
     #[test]
@@ -1319,5 +2307,257 @@ mod tests {
 
         store.replace_file_changes("s1", &[]).unwrap();
         assert!(store.load_file_changes("s1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_change_set_crud_upsert_cleanup_and_session_cascade() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+        let session_id = Uuid::new_v4().to_string();
+        let message_id = Uuid::new_v4();
+        let change_set_id = format!("agent-turn:{session_id}:{message_id}");
+
+        store.create_session(&session_id, "gpt-4").unwrap();
+        store
+            .insert_message(&session_id, &message_id.to_string(), "Assistant", "done", 1)
+            .unwrap();
+
+        let summary = make_change_set_summary(
+            &store,
+            &change_set_id,
+            &session_id,
+            ChangeSetSource::AgentTurn,
+            Some(message_id),
+            "本轮对话",
+        );
+        store
+            .replace_change_set(
+                &summary,
+                &[
+                    make_file_record(
+                        &change_set_id,
+                        "src\\main.rs",
+                        Some("old"),
+                        Some("new"),
+                        1,
+                        1,
+                    ),
+                    make_file_record(&change_set_id, "src/lib.rs", None, Some("created"), 3, 0),
+                ],
+            )
+            .unwrap();
+
+        let summaries = store
+            .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, change_set_id);
+        assert_eq!(summaries[0].file_count, 2);
+        assert_eq!(summaries[0].added_lines, 4);
+        assert_eq!(summaries[0].removed_lines, 1);
+
+        let files = store.list_change_set_files(&change_set_id).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[1].path, "src/main.rs");
+
+        let main_diff = store
+            .load_change_set_file_diff(&change_set_id, "src\\main.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(main_diff.old_text.as_deref(), Some("old"));
+        assert_eq!(main_diff.new_text.as_deref(), Some("new"));
+
+        store
+            .upsert_change_set_file(&make_file_record(
+                &change_set_id,
+                "src/main.rs",
+                Some("old"),
+                Some("newer"),
+                2,
+                2,
+            ))
+            .unwrap();
+        let summaries = store
+            .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+            .unwrap();
+        assert_eq!(summaries[0].file_count, 2);
+        assert_eq!(summaries[0].added_lines, 5);
+        assert_eq!(summaries[0].removed_lines, 2);
+
+        store.replace_change_set(&summary, &[]).unwrap();
+        assert!(
+            store
+                .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_change_set_files(&change_set_id)
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .replace_change_set(
+                &summary,
+                &[make_file_record(
+                    &change_set_id,
+                    "src/main.rs",
+                    Some("base"),
+                    Some("target"),
+                    1,
+                    1,
+                )],
+            )
+            .unwrap();
+        store.delete_session(&session_id).unwrap();
+        assert!(
+            store
+                .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_change_set_files(&change_set_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_change_set_snapshots_survive_workspace_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let store = SessionStore::open(dir.path(), &workspace).unwrap();
+        let session_id = Uuid::new_v4().to_string();
+        let change_set_id = format!("manual:{session_id}");
+
+        store.create_session(&session_id, "gpt-4").unwrap();
+        std::fs::write(workspace.join("src/main.rs"), "current disk").unwrap();
+
+        let summary = make_change_set_summary(
+            &store,
+            &change_set_id,
+            &session_id,
+            ChangeSetSource::ManualEdit,
+            None,
+            "手工修改",
+        );
+        store
+            .replace_change_set(
+                &summary,
+                &[make_file_record(
+                    &change_set_id,
+                    "src/main.rs",
+                    Some("historical base"),
+                    Some("historical target"),
+                    1,
+                    1,
+                )],
+            )
+            .unwrap();
+
+        std::fs::remove_file(workspace.join("src/main.rs")).unwrap();
+        let stored = store
+            .load_change_set_file_diff(&change_set_id, "src/main.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.old_text.as_deref(), Some("historical base"));
+        assert_eq!(stored.new_text.as_deref(), Some("historical target"));
+        assert_eq!(stored.quality, DiffQuality::Exact);
+    }
+
+    #[test]
+    fn test_legacy_change_sets_wrap_existing_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+        let message_id = Uuid::new_v4();
+
+        store.create_session("legacy-session", "gpt-4").unwrap();
+        store
+            .insert_message(
+                "legacy-session",
+                &message_id.to_string(),
+                "Assistant",
+                "legacy done",
+                1,
+            )
+            .unwrap();
+        store
+            .replace_file_changes(
+                "legacy-session",
+                &[SessionFileChange {
+                    path: "src\\conversation.rs".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("A".into()),
+                    new_text: "B".into(),
+                    added_lines: 1,
+                    removed_lines: 1,
+                    timestamp: "100".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .replace_review_file_changes(
+                "legacy-session",
+                &[SessionFileChange {
+                    path: "src/recent.rs".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: None,
+                    new_text: "recent".into(),
+                    added_lines: 2,
+                    removed_lines: 0,
+                    timestamp: "101".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .replace_turn_file_changes(
+                "legacy-session",
+                &message_id,
+                &[SessionFileChange {
+                    path: "src/turn.rs".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("turn base".into()),
+                    new_text: "turn target".into(),
+                    added_lines: 3,
+                    removed_lines: 1,
+                    timestamp: "102".into(),
+                }],
+            )
+            .unwrap();
+
+        let summaries = store
+            .list_change_sets_with_legacy("legacy-session", None)
+            .unwrap();
+        assert_eq!(summaries.len(), 3);
+        assert!(
+            summaries
+                .iter()
+                .any(|summary| summary.source == ChangeSetSource::AgentConversation)
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .filter(|summary| summary.source == ChangeSetSource::AgentTurn)
+                .count(),
+            2
+        );
+
+        let turn_id = legacy_agent_turn_id("legacy-session", &message_id);
+        let turn_diff = store
+            .load_change_set_file_diff_with_legacy(&turn_id, "src\\turn.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn_diff.path, "src/turn.rs");
+        assert_eq!(turn_diff.old_text.as_deref(), Some("turn base"));
+        assert_eq!(turn_diff.new_text.as_deref(), Some("turn target"));
+
+        let recent_id = legacy_agent_recent_id("legacy-session");
+        let recent_files = store.list_change_set_files_with_legacy(&recent_id).unwrap();
+        assert_eq!(recent_files[0].quality, DiffQuality::LegacyIncomplete);
     }
 }

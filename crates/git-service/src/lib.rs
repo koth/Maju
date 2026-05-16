@@ -1,10 +1,11 @@
 use anyhow::{Context, bail};
-use git2::{DiffOptions, IndexAddOption, Repository, Status, StatusOptions};
+use git2::{IndexAddOption, Repository, Status, StatusOptions};
+use similar::{ChangeTag, TextDiff};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use workspace_model::{
-    ChangeSection, ChangedFile, DiffHunk, DiffLine, DiffLineKind, DiffStats, PatchStatus,
-    RepositorySnapshot,
+    ChangeSection, ChangedFile, DiffHunk, DiffLine, DiffLineKind, DiffQuality, DiffStats,
+    FileChangeRecord, FileChangeType, PatchStatus, RepositorySnapshot,
 };
 
 pub struct GitService;
@@ -39,26 +40,20 @@ impl GitService {
             };
 
             let status = entry.status();
-            let section = classify(status);
-            let stats =
-                compute_diff_stats(&repo, &entry, &section).unwrap_or_else(|_| infer_stats(status));
-            if !has_effective_change(&repo, &entry, &section).unwrap_or(true) {
-                continue;
+            for section in sections_for_status(status) {
+                if let Some(record) = build_git_file_record(&repo, path, section.clone(), status)
+                    .unwrap_or_else(|_| fallback_git_record(path, section.clone(), status))
+                {
+                    if !record_has_effective_change(&record) {
+                        continue;
+                    }
+                    changed_files.push(changed_file_from_record(
+                        PathBuf::from(path),
+                        section,
+                        &record,
+                    ));
+                }
             }
-
-            changed_files.push(ChangedFile {
-                path: PathBuf::from(path),
-                section,
-                stats,
-                patch_status: PatchStatus::Proposed,
-                hunks: vec![DiffHunk {
-                    heading: "工作树变更".into(),
-                    lines: vec![DiffLine {
-                        kind: DiffLineKind::Context,
-                        content: format!("Git status entry: {:?}", status),
-                    }],
-                }],
-            });
         }
 
         Ok(RepositorySnapshot {
@@ -86,6 +81,68 @@ impl GitService {
 
         index.write().context("无法写入 Git 索引")
     }
+
+    pub fn head_text(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Option<String>> {
+        let repo = Repository::discover(path).context("failed to discover git repository")?;
+        let workdir = repo.workdir().context("仓库没有工作目录")?;
+        let relative_path = normalize_repo_relative_path(file_path, workdir)?;
+        head_text_for_path(&repo, &relative_path)
+    }
+
+    pub fn file_diff(
+        path: impl AsRef<Path>,
+        file_path: &str,
+        section: ChangeSection,
+    ) -> anyhow::Result<Option<FileChangeRecord>> {
+        let repo = Repository::discover(path).context("failed to discover git repository")?;
+        let workdir = repo.workdir().context("仓库没有工作目录")?;
+        let relative_path = normalize_repo_relative_path(file_path, workdir)?;
+        let status = status_for_path(&repo, &relative_path).unwrap_or(Status::CURRENT);
+        let Some(record) = build_git_file_record(&repo, &relative_path, section, status)? else {
+            return Ok(None);
+        };
+        if record_has_effective_change(&record) {
+            Ok(Some(record))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn file_diff_auto(
+        path: impl AsRef<Path>,
+        file_path: &str,
+    ) -> anyhow::Result<Option<FileChangeRecord>> {
+        let repo = Repository::discover(path).context("failed to discover git repository")?;
+        let workdir = repo.workdir().context("仓库没有工作目录")?;
+        let relative_path = normalize_repo_relative_path(file_path, workdir)?;
+        let status = status_for_path(&repo, &relative_path).unwrap_or(Status::CURRENT);
+
+        for section in sections_for_status(status) {
+            if let Some(record) = build_git_file_record(&repo, &relative_path, section, status)?
+                .filter(record_has_effective_change)
+            {
+                return Ok(Some(record));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn normalize_repo_relative_path(path: &str, workdir: &Path) -> anyhow::Result<String> {
+    let normalized = path.replace('\\', "/");
+    let workdir = workdir.display().to_string().replace('\\', "/");
+    let workdir_prefix = if workdir.ends_with('/') {
+        workdir
+    } else {
+        format!("{workdir}/")
+    };
+    let relative = normalized
+        .strip_prefix(&workdir_prefix)
+        .unwrap_or(&normalized)
+        .trim_start_matches("./");
+    let sanitized = sanitize_relative_path(relative)?;
+    Ok(sanitized.display().to_string().replace('\\', "/"))
 }
 
 fn sanitize_relative_path(path: &str) -> anyhow::Result<PathBuf> {
@@ -125,174 +182,321 @@ fn repository_identity(repo: &Repository) -> (String, String) {
     (branch, head_id)
 }
 
-fn classify(status: Status) -> ChangeSection {
-    if status.is_index_new() || status.is_index_modified() || status.is_index_deleted() {
-        ChangeSection::Staged
-    } else if status.is_wt_new() {
-        ChangeSection::Untracked
-    } else {
-        ChangeSection::Unstaged
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TextState {
+    Text(String),
+    Missing,
+    Binary,
+}
+
+impl TextState {
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            TextState::Text(text) => Some(text),
+            TextState::Missing | TextState::Binary => None,
+        }
+    }
+
+    fn into_text(self) -> Option<String> {
+        match self {
+            TextState::Text(text) => Some(text),
+            TextState::Missing | TextState::Binary => None,
+        }
+    }
+
+    fn exists(&self) -> bool {
+        !matches!(self, TextState::Missing)
+    }
+
+    fn is_binary(&self) -> bool {
+        matches!(self, TextState::Binary)
     }
 }
 
-fn infer_stats(status: Status) -> DiffStats {
+fn sections_for_status(status: Status) -> Vec<ChangeSection> {
+    let mut sections = Vec::new();
+
+    if status.is_index_new()
+        || status.is_index_modified()
+        || status.is_index_deleted()
+        || status.is_index_renamed()
+        || status.is_index_typechange()
+    {
+        sections.push(ChangeSection::Staged);
+    }
+
+    if status.is_wt_new()
+        && !(status.is_index_new()
+            || status.is_index_modified()
+            || status.is_index_deleted()
+            || status.is_index_renamed()
+            || status.is_index_typechange())
+    {
+        sections.push(ChangeSection::Untracked);
+    } else if status.is_wt_modified()
+        || status.is_wt_deleted()
+        || status.is_wt_renamed()
+        || status.is_wt_typechange()
+    {
+        sections.push(ChangeSection::Unstaged);
+    }
+
+    sections
+}
+
+fn status_for_path(repo: &Repository, path: &str) -> Option<Status> {
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(false)
+        .update_index(true);
+
+    let statuses = repo.statuses(Some(&mut options)).ok()?;
+    statuses.iter().find_map(|entry| {
+        let entry_path = entry.path()?;
+        (normalize_status_path(entry_path) == normalize_status_path(path)).then(|| entry.status())
+    })
+}
+
+fn build_git_file_record(
+    repo: &Repository,
+    path: &str,
+    section: ChangeSection,
+    status: Status,
+) -> anyhow::Result<Option<FileChangeRecord>> {
+    let old_state = match section {
+        ChangeSection::Staged => head_text_state_for_path(repo, path)?,
+        ChangeSection::Unstaged => {
+            let index = index_text_state_for_path(repo, path)?;
+            if matches!(index, TextState::Missing) {
+                head_text_state_for_path(repo, path)?
+            } else {
+                index
+            }
+        }
+        ChangeSection::Untracked => TextState::Missing,
+    };
+    let new_state = match section {
+        ChangeSection::Staged => index_text_state_for_path(repo, path)?,
+        ChangeSection::Unstaged | ChangeSection::Untracked => {
+            workdir_text_state_for_path(repo, path)?
+        }
+    };
+
+    let Some(change_type) = infer_file_change_type(&section, status, &old_state, &new_state) else {
+        return Ok(None);
+    };
+    let quality = if old_state.is_binary() || new_state.is_binary() {
+        DiffQuality::BinarySkipped
+    } else {
+        DiffQuality::Exact
+    };
+    let stats = if quality == DiffQuality::Exact {
+        diff_stats_from_text_pair(old_state.as_text(), new_state.as_text())
+    } else {
+        DiffStats {
+            added: 0,
+            removed: 0,
+        }
+    };
+
+    Ok(Some(FileChangeRecord {
+        change_set_id: git_change_set_id(&section),
+        path: normalize_status_path(path),
+        change_type,
+        old_text: old_state.into_text(),
+        new_text: new_state.into_text(),
+        added_lines: stats.added,
+        removed_lines: stats.removed,
+        quality,
+        updated_at: String::new(),
+    }))
+}
+
+fn fallback_git_record(
+    path: &str,
+    section: ChangeSection,
+    status: Status,
+) -> Option<FileChangeRecord> {
+    let change_type = fallback_file_change_type(&section, status)?;
+    Some(FileChangeRecord {
+        change_set_id: git_change_set_id(&section),
+        path: normalize_status_path(path),
+        change_type,
+        old_text: None,
+        new_text: None,
+        added_lines: 0,
+        removed_lines: 0,
+        quality: DiffQuality::BinarySkipped,
+        updated_at: String::new(),
+    })
+}
+
+fn changed_file_from_record(
+    path: PathBuf,
+    section: ChangeSection,
+    record: &FileChangeRecord,
+) -> ChangedFile {
+    ChangedFile {
+        path,
+        section,
+        stats: DiffStats {
+            added: record.added_lines,
+            removed: record.removed_lines,
+        },
+        patch_status: PatchStatus::Proposed,
+        hunks: vec![DiffHunk {
+            heading: "工作树变更".into(),
+            lines: vec![DiffLine {
+                kind: DiffLineKind::Context,
+                content: match record.quality {
+                    DiffQuality::Exact => "Git diff".into(),
+                    DiffQuality::BinarySkipped => "Binary or unreadable file".into(),
+                    DiffQuality::LargeFileSkipped => "Large file skipped".into(),
+                    DiffQuality::MissingBaseline => "Missing baseline".into(),
+                    DiffQuality::FragmentRejected => "Fragment rejected".into(),
+                    DiffQuality::LegacyIncomplete => "Legacy incomplete diff".into(),
+                },
+            }],
+        }],
+    }
+}
+
+fn record_has_effective_change(record: &FileChangeRecord) -> bool {
+    if record.quality != DiffQuality::Exact {
+        return true;
+    }
+    if record.change_type != FileChangeType::Modified {
+        return true;
+    }
+    normalize_line_endings(record.old_text.as_deref().unwrap_or_default())
+        != normalize_line_endings(record.new_text.as_deref().unwrap_or_default())
+}
+
+fn infer_file_change_type(
+    section: &ChangeSection,
+    status: Status,
+    old_state: &TextState,
+    new_state: &TextState,
+) -> Option<FileChangeType> {
+    if matches!(section, ChangeSection::Untracked)
+        || (matches!(section, ChangeSection::Staged) && status.is_index_new())
+    {
+        return Some(FileChangeType::Created);
+    }
+    if (matches!(section, ChangeSection::Staged) && status.is_index_deleted())
+        || (matches!(section, ChangeSection::Unstaged) && status.is_wt_deleted())
+    {
+        return Some(FileChangeType::Deleted);
+    }
+
+    match (old_state.exists(), new_state.exists()) {
+        (false, true) => Some(FileChangeType::Created),
+        (true, false) => Some(FileChangeType::Deleted),
+        (true, true) => Some(FileChangeType::Modified),
+        (false, false) => fallback_file_change_type(section, status),
+    }
+}
+
+fn fallback_file_change_type(section: &ChangeSection, status: Status) -> Option<FileChangeType> {
+    if matches!(section, ChangeSection::Untracked)
+        || (matches!(section, ChangeSection::Staged) && status.is_index_new())
+        || (matches!(section, ChangeSection::Unstaged) && status.is_wt_new())
+    {
+        Some(FileChangeType::Created)
+    } else if (matches!(section, ChangeSection::Staged) && status.is_index_deleted())
+        || (matches!(section, ChangeSection::Unstaged) && status.is_wt_deleted())
+    {
+        Some(FileChangeType::Deleted)
+    } else if status != Status::CURRENT {
+        Some(FileChangeType::Modified)
+    } else {
+        None
+    }
+}
+
+fn git_change_set_id(section: &ChangeSection) -> String {
+    match section {
+        ChangeSection::Staged => "git-worktree:staged",
+        ChangeSection::Unstaged => "git-worktree:unstaged",
+        ChangeSection::Untracked => "git-worktree:untracked",
+    }
+    .into()
+}
+
+fn diff_stats_from_text_pair(old_text: Option<&str>, new_text: Option<&str>) -> DiffStats {
+    let old = normalize_line_endings(old_text.unwrap_or_default());
+    let new = normalize_line_endings(new_text.unwrap_or_default());
+    let diff = TextDiff::from_lines(&old, &new);
     let mut added = 0;
     let mut removed = 0;
 
-    if status.is_index_new() || status.is_wt_new() {
-        added += 1;
-    }
-    if status.is_index_deleted() || status.is_wt_deleted() {
-        removed += 1;
-    }
-    if status.is_index_modified() || status.is_wt_modified() {
-        added += 1;
-        removed += 1;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {}
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Insert => added += 1,
+        }
     }
 
     DiffStats { added, removed }
 }
 
-fn compute_diff_stats(
-    repo: &Repository,
-    entry: &git2::StatusEntry,
-    section: &ChangeSection,
-) -> anyhow::Result<DiffStats> {
-    let path = entry.path().context("entry has no path")?;
-
-    let (added, removed) = match section {
-        ChangeSection::Untracked => {
-            let workdir = repo.workdir().context("no workdir")?;
-            let full_path = workdir.join(path);
-            if full_path.exists() {
-                let content = std::fs::read_to_string(&full_path).unwrap_or_default();
-                let lines = if content.is_empty() {
-                    0
-                } else {
-                    content.lines().count()
-                };
-                (lines, 0)
-            } else {
-                (0, 0)
-            }
-        }
-        ChangeSection::Staged => {
-            let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            let diff = match head_tree {
-                Some(ref tree) => {
-                    let mut opts = DiffOptions::new();
-                    opts.pathspec(path);
-                    repo.diff_tree_to_index(Some(tree), None, Some(&mut opts))?
-                }
-                None => {
-                    return Ok(DiffStats {
-                        added: 0,
-                        removed: 0,
-                    });
-                }
-            };
-            count_diff_stats(&diff)
-        }
-        ChangeSection::Unstaged => {
-            let mut opts = DiffOptions::new();
-            opts.pathspec(path);
-            let diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
-            count_diff_stats(&diff)
-        }
-    };
-
-    Ok(DiffStats { added, removed })
-}
-
-fn has_effective_change(
-    repo: &Repository,
-    entry: &git2::StatusEntry,
-    section: &ChangeSection,
-) -> anyhow::Result<bool> {
-    let path = entry.path().context("entry has no path")?;
-    let status = entry.status();
-
-    if matches!(section, ChangeSection::Untracked) {
-        return Ok(true);
-    }
-
-    if status.is_index_new()
-        || status.is_index_deleted()
-        || status.is_wt_new()
-        || status.is_wt_deleted()
-    {
-        return Ok(true);
-    }
-
-    let old_text = match section {
-        ChangeSection::Staged => head_text_for_path(repo, path)?,
-        ChangeSection::Unstaged => index_text_for_path(repo, path)?
-            .or_else(|| head_text_for_path(repo, path).ok().flatten()),
-        ChangeSection::Untracked => None,
-    };
-    let new_text = match section {
-        ChangeSection::Staged => index_text_for_path(repo, path)?,
-        ChangeSection::Unstaged => workdir_text_for_path(repo, path)?,
-        ChangeSection::Untracked => None,
-    };
-
-    let Some(old_text) = old_text else {
-        return Ok(true);
-    };
-    let Some(new_text) = new_text else {
-        return Ok(true);
-    };
-
-    Ok(normalize_line_endings(&old_text) != normalize_line_endings(&new_text))
-}
-
 fn head_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+    Ok(head_text_state_for_path(repo, path)?.into_text())
+}
+
+fn head_text_state_for_path(repo: &Repository, path: &str) -> anyhow::Result<TextState> {
     let tree = match repo.head().ok().and_then(|head| head.peel_to_tree().ok()) {
         Some(tree) => tree,
-        None => return Ok(None),
+        None => return Ok(TextState::Missing),
     };
     let entry = match tree.get_path(Path::new(path)) {
         Ok(entry) => entry,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(TextState::Missing),
     };
-    read_blob_text(repo, entry.id())
+    read_blob_text_state(repo, entry.id())
 }
 
-fn index_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+fn index_text_state_for_path(repo: &Repository, path: &str) -> anyhow::Result<TextState> {
     let index = repo.index().context("failed to open git index")?;
     let Some(entry) = index.get_path(Path::new(path), 0) else {
-        return Ok(None);
+        return Ok(TextState::Missing);
     };
-    read_blob_text(repo, entry.id)
+    read_blob_text_state(repo, entry.id)
 }
 
-fn workdir_text_for_path(repo: &Repository, path: &str) -> anyhow::Result<Option<String>> {
+fn workdir_text_state_for_path(repo: &Repository, path: &str) -> anyhow::Result<TextState> {
     let workdir = repo.workdir().context("no workdir")?;
     let full_path = workdir.join(path);
     if !full_path.exists() {
-        return Ok(None);
+        return Ok(TextState::Missing);
     }
-    let bytes = std::fs::read(full_path)?;
-    Ok(String::from_utf8(bytes).ok())
+    if full_path.is_dir() {
+        return Ok(TextState::Binary);
+    }
+    let bytes = match std::fs::read(full_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(TextState::Binary),
+    };
+    Ok(String::from_utf8(bytes)
+        .map(TextState::Text)
+        .unwrap_or(TextState::Binary))
 }
 
-fn read_blob_text(repo: &Repository, oid: git2::Oid) -> anyhow::Result<Option<String>> {
+fn read_blob_text_state(repo: &Repository, oid: git2::Oid) -> anyhow::Result<TextState> {
     let blob = repo.find_blob(oid)?;
     Ok(std::str::from_utf8(blob.content())
-        .ok()
-        .map(ToString::to_string))
+        .map(|text| TextState::Text(text.to_string()))
+        .unwrap_or(TextState::Binary))
 }
 
 fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn count_diff_stats(diff: &git2::Diff) -> (usize, usize) {
-    if let Ok(stats) = diff.stats() {
-        (stats.insertions(), stats.deletions())
-    } else {
-        (0, 0)
-    }
+fn normalize_status_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -334,6 +538,12 @@ mod tests {
         repo.commit(Some("HEAD"), &sig, &sig, "commit", &tree, &parent_refs)
             .unwrap();
         drop(tree);
+    }
+
+    fn stage_file(repo: &Repository, rel_path: &str) {
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(rel_path)).unwrap();
+        index.write().unwrap();
     }
 
     #[test]
@@ -470,5 +680,138 @@ mod tests {
         let snapshot = GitService::open_metadata(dir.path()).unwrap();
         assert_eq!(snapshot.branch, "master");
         assert!(snapshot.changed_files.is_empty());
+    }
+
+    #[test]
+    fn staged_diff_uses_head_to_index_pair() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "one\ntwo\n");
+        fs::write(dir.path().join("main.rs"), "one\nTWO\n").unwrap();
+        stage_file(&repo, "main.rs");
+
+        let staged = GitService::file_diff(dir.path(), "main.rs", ChangeSection::Staged)
+            .unwrap()
+            .unwrap();
+        let unstaged =
+            GitService::file_diff(dir.path(), "main.rs", ChangeSection::Unstaged).unwrap();
+
+        assert_eq!(staged.change_type, FileChangeType::Modified);
+        assert_eq!(staged.old_text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(staged.new_text.as_deref(), Some("one\nTWO\n"));
+        assert_eq!(staged.added_lines, 1);
+        assert_eq!(staged.removed_lines, 1);
+        assert_eq!(staged.quality, DiffQuality::Exact);
+        assert!(unstaged.is_none());
+    }
+
+    #[test]
+    fn unstaged_diff_uses_index_to_worktree_pair() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "one\ntwo\n");
+        fs::write(dir.path().join("main.rs"), "one\nTWO\n").unwrap();
+
+        let unstaged = GitService::file_diff(dir.path(), "main.rs", ChangeSection::Unstaged)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(unstaged.change_type, FileChangeType::Modified);
+        assert_eq!(unstaged.old_text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(unstaged.new_text.as_deref(), Some("one\nTWO\n"));
+        assert_eq!(unstaged.added_lines, 1);
+        assert_eq!(unstaged.removed_lines, 1);
+        assert_eq!(unstaged.quality, DiffQuality::Exact);
+    }
+
+    #[test]
+    fn staged_plus_unstaged_same_path_keeps_two_source_pairs() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "value = 1\n");
+        fs::write(dir.path().join("main.rs"), "value = 2\n").unwrap();
+        stage_file(&repo, "main.rs");
+        fs::write(dir.path().join("main.rs"), "value = 3\n").unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        let path_entries: Vec<_> = snapshot
+            .changed_files
+            .iter()
+            .filter(|file| file.path.ends_with("main.rs"))
+            .collect();
+        assert_eq!(path_entries.len(), 2);
+        assert!(
+            path_entries
+                .iter()
+                .any(|file| matches!(file.section, ChangeSection::Staged))
+        );
+        assert!(
+            path_entries
+                .iter()
+                .any(|file| matches!(file.section, ChangeSection::Unstaged))
+        );
+
+        let staged = GitService::file_diff(dir.path(), "main.rs", ChangeSection::Staged)
+            .unwrap()
+            .unwrap();
+        let unstaged = GitService::file_diff(dir.path(), "main.rs", ChangeSection::Unstaged)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(staged.old_text.as_deref(), Some("value = 1\n"));
+        assert_eq!(staged.new_text.as_deref(), Some("value = 2\n"));
+        assert_eq!(unstaged.old_text.as_deref(), Some("value = 2\n"));
+        assert_eq!(unstaged.new_text.as_deref(), Some("value = 3\n"));
+        assert_eq!((staged.added_lines, staged.removed_lines), (1, 1));
+        assert_eq!((unstaged.added_lines, unstaged.removed_lines), (1, 1));
+    }
+
+    #[test]
+    fn untracked_text_diff_uses_empty_to_worktree_pair() {
+        let (dir, _repo) = setup_repo();
+        fs::write(dir.path().join("notes.md"), "alpha\nbeta\n").unwrap();
+
+        let record = GitService::file_diff(dir.path(), "notes.md", ChangeSection::Untracked)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(record.change_type, FileChangeType::Created);
+        assert_eq!(record.old_text, None);
+        assert_eq!(record.new_text.as_deref(), Some("alpha\nbeta\n"));
+        assert_eq!(record.added_lines, 2);
+        assert_eq!(record.removed_lines, 0);
+        assert_eq!(record.quality, DiffQuality::Exact);
+    }
+
+    #[test]
+    fn deleted_file_diff_keeps_old_text_and_empty_target() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "one\ntwo\n");
+        fs::remove_file(dir.path().join("main.rs")).unwrap();
+
+        let record = GitService::file_diff(dir.path(), "main.rs", ChangeSection::Unstaged)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(record.change_type, FileChangeType::Deleted);
+        assert_eq!(record.old_text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(record.new_text, None);
+        assert_eq!(record.added_lines, 0);
+        assert_eq!(record.removed_lines, 2);
+        assert_eq!(record.quality, DiffQuality::Exact);
+    }
+
+    #[test]
+    fn binary_untracked_file_reports_skipped_quality() {
+        let (dir, _repo) = setup_repo();
+        fs::write(dir.path().join("image.bin"), [0, 159, 146, 150]).unwrap();
+
+        let record = GitService::file_diff(dir.path(), "image.bin", ChangeSection::Untracked)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(record.change_type, FileChangeType::Created);
+        assert_eq!(record.old_text, None);
+        assert_eq!(record.new_text, None);
+        assert_eq!(record.added_lines, 0);
+        assert_eq!(record.removed_lines, 0);
+        assert_eq!(record.quality, DiffQuality::BinarySkipped);
     }
 }

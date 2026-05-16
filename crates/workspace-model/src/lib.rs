@@ -124,9 +124,14 @@ pub enum UserPromptContent {
         thumbnail_mime_type: Option<String>,
     },
     File {
-        data: String,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
         mime_type: Option<String>,
         name: String,
+        #[serde(default)]
+        uri: Option<String>,
     },
 }
 
@@ -171,9 +176,26 @@ impl UserPromptContent {
         name: impl Into<String>,
     ) -> Self {
         Self::File {
-            data: data.into(),
+            data: Some(data.into()),
+            text: None,
             mime_type,
             name: name.into(),
+            uri: None,
+        }
+    }
+
+    pub fn text_file(
+        text: impl Into<String>,
+        mime_type: Option<String>,
+        name: impl Into<String>,
+        uri: impl Into<String>,
+    ) -> Self {
+        Self::File {
+            data: None,
+            text: Some(text.into()),
+            mime_type,
+            name: name.into(),
+            uri: Some(uri.into()),
         }
     }
 }
@@ -218,6 +240,8 @@ pub struct ChatMessage {
     pub id: Uuid,
     pub role: MessageRole,
     pub body: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,6 +312,78 @@ pub struct PermissionOption {
 pub struct TerminalOutput {
     pub exit_code: Option<i32>,
     pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalSessionStatus {
+    Running,
+    Exited,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalSession {
+    pub terminal_id: String,
+    pub workspace_root: String,
+    pub cwd: String,
+    pub shell: String,
+    pub status: TerminalSessionStatus,
+    pub exit_code: Option<i32>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalOpenRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub force_new: bool,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalWriteRequest {
+    pub terminal_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalResizeRequest {
+    pub terminal_id: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalIdRequest {
+    pub terminal_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalOutputEvent {
+    pub terminal_id: String,
+    pub workspace_root: String,
+    pub seq: u64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalStatusEvent {
+    pub terminal_id: String,
+    pub workspace_root: String,
+    pub status: TerminalSessionStatus,
+    pub cwd: String,
+    pub shell: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalExitEvent {
+    pub terminal_id: String,
+    pub workspace_root: String,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -390,6 +486,107 @@ pub enum FileChangeType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeSetSource {
+    AgentTurn,
+    AgentConversation,
+    ManualEdit,
+    GitWorktree,
+    ToolPreview,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeSetStatus {
+    Pending,
+    Complete,
+    Live,
+    LegacyIncomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DiffQuality {
+    Exact,
+    LargeFileSkipped,
+    BinarySkipped,
+    MissingBaseline,
+    FragmentRejected,
+    LegacyIncomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangeSetSummary {
+    pub id: String,
+    pub source: ChangeSetSource,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    pub workspace_root: String,
+    #[serde(default)]
+    pub message_id: Option<Uuid>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub owner_key: Option<String>,
+    pub label: String,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub file_count: usize,
+    pub updated_at: String,
+    pub status: ChangeSetStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileChangeSummary {
+    pub change_set_id: String,
+    pub path: String,
+    pub change_type: FileChangeType,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub quality: DiffQuality,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileChangeRecord {
+    pub change_set_id: String,
+    pub path: String,
+    pub change_type: FileChangeType,
+    #[serde(default)]
+    pub old_text: Option<String>,
+    #[serde(default)]
+    pub new_text: Option<String>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub quality: DiffQuality,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ListChangeSetsRequest {
+    #[serde(default)]
+    pub source: Option<ChangeSetSource>,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListChangeSetFilesRequest {
+    pub change_set_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetChangeSetFileDiffRequest {
+    pub change_set_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangeSetFilesResponse {
+    pub change_set_id: String,
+    pub files: Vec<FileChangeSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionFileChange {
     pub path: String,
     pub change_type: FileChangeType,
@@ -398,6 +595,12 @@ pub struct SessionFileChange {
     pub added_lines: usize,
     pub removed_lines: usize,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnFileChanges {
+    pub message_id: Uuid,
+    pub changes: Vec<SessionFileChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -421,6 +624,10 @@ pub struct UiSnapshot {
     pub inspector_tab: InspectorTab,
     pub inspector_sections: Vec<SidebarSection>,
     pub session_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub review_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
 }
@@ -451,6 +658,10 @@ pub struct UiSnapshotPatch {
     pub inspector_sections: Vec<SidebarSection>,
     #[serde(default)]
     pub session_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub review_changes: Vec<SessionFileChange>,
+    #[serde(default)]
+    pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
 }

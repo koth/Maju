@@ -57,9 +57,24 @@ interface Props {
   appTheme: AppTheme;
   onDirtyChange?: (path: string, dirty: boolean) => void;
   onSaved?: () => void;
+  onAddComposerReference?: (request: {
+    path: string;
+    text: string;
+    startLine: number;
+    endLine: number;
+  }) => void;
 }
 
-export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, onDirtyChange, onSaved }: Props) {
+export function EditorView({
+  path,
+  lineNumber,
+  searchQuery,
+  navToken,
+  appTheme,
+  onDirtyChange,
+  onSaved,
+  onAddComposerReference,
+}: Props) {
   const [snapshot, setSnapshot] = useState<EditorFileSnapshot | null>(null);
   const [content, setContent] = useState<string>("");
   const [dirty, setDirty] = useState(false);
@@ -68,20 +83,38 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
   const [conflict, setConflict] = useState<string | null>(null);
   const [lspStatus, setLspStatus] = useState<LspServerStatus | null>(null);
   const [sourceMode, setSourceMode] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [selectionReference, setSelectionReference] = useState<{
+    text: string;
+    startLine: number;
+    endLine: number;
+  } | null>(null);
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const prevPathRef = useRef<string | null>(null);
   const decorationsRef = useRef<monacoEditor.IEditorDecorationsCollection | null>(null);
+  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const lspChangeTimerRef = useRef<number | null>(null);
   const editorDisposedRef = useRef(false);
   const openRequestSeqRef = useRef(0);
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  const onSavedRef = useRef(onSaved);
+
+  useEffect(() => {
+    onDirtyChangeRef.current = onDirtyChange;
+  }, [onDirtyChange]);
+
+  useEffect(() => {
+    onSavedRef.current = onSaved;
+  }, [onSaved]);
 
   const language = useMemo(() => {
     const ext = path.split(".").pop()?.toLowerCase() ?? "";
     return LANG_MAP[ext] ?? "plaintext";
   }, [path]);
-  const fileKind = snapshot?.kind ?? "text";
-  const isTextFile = fileKind === "text";
+  const activeSnapshot = snapshot?.path === path ? snapshot : null;
+  const fileKind = activeSnapshot?.kind ?? "text";
+  const isTextFile = activeSnapshot != null && fileKind === "text";
   const isImageFile = fileKind === "image";
   const isRenderableDocument = isTextFile && (language === "markdown" || language === "html");
   const isSourceMode = isTextFile && (!isRenderableDocument || sourceMode);
@@ -139,7 +172,7 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
           updateModelBaseVersion(path, nextSnapshot.version);
         }
         setDirty(hasDirtyModel);
-        onDirtyChange?.(path, hasDirtyModel);
+        onDirtyChangeRef.current?.(path, hasDirtyModel);
       })
       .catch((e) => {
         if (!cancelled && requestSeq === openRequestSeqRef.current) {
@@ -149,12 +182,12 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
     return () => {
       cancelled = true;
     };
-  }, [path, onDirtyChange, safeSetEditorModel]);
+  }, [path, safeSetEditorModel]);
 
   useEffect(() => {
-    if (!snapshot || !isSourceMode) return;
+    if (!activeSnapshot || !isSourceMode) return;
     let disposed = false;
-    const modelContent = getModelValue(path) ?? snapshot.content;
+    const modelContent = getModelValue(path) ?? activeSnapshot.content;
     editorLspOpenDocument(path, language, modelContent)
       .then((status) => {
         if (!disposed) setLspStatus(status);
@@ -180,7 +213,11 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
       }
       editorLspCloseDocument(path, language).catch(() => {});
     };
-  }, [isSourceMode, language, path, snapshot?.path]);
+  }, [activeSnapshot, isSourceMode, language, path]);
+
+  useEffect(() => {
+    setSelectionReference(null);
+  }, [path, isSourceMode]);
 
   useEffect(() => {
     if (!lspStatus?.running) return;
@@ -252,11 +289,32 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
         if (editorRef.current === editor) {
           editorRef.current = null;
         }
+        selectionDisposableRef.current?.dispose();
+        selectionDisposableRef.current = null;
         editorDisposedRef.current = true;
       });
+      selectionDisposableRef.current?.dispose();
+      const updateSelectionReference = () => {
+        const model = editor.getModel();
+        const selection = editor.getSelection();
+        if (!model || !selection || selection.isEmpty()) {
+          setSelectionReference(null);
+          return;
+        }
+        const text = model.getValueInRange(selection);
+        if (!text.trim()) {
+          setSelectionReference(null);
+          return;
+        }
+        const startLine = Math.min(selection.startLineNumber, selection.endLineNumber);
+        const endLine = Math.max(selection.startLineNumber, selection.endLineNumber);
+        setSelectionReference({ text, startLine, endLine });
+      };
+      selectionDisposableRef.current = editor.onDidChangeCursorSelection(updateSelectionReference);
       const model = getOrCreateModel(monacoInstance, path, content);
-      updateModelBaseVersion(path, snapshot?.version);
+      updateModelBaseVersion(path, activeSnapshot?.version);
       safeSetEditorModel(model);
+      updateSelectionReference();
 
       // Only restore previous view state if we don't have a specific line to jump to
       if (!lineNumber) {
@@ -296,20 +354,20 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
         });
       }
     },
-    [path, content, lineNumber, searchQuery, safeSetEditorModel, snapshot?.version],
+    [path, content, lineNumber, searchQuery, safeSetEditorModel, activeSnapshot?.version],
   );
 
   useEffect(() => {
     const monaco = monacoRef.current;
     const editor = editorRef.current;
-    if (!snapshot || !isSourceMode || !monaco || !editor || editorDisposedRef.current) return;
+    if (!activeSnapshot || !isSourceMode || !monaco || !editor || editorDisposedRef.current) return;
 
     const model = getOrCreateModel(monaco, path, content);
     safeSetEditorModel(model);
     if (!dirty && model.getValue() !== content) {
       setModelContent(path, content);
     }
-  }, [content, dirty, isSourceMode, path, snapshot]);
+  }, [activeSnapshot, content, dirty, isSourceMode, path, safeSetEditorModel]);
 
   const handleBeforeMount = useCallback(
     (monaco: typeof import("monaco-editor")) => {
@@ -352,12 +410,12 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
   }, [isSourceMode, language]);
 
   const setEditorDirty = useCallback(
-    (nextContent: string, baseSnapshot = snapshot) => {
+    (nextContent: string, baseSnapshot = activeSnapshot) => {
       const nextDirty = baseSnapshot ? nextContent !== baseSnapshot.content : false;
       setDirty(nextDirty);
-      onDirtyChange?.(path, nextDirty);
+      onDirtyChangeRef.current?.(path, nextDirty);
     },
-    [onDirtyChange, path, snapshot],
+    [activeSnapshot, path],
   );
 
   const handleContentChange = useCallback(
@@ -381,25 +439,25 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
 
   const handleSave = useCallback(
     async (overwrite = false) => {
-      if (!snapshot || saving) return;
+      if (!activeSnapshot || saving) return;
       if (!dirty && !overwrite) return;
 
       setSaving(true);
       setError(null);
       setConflict(null);
       try {
-        const saved = await editorSaveFile(path, content, snapshot.version, overwrite);
+        const saved = await editorSaveFile(path, content, activeSnapshot.version, overwrite);
         setSnapshot(saved);
         setContent(saved.content);
         setModelContent(path, saved.content);
         updateModelBase(path, saved.content);
         updateModelBaseVersion(path, saved.version);
         setDirty(false);
-        onDirtyChange?.(path, false);
+        onDirtyChangeRef.current?.(path, false);
         if (lspStatus?.running) {
           editorLspSaveDocument(path, language, saved.content).catch(() => {});
         }
-        onSaved?.();
+        onSavedRef.current?.();
       } catch (e) {
         const message = String(e);
         if (message.includes("changed on disk") || message.includes("missing on disk")) {
@@ -411,11 +469,16 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
         setSaving(false);
       }
     },
-    [content, dirty, language, lspStatus?.running, onDirtyChange, onSaved, path, saving, snapshot],
+    [activeSnapshot, content, dirty, language, lspStatus?.running, path, saving],
   );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (fullscreen && event.key === "Escape") {
+        event.preventDefault();
+        setFullscreen(false);
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
       if (!isSourceMode || !editorRef.current?.hasTextFocus()) return;
       event.preventDefault();
@@ -424,21 +487,38 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleSave, isSourceMode]);
+  }, [fullscreen, handleSave, isSourceMode]);
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      const editor = editorRef.current;
+      if (!editorDisposedRef.current && typeof editor?.layout === "function") {
+        editor.layout();
+      }
+    });
+  }, [fullscreen]);
+
+  useEffect(() => {
+    return () => {
+      selectionDisposableRef.current?.dispose();
+      selectionDisposableRef.current = null;
+    };
+  }, []);
 
   if (error) {
     return <div className="editor-error">加载文件失败：{error}</div>;
   }
 
-  if (snapshot === null) {
+  if (activeSnapshot === null) {
     return <div className="editor-loading">正在加载文件...</div>;
   }
 
   return (
-    <div className="editor-view">
+    <div className={`editor-view ${fullscreen ? "is-fullscreen" : ""}`}>
       <div className="editor-toolbar">
         <div className="editor-toolbar-main">
-          <span className="editor-toolbar-path">{snapshot.path}</span>
+          {fullscreen && <span className="editor-fullscreen-mode">全屏编辑</span>}
+          <span className="editor-toolbar-path" title={activeSnapshot.path}>{activeSnapshot.path}</span>
           {saving && <span className="editor-muted-pill">保存中...</span>}
           {isSourceMode && lspStatus?.running && <span className="editor-muted-pill">LSP 已连接</span>}
           {isSourceMode && !lspStatus?.running && lspStatus?.configured && lspStatus?.enabled && lspStatus?.message && (
@@ -463,17 +543,62 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
               预览
             </button>
           )}
+          {isSourceMode && onAddComposerReference && (
+            <button
+              type="button"
+              className="editor-action-btn editor-reference-btn"
+              disabled={!selectionReference}
+              title={
+                selectionReference
+                  ? `引用第 ${selectionReference.startLine}-${selectionReference.endLine} 行`
+                  : "选中代码行后添加到 Composer 引用"
+              }
+              onClick={() => {
+                if (!selectionReference) return;
+                onAddComposerReference({
+                  path,
+                  text: selectionReference.text,
+                  startLine: selectionReference.startLine,
+                  endLine: selectionReference.endLine,
+                });
+              }}
+            >
+              引用选区
+            </button>
+          )}
           {isSourceMode && (
             <>
               {conflict && <span className="editor-conflict-text">磁盘内容已变化</span>}
             </>
           )}
+          <button
+            type="button"
+            className={
+              fullscreen
+                ? "editor-action-btn editor-exit-fullscreen-btn"
+                : "editor-action-btn editor-icon-btn editor-fullscreen-btn"
+            }
+            title={fullscreen ? "退出全屏 (Esc)" : "全屏编辑"}
+            aria-label={fullscreen ? "退出全屏" : "全屏编辑"}
+            aria-keyshortcuts={fullscreen ? "Escape" : undefined}
+            onClick={() => setFullscreen((value) => !value)}
+          >
+            {fullscreen ? (
+              <>
+                <span aria-hidden="true" className="editor-fullscreen-symbol">⤡</span>
+                <span>退出全屏</span>
+                <span className="editor-fullscreen-shortcut">Esc</span>
+              </>
+            ) : (
+              <span aria-hidden="true">⛶</span>
+            )}
+          </button>
         </div>
       </div>
       {conflict && <div className="editor-conflict-banner">{conflict}</div>}
       {isImageFile ? (
         <div className="editor-preview editor-image-preview">
-          <img className="editor-image" src={content} alt={snapshot.path} />
+          <img className="editor-image" src={content} alt={activeSnapshot.path} />
         </div>
       ) : !isSourceMode && language === "markdown" ? (
         <div className="editor-preview editor-document-preview">
@@ -483,7 +608,7 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
         </div>
       ) : !isSourceMode && language === "html" ? (
         <div className="editor-preview editor-html-preview">
-          <iframe className="editor-html-frame" title={snapshot.path} sandbox="" srcDoc={content} />
+          <iframe className="editor-html-frame" title={activeSnapshot.path} sandbox="" srcDoc={content} />
         </div>
       ) : (
         <Suspense fallback={<div className="editor-loading">正在加载编辑器...</div>}>
@@ -492,6 +617,7 @@ export function EditorView({ path, lineNumber, searchQuery, navToken, appTheme, 
             language={language}
             path={path}
             value={content}
+            keepCurrentModel
             onChange={handleContentChange}
             theme={monacoThemeForAppTheme(appTheme)}
             beforeMount={handleBeforeMount}

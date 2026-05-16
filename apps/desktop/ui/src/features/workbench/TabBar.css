@@ -1,41 +1,100 @@
+.tab-bar-shell {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  min-width: 0;
+  background: transparent;
+  border-bottom: 0;
+  flex-shrink: 0;
+}
+
+.tab-fixed-section {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 .tab-bar {
   display: flex;
   align-items: stretch;
-  height: 38px;
-  background: var(--shell-center-bg);
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
+  height: 36px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  border-bottom: 0;
+  flex-shrink: 1;
   overflow-x: auto;
-  gap: 0;
-  padding-left: 0;
+  overflow-y: hidden;
+  gap: 2px;
+  padding: 0;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.tab-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .tab-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 14px;
+  flex: 0 0 168px;
+  width: 168px;
+  min-width: 168px;
+  max-width: 168px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: var(--font-size-shell-meta);
   color: var(--text-muted);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
   white-space: nowrap;
-  min-height: 38px;
+  overflow: hidden;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.tab-conversation {
+  flex-basis: 96px;
+  width: 96px;
+  min-width: 96px;
+  max-width: 96px;
+}
+
+.tab-item::after {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: transparent;
+  content: "";
 }
 
 .tab-item:hover {
   color: var(--text-strong);
-  background: var(--surface-hover);
+  background: color-mix(in srgb, var(--surface-hover) 46%, transparent);
 }
 
 .tab-active {
-  color: var(--text-strong);
-  background: var(--shell-center-bg);
-  border-bottom-color: var(--accent);
+  background: color-mix(in srgb, var(--surface-hover) 34%, transparent);
+  color: color-mix(in srgb, var(--text-strong) 84%, var(--text-muted));
+}
+
+.tab-active::after {
+  background: color-mix(in srgb, var(--accent-hover) 55%, var(--text-soft));
 }
 
 .tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   line-height: 1;
 }
 
@@ -49,21 +108,60 @@
 }
 
 .tab-close {
-  background: none;
-  border: none;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: 13px;
   cursor: pointer;
-  padding: 0 2px;
   line-height: 1;
   opacity: 0;
-  transition: opacity var(--transition-fast);
+  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
 }
 
-.tab-item:hover .tab-close {
+.tab-item:hover .tab-close,
+.tab-active .tab-close {
   opacity: 1;
 }
 
 .tab-close:hover {
+  background: var(--danger-soft);
   color: var(--danger);
+}
+
+.tab-scroll-btn {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 36px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--app-bg) 90%, transparent);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+}
+
+.tab-scroll-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-hover) 52%, transparent);
+  color: var(--text-strong);
+}
+
+.tab-scroll-btn:disabled {
+  cursor: default;
+  opacity: 0.28;
 }

@@ -9,6 +9,7 @@ import {
   settingsSaveCodexAcpProviderKey,
   settingsSaveCodexAcpVenusKey,
   settingsSaveLspServer,
+  settingsSelectCodexAcpProvider,
   settingsSelectCodexDefaultMode,
 } from "../../lib/tauri";
 import type { AgentSettingsSnapshot, LspSettingsSnapshot } from "../../types";
@@ -26,6 +27,7 @@ vi.mock("../../lib/tauri", async () => {
     settingsProbeLspServer: vi.fn(),
     settingsSaveCodexAcpProviderKey: vi.fn(),
     settingsSaveCodexAcpVenusKey: vi.fn(),
+    settingsSelectCodexAcpProvider: vi.fn(),
     settingsSelectCodexDefaultMode: vi.fn(),
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
@@ -112,6 +114,15 @@ describe("SettingsPage LSP settings", () => {
       codex_acp: {
         ...agentSnapshot.codex_acp,
         provider: "deepseek",
+        deepseek_key_configured: true,
+      },
+    });
+    vi.mocked(settingsSelectCodexAcpProvider).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "venus",
+        venus_key_configured: true,
         deepseek_key_configured: true,
       },
     });
@@ -208,6 +219,26 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("DeepSeek API key 已保存");
     expect(screen.getByLabelText("codex_acp_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("deepseek-secret")).not.toBeInTheDocument();
+  });
+
+  it("switches to an already configured Codex provider without requiring a new key", async () => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "deepseek",
+        venus_key_configured: true,
+        deepseek_key_configured: true,
+      },
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await screen.findByText("当前：DeepSeek");
+    fireEvent.click(screen.getByRole("button", { name: /Venus/ }));
+
+    await waitFor(() => expect(settingsSelectCodexAcpProvider).toHaveBeenCalledWith("venus"));
+    await screen.findByText("已切换为 Venus 配置");
+    expect(settingsSaveCodexAcpVenusKey).not.toHaveBeenCalled();
   });
 
   it("selects default Codex mode without requiring an API key", async () => {

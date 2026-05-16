@@ -314,9 +314,13 @@
   background: var(--shell-sidebar-bg);
 }
 
+.workbench-body.has-terminal-dock {
+  padding-bottom: 0;
+}
+
 .panel-resizer {
   position: relative;
-  z-index: 4;
+  z-index: 8;
   width: 0;
   flex: 0 0 0;
 }
@@ -325,9 +329,9 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -5px;
-  z-index: 4;
-  width: 10px;
+  left: -8px;
+  z-index: 8;
+  width: 16px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -337,18 +341,21 @@
 .panel-resizer-hit::after {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 5px;
+  top: 12px;
+  bottom: 12px;
+  left: 7px;
   width: 1px;
-  background: transparent;
-  transition: background var(--transition-fast), box-shadow var(--transition-fast);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  opacity: 0.36;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), opacity var(--transition-fast);
 }
 
 .panel-resizer-hit:hover::after,
 body.is-resizing-right-panel .panel-resizer-hit::after {
   background: rgba(137, 205, 255, 0.32);
   box-shadow: 0 0 0 1px rgba(137, 205, 255, 0.08);
+  opacity: 1;
 }
 
 body.is-resizing-right-panel {
@@ -376,8 +383,10 @@ body.is-resizing-right-panel {
 
 .right-panel {
   width: var(--right-panel-width);
+  display: flex;
   flex-shrink: 0;
-  overflow-y: auto;
+  min-height: 0;
+  overflow: hidden;
   background: var(--shell-review-bg);
   border: 1px solid var(--border-subtle);
   border-top: 1px solid var(--border-subtle);
@@ -503,29 +512,56 @@ body.is-resizing-right-panel {
   background: var(--app-bg);
 }
 
+.conversation-container.is-workspace-tab {
+  padding-top: 0;
+}
+
 .center-tab-bar-shell {
+  position: relative;
   flex-shrink: 0;
+  min-width: 0;
   padding: 0 clamp(12px, 3vw, 42px);
   background: var(--app-bg);
-  border-bottom: 1px solid rgba(215, 225, 223, 0.055);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 56%, transparent);
+  overflow: hidden;
 }
 
 .center-tab-bar {
-  width: var(--conversation-column-width);
-  min-width: var(--conversation-column-min);
+  width: min(var(--conversation-column-width), 100%);
+  min-width: 0;
   max-width: var(--conversation-column-max);
   height: 36px;
   min-height: 36px;
   margin: 0 auto;
-  padding-left: 0;
+  padding: 0;
   border-bottom: 0;
   background: transparent;
 }
 
+.center-tab-bar-shell::before,
+.center-tab-bar-shell::after {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  width: 24px;
+  height: 36px;
+  pointer-events: none;
+  content: "";
+}
+
+.center-tab-bar-shell::before {
+  left: clamp(12px, 3vw, 42px);
+  background: linear-gradient(90deg, var(--app-bg), transparent);
+}
+
+.center-tab-bar-shell::after {
+  right: clamp(12px, 3vw, 42px);
+  background: linear-gradient(270deg, var(--app-bg), transparent);
+}
+
 .center-tab-bar .tab-item {
   min-height: 36px;
-  padding: 0 12px;
-  border-radius: 0;
+  padding: 0 11px;
   font-size: 13px;
 }
 
@@ -675,10 +711,6 @@ body.is-resizing-right-panel {
 @media (max-width: 1120px) {
   .thread-sidebar-shell {
     width: 248px;
-  }
-
-  .right-panel {
-    width: min(var(--right-panel-width), 300px);
   }
 
   .thread-header-actions .thread-header-count {

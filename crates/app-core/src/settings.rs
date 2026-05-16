@@ -21,12 +21,13 @@ const DEEPSEEK_MODEL: &str = "deepseek-v4-pro";
 const DEEPSEEK_PROVIDER_ID: &str = "deepseek";
 const DEEPSEEK_PROVIDER_NAME: &str = "DeepSeek";
 const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
-const VENUS_MODEL_CONTEXT_WINDOW: i64 = 258_400;
-const VENUS_MODEL_MAX_OUTPUT_TOKENS: i64 = 16_384;
+const VENUS_MODEL_CONTEXT_WINDOW: i64 = 200_000;
+const VENUS_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
 const CODEX_AUTH_METHOD_API_KEY: &str = "apikey";
 const CODEX_REASONING_EFFORT_NONE: &str = "none";
 const VENUS_CATALOG_MODELS: &[&str] = &[
     VENUS_MODEL,
+    "gpt-5.2",
     "gpt-5.3",
     "gpt-5.4",
     "gpt-5.5",
@@ -39,18 +40,51 @@ const VENUS_CATALOG_MODELS: &[&str] = &[
     "deepseek-v4-flash",
 ];
 const DEEPSEEK_CATALOG_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-flash"];
+/// Maps display model names to actual model slugs sent to the server.
+/// If a model is not in this map, the display name is used as-is.
+const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
+    ("glm-5.1", "glm-5.1"),
+    ("gpt-5.2", "gpt-5.2"),
+    ("gpt-5.3", "gpt-5.3"),
+    ("gpt-5.4", "gpt-5.4"),
+    ("gpt-5.5", "gpt-5.5"),
+    ("claude-opus-4.5", "claude-opus-4-5-20251101"),
+    ("claude-sonnet-4.5", "claude-4-5-sonnet-20250929"),
+    ("claude-opus-4.6", "claude-opus-4-6"),
+    ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+    ("claude-opus-4.7", "claude-opus-4-7"),
+    ("deepseek-v4-pro", "deepseek-v4-pro"),
+    ("deepseek-v4-flash", "deepseek-v4-flash"),
+];
+
 const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     (VENUS_MODEL, VENUS_MODEL_CONTEXT_WINDOW),
-    ("gpt-5.3", VENUS_MODEL_CONTEXT_WINDOW),
-    ("gpt-5.4", VENUS_MODEL_CONTEXT_WINDOW),
-    ("gpt-5.5", VENUS_MODEL_CONTEXT_WINDOW),
-    ("claude-opus-4.5", VENUS_MODEL_CONTEXT_WINDOW),
-    ("claude-sonnet-4.5", VENUS_MODEL_CONTEXT_WINDOW),
-    ("claude-opus-4.6", VENUS_MODEL_CONTEXT_WINDOW),
-    ("claude-sonnet-4.6", VENUS_MODEL_CONTEXT_WINDOW),
-    ("claude-opus-4.7", VENUS_MODEL_CONTEXT_WINDOW),
-    ("deepseek-v4-pro", VENUS_MODEL_CONTEXT_WINDOW),
-    ("deepseek-v4-flash", VENUS_MODEL_CONTEXT_WINDOW),
+    ("gpt-5.2", 400_000),
+    ("gpt-5.3", 128_000),
+    ("gpt-5.4", 1_050_000),
+    ("gpt-5.5", 1_050_000),
+    ("claude-opus-4.5", 200_000),
+    ("claude-sonnet-4.5", 200_000),
+    ("claude-opus-4.6", 1_000_000),
+    ("claude-sonnet-4.6", 1_000_000),
+    ("claude-opus-4.7", 1_000_000),
+    ("deepseek-v4-pro", 1_000_000),
+    ("deepseek-v4-flash", 1_000_000),
+];
+
+const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
+    (VENUS_MODEL, VENUS_MODEL_MAX_OUTPUT_TOKENS),
+    ("gpt-5.2", 128_000),
+    ("gpt-5.3", 16_384),
+    ("gpt-5.4", 128_000),
+    ("gpt-5.5", 128_000),
+    ("claude-opus-4.5", 64_000),
+    ("claude-sonnet-4.5", 64_000),
+    ("claude-opus-4.6", 128_000),
+    ("claude-sonnet-4.6", 64_000),
+    ("claude-opus-4.7", 128_000),
+    ("deepseek-v4-pro", 384_000),
+    ("deepseek-v4-flash", 384_000),
 ];
 const CODEX_ACP_BASE_INSTRUCTIONS: &str = r#"You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
 
@@ -429,15 +463,19 @@ pub fn codex_acp_settings_status(paths: &AppPaths) -> CodexAcpSettingsStatus {
     let config_path = codex_config_path(paths);
     let connection_mode = load_app_settings(paths).codex_connection_mode;
     CodexAcpSettingsStatus {
-        provider: if connection_mode == CodexConnectionMode::Default {
-            "default".to_string()
-        } else {
-            codex_active_provider(&config_path)
-        },
+        provider: codex_current_provider(paths),
         connection_mode,
         venus_key_configured: codex_venus_key_configured(&config_path),
         deepseek_key_configured: codex_deepseek_key_configured(&config_path),
         config_path,
+    }
+}
+
+pub fn codex_current_provider(paths: &AppPaths) -> String {
+    if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
+        "default".to_string()
+    } else {
+        codex_active_provider(&codex_config_path(paths))
     }
 }
 
@@ -467,6 +505,24 @@ pub fn save_codex_acp_provider_key(
     api_key: &str,
 ) -> Result<AgentSettingsSnapshot> {
     write_codex_acp_provider_config(paths, provider, api_key)?;
+    save_codex_managed_mode(paths)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn select_codex_acp_provider(
+    paths: &AppPaths,
+    provider: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let provider = normalize_codex_provider(provider)?;
+    let config_path = codex_config_path(paths);
+    let Some(api_key) = codex_provider_key(&config_path, provider) else {
+        anyhow::bail!("请先填写并保存 {} API key", provider_label(provider));
+    };
+    if api_key.trim().is_empty() {
+        anyhow::bail!("请先填写并保存 {} API key", provider_label(provider));
+    }
+
+    write_codex_acp_provider_config(paths, provider, &api_key)?;
     save_codex_managed_mode(paths)?;
     Ok(settings_snapshot(paths))
 }
@@ -503,11 +559,12 @@ pub fn write_codex_acp_provider_config(
         DocumentMut::new()
     };
 
-    doc["model"] = value(default_model_for_provider(provider));
+    let default_model = default_model_for_provider(provider);
+    doc["model"] = value(default_model);
     doc["model_provider"] = value(provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
-    doc["model_context_window"] = value(VENUS_MODEL_CONTEXT_WINDOW);
-    doc["model_max_output_tokens"] = value(VENUS_MODEL_MAX_OUTPUT_TOKENS);
+    doc["model_context_window"] = value(model_context_window(default_model));
+    doc["model_max_output_tokens"] = value(model_max_output_tokens(default_model));
     doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
@@ -585,6 +642,12 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
     if api_key.trim().is_empty() {
         return Ok(());
     }
+    let proxy_base_url = acp_core::ensure_codex_api_proxy(provider, &api_key);
+    let active_model = doc
+        .get("model")
+        .and_then(|item| item.as_str())
+        .unwrap_or_else(|| default_model_for_provider(provider))
+        .to_string();
     let mut changed = false;
 
     let provider_is_table = doc
@@ -600,7 +663,7 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
             doc["model_providers"][provider]["name"] = value(provider_name(provider));
             changed = true;
         }
-        let base_url = base_url_for_provider(provider);
+        let base_url = proxy_base_url.clone();
         if !provider_field_eq(&doc, provider, "base_url", &base_url) {
             doc["model_providers"][provider]["base_url"] = value(base_url);
             changed = true;
@@ -618,12 +681,16 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
         changed = true;
     }
+    if !provider_field_eq(&doc, provider, "base_url", &proxy_base_url) {
+        doc["model_providers"][provider]["base_url"] = value(proxy_base_url);
+        changed = true;
+    }
     if doc.get("model_context_window").is_none() {
-        doc["model_context_window"] = value(VENUS_MODEL_CONTEXT_WINDOW);
+        doc["model_context_window"] = value(model_context_window(&active_model));
         changed = true;
     }
     if doc.get("model_max_output_tokens").is_none() {
-        doc["model_max_output_tokens"] = value(VENUS_MODEL_MAX_OUTPUT_TOKENS);
+        doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model));
         changed = true;
     }
     if doc.get("model_reasoning_effort").is_none() {
@@ -687,8 +754,8 @@ fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
 
 fn default_model_for_provider(provider: &str) -> &'static str {
     match provider {
-        DEEPSEEK_PROVIDER_ID => DEEPSEEK_MODEL,
-        _ => VENUS_MODEL,
+        DEEPSEEK_PROVIDER_ID => model_slug(DEEPSEEK_MODEL),
+        _ => model_slug(VENUS_MODEL),
     }
 }
 
@@ -696,6 +763,13 @@ fn provider_name(provider: &str) -> &'static str {
     match provider {
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_PROVIDER_NAME,
         _ => VENUS_PROVIDER_NAME,
+    }
+}
+
+fn provider_label(provider: &str) -> &'static str {
+    match provider {
+        DEEPSEEK_PROVIDER_ID => "DeepSeek",
+        _ => "Venus",
     }
 }
 
@@ -748,10 +822,12 @@ fn codex_acp_model_catalog_entry(
     provider: &str,
     priority: usize,
 ) -> serde_json::Value {
-    let context_window = venus_model_context_window(model);
+    let slug = model_slug(model);
+    let context_window = model_context_window(model);
+    let max_output_tokens = model_max_output_tokens(model);
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID;
     json!({
-        "slug": model,
+        "slug": slug,
         "display_name": model,
         "description": format!("Codex {model}"),
         "default_reasoning_level": CODEX_REASONING_EFFORT_NONE,
@@ -789,6 +865,7 @@ fn codex_acp_model_catalog_entry(
         "supports_image_detail_original": !is_deepseek,
         "context_window": context_window,
         "max_context_window": context_window,
+        "max_output_tokens": max_output_tokens,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": if is_deepseek { json!(["text"]) } else { json!(["text", "image"]) },
@@ -796,11 +873,37 @@ fn codex_acp_model_catalog_entry(
     })
 }
 
-fn venus_model_context_window(model: &str) -> i64 {
-    VENUS_MODEL_CONTEXT_WINDOWS
+/// Resolve a display model name to the actual slug sent to the server.
+fn model_slug(display_name: &str) -> &str {
+    VENUS_MODEL_SLUG_MAP
         .iter()
-        .find_map(|(candidate, context_window)| (*candidate == model).then_some(*context_window))
-        .unwrap_or(VENUS_MODEL_CONTEXT_WINDOW)
+        .find_map(|(name, slug)| (*name == display_name).then_some(*slug))
+        .unwrap_or(display_name)
+}
+
+fn model_context_window(model: &str) -> i64 {
+    model_i64_metadata(
+        model,
+        VENUS_MODEL_CONTEXT_WINDOWS,
+        VENUS_MODEL_CONTEXT_WINDOW,
+    )
+}
+
+fn model_max_output_tokens(model: &str) -> i64 {
+    model_i64_metadata(
+        model,
+        MODEL_MAX_OUTPUT_TOKENS,
+        VENUS_MODEL_MAX_OUTPUT_TOKENS,
+    )
+}
+
+fn model_i64_metadata(model: &str, metadata: &[(&str, i64)], fallback: i64) -> i64 {
+    metadata
+        .iter()
+        .find_map(|(candidate, value)| {
+            (*candidate == model || model_slug(candidate) == model).then_some(*value)
+        })
+        .unwrap_or(fallback)
 }
 
 fn codex_provider_key_from_doc(doc: &DocumentMut, provider: &str) -> Option<String> {
@@ -1156,6 +1259,21 @@ mod tests {
         assert!(catalog.contains("You are Codex, a coding agent"));
         assert!(!catalog.contains("{{ base_instructions }}"));
         assert!(catalog.contains("\"slug\": \"glm-5.1\""));
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        for model in catalog["models"].as_array().unwrap() {
+            let display_name = model["display_name"].as_str().unwrap();
+            assert_eq!(
+                model["max_output_tokens"].as_i64(),
+                Some(model_max_output_tokens(display_name))
+            );
+        }
+        assert!(
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model["display_name"].as_str() == Some("gpt-5.3"))
+        );
         assert_eq!(
             doc["model_providers"][VENUS_PROVIDER_ID]["wire_api"].as_str(),
             Some(VENUS_WIRE_API)
@@ -1186,6 +1304,10 @@ mod tests {
         let doc = content.parse::<DocumentMut>().unwrap();
         assert_eq!(doc["model"].as_str(), Some(DEEPSEEK_MODEL));
         assert_eq!(doc["model_provider"].as_str(), Some(DEEPSEEK_PROVIDER_ID));
+        assert_eq!(
+            doc["model_max_output_tokens"].as_integer(),
+            Some(model_max_output_tokens(DEEPSEEK_MODEL))
+        );
         assert_eq!(
             doc["model_providers"][DEEPSEEK_PROVIDER_ID]["name"].as_str(),
             Some(DEEPSEEK_PROVIDER_NAME)
@@ -1227,10 +1349,89 @@ mod tests {
             catalog["models"][0]["supports_parallel_tool_calls"].as_bool(),
             Some(false)
         );
+        for model in catalog["models"].as_array().unwrap() {
+            let display_name = model["display_name"].as_str().unwrap();
+            assert_eq!(
+                model["max_output_tokens"].as_i64(),
+                Some(model_max_output_tokens(display_name))
+            );
+        }
         let status = codex_acp_settings_status(&paths);
         assert_eq!(status.provider, DEEPSEEK_PROVIDER_ID);
         assert!(!status.venus_key_configured);
         assert!(status.deepseek_key_configured);
+    }
+
+    #[test]
+    fn codex_acp_model_metadata_tracks_individual_model_limits() {
+        assert_eq!(model_context_window("glm-5.1"), 200_000);
+        assert_eq!(model_max_output_tokens("glm-5.1"), 128_000);
+        assert_eq!(model_context_window("gpt-5.2"), 400_000);
+        assert_eq!(model_max_output_tokens("gpt-5.2"), 128_000);
+        assert_eq!(model_context_window("gpt-5.3"), 128_000);
+        assert_eq!(model_max_output_tokens("gpt-5.3"), 16_384);
+        assert_eq!(model_context_window("gpt-5.4"), 1_050_000);
+        assert_eq!(model_max_output_tokens("gpt-5.4"), 128_000);
+        assert_eq!(model_context_window("gpt-5.5"), 1_050_000);
+        assert_eq!(model_max_output_tokens("gpt-5.5"), 128_000);
+        assert_eq!(model_context_window("claude-opus-4.5"), 200_000);
+        assert_eq!(model_max_output_tokens("claude-opus-4.5"), 64_000);
+        assert_eq!(model_context_window("claude-sonnet-4.5"), 200_000);
+        assert_eq!(model_max_output_tokens("claude-sonnet-4.5"), 64_000);
+        assert_eq!(model_context_window("claude-opus-4.6"), 1_000_000);
+        assert_eq!(model_max_output_tokens("claude-opus-4.6"), 128_000);
+        assert_eq!(model_context_window("claude-sonnet-4.6"), 1_000_000);
+        assert_eq!(model_max_output_tokens("claude-sonnet-4.6"), 64_000);
+        assert_eq!(model_context_window("claude-opus-4.7"), 1_000_000);
+        assert_eq!(model_max_output_tokens("claude-opus-4.7"), 128_000);
+        assert_eq!(model_context_window("deepseek-v4-pro"), 1_000_000);
+        assert_eq!(model_max_output_tokens("deepseek-v4-pro"), 384_000);
+        assert_eq!(model_context_window("deepseek-v4-flash"), 1_000_000);
+        assert_eq!(model_max_output_tokens("deepseek-v4-flash"), 384_000);
+    }
+
+    #[test]
+    fn selecting_codex_provider_reuses_saved_key_and_rewrites_catalog() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        write_codex_acp_provider_config(&paths, VENUS_PROVIDER_ID, "venus-secret").unwrap();
+        write_codex_acp_provider_config(&paths, DEEPSEEK_PROVIDER_ID, "deepseek-secret").unwrap();
+
+        let snapshot = select_codex_acp_provider(&paths, VENUS_PROVIDER_ID).unwrap();
+
+        assert_eq!(snapshot.codex_acp.provider, VENUS_PROVIDER_ID);
+        assert!(snapshot.codex_acp.venus_key_configured);
+        assert!(snapshot.codex_acp.deepseek_key_configured);
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(VENUS_MODEL));
+        assert_eq!(doc["model_provider"].as_str(), Some(VENUS_PROVIDER_ID));
+        assert_eq!(
+            doc["model_providers"][VENUS_PROVIDER_ID]["api_key"].as_str(),
+            Some("venus-secret")
+        );
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&VENUS_MODEL));
+        assert!(slugs.contains(&"gpt-5.3"));
+        assert!(slugs.contains(&"gpt-5.5"));
+    }
+
+    #[test]
+    fn selecting_codex_provider_requires_existing_key() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let error = select_codex_acp_provider(&paths, DEEPSEEK_PROVIDER_ID).unwrap_err();
+
+        assert!(error.to_string().contains("DeepSeek API key"));
     }
 
     #[test]

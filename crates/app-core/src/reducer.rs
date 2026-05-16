@@ -30,8 +30,13 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             ui.thinking_status = None;
             ui.agent_plan.clear();
             ui.session.status = SessionStatus::Idle;
+            let section_title = if stop_reason == "end_turn" {
+                "轮次结果"
+            } else {
+                "轮次异常"
+            };
             ui.inspector_sections.push(SidebarSection {
-                title: "轮次结果".into(),
+                title: section_title.into(),
                 items: vec![stop_reason],
             });
         }
@@ -378,6 +383,7 @@ fn push_message(ui: &mut UiSnapshot, role: workspace_model::MessageRole, content
         id: uuid::Uuid::new_v4(),
         role,
         body: content,
+        created_at: chrono_now_iso(),
     };
     ui.timeline.push(TimelineItem::Message(message.id));
     ui.messages.push(message);
@@ -917,6 +923,8 @@ fn finalize_running_children(
 }
 
 fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
+    let normal_finish = stop_reason == "end_turn";
+    let cancelled = stop_reason == "cancelled";
     for tool in ui
         .tools
         .iter_mut()
@@ -927,22 +935,30 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
             continue;
         }
 
-        tool.status = if stop_reason == "cancelled" {
-            ToolStatus::Interrupted
-        } else {
+        tool.status = if normal_finish {
             ToolStatus::Succeeded
+        } else {
+            ToolStatus::Interrupted
         };
         if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
-            tool.summary = if stop_reason == "cancelled" {
+            tool.summary = if cancelled {
                 "已取消".into()
-            } else {
+            } else if normal_finish {
                 "已完成".into()
+            } else {
+                format!("异常结束：{stop_reason}")
             };
         }
-        let label = if stop_reason == "cancelled" {
+        if !normal_finish {
+            tool.error
+                .get_or_insert_with(|| format!("轮次异常结束：{stop_reason}"));
+        }
+        let label = if cancelled {
             "已取消"
-        } else {
+        } else if normal_finish {
             "已完成"
+        } else {
+            "已中断"
         };
         push_tool_log(tool, label, format!("轮次结束：{stop_reason}"));
     }

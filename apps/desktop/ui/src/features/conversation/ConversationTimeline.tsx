@@ -1,15 +1,16 @@
-import { useRef, useEffect, useMemo, useState, Suspense, lazy, memo } from "react";
+import { Fragment, useRef, useEffect, useMemo, useState, memo } from "react";
 import type { ReactNode } from "react";
-import type { MessageRole } from "../../types";
+import type { FileChangeSummary, MessageRole } from "../../types";
 import type { UiSnapshot } from "../../types";
+import { ChangesBar } from "../changes/ChangesBar";
 import { ToolCallCard } from "../tooling/ToolCallCard";
+import MarkdownBody from "./MarkdownBody";
 import {
   ensureStreamingMessageBody,
   subscribeStreamingMessage,
 } from "./streaming-message-store";
 import "./ConversationTimeline.css";
 
-const MarkdownBody = lazy(() => import("./MarkdownBody"));
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
 
@@ -21,7 +22,15 @@ function scrollElementIntoView(element: HTMLElement | null) {
 interface Props {
   snapshot: UiSnapshot;
   onPermissionSelect: (requestId: string, optionId: string | null) => void;
+  turnChangeSetsByMessageId?: Record<string, TimelineTurnChangeSet>;
+  onReviewFileSelect?: (path: string, changeSetId: string) => void;
   planPanel?: ReactNode;
+}
+
+export interface TimelineTurnChangeSet {
+  changeSetId: string;
+  files: FileChangeSummary[];
+  updatedAt: string;
 }
 
 interface MessageRowProps {
@@ -31,32 +40,34 @@ interface MessageRowProps {
   streaming: boolean;
 }
 
-interface StreamingTextProps {
+interface StreamingMarkdownProps {
   id: string;
   body: string;
 }
 
-const StreamingText = memo(function StreamingText({ id, body }: StreamingTextProps) {
-  const textRef = useRef<HTMLPreElement>(null);
+const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: StreamingMarkdownProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
 
   useEffect(() => {
     const currentBody = ensureStreamingMessageBody(id, body);
-    if (textRef.current) {
-      textRef.current.textContent = currentBody;
-    }
+    setContent(currentBody);
 
     return subscribeStreamingMessage(id, (event) => {
-      const node = textRef.current;
-      if (!node) return;
+      const node = hostRef.current;
+      if (!node) {
+        setContent((previous) =>
+          event.type === "replace" ? event.text : `${previous}${event.text}`,
+        );
+        return;
+      }
       const scrollEl = node.closest(".timeline-scroll") as HTMLDivElement | null;
       const wasAtBottom = scrollEl
         ? scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 80
         : false;
-      if (event.type === "replace") {
-        node.textContent = event.text;
-      } else {
-        node.append(document.createTextNode(event.text));
-      }
+      setContent((previous) =>
+        event.type === "replace" ? event.text : `${previous}${event.text}`,
+      );
       if (scrollEl && wasAtBottom) {
         requestAnimationFrame(() => {
           const sentinel = scrollEl.querySelector(".timeline-bottom-sentinel") as
@@ -68,7 +79,11 @@ const StreamingText = memo(function StreamingText({ id, body }: StreamingTextPro
     });
   }, [id, body]);
 
-  return <pre ref={textRef} className="msg-streaming-text">{body}</pre>;
+  return (
+    <div ref={hostRef} className="msg-streaming-markdown">
+      <MarkdownBody content={content} />
+    </div>
+  );
 });
 
 const MessageRow = memo(function MessageRow({ id, role, body, streaming }: MessageRowProps) {
@@ -77,9 +92,7 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
       <div key={id} className="msg msg-user">
         <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
         <div className="msg-content msg-content-user">
-          <Suspense fallback={<pre className="msg-fallback">{body}</pre>}>
-            <MarkdownBody content={body} />
-          </Suspense>
+          <MarkdownBody content={body} />
         </div>
       </div>
     );
@@ -91,11 +104,9 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant">
           {streaming ? (
-            <StreamingText id={id} body={body} />
+            <StreamingMarkdown id={id} body={body} />
           ) : (
-            <Suspense fallback={<pre className="msg-fallback">{body}</pre>}>
-              <MarkdownBody content={body} />
-            </Suspense>
+            <MarkdownBody content={body} />
           )}
           {streaming && <span className="streaming-cursor" />}
         </div>
@@ -110,7 +121,13 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
   );
 });
 
-export function ConversationTimeline({ snapshot, onPermissionSelect, planPanel }: Props) {
+export function ConversationTimeline({
+  snapshot,
+  onPermissionSelect,
+  turnChangeSetsByMessageId = {},
+  onReviewFileSelect,
+  planPanel,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -120,6 +137,23 @@ export function ConversationTimeline({ snapshot, onPermissionSelect, planPanel }
   const scrollToBottom = () => {
     scrollElementIntoView(bottomSentinelRef.current);
   };
+
+  const turnChangesSignature = useMemo(
+    () =>
+      Object.entries(turnChangeSetsByMessageId)
+        .map(([messageId, entry]) =>
+          [
+            messageId,
+            entry.changeSetId,
+            entry.files.length,
+            entry.files
+              .map((change) => `${change.path}:${change.added_lines}:${change.removed_lines}`)
+              .join(","),
+          ].join(":"),
+        )
+        .join("|"),
+    [turnChangeSetsByMessageId],
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -144,7 +178,7 @@ export function ConversationTimeline({ snapshot, onPermissionSelect, planPanel }
     snapshot.messages.length,
     snapshot.tools.length,
     snapshot.agent_plan.length,
-    snapshot.session_changes.length,
+    turnChangesSignature,
     snapshot.thinking_status,
   ]);
 
@@ -279,15 +313,27 @@ export function ConversationTimeline({ snapshot, onPermissionSelect, planPanel }
               msg.role === "Assistant" &&
               snapshot.session.status === "Streaming" &&
               isLastMessage(i);
+            const changesForMessage =
+              msg.role === "Assistant" && !isStreaming
+                ? turnChangeSetsByMessageId[msg.id]
+                : undefined;
 
             return (
-              <MessageRow
-                key={msg.id}
-                id={msg.id}
-                role={msg.role}
-                body={msg.body}
-                streaming={isStreaming}
-              />
+              <Fragment key={msg.id}>
+                <MessageRow
+                  id={msg.id}
+                  role={msg.role}
+                  body={msg.body}
+                  streaming={isStreaming}
+                />
+                {changesForMessage && changesForMessage.files.length > 0 && (
+                  <ChangesBar
+                    changeSetId={changesForMessage.changeSetId}
+                    changes={changesForMessage.files}
+                    onFileSelect={onReviewFileSelect ?? (() => {})}
+                  />
+                )}
+              </Fragment>
             );
           }
 

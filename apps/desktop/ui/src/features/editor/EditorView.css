@@ -7,6 +7,14 @@
   background: var(--surface-muted-bg);
 }
 
+.editor-view.is-fullscreen {
+  position: fixed;
+  inset: var(--shell-chrome-height) 0 0 0;
+  z-index: 1000;
+  background: var(--app-bg);
+  color: var(--text-strong);
+}
+
 .editor-toolbar {
   display: flex;
   align-items: center;
@@ -19,6 +27,16 @@
   color: var(--text-muted);
   font-family: var(--font-chat);
   font-size: 12px;
+}
+
+.editor-view.is-fullscreen .editor-toolbar {
+  position: relative;
+  z-index: 3;
+  min-height: 48px;
+  padding-inline: 18px;
+  border-bottom-color: var(--border);
+  background: var(--surface-bg);
+  box-shadow: 0 1px 0 var(--border-subtle);
 }
 
 .editor-toolbar-main,
@@ -39,6 +57,17 @@
   color: var(--text-soft);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.editor-view.is-fullscreen .editor-toolbar-path {
+  color: var(--text-soft);
+}
+
+.editor-fullscreen-mode {
+  flex-shrink: 0;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .editor-dirty-pill,
@@ -95,6 +124,59 @@
   opacity: 0.45;
 }
 
+.editor-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.editor-icon-btn span {
+  display: block;
+  transform: translateY(-0.5px);
+}
+
+.editor-view.is-fullscreen .editor-fullscreen-btn {
+  color: var(--text-strong);
+}
+
+.editor-exit-fullscreen-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding-inline: 10px;
+  border-color: var(--border);
+  background: var(--surface-alt-bg);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.editor-exit-fullscreen-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+}
+
+.editor-fullscreen-symbol {
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.editor-fullscreen-shortcut {
+  padding-left: 2px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 .editor-action-btn.is-danger {
   border-color: rgba(255, 114, 94, 0.34);
   color: var(--danger);
@@ -103,6 +185,16 @@
 .editor-source-toggle {
   padding-inline: 11px;
   color: var(--text-soft);
+}
+
+.editor-reference-btn {
+  padding-inline: 10px;
+  border-color: var(--border-subtle);
+  color: var(--text-soft);
+}
+
+.editor-reference-btn:not(:disabled) {
+  color: var(--text-strong);
 }
 
 .editor-conflict-banner {

@@ -22,3 +22,4 @@ tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
+windows-sys.workspace = true

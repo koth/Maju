@@ -1,25 +1,42 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
-import { sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
+import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
 import "./Composer.css";
+
+export interface ComposerReferenceRequest {
+  id: string;
+  path: string;
+  text?: string | null;
+  startLine?: number | null;
+  endLine?: number | null;
+}
 
 interface Props {
   snapshot: UiSnapshot;
   onStateChange: () => void;
+  referenceRequests?: ComposerReferenceRequest[];
+  onReferenceRequestConsumed?: (id: string) => void;
 }
 
 interface Attachment {
   id: string;
   name: string;
   mimeType: string;
-  data: string;
+  data: string | null;
+  text: string | null;
+  uri: string | null;
   kind: "image" | "file";
   previewUrl: string | null;
   thumbnailData: string | null;
   thumbnailMimeType: string | null;
 }
 
-export function Composer({ snapshot, onStateChange }: Props) {
+export function Composer({
+  snapshot,
+  onStateChange,
+  referenceRequests = [],
+  onReferenceRequestConsumed,
+}: Props) {
   const [input, setInput] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
@@ -32,6 +49,7 @@ export function Composer({ snapshot, onStateChange }: Props) {
   const [slashFilter, setSlashFilter] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const processingReferenceIds = useRef<Set<string>>(new Set());
 
   const isInterrupted = snapshot.session.status === "Interrupted";
   const controls = snapshot.session_config.controls;
@@ -82,6 +100,55 @@ export function Composer({ snapshot, onStateChange }: Props) {
     }
   }, [snapshot.session.status]);
 
+  useEffect(() => {
+    if (referenceRequests.length === 0) return;
+
+    let disposed = false;
+    async function addReference(request: ComposerReferenceRequest) {
+      if (processingReferenceIds.current.has(request.id)) return;
+      processingReferenceIds.current.add(request.id);
+      try {
+        if (!fileInputEnabled) {
+          setControlError("当前智能体不支持文件引用");
+          return;
+        }
+        const attachment = await attachmentFromReference(
+          request,
+          snapshot.workspace.root,
+          imageInputEnabled,
+        );
+        if (disposed) return;
+        setAttachments((current) => {
+          if (attachment.uri && current.some((item) => item.uri === attachment.uri)) {
+            return current;
+          }
+          return [...current, attachment];
+        });
+        setControlError(null);
+        textareaRef.current?.focus();
+      } catch (error) {
+        if (!disposed) setControlError(String(error));
+      } finally {
+        processingReferenceIds.current.delete(request.id);
+        onReferenceRequestConsumed?.(request.id);
+      }
+    }
+
+    for (const request of referenceRequests) {
+      void addReference(request);
+    }
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    fileInputEnabled,
+    imageInputEnabled,
+    onReferenceRequestConsumed,
+    referenceRequests,
+    snapshot.workspace.root,
+  ]);
+
   const handleSend = useCallback(async () => {
     if (!canSend) return;
     const prompt: UserPromptContent[] = [];
@@ -91,6 +158,7 @@ export function Composer({ snapshot, onStateChange }: Props) {
     }
     for (const attachment of attachments) {
       if (attachment.kind === "image") {
+        if (!attachment.data) continue;
         prompt.push({
           type: "image",
           data: attachment.data,
@@ -103,6 +171,8 @@ export function Composer({ snapshot, onStateChange }: Props) {
         prompt.push({
           type: "file",
           data: attachment.data,
+          text: attachment.text,
+          uri: attachment.uri,
           mime_type: attachment.mimeType || null,
           name: attachment.name,
         });
@@ -313,9 +383,9 @@ export function Composer({ snapshot, onStateChange }: Props) {
                 {attachment.previewUrl ? (
                   <img src={attachment.previewUrl} alt={attachment.name} />
                 ) : (
-                  <span className="composer-file-glyph">FILE</span>
+                  <span className="composer-file-glyph">{attachment.uri ? "REF" : "FILE"}</span>
                 )}
-                <span>{attachment.name}</span>
+                <span title={attachment.uri ?? attachment.name}>{attachment.name}</span>
                 <button
                   type="button"
                   onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
@@ -407,6 +477,8 @@ function readAttachment(file: File): Promise<Attachment> {
           name: file.name,
           mimeType: file.type || "application/octet-stream",
           data,
+          text: null,
+          uri: null,
           kind: isImage ? "image" : "file",
           previewUrl: isImage ? result : null,
           thumbnailData: thumbnail?.data ?? null,
@@ -419,6 +491,154 @@ function readAttachment(file: File): Promise<Attachment> {
     reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`));
     reader.readAsDataURL(file);
   });
+}
+
+async function attachmentFromReference(
+  request: ComposerReferenceRequest,
+  workspaceRoot: string,
+  imageInputEnabled: boolean,
+): Promise<Attachment> {
+  const range = referenceRange(request);
+  const uri = workspaceFileUri(workspaceRoot, request.path, range);
+  const name = referenceDisplayName(request.path, range);
+
+  if (request.text != null) {
+    return {
+      id: `ref:${uri}`,
+      name,
+      mimeType: mimeTypeForPath(request.path),
+      data: null,
+      text: request.text,
+      uri,
+      kind: "file",
+      previewUrl: null,
+      thumbnailData: null,
+      thumbnailMimeType: null,
+    };
+  }
+
+  const file = await editorGetContent(request.path);
+  if ((file.kind ?? "text") === "image") {
+    const { data, mimeType } = parseDataUrl(file.content, file.mime_type ?? "application/octet-stream");
+    const thumbnail = imageInputEnabled ? await createImageThumbnail(file.content).catch(() => null) : null;
+    return {
+      id: `ref:${uri}`,
+      name,
+      mimeType,
+      data,
+      text: null,
+      uri,
+      kind: imageInputEnabled ? "image" : "file",
+      previewUrl: imageInputEnabled ? file.content : null,
+      thumbnailData: thumbnail?.data ?? null,
+      thumbnailMimeType: thumbnail?.mimeType ?? null,
+    };
+  }
+
+  return {
+    id: `ref:${uri}`,
+    name,
+    mimeType: file.mime_type ?? mimeTypeForPath(request.path),
+    data: null,
+    text: file.content,
+    uri,
+    kind: "file",
+    previewUrl: null,
+    thumbnailData: null,
+    thumbnailMimeType: null,
+  };
+}
+
+function referenceRange(request: ComposerReferenceRequest) {
+  const start = Number(request.startLine);
+  const end = Number(request.endLine ?? request.startLine);
+  if (!Number.isFinite(start) || start <= 0) return null;
+  return {
+    startLine: Math.floor(start),
+    endLine: Number.isFinite(end) && end > 0 ? Math.floor(end) : Math.floor(start),
+  };
+}
+
+function referenceDisplayName(
+  path: string,
+  range: { startLine: number; endLine: number } | null,
+) {
+  const filename = path.replace(/\\/g, "/").split("/").pop() || path;
+  if (!range) return filename;
+  return range.startLine === range.endLine
+    ? `${filename}:L${range.startLine}`
+    : `${filename}:L${range.startLine}-L${range.endLine}`;
+}
+
+function workspaceFileUri(
+  workspaceRoot: string,
+  path: string,
+  range: { startLine: number; endLine: number } | null,
+) {
+  const root = workspaceRoot.replace(/[\\/]+$/, "");
+  const relative = path.replace(/^[\\/]+/, "");
+  const absolutePath = `${root}/${relative}`.replace(/\\/g, "/");
+  const fragment = range
+    ? `#L${range.startLine}${range.endLine !== range.startLine ? `-L${range.endLine}` : ""}`
+    : "";
+  return `${pathToFileUri(absolutePath)}${fragment}`;
+}
+
+function pathToFileUri(path: string) {
+  let normalized = path.replace(/\\/g, "/");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    const [drive, ...segments] = normalized.split("/");
+    return `file:///${drive}/${segments.map(encodeURIComponent).join("/")}`;
+  }
+  if (!normalized.startsWith("/")) {
+    normalized = `/${normalized}`;
+  }
+  return `file://${normalized
+    .split("/")
+    .map((segment, index) => (index === 0 ? "" : encodeURIComponent(segment)))
+    .join("/")}`;
+}
+
+function mimeTypeForPath(path: string) {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  switch (ext) {
+    case "md":
+    case "mdx":
+      return "text/markdown";
+    case "html":
+      return "text/html";
+    case "css":
+      return "text/css";
+    case "json":
+      return "application/json";
+    case "ts":
+    case "tsx":
+    case "js":
+    case "jsx":
+    case "mjs":
+    case "cjs":
+      return "text/javascript";
+    case "rs":
+    case "py":
+    case "toml":
+    case "yaml":
+    case "yml":
+    case "txt":
+      return "text/plain";
+    default:
+      return "text/plain";
+  }
+}
+
+function parseDataUrl(dataUrl: string, fallbackMimeType: string) {
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) {
+    return { data: dataUrl, mimeType: fallbackMimeType };
+  }
+  const header = dataUrl.slice(0, comma);
+  const data = dataUrl.slice(comma + 1);
+  const mimeType = header.match(/^data:([^;,]+)/)?.[1] ?? fallbackMimeType;
+  return { data, mimeType };
 }
 
 function createImageThumbnail(dataUrl: string): Promise<{ data: string; mimeType: string }> {

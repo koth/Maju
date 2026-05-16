@@ -1,15 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { UiSnapshot, UiSnapshotPatch, TabDescriptor, SessionFileChange, AppTheme } from "../../types";
-import { startupPerfMark, sessionGetState, gitRefresh, sessionResolvePermission, reviewGetGitDiffContent, sessionGetFileDiff, settingsGetAgentSnapshot, editorSaveFile } from "../../lib/tauri";
+import type { UiSnapshot, UiSnapshotPatch, TabDescriptor, SessionFileChange, AppTheme, FileChangeRecord, ChangeSetSummary, FileChangeSummary } from "../../types";
+import { startupPerfMark, sessionGetState, gitRefresh, sessionResolvePermission, sessionGetChangeSetFileDiff, sessionListChangeSetFiles, sessionListChangeSets, settingsGetAgentSnapshot, editorSaveFile } from "../../lib/tauri";
 import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
-import { ConversationTimeline } from "../conversation/ConversationTimeline";
-import { Composer } from "../composer/Composer";
+import { ConversationTimeline, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
+import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import { AgentPlanPanel } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
-import { ChangesBar } from "../changes/ChangesBar";
 import { WelcomeLauncher } from "./WelcomeLauncher";
 import { SessionList } from "../session/SessionList";
 import { TabBar } from "./TabBar";
@@ -17,6 +16,7 @@ import { GlobalChrome } from "./GlobalChrome";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadSidebarShell } from "./ThreadSidebarShell";
 import { SettingsPage } from "../settings/SettingsPage";
+import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import { disposeModel, getModelBaseVersion, getModelValue, isModelDirty, updateModelBase, updateModelBaseVersion } from "../editor/monaco-model-registry";
 import {
@@ -34,7 +34,26 @@ const CONVERSATION_TAB: TabDescriptor = {
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "kodex.rightPanelWidth";
 const RIGHT_PANEL_DEFAULT_WIDTH = 292;
 const RIGHT_PANEL_MIN_WIDTH = 248;
-const RIGHT_PANEL_MAX_WIDTH = 520;
+const RIGHT_PANEL_MAX_WIDTH = 1280;
+const RIGHT_PANEL_MAX_VIEWPORT_RATIO = 0.78;
+const RIGHT_PANEL_MIN_CENTER_WIDTH = 360;
+const TERMINAL_DOCK_HEIGHT_STORAGE_PREFIX = "kodex.terminalDock.height:";
+const TERMINAL_DOCK_VISIBLE_STORAGE_PREFIX = "kodex.terminalDock.visible:";
+const TERMINAL_DOCK_DEFAULT_HEIGHT = 220;
+
+function getRightPanelMaxWidth() {
+  if (typeof window === "undefined") return RIGHT_PANEL_MAX_WIDTH;
+  const bodyWidth =
+    document.querySelector<HTMLElement>(".workbench-body")?.getBoundingClientRect().width ??
+    window.innerWidth;
+  const layoutMax = Math.floor(bodyWidth - RIGHT_PANEL_MIN_CENTER_WIDTH);
+  const viewportMax = Math.floor(window.innerWidth * RIGHT_PANEL_MAX_VIEWPORT_RATIO);
+  return Math.min(
+    RIGHT_PANEL_MAX_WIDTH,
+    viewportMax,
+    Math.max(RIGHT_PANEL_MIN_WIDTH, layoutMax),
+  );
+}
 
 function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSnapshot {
   const messages =
@@ -64,6 +83,8 @@ function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSna
     inspector_tab: patch.inspector_tab,
     inspector_sections: patch.inspector_sections,
     session_changes: patch.session_changes,
+    review_changes: patch.review_changes,
+    turn_changes: patch.turn_changes ?? snapshot.turn_changes ?? [],
     thinking_status: patch.thinking_status,
   };
 }
@@ -116,15 +137,60 @@ function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
   return changed ? { ...snapshot, messages } : snapshot;
 }
 
-function sessionChangesSignature(changes: SessionFileChange[] | undefined) {
-  if (!changes || changes.length === 0) return "";
-  return changes
-    .map((change) =>
+function timestampValue(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) return parsed;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function buildTimelineTurnChangeSets(
+  summaries: ChangeSetSummary[],
+  filesByChangeSetId: Record<string, FileChangeSummary[]>,
+): Record<string, TimelineTurnChangeSet> {
+  const byMessageId: Record<string, TimelineTurnChangeSet> = {};
+  for (const summary of summaries) {
+    if (summary.source !== "AgentTurn" || !summary.message_id || summary.file_count === 0) {
+      continue;
+    }
+    const files = filesByChangeSetId[summary.id] ?? [];
+    if (files.length === 0) continue;
+    const existing = byMessageId[summary.message_id];
+    if (
+      existing &&
+      timestampValue(existing.updatedAt) >= timestampValue(summary.updated_at)
+    ) {
+      continue;
+    }
+    byMessageId[summary.message_id] = {
+      changeSetId: summary.id,
+      files,
+      updatedAt: summary.updated_at,
+    };
+  }
+  return byMessageId;
+}
+
+function timelineTurnChangeSetsSignature(
+  changeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
+) {
+  return Object.entries(changeSetsByMessageId)
+    .map(([messageId, changeSet]) =>
       [
-        change.path,
-        change.change_type,
-        change.added_lines,
-        change.removed_lines,
+        messageId,
+        changeSet.changeSetId,
+        changeSet.updatedAt,
+        ...changeSet.files.map((file) =>
+          [
+            file.path,
+            file.change_type,
+            file.added_lines,
+            file.removed_lines,
+            file.quality,
+            file.updated_at,
+          ].join(":"),
+        ),
       ].join(":"),
     )
     .sort()
@@ -138,11 +204,35 @@ interface PendingCloseTab {
 }
 
 function clampRightPanelWidth(width: number) {
-  return Math.min(RIGHT_PANEL_MAX_WIDTH, Math.max(RIGHT_PANEL_MIN_WIDTH, width));
+  return Math.min(getRightPanelMaxWidth(), Math.max(RIGHT_PANEL_MIN_WIDTH, width));
+}
+
+function terminalDockHeightKey(workspaceRoot: string) {
+  return `${TERMINAL_DOCK_HEIGHT_STORAGE_PREFIX}${workspaceRoot}`;
+}
+
+function terminalDockVisibleKey(workspaceRoot: string) {
+  return `${TERMINAL_DOCK_VISIBLE_STORAGE_PREFIX}${workspaceRoot}`;
+}
+
+function readTerminalDockHeight(workspaceRoot: string) {
+  const stored = Number(window.localStorage.getItem(terminalDockHeightKey(workspaceRoot)));
+  return Number.isFinite(stored) && stored >= 140 ? stored : TERMINAL_DOCK_DEFAULT_HEIGHT;
+}
+
+function readTerminalDockVisible(workspaceRoot: string) {
+  return window.localStorage.getItem(terminalDockVisibleKey(workspaceRoot)) === "1";
 }
 
 export function Workbench() {
   const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
+  const [timelineTurnChangeSets, setTimelineTurnChangeSets] = useState<
+    Record<string, TimelineTurnChangeSet>
+  >({});
+  const [agentConversationChangeCount, setAgentConversationChangeCount] = useState(0);
+  const [composerReferenceRequests, setComposerReferenceRequests] = useState<
+    ComposerReferenceRequest[]
+  >([]);
   const [tabs, setTabs] = useState<TabDescriptor[]>([CONVERSATION_TAB]);
   const [activeTabId, setActiveTabId] = useState("conversation");
   const [workspaceReady, setWorkspaceReady] = useState(false);
@@ -152,6 +242,9 @@ export function Workbench() {
     const stored = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY));
     return Number.isFinite(stored) ? clampRightPanelWidth(stored) : RIGHT_PANEL_DEFAULT_WIDTH;
   });
+  const [terminalDockVisible, setTerminalDockVisible] = useState(false);
+  const [terminalDockMounted, setTerminalDockMounted] = useState(false);
+  const [terminalDockHeight, setTerminalDockHeight] = useState(TERMINAL_DOCK_DEFAULT_HEIGHT);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [gitRefreshing, setGitRefreshing] = useState(false);
@@ -160,7 +253,7 @@ export function Workbench() {
   const gitRefreshInFlight = useRef(false);
   const gitRefreshPending = useRef(false);
   const gitHydrationKey = useRef(0);
-  const sessionChangesRefreshRef = useRef<{
+  const changeSetRefreshRef = useRef<{
     workspaceRoot: string;
     signature: string;
   } | null>(null);
@@ -187,6 +280,29 @@ export function Workbench() {
     settingsGetAgentSnapshot()
       .then((snapshot) => setAppTheme(applyAppTheme(snapshot.settings.theme)))
       .catch(() => setAppTheme(applyAppTheme(DEFAULT_APP_THEME)));
+  }, []);
+
+  useEffect(() => {
+    const workspaceRoot = snapshot?.workspace.root;
+    if (!workspaceRoot) return;
+    const visible = readTerminalDockVisible(workspaceRoot);
+    setTerminalDockVisible(visible);
+    setTerminalDockMounted(visible);
+    setTerminalDockHeight(readTerminalDockHeight(workspaceRoot));
+  }, [snapshot?.workspace.root]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setRightPanelWidth((current) => {
+        const next = clampRightPanelWidth(current);
+        if (next !== current) {
+          window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(next));
+        }
+        return next;
+      });
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
@@ -292,6 +408,9 @@ export function Workbench() {
     prevSnapshotRevision.current = 0;
     setWorkspaceReady(true);
     setSnapshot(null);
+    setTimelineTurnChangeSets({});
+    setAgentConversationChangeCount(0);
+    setComposerReferenceRequests([]);
     setGitHydrated(false);
     setTabs([CONVERSATION_TAB]);
     setActiveTabId("conversation");
@@ -302,6 +421,9 @@ export function Workbench() {
     prevSnapshotRevision.current = nextSnapshot.revision;
     setWorkspaceReady(true);
     setSnapshot(nextSnapshot);
+    setTimelineTurnChangeSets({});
+    setAgentConversationChangeCount(0);
+    setComposerReferenceRequests([]);
     setGitHydrated(false);
     setTabs([CONVERSATION_TAB]);
     setActiveTabId("conversation");
@@ -389,25 +511,89 @@ export function Workbench() {
     };
   }, [snapshot?.workspace.root, workspaceReady]);
 
-  const currentSessionChangesSignature = sessionChangesSignature(snapshot?.session_changes);
+  const currentAgentTurnChangesSignature =
+    timelineTurnChangeSetsSignature(timelineTurnChangeSets);
+
+  useEffect(() => {
+    const sessionId = snapshot?.session.id;
+    const workspaceRoot = snapshot?.workspace.root;
+    if (!workspaceReady || !sessionId || !workspaceRoot) {
+      setTimelineTurnChangeSets({});
+      setAgentConversationChangeCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    Promise.all([
+      sessionListChangeSets({
+        source: "AgentTurn",
+        session_id: sessionId,
+        workspace_root: workspaceRoot,
+      }),
+      sessionListChangeSets({
+        source: "AgentConversation",
+        session_id: sessionId,
+        workspace_root: workspaceRoot,
+      }),
+    ])
+      .then(async ([summaries, conversationSummaries]) => {
+        const turnSummaries = summaries.filter(
+          (summary) =>
+            summary.source === "AgentTurn" &&
+            summary.message_id != null &&
+            summary.file_count > 0,
+        );
+        const fileEntries = await Promise.all(
+          turnSummaries.map(async (summary) => {
+            try {
+              const response = await sessionListChangeSetFiles({
+                change_set_id: summary.id,
+              });
+              return [summary.id, response.files] as const;
+            } catch {
+              return [summary.id, []] as const;
+            }
+          }),
+        );
+        if (cancelled) return;
+        const filesByChangeSetId = Object.fromEntries(fileEntries);
+        setTimelineTurnChangeSets(
+          buildTimelineTurnChangeSets(turnSummaries, filesByChangeSetId),
+        );
+        const conversationSummary = conversationSummaries.find(
+          (summary) => summary.source === "AgentConversation" && summary.file_count > 0,
+        );
+        setAgentConversationChangeCount(conversationSummary?.file_count ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTimelineTurnChangeSets({});
+          setAgentConversationChangeCount(0);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot?.revision, snapshot?.session.id, snapshot?.workspace.root, workspaceReady]);
 
   useEffect(() => {
     const workspaceRoot = snapshot?.workspace.root;
     if (!workspaceReady || !workspaceRoot) return;
 
-    const previous = sessionChangesRefreshRef.current;
+    const previous = changeSetRefreshRef.current;
     if (!previous || previous.workspaceRoot !== workspaceRoot) {
-      sessionChangesRefreshRef.current = {
+      changeSetRefreshRef.current = {
         workspaceRoot,
-        signature: currentSessionChangesSignature,
+        signature: currentAgentTurnChangesSignature,
       };
       return;
     }
 
-    if (previous.signature === currentSessionChangesSignature) return;
-    sessionChangesRefreshRef.current = {
+    if (previous.signature === currentAgentTurnChangesSignature) return;
+    changeSetRefreshRef.current = {
       workspaceRoot,
-      signature: currentSessionChangesSignature,
+      signature: currentAgentTurnChangesSignature,
     };
 
     const timer = window.setTimeout(() => {
@@ -417,7 +603,7 @@ export function Workbench() {
     }, 120);
 
     return () => window.clearTimeout(timer);
-  }, [currentSessionChangesSignature, handleRefreshGit, snapshot?.workspace.root, workspaceReady]);
+  }, [currentAgentTurnChangesSignature, handleRefreshGit, snapshot?.workspace.root, workspaceReady]);
 
   const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null) => {
     await sessionResolvePermission(requestId, optionId);
@@ -427,6 +613,9 @@ export function Workbench() {
   const handleSessionChanged = useCallback(() => {
     prevSnapshotRevision.current = 0;
     setSnapshot(null);
+    setTimelineTurnChangeSets({});
+    setAgentConversationChangeCount(0);
+    setComposerReferenceRequests([]);
     setGitHydrated(false);
     setTabs([CONVERSATION_TAB]);
     setActiveTabId("conversation");
@@ -435,6 +624,36 @@ export function Workbench() {
 
   const handleToggleThreads = useCallback(() => {
     setSidebarCollapsed((collapsed) => !collapsed);
+  }, []);
+
+  const handleToggleTerminalDock = useCallback(() => {
+    const workspaceRoot = snapshotRef.current?.workspace.root;
+    setTerminalDockVisible((current) => {
+      const next = !current;
+      if (next) {
+        setTerminalDockMounted(true);
+      }
+      if (workspaceRoot) {
+        window.localStorage.setItem(terminalDockVisibleKey(workspaceRoot), next ? "1" : "0");
+      }
+      return next;
+    });
+  }, []);
+
+  const handleHideTerminalDock = useCallback(() => {
+    const workspaceRoot = snapshotRef.current?.workspace.root;
+    if (workspaceRoot) {
+      window.localStorage.setItem(terminalDockVisibleKey(workspaceRoot), "0");
+    }
+    setTerminalDockVisible(false);
+  }, []);
+
+  const handleTerminalDockHeightChange = useCallback((height: number) => {
+    const workspaceRoot = snapshotRef.current?.workspace.root;
+    setTerminalDockHeight(height);
+    if (workspaceRoot) {
+      window.localStorage.setItem(terminalDockHeightKey(workspaceRoot), String(height));
+    }
   }, []);
 
   const handleRightPanelResizeStart = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -468,14 +687,33 @@ export function Workbench() {
   // ── Tab management ──
 
   const handleOpenDiffTab = useCallback(
-    (path: string, source: "session" | "git" = "session") => {
-      const tabId = `diff:${source}:${path}`;
+    (
+      path: string,
+      source: "session" | "git" | "change-set" = "session",
+      change?: SessionFileChange,
+      changeSetId?: string,
+      record?: FileChangeRecord,
+    ) => {
+      const tabId = changeSetId
+        ? `diff:${changeSetId}:${path}`
+        : change
+          ? `diff:turn:${path}:${change.timestamp}:${change.added_lines}:${change.removed_lines}`
+          : `diff:${source}:${path}`;
       setTabs((prev) => {
         if (prev.some((t) => t.id === tabId)) return prev;
         const fileName = path.replace(/\\/g, "/").split("/").pop() || path;
         return [
           ...prev,
-          { id: tabId, type: "diff" as const, label: fileName, filePath: path, diffSource: source },
+          {
+            id: tabId,
+            type: "diff" as const,
+            label: fileName,
+            filePath: path,
+            diffSource: source,
+            changeSetId,
+            diffChange: change,
+            diffRecord: record,
+          },
         ];
       });
       setActiveTabId(tabId);
@@ -612,6 +850,23 @@ export function Workbench() {
     await pollState();
   }, [handleRefreshGit, pollState]);
 
+  const enqueueComposerReference = useCallback(
+    (request: Omit<ComposerReferenceRequest, "id">) => {
+      setComposerReferenceRequests((current) => [
+        ...current,
+        {
+          ...request,
+          id: `ref-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        },
+      ]);
+    },
+    [],
+  );
+
+  const handleComposerReferenceConsumed = useCallback((id: string) => {
+    setComposerReferenceRequests((current) => current.filter((request) => request.id !== id));
+  }, []);
+
   const handleTabSelect = useCallback((id: string) => {
     setActiveTabId(id);
   }, []);
@@ -620,11 +875,10 @@ export function Workbench() {
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
   const isDiffTab = activeTab.type === "diff" && activeTab.filePath != null;
 
-  const [resolvedDiffChange, setResolvedDiffChange] = useState<SessionFileChange | null>(null);
+  const [resolvedDiffChange, setResolvedDiffChange] = useState<SessionFileChange | FileChangeRecord | null>(null);
 
   // Snapshot changes intentionally carry only stats; fetch full old/new text on demand.
   useEffect(() => {
-    const source = activeTab.diffSource ?? "session";
     const filePath = activeTab.filePath;
     if (!isDiffTab || !filePath) {
       setResolvedDiffChange(null);
@@ -633,11 +887,28 @@ export function Workbench() {
 
     let cancelled = false;
     setResolvedDiffChange(null);
-    const loadDiff =
-      source === "git"
-        ? reviewGetGitDiffContent(filePath)
-        : sessionGetFileDiff(filePath).catch(() => reviewGetGitDiffContent(filePath));
-    loadDiff
+    if (activeTab.diffRecord) {
+      setResolvedDiffChange(activeTab.diffRecord);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (activeTab.diffChange && !activeTab.changeSetId) {
+      setResolvedDiffChange(activeTab.diffChange);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!activeTab.changeSetId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    sessionGetChangeSetFileDiff({
+      change_set_id: activeTab.changeSetId,
+      path: filePath,
+    })
       .then((change) => {
         if (!cancelled) setResolvedDiffChange(change);
       })
@@ -648,7 +919,7 @@ export function Workbench() {
     return () => {
       cancelled = true;
     };
-  }, [isDiffTab, activeTab.filePath, activeTab.diffSource, snapshot?.revision]);
+  }, [isDiffTab, activeTab.filePath, activeTab.diffChange, activeTab.diffRecord, activeTab.changeSetId]);
 
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
@@ -683,7 +954,9 @@ export function Workbench() {
         sidebarCollapsed={sidebarCollapsed}
         refreshing={gitRefreshing}
         rightPanelCollapsed={rightPanelCollapsed}
+        terminalDockVisible={terminalDockVisible}
         onToggleSidebar={handleToggleThreads}
+        onToggleTerminal={handleToggleTerminalDock}
         onRefreshGit={handleRefreshGit}
         onToggleRightPanel={() => setRightPanelCollapsed((collapsed) => !collapsed)}
         onFileOpen={handleSearchResultOpen}
@@ -693,6 +966,7 @@ export function Workbench() {
         <ThreadSidebarShell collapsed={sidebarCollapsed}>
           <SessionList
             activeSessionId={snapshot.session.id}
+            activeSessionTitle={snapshot.session.title}
             activeWorkspaceRoot={snapshot.workspace.root}
             currentSessionStatus={snapshot.session.status}
             onOpenSettings={() => setSettingsOpen(true)}
@@ -704,7 +978,7 @@ export function Workbench() {
         <div className="workbench-main-shell">
 
         <div
-          className="workbench-body"
+          className={`workbench-body ${terminalDockVisible ? "has-terminal-dock" : ""}`}
           style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
         >
           <main className="center-panel">
@@ -712,7 +986,7 @@ export function Workbench() {
               session={snapshot.session}
               workspace={snapshot.workspace}
               activeTabLabel={agentLabel}
-              changeCount={snapshot.session_changes?.length ?? 0}
+              changeCount={agentConversationChangeCount}
             />
 
             {displayTabs.length > 1 && (
@@ -727,12 +1001,16 @@ export function Workbench() {
               </div>
             )}
 
-            <div className="conversation-container">
+            <div className={`conversation-container ${activeTab.type === "conversation" ? "" : "is-workspace-tab"}`}>
               {activeTab.type === "conversation" ? (
                 <>
                   <ConversationTimeline
                     snapshot={snapshot}
                     onPermissionSelect={handlePermissionSelect}
+                    turnChangeSetsByMessageId={timelineTurnChangeSets}
+                    onReviewFileSelect={(path, changeSetId) =>
+                      handleOpenDiffTab(path, "change-set", undefined, changeSetId)
+                    }
                     planPanel={<AgentPlanPanel entries={snapshot.agent_plan ?? []} />}
                   />
                 </>
@@ -753,17 +1031,16 @@ export function Workbench() {
                       appTheme={appTheme}
                       onDirtyChange={handleEditorDirtyChange}
                       onSaved={handleEditorSaved}
+                      onAddComposerReference={enqueueComposerReference}
                     />
                   )}
                 </section>
               )}
-              <ChangesBar
-                changes={snapshot.session_changes ?? []}
-                onFileSelect={(path) => handleOpenDiffTab(path, "session")}
-              />
               <Composer
                 snapshot={snapshot}
                 onStateChange={pollState}
+                referenceRequests={composerReferenceRequests}
+                onReferenceRequestConsumed={handleComposerReferenceConsumed}
               />
             </div>
           </main>
@@ -774,6 +1051,7 @@ export function Workbench() {
                 type="button"
                 className="panel-resizer-hit"
                 aria-label="调整右侧面板宽度"
+                title="拖拽调整右侧面板宽度"
                 onPointerDown={handleRightPanelResizeStart}
               />
             </div>
@@ -784,12 +1062,28 @@ export function Workbench() {
               snapshot={snapshot}
               refreshing={gitRefreshing}
               hydrated={gitHydrated}
+              appTheme={appTheme}
               onRefresh={handleRefreshGit}
-              onFileSelect={(path) => handleOpenDiffTab(path, "git")}
+              onFileSelect={(path, changeSetId) =>
+                handleOpenDiffTab(path, "git", undefined, changeSetId)
+              }
               onFileOpen={handleOpenEditorTab}
+              onAddComposerReference={(path) => enqueueComposerReference({ path })}
             />
           </aside>
         </div>
+        {terminalDockMounted && (
+          <TerminalDock
+            key={snapshot.workspace.root}
+            workspaceRoot={snapshot.workspace.root}
+            appTheme={appTheme}
+            visible={terminalDockVisible}
+            height={terminalDockHeight}
+            layoutSignal={`${rightPanelWidth}:${rightPanelCollapsed}`}
+            onHeightChange={handleTerminalDockHeightChange}
+            onHide={handleHideTerminalDock}
+          />
+        )}
         {pendingCloseTab && (
           <div className="unsaved-close-backdrop" role="presentation">
             <div className="unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="unsaved-close-title">

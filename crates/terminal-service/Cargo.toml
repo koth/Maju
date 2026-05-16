@@ -1,13 +1,14 @@
 [package]
-name = "git-service"
-version = "0.1.0"
-edition = "2024"
+name = "terminal-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-git2.workspace = true
+portable-pty.workspace = true
 serde.workspace = true
-similar.workspace = true
+uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
 
 [dev-dependencies]

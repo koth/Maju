@@ -9,7 +9,9 @@ interface Props {
   sidebarCollapsed: boolean;
   refreshing: boolean;
   rightPanelCollapsed: boolean;
+  terminalDockVisible: boolean;
   onToggleSidebar: () => void;
+  onToggleTerminal: () => void;
   onRefreshGit: () => void;
   onToggleRightPanel: () => void;
   onFileOpen: (filePath: string, lineNumber?: number, searchQuery?: string) => void;
@@ -20,7 +22,9 @@ export function GlobalChrome({
   sidebarCollapsed,
   refreshing,
   rightPanelCollapsed,
+  terminalDockVisible,
   onToggleSidebar,
+  onToggleTerminal,
   onRefreshGit,
   onToggleRightPanel,
   onFileOpen,
@@ -117,6 +121,16 @@ export function GlobalChrome({
         </div>
       </div>
       <div className="global-chrome-actions">
+        <button
+          type="button"
+          className={`chrome-icon-btn ${terminalDockVisible ? "is-active" : ""}`}
+          onClick={onToggleTerminal}
+          title={terminalDockVisible ? "隐藏终端" : "打开终端"}
+          aria-label={terminalDockVisible ? "隐藏终端" : "打开终端"}
+          aria-pressed={terminalDockVisible}
+        >
+          <TerminalIcon />
+        </button>
         <div className="chrome-search-container" ref={searchContainerRef}>
           <button
             type="button"
@@ -203,6 +217,16 @@ function GitBranchIcon() {
       <circle cx="7" cy="5" r="2" />
       <circle cx="7" cy="19" r="2" />
       <circle cx="17" cy="7" r="2" />
+    </svg>
+  );
+}
+
+function TerminalIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="m8 10 3 2-3 2" />
+      <path d="M13 15h3" />
     </svg>
   );
 }

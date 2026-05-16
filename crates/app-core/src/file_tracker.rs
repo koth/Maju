@@ -3,7 +3,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use workspace_model::{DiffHunk, FileChangeType};
+use workspace_model::{DiffQuality, FileChangeType};
 
 /// Directories to skip when scanning for changed files.
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".kodex"];
@@ -167,6 +167,7 @@ impl FileChangeTracker {
     /// Look up the baseline text for a given path across all active recording windows.
     /// Returns the content that was on disk when the tool started, suitable for
     /// computing a "what did this tool change?" diff.
+    #[cfg(test)]
     pub(crate) fn get_any_baseline_text(&self, path: &str) -> Option<&str> {
         let normalized = self.normalize_candidate_path(path);
         for window in self.active_windows.values() {
@@ -175,6 +176,22 @@ impl FileChangeTracker {
             }
         }
         None
+    }
+
+    pub(crate) fn get_baseline_text(&self, call_id: &str, path: &str) -> Option<&str> {
+        let normalized = self.normalize_candidate_path(path);
+        self.active_windows
+            .get(call_id)
+            .and_then(|window| window.baseline_text.get(&normalized))
+            .map(String::as_str)
+    }
+
+    pub(crate) fn was_missing_at_start(&self, call_id: &str, path: &str) -> Option<bool> {
+        let normalized = self.normalize_candidate_path(path);
+        self.active_windows.get(call_id).map(|window| {
+            window.missing_at_start.contains(&normalized)
+                && !window.baseline.contains_key(&normalized)
+        })
     }
 
     fn normalize_candidate_path(&self, path: &str) -> String {
@@ -264,8 +281,8 @@ impl FileChangeTracker {
                         },
                         old_text,
                         new_text: String::new(),
-                        hunks: Vec::new(),
                         skipped_diff: true,
+                        quality: DiffQuality::LargeFileSkipped,
                     });
                     continue;
                 }
@@ -280,8 +297,8 @@ impl FileChangeTracker {
                         },
                         old_text,
                         new_text: String::new(),
-                        hunks: Vec::new(),
                         skipped_diff: true,
+                        quality: DiffQuality::BinarySkipped,
                     });
                     continue;
                 };
@@ -293,8 +310,8 @@ impl FileChangeTracker {
                             change_type: FileChangeType::Modified,
                             old_text: None,
                             new_text: String::new(),
-                            hunks: Vec::new(),
                             skipped_diff: true,
+                            quality: DiffQuality::MissingBaseline,
                         });
                         continue;
                     };
@@ -306,8 +323,8 @@ impl FileChangeTracker {
                         change_type: FileChangeType::Modified,
                         old_text: Some(old_text),
                         new_text,
-                        hunks: Vec::new(),
                         skipped_diff: false,
+                        quality: DiffQuality::Exact,
                     });
                 } else {
                     results.push(VerifiedFileChange {
@@ -315,18 +332,24 @@ impl FileChangeTracker {
                         change_type: FileChangeType::Created,
                         old_text: None,
                         new_text,
-                        hunks: Vec::new(),
                         skipped_diff: false,
+                        quality: DiffQuality::Exact,
                     });
                 }
             } else if base_meta.is_some() {
+                let old_text = window.baseline_text.get(path).cloned();
+                let skipped_diff = old_text.is_none();
                 results.push(VerifiedFileChange {
                     path: path.clone(),
                     change_type: FileChangeType::Deleted,
-                    old_text: window.baseline_text.get(path).cloned(),
+                    old_text,
                     new_text: String::new(),
-                    hunks: Vec::new(),
-                    skipped_diff: true,
+                    skipped_diff,
+                    quality: if skipped_diff {
+                        DiffQuality::MissingBaseline
+                    } else {
+                        DiffQuality::Exact
+                    },
                 });
             }
         }
@@ -341,8 +364,8 @@ pub(crate) struct VerifiedFileChange {
     pub(crate) change_type: FileChangeType,
     pub(crate) old_text: Option<String>,
     pub(crate) new_text: String,
-    pub(crate) hunks: Vec<DiffHunk>,
     pub(crate) skipped_diff: bool,
+    pub(crate) quality: DiffQuality,
 }
 
 #[cfg(test)]
@@ -407,6 +430,7 @@ mod tests {
         assert_eq!(changes[0].old_text.as_deref(), Some("hello"));
         assert_eq!(changes[0].new_text, "hello world");
         assert!(!changes[0].skipped_diff);
+        assert_eq!(changes[0].quality, DiffQuality::Exact);
     }
 
     #[test]
@@ -506,7 +530,8 @@ mod tests {
         let changes = tracker.finish_recording("call-1");
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, FileChangeType::Deleted);
-        assert!(changes[0].skipped_diff);
+        assert!(!changes[0].skipped_diff);
+        assert_eq!(changes[0].quality, DiffQuality::Exact);
     }
 
     #[test]
@@ -524,6 +549,7 @@ mod tests {
         let changes = tracker.finish_recording("call-1");
         assert_eq!(changes.len(), 1);
         assert!(changes[0].skipped_diff);
+        assert_eq!(changes[0].quality, DiffQuality::LargeFileSkipped);
         assert!(changes[0].new_text.is_empty());
     }
 
@@ -541,6 +567,7 @@ mod tests {
         let changes = tracker.finish_recording("call-1");
         assert_eq!(changes.len(), 1);
         assert!(changes[0].skipped_diff);
+        assert_eq!(changes[0].quality, DiffQuality::BinarySkipped);
     }
 
     #[test]

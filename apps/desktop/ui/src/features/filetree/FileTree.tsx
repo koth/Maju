@@ -1,17 +1,31 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import type { FileEntry } from "../../types";
-import { fsListDir } from "../../lib/tauri";
+import { fsListDir, fsRename, fsReveal } from "../../lib/tauri";
 import { getFileIcon } from "./file-icons";
 import "./FileTree.css";
 
 interface FileTreeProps {
   onFileOpen: (filePath: string) => void;
   refreshSignal?: number;
+  onAddComposerReference?: (filePath: string) => void;
+  composerReferenceEnabled?: boolean;
 }
 
 interface SelectedEntry {
   path: string;
   kind: FileEntry["kind"];
+}
+
+interface ContextMenuState {
+  entry: FileEntry;
+  x: number;
+  y: number;
+}
+
+interface RenameState {
+  entry: FileEntry;
+  value: string;
 }
 
 interface TreeNodeProps {
@@ -20,9 +34,15 @@ interface TreeNodeProps {
   expandedDirs: Set<string>;
   childrenCache: Map<string, FileEntry[]>;
   selectedPath: string | null;
+  renamingPath: string | null;
+  renameValue: string;
   onToggleDir: (path: string) => void;
   onSelect: (entry: FileEntry) => void;
   onFileOpen: (filePath: string) => void;
+  onContextMenu: (entry: FileEntry, x: number, y: number) => void;
+  onRenameValueChange: (value: string) => void;
+  onRenameCommit: () => void;
+  onRenameCancel: () => void;
 }
 
 function TreeNode({
@@ -31,23 +51,38 @@ function TreeNode({
   expandedDirs,
   childrenCache,
   selectedPath,
+  renamingPath,
+  renameValue,
   onToggleDir,
   onSelect,
   onFileOpen,
+  onContextMenu,
+  onRenameValueChange,
+  onRenameCommit,
+  onRenameCancel,
 }: TreeNodeProps) {
   const isDir = entry.kind === "Directory";
   const isExpanded = expandedDirs.has(entry.path);
   const isSelected = selectedPath === entry.path;
+  const isRenaming = renamingPath === entry.path;
   const children = childrenCache.get(entry.path);
 
   const handleClick = useCallback(() => {
+    if (isRenaming) return;
     onSelect(entry);
     if (isDir) {
       onToggleDir(entry.path);
     } else {
       onFileOpen(entry.path);
     }
-  }, [entry, isDir, onFileOpen, onSelect, onToggleDir]);
+  }, [entry, isDir, isRenaming, onFileOpen, onSelect, onToggleDir]);
+
+  const handleContextMenu = useCallback((event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(entry);
+    onContextMenu(entry, event.clientX, event.clientY);
+  }, [entry, onContextMenu, onSelect]);
 
   return (
     <>
@@ -55,6 +90,7 @@ function TreeNode({
         className={`filetree-node ${isDir ? "filetree-dir" : "filetree-file"} ${isSelected ? "is-selected" : ""}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         title={entry.path}
       >
         <span className="filetree-chevron">
@@ -65,7 +101,27 @@ function TreeNode({
         ) : (
           <img className="filetree-icon" src={getFileIcon(entry.path)} alt="" />
         )}
-        <span className="filetree-name">{entry.name}</span>
+        {isRenaming ? (
+          <input
+            className="filetree-rename-input"
+            value={renameValue}
+            autoFocus
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => onRenameValueChange(event.target.value)}
+            onBlur={onRenameCommit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                onRenameCommit();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                onRenameCancel();
+              }
+            }}
+          />
+        ) : (
+          <span className="filetree-name">{entry.name}</span>
+        )}
       </div>
       {isDir && isExpanded && children && (
         <div className="filetree-children">
@@ -77,9 +133,15 @@ function TreeNode({
               expandedDirs={expandedDirs}
               childrenCache={childrenCache}
               selectedPath={selectedPath}
+              renamingPath={renamingPath}
+              renameValue={renameValue}
               onToggleDir={onToggleDir}
               onSelect={onSelect}
               onFileOpen={onFileOpen}
+              onContextMenu={onContextMenu}
+              onRenameValueChange={onRenameValueChange}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
             />
           ))}
         </div>
@@ -88,14 +150,22 @@ function TreeNode({
   );
 }
 
-export function FileTree({ onFileOpen, refreshSignal = 0 }: FileTreeProps) {
+export function FileTree({
+  onFileOpen,
+  refreshSignal = 0,
+  onAddComposerReference,
+  composerReferenceEnabled = false,
+}: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [childrenCache, setChildrenCache] = useState<Map<string, FileEntry[]>>(
     new Map()
   );
   const [selectedEntry, setSelectedEntry] = useState<SelectedEntry | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const committingRenameRef = useRef(false);
 
   const refreshDirectory = useCallback(async (dirPath: string) => {
     setError(null);
@@ -129,6 +199,19 @@ export function FileTree({ onFileOpen, refreshSignal = 0 }: FileTreeProps) {
       .catch((e) => setError(String(e)));
   }, [refreshDirectory, refreshSignal, selectedEntry]);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
+
   const handleToggleDir = useCallback(
     async (dirPath: string) => {
       if (expandedDirs.has(dirPath)) {
@@ -156,13 +239,92 @@ export function FileTree({ onFileOpen, refreshSignal = 0 }: FileTreeProps) {
     setSelectedEntry({ path: entry.path, kind: entry.kind });
   }, []);
 
-  if (error) {
-    return <div className="filetree-error">{error}</div>;
-  }
+  const handleContextMenu = useCallback((entry: FileEntry, x: number, y: number) => {
+    const width = 190;
+    const height = entry.kind === "File" ? 118 : 82;
+    setContextMenu({
+      entry,
+      x: Math.min(x, window.innerWidth - width - 8),
+      y: Math.min(y, window.innerHeight - height - 8),
+    });
+  }, []);
+
+  const startRename = useCallback((entry: FileEntry) => {
+    setContextMenu(null);
+    setRenameState({ entry, value: entry.name });
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    committingRenameRef.current = true;
+    setRenameState(null);
+    requestAnimationFrame(() => {
+      committingRenameRef.current = false;
+    });
+  }, []);
+
+  const commitRename = useCallback(async () => {
+    if (!renameState || committingRenameRef.current) return;
+    const nextName = renameState.value.trim();
+    if (!nextName || nextName === renameState.entry.name) {
+      cancelRename();
+      return;
+    }
+    if (nextName.includes("/") || nextName.includes("\\") || nextName === "." || nextName === "..") {
+      setError("名称只能是单个文件或文件夹名");
+      return;
+    }
+
+    committingRenameRef.current = true;
+    try {
+      const renamed = await fsRename(renameState.entry.path, nextName);
+      const parent = parentDirectory(renameState.entry.path);
+      const wasExpanded = expandedDirs.has(renameState.entry.path);
+      setSelectedEntry({ path: renamed.path, kind: renamed.kind });
+      if (renameState.entry.kind === "Directory") {
+        setChildrenCache((prev) => {
+          const next = new Map(prev);
+          next.delete(renameState.entry.path);
+          return next;
+        });
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          if (next.delete(renameState.entry.path)) {
+            next.add(renamed.path);
+          }
+          return next;
+        });
+      }
+      setRenameState(null);
+      await refreshDirectory(parent);
+      if (renamed.kind === "Directory" && wasExpanded) {
+        await refreshDirectory(renamed.path);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      committingRenameRef.current = false;
+    }
+  }, [cancelRename, expandedDirs, refreshDirectory, renameState]);
+
+  const handleReveal = useCallback(async (entry: FileEntry) => {
+    setContextMenu(null);
+    try {
+      await fsReveal(entry.path, entry.kind === "File");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  const handleAddReference = useCallback((entry: FileEntry) => {
+    if (entry.kind !== "File" || !composerReferenceEnabled || !onAddComposerReference) return;
+    setContextMenu(null);
+    onAddComposerReference(entry.path);
+  }, [composerReferenceEnabled, onAddComposerReference]);
 
   return (
     <div className="filetree">
       <div className="filetree-header">所有文件</div>
+      {error && <div className="filetree-inline-error">{error}</div>}
       <div className="filetree-list">
         {rootEntries.map((entry) => (
           <TreeNode
@@ -172,12 +334,46 @@ export function FileTree({ onFileOpen, refreshSignal = 0 }: FileTreeProps) {
             expandedDirs={expandedDirs}
             childrenCache={childrenCache}
             selectedPath={selectedEntry?.path ?? null}
+            renamingPath={renameState?.entry.path ?? null}
+            renameValue={renameState?.value ?? ""}
             onToggleDir={handleToggleDir}
             onSelect={handleSelect}
             onFileOpen={onFileOpen}
+            onContextMenu={handleContextMenu}
+            onRenameValueChange={(value) =>
+              setRenameState((current) => current ? { ...current, value } : current)
+            }
+            onRenameCommit={commitRename}
+            onRenameCancel={cancelRename}
           />
         ))}
       </div>
+      {contextMenu && (
+        <div
+          className="filetree-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button type="button" role="menuitem" onClick={() => startRename(contextMenu.entry)}>
+            重命名
+          </button>
+          <button type="button" role="menuitem" onClick={() => handleReveal(contextMenu.entry)}>
+            {contextMenu.entry.kind === "Directory" ? "在文件浏览器中打开" : "打开所在位置"}
+          </button>
+          {contextMenu.entry.kind === "File" && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!composerReferenceEnabled || !onAddComposerReference}
+              title={composerReferenceEnabled ? "添加到 Composer 引用" : "当前智能体不支持文件引用"}
+              onClick={() => handleAddReference(contextMenu.entry)}
+            >
+              添加到 Composer 引用
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

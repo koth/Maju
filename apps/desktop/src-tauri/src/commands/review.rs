@@ -1,9 +1,8 @@
 use crate::state::AppState;
 use app_core::normalize_tracked_path;
-use git2::Repository;
-use std::path::Path;
+use git_service::GitService;
 use tauri::State;
-use workspace_model::{ChangedFile, DiffStats, FileChangeType, SessionFileChange};
+use workspace_model::{ChangedFile, SessionFileChange};
 
 fn normalize_to_ws_relative(path: &str, ws_root: &str) -> String {
     let normalized = normalize_tracked_path(path);
@@ -67,12 +66,9 @@ pub fn review_get_git_diff_content(
         return Ok(None);
     }
 
-    let repo = Repository::discover(&ws_root).map_err(|e| format!("failed to open repo: {e}"))?;
-    let workdir = repo.workdir().ok_or("no workdir")?;
-
     let rel_path = {
         let normalized = normalize_tracked_path(&path);
-        let ws_norm = normalize_tracked_path(&workdir.display().to_string());
+        let ws_norm = normalize_tracked_path(&ws_root.display().to_string());
         let ws_prefix = if ws_norm.ends_with('/') {
             ws_norm
         } else {
@@ -83,7 +79,7 @@ pub fn review_get_git_diff_content(
             .unwrap_or(&normalized)
             .to_string()
     };
-    let snapshot_stats = state
+    let snapshot_section = state
         .with_app(|app| {
             Ok(app
                 .ui
@@ -94,90 +90,25 @@ pub fn review_get_git_diff_content(
                     normalize_tracked_path(&file.path.display().to_string())
                         == normalize_tracked_path(&rel_path)
                 })
-                .map(|file| file.stats.clone()))
+                .map(|file| file.section.clone()))
         })
         .unwrap_or(None);
 
-    let full_path = workdir.join(&rel_path);
-
-    let new_text = if full_path.exists() {
-        std::fs::read_to_string(&full_path).unwrap_or_default()
+    let record = if let Some(section) = snapshot_section {
+        GitService::file_diff(&ws_root, &rel_path, section)
+            .map_err(|e| format!("failed to load git diff: {e}"))?
     } else {
-        String::new()
+        GitService::file_diff_auto(&ws_root, &rel_path)
+            .map_err(|e| format!("failed to load git diff: {e}"))?
     };
 
-    let old_text = (|| -> Option<String> {
-        let head = repo.head().ok()?;
-        let tree = head.peel_to_tree().ok()?;
-        let entry = tree.get_path(Path::new(&rel_path)).ok()?;
-        let blob = entry.to_object(&repo).ok()?;
-        let blob = blob.peel_to_blob().ok()?;
-        String::from_utf8(blob.content().to_vec()).ok()
-    })();
-
-    let change_type = if old_text.is_none() && !new_text.is_empty() {
-        FileChangeType::Created
-    } else if old_text.is_some() && new_text.is_empty() {
-        FileChangeType::Deleted
-    } else {
-        FileChangeType::Modified
-    };
-
-    let stats =
-        snapshot_stats.unwrap_or_else(|| diff_stats_from_text(old_text.as_deref(), &new_text));
-
-    Ok(Some(SessionFileChange {
-        path: rel_path,
-        change_type,
-        old_text,
-        new_text,
-        added_lines: stats.added,
-        removed_lines: stats.removed,
-        timestamp: String::new(),
+    Ok(record.map(|record| SessionFileChange {
+        path: record.path,
+        change_type: record.change_type,
+        old_text: record.old_text,
+        new_text: record.new_text.unwrap_or_default(),
+        added_lines: record.added_lines,
+        removed_lines: record.removed_lines,
+        timestamp: record.updated_at,
     }))
-}
-
-fn diff_stats_from_text(old_text: Option<&str>, new_text: &str) -> DiffStats {
-    let hunks = acp_core::diff_to_hunks(old_text, new_text);
-    DiffStats {
-        added: hunks
-            .iter()
-            .flat_map(|hunk| &hunk.lines)
-            .filter(|line| matches!(line.kind, workspace_model::DiffLineKind::Added))
-            .count(),
-        removed: hunks
-            .iter()
-            .flat_map(|hunk| &hunk.lines)
-            .filter(|line| matches!(line.kind, workspace_model::DiffLineKind::Removed))
-            .count(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::diff_stats_from_text;
-
-    #[test]
-    fn diff_stats_count_changed_lines_not_file_lengths() {
-        let old_text = (1..=890)
-            .map(|line| {
-                if line == 10 {
-                    "old a".to_string()
-                } else if line == 20 {
-                    "old b".to_string()
-                } else {
-                    format!("same {line}")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let new_text = old_text
-            .replace("old a", "new a")
-            .replace("old b", "new b\nnew c\nnew d");
-
-        let stats = diff_stats_from_text(Some(&old_text), &new_text);
-
-        assert_eq!(stats.added, 4);
-        assert_eq!(stats.removed, 2);
-    }
 }

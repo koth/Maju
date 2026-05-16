@@ -1,14 +1,18 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { memo } from "react";
+import { Children, isValidElement, memo, useEffect, useState, type ReactNode } from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { oneLight, vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { getAppliedAppTheme } from "../../theme";
 
 interface Props {
   content: string;
 }
 
 function MarkdownBody({ content }: Props) {
+  const appTheme = useCurrentAppTheme();
+  const codeTheme = appTheme === "light" ? oneLight : vscDarkPlus;
+
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -25,7 +29,7 @@ function MarkdownBody({ content }: Props) {
                   <span className="md-code-lang">{match[1]}</span>
                 </div>
                 <SyntaxHighlighter
-                  style={vscDarkPlus}
+                  style={codeTheme}
                   language={match[1]}
                   PreTag="div"
                   customStyle={{
@@ -34,8 +38,9 @@ function MarkdownBody({ content }: Props) {
                     borderRadius: "0 0 10px 10px",
                     fontSize: "13px",
                     lineHeight: "1.5",
-                    background: "var(--app-bg)",
-                    backgroundColor: "var(--app-bg)",
+                    color: "var(--md-code-pre-text, inherit)",
+                    background: "var(--md-code-block-bg, var(--app-bg))",
+                    backgroundColor: "var(--md-code-block-bg, var(--app-bg))",
                   }}
                 >
                   {codeString}
@@ -51,7 +56,12 @@ function MarkdownBody({ content }: Props) {
           );
         },
         p({ children }) {
-          return <p className="md-paragraph">{children}</p>;
+          const imageOnly = isImageOnlyParagraph(children);
+          return (
+            <p className={imageOnly ? "md-paragraph md-image-paragraph" : "md-paragraph"}>
+              {children}
+            </p>
+          );
         },
         ul({ children }) {
           return <ul className="md-list">{children}</ul>;
@@ -121,6 +131,19 @@ function MarkdownBody({ content }: Props) {
 
 export default memo(MarkdownBody);
 
+function useCurrentAppTheme() {
+  const [theme, setTheme] = useState(() => getAppliedAppTheme());
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => setTheme(getAppliedAppTheme()));
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
+
+  return theme;
+}
+
 function safeMarkdownUrl(url: string) {
   if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) {
     return url;
@@ -129,4 +152,21 @@ function safeMarkdownUrl(url: string) {
     return url;
   }
   return "";
+}
+
+function isImageOnlyParagraph(children: ReactNode) {
+  const meaningfulChildren = Children.toArray(children).filter(
+    (child) => !(typeof child === "string" && child.trim() === ""),
+  );
+  return (
+    meaningfulChildren.length > 0 &&
+    meaningfulChildren.every(isMarkdownImageElement)
+  );
+}
+
+function isMarkdownImageElement(child: ReactNode) {
+  if (!isValidElement<{ className?: string; src?: string }>(child)) {
+    return false;
+  }
+  return child.props.className === "md-image" || child.type === "img" || Boolean(child.props.src);
 }

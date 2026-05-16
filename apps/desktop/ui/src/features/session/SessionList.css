@@ -1098,6 +1098,28 @@
   white-space: nowrap;
 }
 
+.sl-item-side-label {
+  display: grid;
+  justify-items: end;
+  min-width: 0;
+}
+
+.sl-item-agent {
+  display: none;
+  max-width: 78px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sl-active .sl-item-agent {
+  color: var(--text-muted);
+}
+
 .sl-delete-btn {
   display: grid;
   width: 26px;
@@ -1109,7 +1131,11 @@
 }
 
 .sl-item:hover .sl-item-time {
-  opacity: 0;
+  display: none;
+}
+
+.sl-item:hover .sl-item-agent {
+  display: block;
 }
 
 .sl-item:hover .sl-delete-btn,

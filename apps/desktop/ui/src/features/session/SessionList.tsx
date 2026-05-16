@@ -16,6 +16,7 @@ import "./SessionList.css";
 
 interface Props {
   activeSessionId: string;
+  activeSessionTitle: string;
   activeWorkspaceRoot: string;
   currentSessionStatus: SessionStatus;
   onOpenSettings: () => void;
@@ -32,6 +33,7 @@ interface PendingSwitch {
 
 export function SessionList({
   activeSessionId,
+  activeSessionTitle,
   activeWorkspaceRoot,
   currentSessionStatus,
   onOpenSettings,
@@ -60,6 +62,25 @@ export function SessionList({
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!activeSessionId || !activeSessionTitle) return;
+    setWorkspaceSessions((current) =>
+      current.map((workspaceItem) => {
+        if (workspaceItem.workspace.root !== activeWorkspaceRoot) {
+          return workspaceItem;
+        }
+        return {
+          ...workspaceItem,
+          sessions: workspaceItem.sessions.map((session) =>
+            session.id === activeSessionId
+              ? { ...session, title: activeSessionTitle, status: currentSessionStatus }
+              : session,
+          ),
+        };
+      }),
+    );
+  }, [activeSessionId, activeSessionTitle, activeWorkspaceRoot, currentSessionStatus]);
 
   const openAgentModal = useCallback(async (mode: AgentModalMode) => {
     setModalError(null);
@@ -452,6 +473,8 @@ function ThreadRow({
   onDelete: (id: string) => void;
 }) {
   const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
+  const agentLabel = formatAgentLabel(session.agent_cli);
+  const sessionTooltip = agentLabel ? `${session.title} · ${agentLabel}` : session.title;
 
   return (
     <div className={`sl-item ${active ? "sl-active" : ""}`}>
@@ -463,9 +486,14 @@ function ThreadRow({
       >
         <span className={`sl-session-online ${connected ? "is-visible" : ""}`} title={connected ? "Agent 已连接" : undefined} aria-label={connected ? "Agent 已连接" : undefined} />
         <span className="sl-item-main">
-          <span className="sl-item-title" title={session.title}>{session.title}</span>
+          <span className="sl-item-title" title={sessionTooltip}>{session.title}</span>
         </span>
-        {timeLabel && <span className="sl-item-time">{timeLabel}</span>}
+        {(timeLabel || agentLabel) && (
+          <span className="sl-item-side-label">
+            {timeLabel && <span className="sl-item-time">{timeLabel}</span>}
+            {agentLabel && <span className="sl-item-agent">{agentLabel}</span>}
+          </span>
+        )}
       </button>
       <button
         className="sl-delete-btn"
@@ -486,6 +514,16 @@ function ThreadRow({
       </button>
     </div>
   );
+}
+
+function formatAgentLabel(value?: string | null): string | null {
+  const raw = value?.trim();
+  if (!raw) return "未知";
+  const normalized = raw.toLowerCase();
+  if (normalized.includes("codebuddy")) return "CodeBuddy";
+  if (normalized.includes("codex")) return "Codex";
+  if (normalized.includes("goose")) return "goose";
+  return raw;
 }
 
 function sortSessions(sessions: SessionListItem[]): SessionListItem[] {

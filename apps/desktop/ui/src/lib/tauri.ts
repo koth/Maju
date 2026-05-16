@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest } from "../types";
 
 export async function startupPerfMark(stage: string, detail?: string): Promise<void> {
   try {
@@ -167,12 +167,32 @@ export async function sessionGetChanges(): Promise<SessionFileChange[]> {
   return invoke<SessionFileChange[]>("session_get_changes");
 }
 
+export async function sessionListChangeSets(request?: ListChangeSetsRequest): Promise<ChangeSetSummary[]> {
+  return invoke<ChangeSetSummary[]>("session_list_change_sets", { request: request ?? null });
+}
+
+export async function sessionListChangeSetFiles(request: ListChangeSetFilesRequest): Promise<ChangeSetFilesResponse> {
+  return invoke<ChangeSetFilesResponse>("session_list_change_set_files", { request });
+}
+
+export async function sessionGetChangeSetFileDiff(request: GetChangeSetFileDiffRequest): Promise<FileChangeRecord | null> {
+  return invoke<FileChangeRecord | null>("session_get_change_set_file_diff", { request });
+}
+
 export async function sessionGetFileDiff(path: string): Promise<SessionFileChange> {
   return invoke<SessionFileChange>("session_get_file_diff", { path });
 }
 
 export async function fsListDir(path: string): Promise<FileEntry[]> {
   return invoke<FileEntry[]>("fs_list_dir", { path });
+}
+
+export async function fsRename(path: string, newName: string): Promise<FileEntry> {
+  return invoke<FileEntry>("fs_rename", { path, newName });
+}
+
+export async function fsReveal(path: string, select = false): Promise<void> {
+  return invoke("fs_reveal", { path, select });
 }
 
 export async function sessionReconnect(): Promise<void> {
@@ -207,6 +227,10 @@ export async function settingsSaveCodexAcpProviderKey(provider: string, apiKey: 
   return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_provider_key", { provider, apiKey });
 }
 
+export async function settingsSelectCodexAcpProvider(provider: string): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_codex_acp_provider", { provider });
+}
+
 export async function settingsSelectCodexDefaultMode(): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode");
 }
@@ -229,4 +253,28 @@ export async function settingsResetLspServer(languageId: string): Promise<LspSet
 
 export async function settingsProbeLspServer(command: string): Promise<LspProbeResult> {
   return invoke<LspProbeResult>("settings_probe_lsp_server", { command });
+}
+
+export async function terminalOpen(request: TerminalOpenRequest): Promise<TerminalSession> {
+  return invoke<TerminalSession>("terminal_open", { request });
+}
+
+export async function terminalWrite(request: TerminalWriteRequest): Promise<void> {
+  return invoke("terminal_write", { request });
+}
+
+export async function terminalResize(request: TerminalResizeRequest): Promise<TerminalSession> {
+  return invoke<TerminalSession>("terminal_resize", { request });
+}
+
+export async function terminalTerminate(request: TerminalIdRequest): Promise<void> {
+  return invoke("terminal_terminate", { request });
+}
+
+export async function terminalRestart(request: TerminalResizeRequest): Promise<TerminalSession> {
+  return invoke<TerminalSession>("terminal_restart", { request });
+}
+
+export async function terminalList(workspaceRoot?: string | null): Promise<TerminalSession[]> {
+  return invoke<TerminalSession[]>("terminal_list", { workspaceRoot: workspaceRoot ?? null });
 }

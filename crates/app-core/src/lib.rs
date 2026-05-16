@@ -18,10 +18,10 @@ mod tests {
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, FileChangeType,
-        MessageRole, SessionConfigCategory, SessionConfigChoice, SessionConfigControl,
-        SessionConfigSource, SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem,
-        ToolStatus, UserPromptContent,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, MessageRole,
+        SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
+        SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus,
+        UserPromptContent,
     };
 
     use tempfile::tempdir;
@@ -271,6 +271,45 @@ mod tests {
 
         assert_eq!(ui.session.status, workspace_model::SessionStatus::Idle);
         assert_eq!(ui.messages.len(), message_count);
+    }
+
+    #[test]
+    fn reducer_marks_open_tools_interrupted_on_abnormal_turn_finish() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call_refusal".into(),
+                parent_id: None,
+                name: "PowerShell".into(),
+                kind: "shell".into(),
+                summary: "正在运行命令".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "refusal".into(),
+            },
+        );
+
+        let tool = ui.tools.iter().find(|tool| tool.call_id == "call_refusal");
+        assert_eq!(ui.session.status, workspace_model::SessionStatus::Idle);
+        assert_eq!(
+            tool.map(|tool| &tool.status),
+            Some(&ToolStatus::Interrupted)
+        );
+        assert!(tool.and_then(|tool| tool.error.as_ref()).is_some());
+        assert_eq!(
+            ui.inspector_sections
+                .last()
+                .map(|section| section.title.as_str()),
+            Some("轮次异常")
+        );
     }
 
     #[test]
@@ -717,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_editor_save_updates_existing_session_change_against_original_base() {
+    fn manual_editor_save_does_not_update_agent_session_changes() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
 
@@ -732,17 +771,12 @@ mod tests {
             "manual edit\n".into(),
         );
 
-        assert_eq!(app.ui.session_changes.len(), 1);
-        let change = &app.ui.session_changes[0];
-        assert_eq!(change.old_text.as_deref(), Some("before\n"));
-        assert_eq!(change.new_text, "manual edit\n");
-        assert_eq!(change.change_type, FileChangeType::Modified);
-        assert_eq!(change.added_lines, 1);
-        assert_eq!(change.removed_lines, 1);
+        assert!(app.ui.session_changes.is_empty());
+        assert!(app.ui.review_changes.is_empty());
     }
 
     #[test]
-    fn manual_editor_save_creates_session_change_from_editor_before_content() {
+    fn manual_editor_save_is_separate_from_current_turn_changes() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
 
@@ -752,17 +786,12 @@ mod tests {
             "before\nextra\n".into(),
         );
 
-        assert_eq!(app.ui.session_changes.len(), 1);
-        let change = &app.ui.session_changes[0];
-        assert_eq!(change.path, "src/new.ts");
-        assert_eq!(change.old_text.as_deref(), Some("before\n"));
-        assert_eq!(change.new_text, "before\nextra\n");
-        assert_eq!(change.added_lines, 1);
-        assert_eq!(change.removed_lines, 0);
+        assert!(app.ui.session_changes.is_empty());
+        assert!(app.ui.review_changes.is_empty());
     }
 
     #[test]
-    fn manual_editor_save_removes_session_change_when_reverted_to_base() {
+    fn manual_editor_save_revert_does_not_create_agent_changes() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
 
@@ -773,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_editor_save_removes_session_change_for_line_ending_only_diff() {
+    fn manual_editor_save_line_ending_only_diff_does_not_create_agent_changes() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
 

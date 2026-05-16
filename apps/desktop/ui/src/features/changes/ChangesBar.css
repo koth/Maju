@@ -1,10 +1,10 @@
 .changes-bar {
   flex-shrink: 0;
-  width: var(--conversation-column-width);
-  min-width: var(--conversation-column-min);
-  max-width: var(--conversation-column-max);
-  border: 1px solid var(--border);
-  background: var(--app-bg);
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  border: 1px solid rgba(226, 229, 233, 0.12);
+  background: #242526;
   border-radius: 12px;
   margin: 0 auto 12px;
   overflow: hidden;
@@ -21,7 +21,8 @@
   gap: 10px;
   min-height: 42px;
   padding: 0 12px 0 16px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid rgba(226, 229, 233, 0.08);
+  background: color-mix(in srgb, #242526 94%, #ffffff 6%);
 }
 
 .changes-bar-chevron {
@@ -101,7 +102,7 @@
   padding: 0;
   max-height: 280px;
   overflow-y: auto;
-  background: var(--app-bg);
+  background: #242526;
 }
 
 .changes-bar-row {
@@ -110,7 +111,7 @@
   gap: 10px;
   min-height: 42px;
   padding: 0 14px 0 16px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid rgba(226, 229, 233, 0.07);
   border-radius: 0;
   cursor: pointer;
   font: inherit;
@@ -152,6 +153,14 @@
 :root[data-theme="light"] .changes-bar {
   border-color: rgba(32, 33, 36, 0.12);
   background: #ffffff;
+}
+
+:root[data-theme="light"] .changes-bar-list {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .changes-bar-header {
+  background: #f7f7f5;
 }
 
 :root[data-theme="light"] .changes-bar-header,

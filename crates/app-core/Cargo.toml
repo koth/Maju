@@ -18,4 +18,5 @@ workspace-model = { path = "../workspace-model" }
 
 [dev-dependencies]
 filetime = "0.2"
+git2.workspace = true
 tempfile.workspace = true
