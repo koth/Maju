@@ -1,6 +1,5 @@
 use crate::commands::workspace::save_open_workspace_state;
 use crate::state::AppState;
-use app_core::normalize_tracked_path;
 use tauri::{AppHandle, State};
 use workspace_model::{
     AgentCliId, ChangeSetFilesResponse, ChangeSetSummary, FileChangeRecord,
@@ -124,38 +123,12 @@ pub fn session_get_change_set_file_diff(
     state.with_app(|app| Ok(app.get_change_set_file_diff(request)))
 }
 
-fn normalize_to_ws_relative(path: &str, ws_root: &str) -> String {
-    let normalized = normalize_tracked_path(path);
-    let ws_norm = normalize_tracked_path(ws_root);
-    let ws_prefix = if ws_norm.ends_with('/') {
-        ws_norm
-    } else {
-        format!("{}/", ws_norm)
-    };
-    normalized
-        .strip_prefix(&ws_prefix)
-        .unwrap_or(&normalized)
-        .to_string()
-}
-
 #[tauri::command]
 pub fn session_get_file_diff(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<SessionFileChange, String> {
-    state.with_app(|app| {
-        let normalized = normalize_tracked_path(&path);
-        let ws_root = app.ui.workspace.root.display().to_string();
-        app.ui
-            .session_changes
-            .iter()
-            .find(|c| {
-                normalize_tracked_path(&c.path) == normalized
-                    || normalize_to_ws_relative(&c.path, &ws_root) == normalized
-            })
-            .cloned()
-            .ok_or_else(|| format!("No change found for path: {path}"))
-    })
+    state.with_app(|app| app.session_file_diff(&path))
 }
 
 #[tauri::command]

@@ -270,24 +270,6 @@ impl AppState {
         }))
     }
 
-    pub fn poll_active_and_get_snapshot_since(
-        &self,
-        last_revision: u64,
-    ) -> Result<Option<UiSnapshot>, String> {
-        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
-        let app = match guard.workspaces.get_mut(&active_key) {
-            Some(WorkspaceEntry::Connected(app)) => app,
-            _ => return Err("No connected workspace open".into()),
-        };
-        app.poll_prompt_progress();
-        if app.ui.revision == last_revision {
-            Ok(None)
-        } else {
-            Ok(Some(app.lightweight_ui_snapshot()))
-        }
-    }
-
     pub fn poll_active_and_get_update(
         &self,
         cursor: &mut UiPatchCursor,

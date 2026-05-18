@@ -1,9 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { UiSnapshot, UiSnapshotPatch, TabDescriptor, SessionFileChange, AppTheme, FileChangeRecord, ChangeSetSummary, FileChangeSummary } from "../../types";
-import { startupPerfMark, sessionGetState, gitRefresh, sessionResolvePermission, sessionGetChangeSetFileDiff, sessionListChangeSetFiles, sessionListChangeSets, settingsGetAgentSnapshot, editorSaveFile } from "../../lib/tauri";
-import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
-import { ConversationTimeline, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
+import { useState, useEffect, useCallback } from "react";
+import type { UiSnapshot, AppTheme } from "../../types";
+import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
+import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import { AgentPlanPanel } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
@@ -18,263 +16,89 @@ import { ThreadSidebarShell } from "./ThreadSidebarShell";
 import { SettingsPage } from "../settings/SettingsPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
-import { disposeModel, getModelBaseVersion, getModelValue, isModelDirty, updateModelBase, updateModelBaseVersion } from "../editor/monaco-model-registry";
-import {
-  appendStreamingMessageDelta,
-  getStreamingMessageBody,
-} from "../conversation/streaming-message-store";
+import { useWorkbenchSnapshot } from "./useWorkbenchSnapshot";
+import { useWorkbenchGit } from "./useWorkbenchGit";
+import { useTimelineChangeSets } from "./useTimelineChangeSets";
+import { useWorkbenchTabs } from "./useWorkbenchTabs";
+import { useRightPanelState } from "./useRightPanelState";
+import { useTerminalDockState } from "./useTerminalDockState";
 import "./Workbench.css";
 
-const CONVERSATION_TAB: TabDescriptor = {
-  id: "conversation",
-  type: "conversation",
-  label: "Chat",
-};
-
-const RIGHT_PANEL_WIDTH_STORAGE_KEY = "kodex.rightPanelWidth";
-const RIGHT_PANEL_DEFAULT_WIDTH = 292;
-const RIGHT_PANEL_MIN_WIDTH = 248;
-const RIGHT_PANEL_MAX_WIDTH = 1280;
-const RIGHT_PANEL_MAX_VIEWPORT_RATIO = 0.78;
-const RIGHT_PANEL_MIN_CENTER_WIDTH = 360;
-const TERMINAL_DOCK_HEIGHT_STORAGE_PREFIX = "kodex.terminalDock.height:";
-const TERMINAL_DOCK_VISIBLE_STORAGE_PREFIX = "kodex.terminalDock.visible:";
-const TERMINAL_DOCK_DEFAULT_HEIGHT = 220;
-
-function getRightPanelMaxWidth() {
-  if (typeof window === "undefined") return RIGHT_PANEL_MAX_WIDTH;
-  const bodyWidth =
-    document.querySelector<HTMLElement>(".workbench-body")?.getBoundingClientRect().width ??
-    window.innerWidth;
-  const layoutMax = Math.floor(bodyWidth - RIGHT_PANEL_MIN_CENTER_WIDTH);
-  const viewportMax = Math.floor(window.innerWidth * RIGHT_PANEL_MAX_VIEWPORT_RATIO);
-  return Math.min(
-    RIGHT_PANEL_MAX_WIDTH,
-    viewportMax,
-    Math.max(RIGHT_PANEL_MIN_WIDTH, layoutMax),
-  );
-}
-
-function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSnapshot {
-  const messages =
-    patch.messages.length === 0
-      ? snapshot.messages
-      : mergeById(snapshot.messages, patch.messages);
-  const tools =
-    patch.tools.length === 0
-      ? snapshot.tools
-      : mergeById(snapshot.tools, patch.tools);
-  const timeline =
-    patch.timeline.length === 0 && patch.timeline_start === snapshot.timeline.length
-      ? snapshot.timeline
-      : [...snapshot.timeline.slice(0, patch.timeline_start), ...patch.timeline];
-
-  return {
-    ...snapshot,
-    revision: patch.revision,
-    session: patch.session,
-    session_config: patch.session_config,
-    prompt_capabilities: patch.prompt_capabilities,
-    available_commands: patch.available_commands,
-    agent_plan: patch.agent_plan,
-    messages,
-    timeline,
-    tools,
-    inspector_tab: patch.inspector_tab,
-    inspector_sections: patch.inspector_sections,
-    session_changes: patch.session_changes,
-    review_changes: patch.review_changes,
-    turn_changes: patch.turn_changes ?? snapshot.turn_changes ?? [],
-    thinking_status: patch.thinking_status,
-  };
-}
-
-function mergeById<T extends { id: string }>(current: T[], updates: T[]): T[] {
-  if (updates.length === 0) return current;
-  const next = current.slice();
-  const appended: T[] = [];
-
-  for (const update of updates) {
-    const index = next.findIndex((item) => item.id === update.id);
-    if (index >= 0) {
-      if (next[index] !== update) {
-        next[index] = update;
-      }
-    } else {
-      appended.push(update);
-    }
-  }
-
-  return appended.length === 0 ? next : [...next, ...appended];
-}
-
-function applyStreamingDeltas(patch: UiSnapshotPatch) {
-  for (const delta of patch.message_deltas ?? []) {
-    appendStreamingMessageDelta(delta.id, delta.append);
-  }
-}
-
-function isStreamingDeltaOnlyPatch(patch: UiSnapshotPatch) {
-  return (
-    patch.session.status === "Streaming" &&
-    (patch.message_deltas?.length ?? 0) > 0 &&
-    patch.messages.length === 0 &&
-    patch.timeline.length === 0 &&
-    patch.tools.length === 0
-  );
-}
-
-function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
-  let changed = false;
-  const messages = snapshot.messages.map((message) => {
-    const streamingBody = getStreamingMessageBody(message.id);
-    if (streamingBody == null || streamingBody === message.body) {
-      return message;
-    }
-    changed = true;
-    return { ...message, body: streamingBody };
-  });
-  return changed ? { ...snapshot, messages } : snapshot;
-}
-
-function timestampValue(value: string | null | undefined) {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  if (Number.isFinite(parsed)) return parsed;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function buildTimelineTurnChangeSets(
-  summaries: ChangeSetSummary[],
-  filesByChangeSetId: Record<string, FileChangeSummary[]>,
-): Record<string, TimelineTurnChangeSet> {
-  const byMessageId: Record<string, TimelineTurnChangeSet> = {};
-  for (const summary of summaries) {
-    if (summary.source !== "AgentTurn" || !summary.message_id || summary.file_count === 0) {
-      continue;
-    }
-    const files = filesByChangeSetId[summary.id] ?? [];
-    if (files.length === 0) continue;
-    const existing = byMessageId[summary.message_id];
-    if (
-      existing &&
-      timestampValue(existing.updatedAt) >= timestampValue(summary.updated_at)
-    ) {
-      continue;
-    }
-    byMessageId[summary.message_id] = {
-      changeSetId: summary.id,
-      files,
-      updatedAt: summary.updated_at,
-    };
-  }
-  return byMessageId;
-}
-
-function timelineTurnChangeSetsSignature(
-  changeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
-) {
-  return Object.entries(changeSetsByMessageId)
-    .map(([messageId, changeSet]) =>
-      [
-        messageId,
-        changeSet.changeSetId,
-        changeSet.updatedAt,
-        ...changeSet.files.map((file) =>
-          [
-            file.path,
-            file.change_type,
-            file.added_lines,
-            file.removed_lines,
-            file.quality,
-            file.updated_at,
-          ].join(":"),
-        ),
-      ].join(":"),
-    )
-    .sort()
-    .join("|");
-}
-
-interface PendingCloseTab {
-  id: string;
-  label: string;
-  filePath: string;
-}
-
-function clampRightPanelWidth(width: number) {
-  return Math.min(getRightPanelMaxWidth(), Math.max(RIGHT_PANEL_MIN_WIDTH, width));
-}
-
-function terminalDockHeightKey(workspaceRoot: string) {
-  return `${TERMINAL_DOCK_HEIGHT_STORAGE_PREFIX}${workspaceRoot}`;
-}
-
-function terminalDockVisibleKey(workspaceRoot: string) {
-  return `${TERMINAL_DOCK_VISIBLE_STORAGE_PREFIX}${workspaceRoot}`;
-}
-
-function readTerminalDockHeight(workspaceRoot: string) {
-  const stored = Number(window.localStorage.getItem(terminalDockHeightKey(workspaceRoot)));
-  return Number.isFinite(stored) && stored >= 140 ? stored : TERMINAL_DOCK_DEFAULT_HEIGHT;
-}
-
-function readTerminalDockVisible(workspaceRoot: string) {
-  return window.localStorage.getItem(terminalDockVisibleKey(workspaceRoot)) === "1";
-}
-
 export function Workbench() {
-  const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
-  const [timelineTurnChangeSets, setTimelineTurnChangeSets] = useState<
-    Record<string, TimelineTurnChangeSet>
-  >({});
-  const [agentConversationChangeCount, setAgentConversationChangeCount] = useState(0);
+  const {
+    snapshot,
+    setSnapshot,
+    snapshotRef,
+    workspaceReady,
+    pollState,
+    acceptSnapshot,
+    clearSnapshot,
+  } = useWorkbenchSnapshot();
+  const {
+    gitRefreshing,
+    gitHydrated,
+    handleRefreshGit,
+    resetGitHydration,
+  } = useWorkbenchGit({
+    snapshot,
+    setSnapshot,
+    snapshotRef,
+    workspaceReady,
+  });
+  const {
+    timelineTurnChangeSets,
+    agentConversationChangeCount,
+    clearChangeSets,
+  } = useTimelineChangeSets({
+    snapshot,
+    snapshotRef,
+    workspaceReady,
+    onGitRefresh: handleRefreshGit,
+  });
+  const handleAfterEditorSave = useCallback(async () => {
+    await handleRefreshGit();
+    await pollState();
+  }, [handleRefreshGit, pollState]);
+  const {
+    activeTab,
+    activeTabId,
+    displayTabs,
+    resolvedDiffChange,
+    pendingCloseTab,
+    resetTabs,
+    handleOpenDiffTab,
+    handleOpenEditorTab,
+    handleSearchResultOpen,
+    handleCloseTab,
+    handleConfirmSaveClose,
+    handleConfirmDiscardClose,
+    handleCancelClose,
+    handleEditorDirtyChange,
+    handleEditorSaved,
+    handleTabSelect,
+  } = useWorkbenchTabs({ onAfterEditorSave: handleAfterEditorSave });
   const [composerReferenceRequests, setComposerReferenceRequests] = useState<
     ComposerReferenceRequest[]
   >([]);
-  const [tabs, setTabs] = useState<TabDescriptor[]>([CONVERSATION_TAB]);
-  const [activeTabId, setActiveTabId] = useState("conversation");
-  const [workspaceReady, setWorkspaceReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
-  const [rightPanelWidth, setRightPanelWidth] = useState(() => {
-    const stored = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY));
-    return Number.isFinite(stored) ? clampRightPanelWidth(stored) : RIGHT_PANEL_DEFAULT_WIDTH;
-  });
-  const [terminalDockVisible, setTerminalDockVisible] = useState(false);
-  const [terminalDockMounted, setTerminalDockMounted] = useState(false);
-  const [terminalDockHeight, setTerminalDockHeight] = useState(TERMINAL_DOCK_DEFAULT_HEIGHT);
+  const {
+    rightPanelCollapsed,
+    setRightPanelCollapsed,
+    rightPanelWidth,
+    rightPanelStyle,
+    clampStoredRightPanelWidth,
+    handleRightPanelResizeStart,
+  } = useRightPanelState();
+  const {
+    terminalDockVisible,
+    terminalDockMounted,
+    terminalDockHeight,
+    handleToggleTerminalDock,
+    handleHideTerminalDock,
+    handleTerminalDockHeightChange,
+  } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
-  const [gitRefreshing, setGitRefreshing] = useState(false);
-  const [gitHydrated, setGitHydrated] = useState(false);
-  const [pendingCloseTab, setPendingCloseTab] = useState<PendingCloseTab | null>(null);
-  const gitRefreshInFlight = useRef(false);
-  const gitRefreshPending = useRef(false);
-  const gitHydrationKey = useRef(0);
-  const changeSetRefreshRef = useRef<{
-    workspaceRoot: string;
-    signature: string;
-  } | null>(null);
-  const prevSnapshotRevision = useRef<number>(0);
-  const snapshotRef = useRef<UiSnapshot | null>(null);
-  const firstSnapshotLogged = useRef(false);
-  const firstWorkspaceReadyLogged = useRef(false);
-
-  useEffect(() => {
-    snapshotRef.current = snapshot;
-    if (snapshot && !firstSnapshotLogged.current) {
-      firstSnapshotLogged.current = true;
-      void startupPerfMark(
-        "workbench/first_snapshot_committed",
-        `revision=${snapshot.revision} messages=${snapshot.messages.length} tools=${snapshot.tools.length} timeline=${snapshot.timeline.length}`,
-      );
-      requestAnimationFrame(() => {
-        void startupPerfMark("workbench/first_snapshot_painted", `performance_now=${performance.now().toFixed(1)}`);
-      });
-    }
-  }, [snapshot]);
 
   useEffect(() => {
     settingsGetAgentSnapshot()
@@ -283,27 +107,9 @@ export function Workbench() {
   }, []);
 
   useEffect(() => {
-    const workspaceRoot = snapshot?.workspace.root;
-    if (!workspaceRoot) return;
-    const visible = readTerminalDockVisible(workspaceRoot);
-    setTerminalDockVisible(visible);
-    setTerminalDockMounted(visible);
-    setTerminalDockHeight(readTerminalDockHeight(workspaceRoot));
-  }, [snapshot?.workspace.root]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      setRightPanelWidth((current) => {
-        const next = clampRightPanelWidth(current);
-        if (next !== current) {
-          window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(next));
-        }
-        return next;
-      });
-    };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+    window.addEventListener("resize", clampStoredRightPanelWidth);
+    return () => window.removeEventListener("resize", clampStoredRightPanelWidth);
+  }, [clampStoredRightPanelWidth]);
 
   useEffect(() => {
     const handleOpenSettings = () => setSettingsOpen(true);
@@ -311,299 +117,25 @@ export function Workbench() {
     return () => window.removeEventListener("kodex:open-settings", handleOpenSettings);
   }, []);
 
-  const pollState = useCallback(async () => {
-    try {
-      const state = await sessionGetState();
-      if (state.revision !== prevSnapshotRevision.current) {
-        prevSnapshotRevision.current = state.revision;
-        setSnapshot(state);
-      }
-    } catch {
-      // No workspace open — stay on welcome screen
-    }
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    let unlistenPatch: (() => void) | undefined;
-
-    onUiSnapshot((nextSnapshot) => {
-      if (disposed) return;
-      if (nextSnapshot.revision === prevSnapshotRevision.current) return;
-      prevSnapshotRevision.current = nextSnapshot.revision;
-      setWorkspaceReady(true);
-      if (!firstWorkspaceReadyLogged.current) {
-        firstWorkspaceReadyLogged.current = true;
-        void startupPerfMark(
-          "workbench/ui_snapshot_event_first",
-          `revision=${nextSnapshot.revision} messages=${nextSnapshot.messages.length} tools=${nextSnapshot.tools.length} timeline=${nextSnapshot.timeline.length}`,
-        );
-      }
-      setSnapshot(nextSnapshot);
-    })
-      .then((cleanup) => {
-        if (disposed) {
-          cleanup();
-          return;
-        }
-        unlisten = cleanup;
-      })
-      .catch(() => {});
-
-    onUiSnapshotPatch((patch) => {
-      if (disposed) return;
-      if (patch.revision === prevSnapshotRevision.current) return;
-      applyStreamingDeltas(patch);
-      setWorkspaceReady(true);
-      if (isStreamingDeltaOnlyPatch(patch)) {
-        prevSnapshotRevision.current = patch.revision;
-        if (!snapshotRef.current) {
-          void pollState();
-        }
-        return;
-      }
-      setSnapshot((prev) => {
-        if (!prev) {
-          void pollState();
-          return prev;
-        }
-        if (patch.revision <= prev.revision) return prev;
-        prevSnapshotRevision.current = patch.revision;
-        const next = applySnapshotPatch(prev, patch);
-        return patch.session.status === "Streaming"
-          ? next
-          : materializeStreamingMessageBodies(next);
-      });
-    })
-      .then((cleanup) => {
-        if (disposed) {
-          cleanup();
-          return;
-        }
-        unlistenPatch = cleanup;
-      })
-      .catch(() => {});
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-      unlistenPatch?.();
-    };
-  }, [pollState]);
-
-  useEffect(() => {
-    if (!workspaceReady) return;
-    pollState();
-    const interval = setInterval(() => {
-      const status = snapshotRef.current?.session.status;
-      if (status === "Streaming" || status === "WaitingForTool") return;
-      pollState();
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [pollState, workspaceReady]);
-
-  const handleWorkspaceOpened = useCallback(() => {
+  const handleWorkspaceOpened = useCallback((nextSnapshot: UiSnapshot) => {
     void startupPerfMark("workbench/handle_workspace_opened", "");
-    prevSnapshotRevision.current = 0;
-    setWorkspaceReady(true);
-    setSnapshot(null);
-    setTimelineTurnChangeSets({});
-    setAgentConversationChangeCount(0);
+    acceptSnapshot(nextSnapshot);
+    clearChangeSets();
     setComposerReferenceRequests([]);
-    setGitHydrated(false);
-    setTabs([CONVERSATION_TAB]);
-    setActiveTabId("conversation");
+    resetGitHydration();
+    resetTabs();
     setRightPanelCollapsed(false);
-  }, []);
+  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetTabs]);
 
   const handleWorkspaceChanged = useCallback((nextSnapshot: UiSnapshot) => {
-    prevSnapshotRevision.current = nextSnapshot.revision;
-    setWorkspaceReady(true);
-    setSnapshot(nextSnapshot);
-    setTimelineTurnChangeSets({});
-    setAgentConversationChangeCount(0);
+    acceptSnapshot(nextSnapshot);
+    clearChangeSets();
     setComposerReferenceRequests([]);
-    setGitHydrated(false);
-    setTabs([CONVERSATION_TAB]);
-    setActiveTabId("conversation");
+    resetGitHydration();
+    resetTabs();
     setSidebarCollapsed(false);
     setRightPanelCollapsed(false);
-  }, []);
-
-  const handleRefreshGit = useCallback(async () => {
-    if (gitRefreshInFlight.current) {
-      gitRefreshPending.current = true;
-      return;
-    }
-    const workspaceRoot = snapshotRef.current?.workspace.root;
-    if (!workspaceRoot) return;
-    const requestKey = ++gitHydrationKey.current;
-    gitRefreshInFlight.current = true;
-    gitRefreshPending.current = false;
-    setGitRefreshing(true);
-    try {
-      const repo = await gitRefresh();
-      setSnapshot((prev) => {
-        if (!prev || prev.workspace.root !== workspaceRoot || requestKey !== gitHydrationKey.current) {
-          return prev;
-        }
-        return { ...prev, repository: repo };
-      });
-      if (requestKey === gitHydrationKey.current) {
-        setGitHydrated(true);
-      }
-    } catch {
-      // ignored
-    } finally {
-      if (requestKey === gitHydrationKey.current) {
-        gitRefreshInFlight.current = false;
-        setGitRefreshing(false);
-      }
-      if (
-        gitRefreshPending.current &&
-        requestKey === gitHydrationKey.current &&
-        snapshotRef.current?.workspace.root === workspaceRoot
-      ) {
-        gitRefreshPending.current = false;
-        void handleRefreshGit();
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    const workspaceRoot = snapshot?.workspace.root;
-    if (!workspaceReady || !workspaceRoot) return;
-
-    const requestKey = ++gitHydrationKey.current;
-    setGitHydrated(false);
-    setGitRefreshing(true);
-
-    let disposed = false;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (disposed || requestKey !== gitHydrationKey.current) return;
-        gitRefresh()
-          .then((repo) => {
-            if (disposed || requestKey !== gitHydrationKey.current) return;
-            setSnapshot((prev) =>
-              prev && prev.workspace.root === workspaceRoot
-                ? { ...prev, repository: repo }
-                : prev,
-            );
-            setGitHydrated(true);
-          })
-          .catch(() => {
-            if (!disposed && requestKey === gitHydrationKey.current) {
-              setGitHydrated(true);
-            }
-          })
-          .finally(() => {
-            if (!disposed && requestKey === gitHydrationKey.current) {
-              setGitRefreshing(false);
-            }
-          });
-      });
-    });
-
-    return () => {
-      disposed = true;
-    };
-  }, [snapshot?.workspace.root, workspaceReady]);
-
-  const currentAgentTurnChangesSignature =
-    timelineTurnChangeSetsSignature(timelineTurnChangeSets);
-
-  useEffect(() => {
-    const sessionId = snapshot?.session.id;
-    const workspaceRoot = snapshot?.workspace.root;
-    if (!workspaceReady || !sessionId || !workspaceRoot) {
-      setTimelineTurnChangeSets({});
-      setAgentConversationChangeCount(0);
-      return;
-    }
-
-    let cancelled = false;
-    Promise.all([
-      sessionListChangeSets({
-        source: "AgentTurn",
-        session_id: sessionId,
-        workspace_root: workspaceRoot,
-      }),
-      sessionListChangeSets({
-        source: "AgentConversation",
-        session_id: sessionId,
-        workspace_root: workspaceRoot,
-      }),
-    ])
-      .then(async ([summaries, conversationSummaries]) => {
-        const turnSummaries = summaries.filter(
-          (summary) =>
-            summary.source === "AgentTurn" &&
-            summary.message_id != null &&
-            summary.file_count > 0,
-        );
-        const fileEntries = await Promise.all(
-          turnSummaries.map(async (summary) => {
-            try {
-              const response = await sessionListChangeSetFiles({
-                change_set_id: summary.id,
-              });
-              return [summary.id, response.files] as const;
-            } catch {
-              return [summary.id, []] as const;
-            }
-          }),
-        );
-        if (cancelled) return;
-        const filesByChangeSetId = Object.fromEntries(fileEntries);
-        setTimelineTurnChangeSets(
-          buildTimelineTurnChangeSets(turnSummaries, filesByChangeSetId),
-        );
-        const conversationSummary = conversationSummaries.find(
-          (summary) => summary.source === "AgentConversation" && summary.file_count > 0,
-        );
-        setAgentConversationChangeCount(conversationSummary?.file_count ?? 0);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setTimelineTurnChangeSets({});
-          setAgentConversationChangeCount(0);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [snapshot?.revision, snapshot?.session.id, snapshot?.workspace.root, workspaceReady]);
-
-  useEffect(() => {
-    const workspaceRoot = snapshot?.workspace.root;
-    if (!workspaceReady || !workspaceRoot) return;
-
-    const previous = changeSetRefreshRef.current;
-    if (!previous || previous.workspaceRoot !== workspaceRoot) {
-      changeSetRefreshRef.current = {
-        workspaceRoot,
-        signature: currentAgentTurnChangesSignature,
-      };
-      return;
-    }
-
-    if (previous.signature === currentAgentTurnChangesSignature) return;
-    changeSetRefreshRef.current = {
-      workspaceRoot,
-      signature: currentAgentTurnChangesSignature,
-    };
-
-    const timer = window.setTimeout(() => {
-      if (snapshotRef.current?.workspace.root === workspaceRoot) {
-        void handleRefreshGit();
-      }
-    }, 120);
-
-    return () => window.clearTimeout(timer);
-  }, [currentAgentTurnChangesSignature, handleRefreshGit, snapshot?.workspace.root, workspaceReady]);
+  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetTabs]);
 
   const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null) => {
     await sessionResolvePermission(requestId, optionId);
@@ -611,244 +143,17 @@ export function Workbench() {
   }, [pollState]);
 
   const handleSessionChanged = useCallback(() => {
-    prevSnapshotRevision.current = 0;
-    setSnapshot(null);
-    setTimelineTurnChangeSets({});
-    setAgentConversationChangeCount(0);
+    clearSnapshot();
+    clearChangeSets();
     setComposerReferenceRequests([]);
-    setGitHydrated(false);
-    setTabs([CONVERSATION_TAB]);
-    setActiveTabId("conversation");
+    resetGitHydration();
+    resetTabs();
     pollState();
-  }, [pollState]);
+  }, [clearChangeSets, clearSnapshot, pollState, resetGitHydration, resetTabs]);
 
   const handleToggleThreads = useCallback(() => {
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
-
-  const handleToggleTerminalDock = useCallback(() => {
-    const workspaceRoot = snapshotRef.current?.workspace.root;
-    setTerminalDockVisible((current) => {
-      const next = !current;
-      if (next) {
-        setTerminalDockMounted(true);
-      }
-      if (workspaceRoot) {
-        window.localStorage.setItem(terminalDockVisibleKey(workspaceRoot), next ? "1" : "0");
-      }
-      return next;
-    });
-  }, []);
-
-  const handleHideTerminalDock = useCallback(() => {
-    const workspaceRoot = snapshotRef.current?.workspace.root;
-    if (workspaceRoot) {
-      window.localStorage.setItem(terminalDockVisibleKey(workspaceRoot), "0");
-    }
-    setTerminalDockVisible(false);
-  }, []);
-
-  const handleTerminalDockHeightChange = useCallback((height: number) => {
-    const workspaceRoot = snapshotRef.current?.workspace.root;
-    setTerminalDockHeight(height);
-    if (workspaceRoot) {
-      window.localStorage.setItem(terminalDockHeightKey(workspaceRoot), String(height));
-    }
-  }, []);
-
-  const handleRightPanelResizeStart = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    event.preventDefault();
-    const pointerId = event.pointerId;
-    event.currentTarget.setPointerCapture(pointerId);
-    document.body.classList.add("is-resizing-right-panel");
-
-    const updateWidth = (clientX: number) => {
-      const nextWidth = clampRightPanelWidth(window.innerWidth - clientX - 10);
-      setRightPanelWidth(nextWidth);
-      window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(nextWidth));
-    };
-
-    const handlePointerMove = (moveEvent: PointerEvent) => {
-      updateWidth(moveEvent.clientX);
-    };
-
-    const handlePointerUp = () => {
-      document.body.classList.remove("is-resizing-right-panel");
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-      window.removeEventListener("pointercancel", handlePointerUp);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    window.addEventListener("pointercancel", handlePointerUp);
-  }, []);
-
-  // ── Tab management ──
-
-  const handleOpenDiffTab = useCallback(
-    (
-      path: string,
-      source: "session" | "git" | "change-set" = "session",
-      change?: SessionFileChange,
-      changeSetId?: string,
-      record?: FileChangeRecord,
-    ) => {
-      const tabId = changeSetId
-        ? `diff:${changeSetId}:${path}`
-        : change
-          ? `diff:turn:${path}:${change.timestamp}:${change.added_lines}:${change.removed_lines}`
-          : `diff:${source}:${path}`;
-      setTabs((prev) => {
-        if (prev.some((t) => t.id === tabId)) return prev;
-        const fileName = path.replace(/\\/g, "/").split("/").pop() || path;
-        return [
-          ...prev,
-          {
-            id: tabId,
-            type: "diff" as const,
-            label: fileName,
-            filePath: path,
-            diffSource: source,
-            changeSetId,
-            diffChange: change,
-            diffRecord: record,
-          },
-        ];
-      });
-      setActiveTabId(tabId);
-    },
-    [],
-  );
-
-  const handleOpenEditorTab = useCallback(
-    (filePath: string) => {
-      const tabId = `editor:${filePath}`;
-      setTabs((prev) => {
-        if (prev.some((t) => t.id === tabId)) return prev;
-        const fileName = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
-        return [
-          ...prev,
-          { id: tabId, type: "editor" as const, label: fileName, filePath },
-        ];
-      });
-      setActiveTabId(tabId);
-    },
-    [],
-  );
-
-  const navTokenRef = useRef(0);
-
-  const handleSearchResultOpen = useCallback(
-    (filePath: string, lineNumber?: number, searchQuery?: string) => {
-      const tabId = `editor:${filePath}`;
-      const token = ++navTokenRef.current;
-      setTabs((prev) => {
-        const existing = prev.find((t) => t.id === tabId);
-        if (existing) {
-          return prev.map((t) =>
-            t.id === tabId ? { ...t, lineNumber, searchQuery, navToken: token } : t,
-          );
-        }
-        const fileName = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
-        return [
-          ...prev,
-          { id: tabId, type: "editor" as const, label: fileName, filePath, lineNumber, searchQuery, navToken: token },
-        ];
-      });
-      setActiveTabId(tabId);
-    },
-    [],
-  );
-
-  const closeTabById = useCallback(
-    (id: string) => {
-      if (id === "conversation") return;
-      setTabs((prev) => {
-        const filtered = prev.filter((t) => t.id !== id);
-        if (activeTabId === id) {
-          const idx = prev.findIndex((t) => t.id === id);
-          const newActive = filtered[Math.min(idx, filtered.length - 1)]?.id ?? "conversation";
-          setActiveTabId(newActive);
-        }
-        return filtered;
-      });
-    },
-    [activeTabId],
-  );
-
-  const handleCloseTab = useCallback(
-    async (id: string) => {
-      if (id === "conversation") return;
-
-      const closing = tabs.find((tab) => tab.id === id);
-      if (closing?.type !== "editor" || !closing.filePath) {
-        closeTabById(id);
-        return;
-      }
-
-      const hasUnsavedChanges = Boolean(closing.dirty) || isModelDirty(closing.filePath);
-      if (!hasUnsavedChanges) {
-        closeTabById(id);
-        return;
-      }
-
-      setPendingCloseTab({
-        id,
-        label: closing.label,
-        filePath: closing.filePath,
-      });
-    },
-    [closeTabById, tabs],
-  );
-
-  const handleConfirmSaveClose = useCallback(async () => {
-    if (!pendingCloseTab) return;
-
-    const content = getModelValue(pendingCloseTab.filePath);
-    const baseVersion = getModelBaseVersion(pendingCloseTab.filePath);
-    if (content == null || !baseVersion) {
-      window.alert("这个文件的编辑状态还没有准备好，请切回文件后再保存或关闭。");
-      return;
-    }
-
-    try {
-      const saved = await editorSaveFile(pendingCloseTab.filePath, content, baseVersion);
-      updateModelBase(pendingCloseTab.filePath, saved.content);
-      updateModelBaseVersion(pendingCloseTab.filePath, saved.version);
-      disposeModel(pendingCloseTab.filePath);
-      closeTabById(pendingCloseTab.id);
-      setPendingCloseTab(null);
-      await handleRefreshGit();
-      await pollState();
-    } catch (error) {
-      window.alert(`保存失败，文件未关闭：${String(error)}`);
-    }
-  }, [closeTabById, handleRefreshGit, pendingCloseTab, pollState]);
-
-  const handleConfirmDiscardClose = useCallback(() => {
-    if (!pendingCloseTab) return;
-    disposeModel(pendingCloseTab.filePath);
-    closeTabById(pendingCloseTab.id);
-    setPendingCloseTab(null);
-  }, [closeTabById, pendingCloseTab]);
-
-  const handleCancelClose = useCallback(() => {
-    setPendingCloseTab(null);
-  }, []);
-
-  const handleEditorDirtyChange = useCallback((filePath: string, dirty: boolean) => {
-    setTabs((prev) =>
-      prev.map((tab) =>
-        tab.type === "editor" && tab.filePath === filePath ? { ...tab, dirty } : tab,
-      ),
-    );
-  }, []);
-
-  const handleEditorSaved = useCallback(async () => {
-    await handleRefreshGit();
-    await pollState();
-  }, [handleRefreshGit, pollState]);
 
   const enqueueComposerReference = useCallback(
     (request: Omit<ComposerReferenceRequest, "id">) => {
@@ -866,60 +171,6 @@ export function Workbench() {
   const handleComposerReferenceConsumed = useCallback((id: string) => {
     setComposerReferenceRequests((current) => current.filter((request) => request.id !== id));
   }, []);
-
-  const handleTabSelect = useCallback((id: string) => {
-    setActiveTabId(id);
-  }, []);
-
-  // Computed before conditional returns — hooks must be unconditional
-  const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0];
-  const isDiffTab = activeTab.type === "diff" && activeTab.filePath != null;
-
-  const [resolvedDiffChange, setResolvedDiffChange] = useState<SessionFileChange | FileChangeRecord | null>(null);
-
-  // Snapshot changes intentionally carry only stats; fetch full old/new text on demand.
-  useEffect(() => {
-    const filePath = activeTab.filePath;
-    if (!isDiffTab || !filePath) {
-      setResolvedDiffChange(null);
-      return;
-    }
-
-    let cancelled = false;
-    setResolvedDiffChange(null);
-    if (activeTab.diffRecord) {
-      setResolvedDiffChange(activeTab.diffRecord);
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (activeTab.diffChange && !activeTab.changeSetId) {
-      setResolvedDiffChange(activeTab.diffChange);
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (!activeTab.changeSetId) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    sessionGetChangeSetFileDiff({
-      change_set_id: activeTab.changeSetId,
-      path: filePath,
-    })
-      .then((change) => {
-        if (!cancelled) setResolvedDiffChange(change);
-      })
-      .catch(() => {
-        if (!cancelled) setResolvedDiffChange(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isDiffTab, activeTab.filePath, activeTab.diffChange, activeTab.diffRecord, activeTab.changeSetId]);
 
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
@@ -945,7 +196,6 @@ export function Workbench() {
   }
 
   const agentLabel = snapshot.session.agent_cli || "智能体";
-  const displayTabs = tabs.map((t) => (t.type === "conversation" ? { ...t, label: "Chat" } : t));
 
   return (
     <div className="workbench">
@@ -979,7 +229,7 @@ export function Workbench() {
 
         <div
           className={`workbench-body ${terminalDockVisible ? "has-terminal-dock" : ""}`}
-          style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
+          style={rightPanelStyle}
         >
           <main className="center-panel">
             <ThreadHeader

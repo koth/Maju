@@ -1,10 +1,12 @@
 mod application;
 mod bootstrap;
+mod editor_files;
 mod file_tracker;
 mod paths;
 mod reducer;
 pub mod settings;
 pub mod startup_perf;
+mod workspace_files;
 
 pub use application::{
     Application, UiPatchCursor, UiSnapshotUpdate, normalize_path_for_storage,
@@ -18,10 +20,10 @@ mod tests {
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, MessageRole,
-        SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
-        SessionConfigState, TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus,
-        UserPromptContent,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, FileChangeType,
+        MessageRole, SessionConfigCategory, SessionConfigChoice, SessionConfigControl,
+        SessionConfigSource, SessionConfigState, SessionFileChange, TerminalOutput, ThinkingStatus,
+        TimelineItem, ToolStatus, UserPromptContent,
     };
 
     use tempfile::tempdir;
@@ -99,6 +101,7 @@ mod tests {
         assert!(patch.message_deltas.is_empty());
         assert_eq!(patch.messages[0].role, MessageRole::User);
         assert!(patch.messages[0].body.contains("hello from patch cursor"));
+        assert!(patch.repository.is_none());
         assert!(app.lightweight_ui_update(&mut cursor).is_none());
 
         app.ui
@@ -119,6 +122,27 @@ mod tests {
         assert!(append_patch.messages.is_empty());
         assert_eq!(append_patch.message_deltas.len(), 1);
         assert_eq!(append_patch.message_deltas[0].append, " with appended text");
+        assert!(append_patch.repository.is_none());
+
+        app.ui.repository.branch = "feature/snapshot-patch".into();
+        app.ui.revision += 1;
+
+        let repository_update = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("repository changes should produce a patch");
+        let repository_patch = match repository_update {
+            UiSnapshotUpdate::Patch(patch) => patch,
+            UiSnapshotUpdate::Full(_) => {
+                panic!("repository updates should stay incremental for the same session")
+            }
+        };
+        assert_eq!(
+            repository_patch
+                .repository
+                .as_ref()
+                .map(|repo| repo.branch.as_str()),
+            Some("feature/snapshot-patch"),
+        );
     }
 
     #[test]
@@ -1354,6 +1378,29 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         let (_, persisted_tools, _) = reopened_store.load_session(&session_id).unwrap();
         assert_eq!(persisted_tools.len(), 1);
         assert_eq!(persisted_tools[0].status, ToolStatus::Interrupted);
+    }
+
+    #[test]
+    fn session_file_diff_matches_absolute_and_relative_workspace_paths() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let mut app = test_app(&dir);
+        app.ui.session_changes = vec![SessionFileChange {
+            path: "src/main.rs".into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some("old\n".into()),
+            new_text: "new\n".into(),
+            added_lines: 1,
+            removed_lines: 1,
+            timestamp: "1".into(),
+        }];
+
+        let relative = app.session_file_diff("src/main.rs").unwrap();
+        let absolute_path = dir.path().join("src/main.rs").display().to_string();
+        let absolute = app.session_file_diff(&absolute_path).unwrap();
+
+        assert_eq!(relative.path, "src/main.rs");
+        assert_eq!(absolute.path, "src/main.rs");
     }
 
     fn test_app(dir: &tempfile::TempDir) -> Application {

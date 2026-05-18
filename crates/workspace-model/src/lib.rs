@@ -479,6 +479,42 @@ pub struct WorkspaceSessionList {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileEntryKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileEntry {
+    pub name: String,
+    pub kind: FileEntryKind,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorFileVersion {
+    pub content_hash: String,
+    pub modified_ms: Option<u128>,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorFileKind {
+    Text,
+    Image,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditorFileSnapshot {
+    pub path: String,
+    pub content: String,
+    pub version: EditorFileVersion,
+    pub kind: EditorFileKind,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileChangeType {
     Created,
     Modified,
@@ -653,6 +689,8 @@ pub struct UiSnapshotPatch {
     pub timeline: Vec<TimelineItem>,
     #[serde(default)]
     pub tools: Vec<ToolInvocation>,
+    #[serde(default)]
+    pub repository: Option<RepositorySnapshot>,
     pub inspector_tab: InspectorTab,
     #[serde(default)]
     pub inspector_sections: Vec<SidebarSection>,
