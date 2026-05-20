@@ -42,7 +42,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/codex-acp/": "codex-acp/"
+      "resources/codex-acp/*": "bundled-codex-acp/"
     },
     "windows": {
       "nsis": {

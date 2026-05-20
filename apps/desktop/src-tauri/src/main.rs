@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
+
 fn main() {
     app_core::startup_perf::start_run("kodex-desktop");
     app_core::startup_perf::mark("desktop/main_enter", "");
@@ -148,7 +151,11 @@ fn install_bundled_codex_acp(app: &tauri::App) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let source = app.path().resource_dir()?.join("codex-acp");
+    let source = app
+        .path()
+        .resource_dir()?
+        .join(BUNDLED_CODEX_ACP_RESOURCE_DIR)
+        .join("codex-acp");
     if !source.is_file() {
         return Ok(());
     }

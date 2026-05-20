@@ -2,7 +2,8 @@ use super::diff_utils::{
     ExactEditText, canonical_text_diff, edit_input_after_text, edit_input_before_text,
     is_file_write_tool_identity, looks_like_fragment_to_full_file_text,
     looks_like_whole_file_addition_hunks, normalize_diff_text_for_session_change,
-    tool_diff_hunks_for_detected_write, tool_event_hint_paths, tool_hunks_for_tracker_update,
+    tool_command_write_hint_paths, tool_diff_hunks_for_detected_write,
+    tool_hunks_for_tracker_update,
 };
 use super::{Application, current_timestamp, normalize_path_for_storage, normalize_tracked_path};
 use acp_core::diff_to_hunks;
@@ -340,7 +341,7 @@ impl Application {
 
             // Shell tools can write files via command text (Set-Content, Out-File,
             // redirects, etc.) without emitting ACP ToolDiff events.
-            for path in tool_event_hint_paths(tool.raw_input.as_deref()) {
+            for path in tool_command_write_hint_paths(tool.raw_input.as_deref()) {
                 add_path(path);
             }
         }

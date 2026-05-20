@@ -191,6 +191,23 @@ pub(super) fn tool_event_hint_paths(raw_input: Option<&str>) -> Vec<String> {
     paths
 }
 
+pub(super) fn tool_command_write_hint_paths(raw_input: Option<&str>) -> Vec<String> {
+    let Some(raw_input) = raw_input else {
+        return Vec::new();
+    };
+
+    let mut paths = if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) {
+        let mut paths = Vec::new();
+        collect_command_write_hint_paths(&value, &mut paths);
+        paths
+    } else {
+        extract_write_paths_from_command_text(raw_input)
+    };
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 fn collect_path_like_values(value: &serde_json::Value, paths: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(object) => {

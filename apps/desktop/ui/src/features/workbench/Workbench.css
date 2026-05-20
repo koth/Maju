@@ -364,7 +364,8 @@ body.is-resizing-right-panel {
 }
 
 .center-panel {
-  --conversation-column-width: 66.666%;
+  --center-panel-gutter: clamp(8px, 1.5vw, 21px);
+  --conversation-column-width: 83.333%;
   --conversation-column-min: min(100%, 720px);
   --conversation-column-max: 1180px;
 
@@ -508,7 +509,7 @@ body.is-resizing-right-panel {
   flex-direction: column;
   min-height: 0;
   height: 100%;
-  padding: 18px clamp(12px, 3vw, 42px) 0;
+  padding: 18px var(--center-panel-gutter) 0;
   background: var(--app-bg);
 }
 
@@ -520,7 +521,7 @@ body.is-resizing-right-panel {
   position: relative;
   flex-shrink: 0;
   min-width: 0;
-  padding: 0 clamp(12px, 3vw, 42px);
+  padding: 0 var(--center-panel-gutter);
   background: var(--app-bg);
   border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 56%, transparent);
   overflow: hidden;
@@ -550,12 +551,12 @@ body.is-resizing-right-panel {
 }
 
 .center-tab-bar-shell::before {
-  left: clamp(12px, 3vw, 42px);
+  left: var(--center-panel-gutter);
   background: linear-gradient(90deg, var(--app-bg), transparent);
 }
 
 .center-tab-bar-shell::after {
-  right: clamp(12px, 3vw, 42px);
+  right: var(--center-panel-gutter);
   background: linear-gradient(270deg, var(--app-bg), transparent);
 }
 
@@ -733,6 +734,7 @@ body.is-resizing-right-panel {
   }
 
   .center-panel {
+    --center-panel-gutter: 14px;
     --conversation-column-width: 100%;
     --conversation-column-min: 0;
     --conversation-column-max: none;

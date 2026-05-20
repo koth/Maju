@@ -528,6 +528,49 @@ fn completed_shell_write_hint_enters_review_via_git_fallback() {
 }
 
 #[test]
+fn completed_read_tool_does_not_claim_preexisting_git_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "src/main.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, "fn main() {\n    println!(\"dirty\");\n}\n").unwrap();
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "read-main".into(),
+        parent_call_id: None,
+        name: "Read".into(),
+        kind: "Read".into(),
+        summary: "Read src/main.rs".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: Some(
+            serde_json::json!({
+                "file_path": relative_path,
+            })
+            .to_string(),
+        ),
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(!app.detect_file_writes_from_tools(&["read-main".into()]));
+    assert!(app.ui.review_changes.is_empty());
+    assert!(app.ui.session_changes.is_empty());
+}
+
+#[test]
 fn missing_tool_diff_old_text_uses_session_target_as_turn_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

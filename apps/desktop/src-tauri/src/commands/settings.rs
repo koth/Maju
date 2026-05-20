@@ -14,6 +14,7 @@ use workspace_model::{
 use std::os::windows::process::CommandExt;
 
 const CODEX_ACP_NPM_PACKAGE: &str = "@zed-industries/codex-acp@latest";
+const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
 
 #[tauri::command]
 pub fn settings_get_agent_snapshot() -> Result<AgentSettingsSnapshot, String> {
@@ -412,7 +413,7 @@ fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
         .path()
         .resource_dir()
         .ok()?
-        .join("codex-acp")
+        .join(BUNDLED_CODEX_ACP_RESOURCE_DIR)
         .join(codex_acp_binary_name());
     candidate.is_file().then_some(candidate)
 }
