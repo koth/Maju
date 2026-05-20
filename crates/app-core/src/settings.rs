@@ -90,6 +90,8 @@ const CODEX_ACP_BASE_INSTRUCTIONS: &str = r#"You are Codex, a coding agent. You 
 
 Use the available tools to inspect files, run commands, and edit the workspace when the request calls for action. Do not merely say that you will inspect or change something; perform the needed tool calls and then report the result.
 
+When editing files, creating files, or deleting files, you MUST use the apply_patch tool. Do not use shell commands to modify the filesystem. Shell commands may only be used for reading, searching, building, testing, formatting, or inspecting files. Never use shell redirection, rm, mv, cp, sed -i, perl -pi, tee, truncate, or scripts to create, edit, move, or delete repository files.
+
 When you need repository context, read the relevant files first. Keep responses concise, concrete, and grounded in what you actually observed or changed."#;
 
 fn default_settings() -> AppSettings {
@@ -1257,6 +1259,8 @@ mod tests {
         assert!(codex_model_catalog_path(&paths).is_file());
         let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
         assert!(catalog.contains("You are Codex, a coding agent"));
+        assert!(catalog.contains("you MUST use the apply_patch tool"));
+        assert!(catalog.contains("Never use shell redirection, rm, mv, cp, sed -i"));
         assert!(!catalog.contains("{{ base_instructions }}"));
         assert!(catalog.contains("\"slug\": \"glm-5.1\""));
         let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();

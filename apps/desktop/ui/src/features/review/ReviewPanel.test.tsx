@@ -28,6 +28,15 @@ vi.mock("../../lib/tauri", async () => {
   };
 });
 
+vi.stubGlobal(
+  "ResizeObserver",
+  class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+);
+
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
   return {
     revision: 1,
@@ -170,7 +179,16 @@ describe("ReviewPanel scoped change sets", () => {
     }));
     render(
       <ReviewPanel
-        snapshot={makeSnapshot()}
+        snapshot={makeSnapshot({
+          messages: [
+            {
+              id: "turn-1-message",
+              role: "Assistant",
+              body: "done",
+            },
+          ],
+          timeline: [{ Message: "turn-1-message" }],
+        })}
         refreshing={false}
         hydrated
         onRefresh={() => {}}
@@ -179,9 +197,11 @@ describe("ReviewPanel scoped change sets", () => {
       />,
     );
 
-    expect(await screen.findByText("src/turn.ts")).toBeTruthy();
-    expect(screen.queryByText("src/conversation.ts")).toBeNull();
-    expect(screen.queryByText("src/manual.ts")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/turn.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/conversation.ts")).toHaveLength(0);
+    expect(screen.queryAllByText("src/manual.ts")).toHaveLength(0);
     await waitFor(() =>
       expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
         change_set_id: "turn-1",
@@ -192,10 +212,145 @@ describe("ReviewPanel scoped change sets", () => {
     fireEvent.click(screen.getByRole("button", { name: /上轮对话/ }));
     expect(screen.queryByRole("menuitem", { name: "整体对话" })).toBeNull();
     fireEvent.click(screen.getByRole("menuitem", { name: "手工修改" }));
-    expect(await screen.findByText("src/manual.ts")).toBeTruthy();
-    expect(screen.queryByText("src/turn.ts")).toBeNull();
-    expect(screen.queryByText("src/conversation.ts")).toBeNull();
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/manual.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/turn.ts")).toHaveLength(0);
+    expect(screen.queryAllByText("src/conversation.ts")).toHaveLength(0);
     expect(screen.queryByRole("button", { name: "src/manual.ts" })).toBeNull();
+  });
+
+  it("does not fall back to an older agent turn when the latest assistant turn has no files", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "old-turn",
+      files: [makeSummary("old-turn", "src/old.ts")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [
+            {
+              id: "old-turn-message",
+              role: "Assistant",
+              body: "edited files",
+            },
+            {
+              id: "latest-message",
+              role: "Assistant",
+              body: "no file changes this time",
+            },
+          ],
+          timeline: [{ Message: "old-turn-message" }, { Message: "latest-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("上轮对话暂无文件变化")).toBeTruthy();
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+  });
+
+  it("shows the previous completed turn while the current turn is active", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("previous-turn", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "previous-turn",
+      files: [makeSummary("previous-turn", "src/previous.ts")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          session: {
+            ...makeSnapshot().session,
+            status: "Streaming",
+          },
+          messages: [
+            {
+              id: "previous-turn-message",
+              role: "Assistant",
+              body: "edited files",
+            },
+            {
+              id: "current-user",
+              role: "User",
+              body: "new request",
+            },
+          ],
+          timeline: [{ Message: "previous-turn-message" }, { Message: "current-user" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/previous.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("上轮对话暂无文件变化")).toBeNull();
+  });
+
+  it("does not skip a no-change previous turn to show an older active-turn diff", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "old-turn",
+      files: [makeSummary("old-turn", "src/old.ts")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          session: {
+            ...makeSnapshot().session,
+            status: "Streaming",
+          },
+          messages: [
+            {
+              id: "old-turn-message",
+              role: "Assistant",
+              body: "edited files",
+            },
+            {
+              id: "previous-no-change",
+              role: "Assistant",
+              body: "no file changes this time",
+            },
+            {
+              id: "current-user",
+              role: "User",
+              body: "new request",
+            },
+          ],
+          timeline: [
+            { Message: "old-turn-message" },
+            { Message: "previous-no-change" },
+            { Message: "current-user" },
+          ],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("上轮对话暂无文件变化")).toBeTruthy();
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
   });
 
   it("opens Git rows with live scoped change set ids", async () => {
@@ -238,5 +393,53 @@ describe("ReviewPanel scoped change sets", () => {
       "src/untracked.ts",
       "git-worktree:untracked",
     );
+  });
+
+  it("reloads the file tree when the active workspace changes", async () => {
+    vi.mocked(fsListDir)
+      .mockResolvedValueOnce([
+        { name: "old-project.ts", kind: "File", path: "old-project.ts" },
+      ])
+      .mockResolvedValueOnce([
+        { name: "new-project.ts", kind: "File", path: "new-project.ts" },
+      ]);
+
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={makeSnapshot()}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+    expect(await screen.findByText("old-project.ts")).toBeTruthy();
+
+    rerender(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          workspace: { id: "ws-2", name: "next", root: "/next-repo" },
+          session: {
+            ...makeSnapshot().session,
+            id: "s-2",
+            workspace_id: "ws-2",
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("new-project.ts")).toBeTruthy();
+    expect(screen.queryByText("old-project.ts")).toBeNull();
+    expect(fsListDir).toHaveBeenCalledTimes(2);
+    expect(fsListDir).toHaveBeenNthCalledWith(1, "");
+    expect(fsListDir).toHaveBeenNthCalledWith(2, "");
   });
 });

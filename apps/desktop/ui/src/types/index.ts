@@ -270,6 +270,7 @@ export interface UiSnapshotPatch {
   timeline_start: number;
   timeline: TimelineItem[];
   tools: ToolInvocation[];
+  repository?: RepositorySnapshot | null;
   inspector_tab: InspectorTab;
   inspector_sections: SidebarSection[];
   session_changes: SessionFileChange[];

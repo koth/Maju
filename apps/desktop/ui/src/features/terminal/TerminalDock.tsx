@@ -43,7 +43,7 @@ const TERMINAL_WRITE_CHUNKS_PER_FRAME = 8;
 
 let ghosttyInitPromise: Promise<void> | null = null;
 
-function ensureGhosttyLoaded() {
+function ensureGhosttyLoaded(): Promise<void> {
   if (!ghosttyInitPromise) {
     ghosttyInitPromise = init();
   }

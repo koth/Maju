@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
@@ -32,14 +32,14 @@ interface TreeNode {
 
 const MAX_REVIEW_FILES = 300;
 const REVIEW_DIFF_MAX_MATRIX_CELLS = 250_000;
+const REVIEW_SPLIT_DIFF_MIN_WIDTH = 640;
 const REVIEW_DIFF_OPTIONS_BASE = {
-  diffStyle: "unified",
   disableFileHeader: true,
   hunkSeparators: "line-info",
   collapsedContextThreshold: 6,
   expansionLineCount: 80,
   lineDiffType: "none",
-  overflow: "wrap",
+  overflow: "scroll",
   unsafeCSS: `
     :host {
       --diffs-bg: var(--app-bg) !important;
@@ -211,6 +211,12 @@ export function ReviewPanel({
     () => filteredFiles.slice(0, MAX_REVIEW_FILES),
     [filteredFiles],
   );
+  const inActiveTurn =
+    snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool";
+  const reviewTargetAssistantMessageId = useMemo(
+    () => lastReviewableAssistantMessageId(snapshot.messages, snapshot.timeline, inActiveTurn),
+    [inActiveTurn, snapshot.messages, snapshot.timeline],
+  );
 
   const grouped = useMemo(() => {
     const groups: Record<ChangeSection, ChangedFile[]> = {
@@ -301,12 +307,14 @@ export function ReviewPanel({
       <div className="review-tab-panel review-tab-panel-review" hidden={tab !== "Review"}>
         <ReviewChangesView
           changeSetState={changeSetState}
+          lastAssistantMessageId={reviewTargetAssistantMessageId}
           appTheme={appTheme}
         />
       </div>
 
       <div className="review-tab-panel review-tab-panel-files" hidden={tab !== "Files"}>
         <FileTree
+          workspaceRoot={snapshot.workspace.root}
           onFileOpen={onFileOpen}
           refreshSignal={fileTreeRefreshSignal}
           onAddComposerReference={onAddComposerReference}
@@ -376,19 +384,21 @@ function ReviewTabIcon() {
 
 function ReviewChangesView({
   changeSetState,
+  lastAssistantMessageId,
   appTheme,
 }: {
   changeSetState: {
     summaries: ChangeSetSummary[];
     filesById: Record<string, FileChangeSummary[]>;
   };
+  lastAssistantMessageId: string | null;
   appTheme: AppTheme;
 }) {
   const [scope, setScope] = useState<ReviewScope>("last");
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const selectedChangeSet = useMemo(
-    () => selectReviewChangeSet(changeSetState.summaries, scope),
-    [changeSetState.summaries, scope],
+    () => selectReviewChangeSet(changeSetState.summaries, scope, lastAssistantMessageId),
+    [changeSetState.summaries, lastAssistantMessageId, scope],
   );
   const scopedFiles = selectedChangeSet
     ? changeSetState.filesById[selectedChangeSet.id] ?? []
@@ -489,6 +499,8 @@ function ReviewChangeCard({
   const [hydratedChange, setHydratedChange] = useState<FileChangeRecord | null>(null);
   const [hydrationFailed, setHydrationFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [diffWidth, setDiffWidth] = useState(0);
+  const diffContainerRef = useRef<HTMLDivElement | null>(null);
   const displayChange = hydratedChange ?? change;
   const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
   const diffPreview = useMemo(
@@ -501,10 +513,11 @@ function ReviewChangeCard({
   const diffOptions = useMemo(
     () => ({
       ...REVIEW_DIFF_OPTIONS_BASE,
+      diffStyle: diffWidth >= REVIEW_SPLIT_DIFF_MIN_WIDTH ? "split" : "unified",
       theme: appTheme === "light" ? "pierre-light" : "pierre-dark",
       themeType: appTheme === "light" ? "light" : "dark",
     } as const),
-    [appTheme],
+    [appTheme, diffWidth],
   );
 
   useEffect(() => {
@@ -539,10 +552,26 @@ function ReviewChangeCard({
     needsHydration,
   ]);
 
+  useEffect(() => {
+    const node = diffContainerRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+
+    setDiffWidth(node.getBoundingClientRect().width);
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = entries[0]?.contentRect.width ?? node.getBoundingClientRect().width;
+      setDiffWidth(nextWidth);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <article className={`review-change-card ${collapsed ? "is-collapsed" : ""}`}>
-      <div className="review-change-header" title={change.path}>
+      <div className="review-change-header" aria-label={change.path}>
         <span className="review-change-path">
+          {change.path}
+        </span>
+        <span className="review-change-tooltip" role="tooltip">
           {change.path}
         </span>
         <span className="review-change-stats">
@@ -560,7 +589,11 @@ function ReviewChangeCard({
         </button>
       </div>
       {!collapsed && (
-        <div className="review-inline-diff" aria-label={`${change.path} 差异预览`}>
+        <div
+          className="review-inline-diff"
+          aria-label={`${change.path} 差异预览`}
+          ref={diffContainerRef}
+        >
           {diffPreview.kind === "patch" ? (
             <MultiFileDiff
               oldFile={diffPreview.oldFile}
@@ -578,11 +611,62 @@ function ReviewChangeCard({
   );
 }
 
-function selectReviewChangeSet(summaries: ChangeSetSummary[], scope: ReviewScope) {
-  const source = scope === "last" ? "AgentTurn" : "ManualEdit";
-  return summaries
-    .filter((summary) => summary.source === source)
-    .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at))[0];
+function selectReviewChangeSet(
+  summaries: ChangeSetSummary[],
+  scope: ReviewScope,
+  lastAssistantMessageId: string | null,
+) {
+  if (scope === "manual") {
+    return summaries
+      .filter((summary) => summary.source === "ManualEdit")
+      .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at))[0];
+  }
+
+  const agentTurns = summaries
+    .filter((summary) => summary.source === "AgentTurn")
+    .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at));
+  const pending = agentTurns.find((summary) => summary.status === "Pending");
+  if (pending) return pending;
+  if (!lastAssistantMessageId) return undefined;
+  return agentTurns.find((summary) => summary.message_id === lastAssistantMessageId);
+}
+
+function lastReviewableAssistantMessageId(
+  messages: UiSnapshot["messages"],
+  timeline: UiSnapshot["timeline"],
+  inActiveTurn: boolean,
+) {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const latestUserIndex = inActiveTurn
+    ? findLatestTimelineMessageIndex(timeline, messageById, "User")
+    : -1;
+  const endIndex = latestUserIndex >= 0 ? latestUserIndex - 1 : timeline.length - 1;
+
+  for (let index = endIndex; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (typeof item === "string" || !("Message" in item)) continue;
+    const message = messageById.get(item.Message);
+    if (message?.role === "Assistant") {
+      return message.id;
+    }
+  }
+  return null;
+}
+
+function findLatestTimelineMessageIndex(
+  timeline: UiSnapshot["timeline"],
+  messageById: Map<string, UiSnapshot["messages"][number]>,
+  role: UiSnapshot["messages"][number]["role"],
+) {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (typeof item === "string" || !("Message" in item)) continue;
+    const message = messageById.get(item.Message);
+    if (message?.role === role) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function timestampValue(value: string | null | undefined) {

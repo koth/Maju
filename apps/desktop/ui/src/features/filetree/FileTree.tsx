@@ -6,6 +6,7 @@ import { getFileIcon } from "./file-icons";
 import "./FileTree.css";
 
 interface FileTreeProps {
+  workspaceRoot: string;
   onFileOpen: (filePath: string) => void;
   refreshSignal?: number;
   onAddComposerReference?: (filePath: string) => void;
@@ -151,6 +152,7 @@ function TreeNode({
 }
 
 export function FileTree({
+  workspaceRoot,
   onFileOpen,
   refreshSignal = 0,
   onAddComposerReference,
@@ -166,38 +168,68 @@ export function FileTree({
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const committingRenameRef = useRef(false);
+  const workspaceRootRef = useRef(workspaceRoot);
+  const consumedRefreshSignalRef = useRef(refreshSignal);
+  workspaceRootRef.current = workspaceRoot;
 
-  const refreshDirectory = useCallback(async (dirPath: string) => {
+  const refreshDirectory = useCallback(
+    async (dirPath: string, requestWorkspaceRoot = workspaceRootRef.current) => {
+      if (workspaceRootRef.current === requestWorkspaceRoot) {
+        setError(null);
+      }
+      const entries = await fsListDir(dirPath);
+      if (workspaceRootRef.current !== requestWorkspaceRoot) {
+        return false;
+      }
+      if (dirPath) {
+        setChildrenCache((prev) => new Map(prev).set(dirPath, entries));
+      } else {
+        setRootEntries(entries);
+      }
+      return true;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const requestWorkspaceRoot = workspaceRoot;
+    setRootEntries([]);
+    setExpandedDirs(new Set());
+    setChildrenCache(new Map());
+    setSelectedEntry(null);
+    setContextMenu(null);
+    setRenameState(null);
     setError(null);
-    const entries = await fsListDir(dirPath);
-    if (dirPath) {
-      setChildrenCache((prev) => new Map(prev).set(dirPath, entries));
-    } else {
-      setRootEntries(entries);
-    }
-  }, []);
+    refreshDirectory("", requestWorkspaceRoot).catch((e) => {
+      if (workspaceRootRef.current === requestWorkspaceRoot) {
+        setError(String(e));
+      }
+    });
+  }, [refreshDirectory, workspaceRoot]);
 
   useEffect(() => {
-    refreshDirectory("").catch((e) => setError(String(e)));
-  }, [refreshDirectory]);
-
-  useEffect(() => {
-    if (refreshSignal === 0) return;
+    if (refreshSignal === 0 || refreshSignal === consumedRefreshSignalRef.current) return;
+    consumedRefreshSignalRef.current = refreshSignal;
 
     const dirPath = selectedEntry
       ? selectedEntry.kind === "Directory"
         ? selectedEntry.path
         : parentDirectory(selectedEntry.path)
       : "";
+    const requestWorkspaceRoot = workspaceRoot;
 
-    refreshDirectory(dirPath)
-      .then(() => {
-        if (dirPath) {
+    refreshDirectory(dirPath, requestWorkspaceRoot)
+      .then((applied) => {
+        if (applied && dirPath) {
           setExpandedDirs((prev) => new Set(prev).add(dirPath));
         }
       })
-      .catch((e) => setError(String(e)));
-  }, [refreshDirectory, refreshSignal, selectedEntry]);
+      .catch((e) => {
+        if (workspaceRootRef.current === requestWorkspaceRoot) {
+          setError(String(e));
+        }
+      });
+  }, [refreshDirectory, refreshSignal, selectedEntry, workspaceRoot]);
 
   useEffect(() => {
     if (!contextMenu) return;

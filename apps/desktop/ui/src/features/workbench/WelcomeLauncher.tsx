@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import type { RecentWorkspace } from "../../types";
+import type { RecentWorkspace, UiSnapshot } from "../../types";
 import { startupPerfMark, workspaceOpen, workspaceGetRecent, workspaceRemoveRecent, workspaceRestoreOpen } from "../../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { WindowControls } from "./WindowControls";
 import "./WelcomeLauncher.css";
 
 interface Props {
-  onWorkspaceOpened: () => void;
+  onWorkspaceOpened: (snapshot: UiSnapshot) => void;
 }
 
 export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
@@ -48,7 +48,7 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
               "welcome/on_workspace_opened_restore",
               `total_duration_ms=${(performance.now() - loadStart).toFixed(1)}`,
             );
-            onWorkspaceOpened();
+            onWorkspaceOpened(restored);
             return;
           }
 
@@ -56,12 +56,12 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
           if (first) {
             const openStart = performance.now();
             void startupPerfMark("welcome/open_recent_start", first.path);
-            await workspaceOpen(first.path);
+            const snapshot = await workspaceOpen(first.path);
             void startupPerfMark(
               "welcome/open_recent_end",
               `duration_ms=${(performance.now() - openStart).toFixed(1)} path=${first.path}`,
             );
-            if (!disposed) onWorkspaceOpened();
+            if (!disposed) onWorkspaceOpened(snapshot);
           } else {
             setLoading(false);
           }
@@ -86,8 +86,8 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
       if (!selected) return;
       setLoading(true);
       setError(null);
-      await workspaceOpen(selected as string);
-      onWorkspaceOpened();
+      const snapshot = await workspaceOpen(selected as string);
+      onWorkspaceOpened(snapshot);
     } catch (e) {
       setError(String(e));
       setLoading(false);
@@ -99,8 +99,8 @@ export function WelcomeLauncher({ onWorkspaceOpened }: Props) {
       try {
         setLoading(true);
         setError(null);
-        await workspaceOpen(path);
-        onWorkspaceOpened();
+        const snapshot = await workspaceOpen(path);
+        onWorkspaceOpened(snapshot);
       } catch (e) {
         setError(String(e));
         setLoading(false);
