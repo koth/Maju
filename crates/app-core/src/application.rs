@@ -1352,7 +1352,7 @@ impl Application {
                         crate::startup_perf::measure("app/bootstrap/next_seq", session_id, || {
                             store.next_seq(session_id).unwrap_or(1)
                         });
-                    let needs_title = recent.title == "新会话";
+                    let needs_title = is_placeholder_session_title(&recent.title);
                     (needs_title, seq, pending_model_restore)
                 } else {
                     // Failed to load — create new session
@@ -1546,8 +1546,12 @@ impl Application {
         self.current_turn_user_message_id = Some(message_id);
         self.inline_think_filter.reset();
 
-        // Step 1: Immediately set a truncated title from user prompt (no delay)
-        if self.needs_title && self.ui.session.title == "新会话" {
+        // Step 1: Non-Codex agents use a local fallback. Codex ACP titles come
+        // from session/list after the first turn.
+        if self.needs_title
+            && is_placeholder_session_title(&self.ui.session.title)
+            && !self.uses_protocol_session_titles()
+        {
             let title = extract_title_from_prompt(&title_source);
             self.ui.session.title = title.clone();
             self.provisional_prompt_title = Some(title.clone());
@@ -1794,8 +1798,11 @@ impl Application {
                 ui_changed = true;
             }
 
-            // Step 2: After first turn, try to refine title from assistant's response
-            if self.needs_title && !self.agent_title_received {
+            // Step 2: If ACP did not provide title metadata, refine the local fallback.
+            if self.needs_title
+                && !self.agent_title_received
+                && !self.uses_protocol_session_titles()
+            {
                 self.needs_title = false;
                 self.refine_session_title();
                 ui_changed = true;
@@ -2129,7 +2136,7 @@ impl Application {
             self.ui.session.title = s.title.clone();
         }
 
-        self.needs_title = self.ui.session.title == "新会话";
+        self.needs_title = is_placeholder_session_title(&self.ui.session.title);
         self.agent_title_received = false;
         self.provisional_prompt_title = None;
         self.pending_model_restore = Some(self.ui.session.model.clone());
@@ -2285,9 +2292,8 @@ impl Application {
 
     // ── Title refinement ──
 
-    /// After the first turn completes, try to extract a better title from the
-    /// assistant's response. The truncated user prompt is already set as Step 1.
-    /// This Step 2 tries to improve it by looking at what the assistant actually did.
+    /// After the first turn completes, try to extract a better local fallback
+    /// from the assistant's response. ACP session metadata wins when present.
     fn refine_session_title(&mut self) {
         // Find first assistant message
         let assistant_body = match self
@@ -2311,6 +2317,14 @@ impl Application {
                 .update_session_title(&self.ui.session.id.to_string(), &title);
         }
         // If extraction fails, keep the truncated user prompt title from Step 1
+    }
+
+    fn uses_protocol_session_titles(&self) -> bool {
+        self.ui
+            .session
+            .agent_cli
+            .as_deref()
+            .is_some_and(is_codex_agent_label)
     }
 
     // ── Internal helpers ──
@@ -3187,18 +3201,12 @@ impl Application {
     }
 
     fn apply_event_with_dirty_tracking_unfiltered(&mut self, event: &ClientEvent) {
-        if let ClientEvent::SessionTitleUpdated { title } = event
-            && !self.should_apply_session_title_update(title)
-        {
+        let Some(event) = self.prepare_event_for_application(event) else {
             return;
-        }
-        self.mark_event_tools_dirty(event);
+        };
+        self.mark_event_tools_dirty(&event);
         apply_event(&mut self.ui, event.clone());
-        if let ClientEvent::SessionTitleUpdated { .. } = event {
-            self.agent_title_received = true;
-            self.provisional_prompt_title = None;
-        }
-        self.persist_event(event);
+        self.persist_event(&event);
     }
 
     fn mark_tool_call_dirty(&mut self, call_id: &str) {
@@ -3279,18 +3287,12 @@ impl Application {
     fn apply_event_and_restore_model(&mut self, event: ClientEvent) {
         let events = self.filter_inline_think_event(event);
         for event in events {
-            if let ClientEvent::SessionTitleUpdated { title } = &event
-                && !self.should_apply_session_title_update(title)
-            {
+            let Some(event) = self.prepare_event_for_application(&event) else {
                 continue;
-            }
+            };
             let should_restore_model = matches!(event, ClientEvent::SessionConfigUpdated { .. });
             self.mark_event_tools_dirty(&event);
             apply_event(&mut self.ui, event.clone());
-            if let ClientEvent::SessionTitleUpdated { .. } = &event {
-                self.agent_title_received = true;
-                self.provisional_prompt_title = None;
-            }
             if should_restore_model {
                 self.restore_pending_model_selection();
             }
@@ -3298,22 +3300,26 @@ impl Application {
         }
     }
 
-    fn should_apply_session_title_update(&self, title: &str) -> bool {
+    fn prepare_event_for_application(&mut self, event: &ClientEvent) -> Option<ClientEvent> {
+        match event {
+            ClientEvent::SessionTitleUpdated { title } => self.prepare_session_title_update(title),
+            _ => Some(event.clone()),
+        }
+    }
+
+    fn prepare_session_title_update(&mut self, title: &str) -> Option<ClientEvent> {
         let trimmed = title.trim();
-        if trimmed.is_empty() || is_placeholder_session_title(trimmed) {
-            return false;
+        if trimmed.is_empty() {
+            return None;
         }
-        if same_session_title(&self.ui.session.title, trimmed) {
-            return false;
-        }
-        if self
-            .provisional_prompt_title
-            .as_deref()
-            .is_some_and(|provisional| same_session_title(provisional, trimmed))
-        {
-            return false;
-        }
-        true
+
+        self.agent_title_received = true;
+        self.needs_title = false;
+        self.provisional_prompt_title = None;
+
+        Some(ClientEvent::SessionTitleUpdated {
+            title: trimmed.to_string(),
+        })
     }
 
     fn filter_inline_think_event(&mut self, event: ClientEvent) -> Vec<ClientEvent> {
@@ -3930,10 +3936,6 @@ fn extract_title_from_prompt(prompt: &str) -> String {
     }
 }
 
-fn same_session_title(left: &str, right: &str) -> bool {
-    left.trim() == right.trim()
-}
-
 fn is_placeholder_session_title(title: &str) -> bool {
     matches!(title.trim(), "" | "新会话" | "New Session" | "新 ACP 会话")
 }
@@ -3999,7 +4001,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_prompt_title_sync_does_not_block_turn_end_refinement() {
+    fn agent_title_matching_prompt_acknowledges_protocol_sync() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = test_app(&dir);
 
@@ -4015,7 +4017,17 @@ mod tests {
         });
 
         assert_eq!(app.ui.session.title, "修复登录");
-        assert!(!app.agent_title_received);
+        assert!(app.agent_title_received);
+        assert!(!app.needs_title);
+        assert!(app.provisional_prompt_title.is_none());
+        let persisted = app
+            .store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == app.ui.session.id.to_string())
+            .unwrap();
+        assert_eq!(persisted.title, "修复登录");
 
         app.ui.messages.push(ChatMessage {
             id: uuid::Uuid::new_v4(),
@@ -4024,9 +4036,50 @@ mod tests {
             created_at: current_timestamp(),
         });
 
-        app.refine_session_title();
+        if app.needs_title && !app.agent_title_received {
+            app.refine_session_title();
+        }
 
-        assert_eq!(app.ui.session.title, "修复登录流程。");
+        assert_eq!(app.ui.session.title, "修复登录");
+        app.session.shutdown();
+    }
+
+    #[test]
+    fn non_codex_first_prompt_sets_provisional_title_for_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.needs_title = true;
+        app.ui.session.title = "新 ACP 会话".into();
+        app.provisional_prompt_title = None;
+
+        app.send_prompt_background("修复登录").unwrap();
+
+        assert_eq!(app.ui.session.title, "修复登录");
+        assert_eq!(app.provisional_prompt_title.as_deref(), Some("修复登录"));
+        app.session.shutdown();
+    }
+
+    #[test]
+    fn codex_first_prompt_waits_for_protocol_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        app.needs_title = true;
+        app.ui.session.title = "新 ACP 会话".into();
+        app.ui.session.agent_cli = Some("Codex".into());
+        app.provisional_prompt_title = None;
+
+        app.send_prompt_background("修复登录").unwrap();
+
+        assert_eq!(app.ui.session.title, "新 ACP 会话");
+        assert!(app.provisional_prompt_title.is_none());
+        app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+            title: "修复登录流程".into(),
+        });
+        assert_eq!(app.ui.session.title, "修复登录流程");
+        assert!(app.agent_title_received);
+        assert!(!app.needs_title);
         app.session.shutdown();
     }
 

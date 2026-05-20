@@ -125,6 +125,24 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".thinking-indicator")).toBeNull();
   });
 
+  it("skips whitespace-only assistant and system messages", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }, { Message: "msg-3" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "\n\n" },
+        { id: "msg-2", role: "System", body: " \t\n" },
+        { id: "msg-3", role: "Assistant", body: "done" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelectorAll(".msg")).toHaveLength(1);
+    expect(container.querySelector(".msg-assistant")?.textContent).toContain("done");
+  });
+
   it("renders the active streaming assistant message as markdown", async () => {
     const snapshot = makeSnapshot({
       session: {

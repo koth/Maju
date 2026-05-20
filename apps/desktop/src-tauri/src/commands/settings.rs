@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme, LspProbeResult,
     LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
@@ -93,12 +93,22 @@ fn ensure_no_running_codex_acp_session(state: &State<'_, AppState>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn settings_install_agent(agent: AgentCliId) -> Result<AgentInstallResult, String> {
+pub async fn settings_install_agent(
+    app: AppHandle,
+    agent: AgentCliId,
+) -> Result<AgentInstallResult, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     let install_paths = paths.clone();
-    let result = tokio::task::spawn_blocking(move || install_agent(&install_paths, agent))
-        .await
-        .map_err(|e| format!("Installer task failed: {e}"))?;
+    let bundled_codex_acp = if agent == AgentCliId::CodexAcp {
+        bundled_codex_acp_binary(&app)
+    } else {
+        None
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        install_agent(&install_paths, agent, bundled_codex_acp.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Installer task failed: {e}"))?;
     let snapshot =
         tokio::task::spawn_blocking(move || app_core::settings::settings_snapshot(&paths))
             .await
@@ -221,9 +231,13 @@ fn lsp_snapshot_with_paths(
     Ok(LspSettingsSnapshot { servers })
 }
 
-fn install_agent(paths: &app_core::AppPaths, agent: AgentCliId) -> Result<String, String> {
+fn install_agent(
+    paths: &app_core::AppPaths,
+    agent: AgentCliId,
+    bundled_codex_acp: Option<&Path>,
+) -> Result<String, String> {
     if agent == AgentCliId::CodexAcp {
-        return install_codex_acp(paths);
+        return install_codex_acp(paths, bundled_codex_acp);
     }
 
     let (program, args) = install_command(agent);
@@ -283,15 +297,26 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
     }
 }
 
-fn install_codex_acp(paths: &app_core::AppPaths) -> Result<String, String> {
-    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
-    fs::create_dir_all(&bin_dir).map_err(|e| {
-        format!(
-            "Failed to create Codex install directory {}: {e}",
-            bin_dir.display()
-        )
-    })?;
+fn install_codex_acp(
+    paths: &app_core::AppPaths,
+    bundled_binary: Option<&Path>,
+) -> Result<String, String> {
+    if let Some(source) = bundled_binary.filter(|path| path.is_file()) {
+        return install_codex_acp_from_bundled_binary(paths, source);
+    }
 
+    install_codex_acp_from_npm(paths)
+}
+
+fn install_codex_acp_from_bundled_binary(
+    paths: &app_core::AppPaths,
+    source: &Path,
+) -> Result<String, String> {
+    let target = install_codex_acp_binary(paths, source)?;
+    Ok(format!("Codex 已从安装包安装到 {}", target.display()))
+}
+
+fn install_codex_acp_from_npm(paths: &app_core::AppPaths) -> Result<String, String> {
     let temp_dir = unique_install_temp_dir();
     fs::create_dir_all(&temp_dir).map_err(|e| {
         format!(
@@ -330,15 +355,37 @@ fn install_codex_acp(paths: &app_core::AppPaths) -> Result<String, String> {
         });
     }
 
-    let target = app_core::settings::codex_acp_binary_path(paths);
-    let binary_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("Invalid codex-acp binary path {}", target.display()))?;
-    let source = find_named_file(&temp_dir, binary_name)
-        .ok_or_else(|| format!("Downloaded package did not contain {binary_name}"))?;
+    let binary_name = codex_acp_binary_name();
+    let source = match find_named_file(&temp_dir, binary_name) {
+        Some(source) => source,
+        None => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(format!("Downloaded package did not contain {binary_name}"));
+        }
+    };
+    let target = match install_codex_acp_binary(paths, &source) {
+        Ok(target) => target,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(error);
+        }
+    };
 
-    fs::copy(&source, &target).map_err(|e| {
+    let _ = fs::remove_dir_all(&temp_dir);
+    Ok(format!("Codex 已安装到 {}", target.display()))
+}
+
+fn install_codex_acp_binary(paths: &app_core::AppPaths, source: &Path) -> Result<PathBuf, String> {
+    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
+    fs::create_dir_all(&bin_dir).map_err(|e| {
+        format!(
+            "Failed to create Codex install directory {}: {e}",
+            bin_dir.display()
+        )
+    })?;
+
+    let target = app_core::settings::codex_acp_binary_path(paths);
+    fs::copy(source, &target).map_err(|e| {
         format!(
             "Failed to install codex-acp from {} to {}: {e}",
             source.display(),
@@ -357,8 +404,25 @@ fn install_codex_acp(paths: &app_core::AppPaths) -> Result<String, String> {
             .map_err(|e| format!("Failed to mark codex-acp executable: {e}"))?;
     }
 
-    let _ = fs::remove_dir_all(&temp_dir);
-    Ok(format!("Codex 已安装到 {}", target.display()))
+    Ok(target)
+}
+
+fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
+    let candidate = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("codex-acp")
+        .join(codex_acp_binary_name());
+    candidate.is_file().then_some(candidate)
+}
+
+fn codex_acp_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "codex-acp.exe"
+    } else {
+        "codex-acp"
+    }
 }
 
 fn unique_install_temp_dir() -> PathBuf {
@@ -415,7 +479,7 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
                 .to_string(),
         ),
         AgentCliId::CodexAcp => Some(
-            "点击下载会把 Codex 下载到 `~/.kodex/bin`；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 Venus 或 DeepSeek API key。"
+            "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 Venus 或 DeepSeek API key。"
                 .to_string(),
         ),
     }
@@ -528,5 +592,27 @@ mod tests {
                 .unwrap_or_default()
                 .contains("not found")
         );
+    }
+
+    #[test]
+    fn codex_acp_install_can_use_bundled_binary() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-bundled-codex-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(codex_acp_binary_name());
+        fs::write(&source, b"bundled-codex-acp").unwrap();
+
+        let message = install_codex_acp_from_bundled_binary(&paths, &source).unwrap();
+
+        let target = app_core::settings::codex_acp_binary_path(&paths);
+        assert_eq!(fs::read(&target).unwrap(), b"bundled-codex-acp");
+        assert!(message.contains("安装包"));
+        let _ = fs::remove_dir_all(source_dir);
     }
 }

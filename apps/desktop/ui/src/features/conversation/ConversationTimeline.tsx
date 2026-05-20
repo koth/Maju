@@ -121,6 +121,10 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
   );
 });
 
+function shouldRenderMessage(role: MessageRole, body: string) {
+  return role === "User" || body.trim().length > 0;
+}
+
 export function ConversationTimeline({
   snapshot,
   onPermissionSelect,
@@ -317,15 +321,22 @@ export function ConversationTimeline({
               msg.role === "Assistant" && !isStreaming
                 ? turnChangeSetsByMessageId[msg.id]
                 : undefined;
+            const renderMessage = shouldRenderMessage(msg.role, msg.body);
+
+            if (!renderMessage && !changesForMessage?.files.length) {
+              return null;
+            }
 
             return (
               <Fragment key={msg.id}>
-                <MessageRow
-                  id={msg.id}
-                  role={msg.role}
-                  body={msg.body}
-                  streaming={isStreaming}
-                />
+                {renderMessage && (
+                  <MessageRow
+                    id={msg.id}
+                    role={msg.role}
+                    body={msg.body}
+                    streaming={isStreaming}
+                  />
+                )}
                 {changesForMessage && changesForMessage.files.length > 0 && (
                   <ChangesBar
                     changeSetId={changesForMessage.changeSetId}

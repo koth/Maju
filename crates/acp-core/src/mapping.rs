@@ -894,7 +894,7 @@ fn emit_codebuddy_text_content(
     update: &Value,
 ) -> anyhow::Result<()> {
     let text = extract_text(update.get("content"));
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Ok(());
     }
 
@@ -910,7 +910,7 @@ fn emit_codebuddy_agent_chunk(
     update: &Value,
 ) -> anyhow::Result<()> {
     let text = extract_text(update.get("content"));
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Ok(());
     }
 
@@ -1113,7 +1113,7 @@ fn tool_summary(update: &Value, fallback: &str) -> String {
         })
         .or_else(|| {
             let text = extract_text(update.get("content"));
-            (!text.is_empty()).then_some(text)
+            (!text.trim().is_empty()).then_some(text)
         })
         .or_else(|| {
             update
@@ -1187,7 +1187,7 @@ fn extract_text(value: Option<&Value>) -> String {
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| extract_text(Some(item)))
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n"),
         Some(Value::Object(map)) => {
@@ -2069,5 +2069,34 @@ mod tests {
             event,
             ClientEvent::ToolCompleted { id, .. } if id == "chatcmpl-tool-1"
         )));
+    }
+
+    #[test]
+    fn codebuddy_whitespace_agent_chunks_are_ignored() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "\n\n"
+                        },
+                        {
+                            "type": "text",
+                            "text": " \t"
+                        }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        assert!(rx.try_recv().is_err());
     }
 }

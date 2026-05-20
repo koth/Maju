@@ -34,6 +34,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/codex-acp/": "codex-acp/"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis/kodex-hooks.nsh"
+      }
+    }
   }
 }

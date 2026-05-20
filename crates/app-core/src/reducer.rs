@@ -379,6 +379,11 @@ fn push_message(ui: &mut UiSnapshot, role: workspace_model::MessageRole, content
         return;
     }
 
+    let content = new_message_content(role.clone(), content);
+    let Some(content) = content else {
+        return;
+    };
+
     let message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role,
@@ -387,6 +392,18 @@ fn push_message(ui: &mut UiSnapshot, role: workspace_model::MessageRole, content
     };
     ui.timeline.push(TimelineItem::Message(message.id));
     ui.messages.push(message);
+}
+
+fn new_message_content(role: workspace_model::MessageRole, content: String) -> Option<String> {
+    if role == workspace_model::MessageRole::User {
+        return Some(content);
+    }
+
+    if content.trim().is_empty() {
+        return None;
+    }
+
+    Some(content.trim_start_matches(['\r', '\n']).to_string())
 }
 
 fn is_internal_session_metadata(content: &str) -> bool {
@@ -1058,4 +1075,125 @@ fn chrono_now_iso() -> String {
         .as_secs();
     // Simple ISO 8601 timestamp without chrono dependency
     format!("{now}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use workspace_model::{
+        InspectorTab, MessageRole, RepositorySnapshot, SessionStatus, SessionSummary,
+        WorkspaceDescriptor,
+    };
+
+    fn empty_ui() -> UiSnapshot {
+        let workspace_id = uuid::Uuid::new_v4();
+        UiSnapshot {
+            revision: 1,
+            workspace: WorkspaceDescriptor {
+                id: workspace_id,
+                name: "test".into(),
+                root: PathBuf::from("/test"),
+            },
+            session: SessionSummary {
+                id: uuid::Uuid::new_v4(),
+                workspace_id,
+                title: "test".into(),
+                model: "test".into(),
+                mode: None,
+                agent_cli: None,
+                status: SessionStatus::Idle,
+            },
+            session_config: Default::default(),
+            prompt_capabilities: Default::default(),
+            available_commands: Vec::new(),
+            agent_plan: Vec::new(),
+            messages: Vec::new(),
+            timeline: Vec::new(),
+            tools: Vec::new(),
+            repository: RepositorySnapshot {
+                branch: "main".into(),
+                head: "abc".into(),
+                changed_files: Vec::new(),
+            },
+            inspector_tab: InspectorTab::Activity,
+            inspector_sections: Vec::new(),
+            session_changes: Vec::new(),
+            review_changes: Vec::new(),
+            turn_changes: Vec::new(),
+            thinking_status: None,
+        }
+    }
+
+    #[test]
+    fn ignores_blank_assistant_chunks_that_would_create_rows() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "checking".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "tool-1".into(),
+                parent_id: None,
+                name: "Read".into(),
+                kind: "read".into(),
+                summary: "Read file".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "\n\n".into(),
+            },
+        );
+
+        assert_eq!(ui.messages.len(), 1);
+        assert!(matches!(
+            ui.timeline.as_slice(),
+            [TimelineItem::Message(_), TimelineItem::Tool(_)]
+        ));
+
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "\n\ndone".into(),
+            },
+        );
+
+        assert_eq!(ui.messages.len(), 2);
+        assert_eq!(ui.messages[1].body, "done");
+    }
+
+    #[test]
+    fn preserves_blank_lines_inside_an_active_assistant_message() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "first".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content: "\n\nsecond".into(),
+            },
+        );
+
+        assert_eq!(ui.messages.len(), 1);
+        assert_eq!(ui.messages[0].body, "first\n\nsecond");
+    }
 }

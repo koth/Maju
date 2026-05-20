@@ -6,18 +6,19 @@ use crate::mapping::{
     session_config_from_parts,
 };
 use agent_client_protocol::schema::{
-    BlobResourceContents, CancelNotification, ClientCapabilities, ClientRequest, ContentBlock,
-    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
-    ExtRequest, FileSystemCapabilities, ImageContent, Implementation, InitializeRequest,
-    KillTerminalRequest, KillTerminalResponse, ListSessionsRequest, LoadSessionRequest,
-    NewSessionRequest, NewSessionResponse, PermissionOptionKind, PromptRequest, PromptResponse,
-    ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest,
-    StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    TextContent, TextResourceContents, ToolKind, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    AgentCapabilities, BlobResourceContents, CancelNotification, ClientCapabilities, ClientRequest,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource,
+    EmbeddedResourceResource, ExtRequest, FileSystemCapabilities, ImageContent, Implementation,
+    InitializeRequest, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
+    LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOptionKind, PromptRequest,
+    PromptResponse, ProtocolVersion, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, TextContent, TextResourceContents, ToolKind,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectTo, ConnectionTo, Dispatch, Lines, Role};
 use anyhow::{Context, anyhow};
@@ -40,6 +41,7 @@ use workspace_model::{PermissionOption, PromptInputCapabilities, UserPromptConte
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const TITLE_SYNC_RETRY_DELAYS_MS: [u64; 3] = [120, 400, 900];
+const TITLE_SYNC_TIMEOUT_MS: u64 = 2_000;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PermissionBroker {
@@ -1961,11 +1963,23 @@ pub(crate) fn run_session(
                         &init_response.agent_capabilities.prompt_capabilities,
                     );
                     let supports_load_session = init_response.agent_capabilities.load_session;
-                    let supports_session_list = init_response
-                        .agent_capabilities
-                        .session_capabilities
-                        .list
-                        .is_some();
+                    let advertised_session_list =
+                        advertised_session_list_capability(&init_response.agent_capabilities);
+                    let codex_session_list_fallback =
+                        !advertised_session_list && command_implies_codex_session_list(&config);
+                    let supports_session_list =
+                        advertised_session_list || codex_session_list_fallback;
+                    append_runtime_event_log(
+                        &config,
+                        "session/capabilities",
+                        &json!({
+                            "loadSession": supports_load_session,
+                            "sessionCapabilities": &init_response.agent_capabilities.session_capabilities,
+                            "advertisedSessionList": advertised_session_list,
+                            "codexAcpSessionListFallback": codex_session_list_fallback,
+                            "supportsSessionList": supports_session_list,
+                        }),
+                    )?;
                     let has_resume_id = config.resume_session_id.is_some();
 
                     // Decide whether to load an existing session or create a new one
@@ -2078,13 +2092,23 @@ pub(crate) fn run_session(
                         session_id: session.session_id().0.to_string(),
                     });
                     if supports_session_list {
-                        let _ = sync_session_title_from_list(
+                        if let Err(error) = sync_session_title_from_list(
                             &config,
                             &tx_events,
                             &connection,
                             session.session_id(),
                         )
-                        .await?;
+                        .await
+                        {
+                            let _ = append_runtime_event_log(
+                                &config,
+                                "session/list_title_sync_failed",
+                                &json!({
+                                    "phase": "startup",
+                                    "error": error.to_string(),
+                                }),
+                            );
+                        }
                     }
                     let _ = tx_events.send(ClientEvent::PromptCapabilitiesUpdated {
                         capabilities: prompt_capabilities.clone(),
@@ -2503,26 +2527,50 @@ async fn emit_turn_finished(
     Ok(())
 }
 
+fn advertised_session_list_capability(agent_capabilities: &AgentCapabilities) -> bool {
+    agent_capabilities.session_capabilities.list.is_some()
+}
+
+fn command_implies_codex_session_list(config: &SessionConfig) -> bool {
+    config
+        .agent_command
+        .to_ascii_lowercase()
+        .contains("codex-acp")
+}
+
 async fn sync_session_title_from_list(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
 ) -> anyhow::Result<bool> {
+    append_runtime_event_log(
+        config,
+        "session/list_title_sync_start",
+        &json!({
+            "sessionId": session_id.0.as_ref(),
+            "cwd": config.workspace_root,
+            "timeoutMs": TITLE_SYNC_TIMEOUT_MS,
+        }),
+    )?;
     let request = ListSessionsRequest::new().cwd(PathBuf::from(&config.workspace_root));
-    let response = connection
-        .send_request_to(Agent, request)
-        .block_task()
-        .await
-        .map_err(|err| anyhow!(err.to_string()))?;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(TITLE_SYNC_TIMEOUT_MS),
+        connection.send_request_to(Agent, request).block_task(),
+    )
+    .await
+    .map_err(|_| anyhow!("session/list timed out after {TITLE_SYNC_TIMEOUT_MS}ms"))?
+    .map_err(|err| anyhow!(err.to_string()))?;
+    let session_count = response.sessions.len();
 
     let matched = response
         .sessions
         .into_iter()
         .find(|session| session.session_id == *session_id);
 
-    if let Some(session) = matched
-        && let Some(title) = session.title
+    if let Some(title) = matched
+        .as_ref()
+        .and_then(|session| session.title.as_deref())
     {
         let trimmed = title.trim();
         if !trimmed.is_empty() {
@@ -2540,6 +2588,17 @@ async fn sync_session_title_from_list(
             return Ok(true);
         }
     }
+
+    append_runtime_event_log(
+        config,
+        "session/list_title_sync_empty",
+        &json!({
+            "sessionId": session_id.0.as_ref(),
+            "sessionCount": session_count,
+            "matched": matched.is_some(),
+            "hasTitle": matched.as_ref().and_then(|session| session.title.as_ref()).is_some(),
+        }),
+    )?;
 
     Ok(false)
 }
@@ -2709,6 +2768,7 @@ fn select_lines(content: &str, start_line: Option<u32>, limit: Option<u32>) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_client_protocol::schema::{SessionCapabilities, SessionListCapabilities};
     use std::time::Duration;
 
     #[test]
@@ -2795,5 +2855,40 @@ mod tests {
 
         assert!(!delivered);
         assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+    }
+
+    #[test]
+    fn advertised_session_list_capability_detects_initialize_capability() {
+        let capabilities = AgentCapabilities::new()
+            .session_capabilities(SessionCapabilities::new().list(SessionListCapabilities::new()));
+
+        assert!(advertised_session_list_capability(&capabilities));
+    }
+
+    fn test_session_config(agent_command: &str) -> SessionConfig {
+        SessionConfig {
+            workspace_root: String::new(),
+            app_data_root: String::new(),
+            model: String::new(),
+            agent_command: agent_command.into(),
+            agent_env: Vec::new(),
+            resume_session_id: None,
+            log_id: String::new(),
+            acp_port: 0,
+        }
+    }
+
+    #[test]
+    fn codex_agent_command_implies_session_list_support() {
+        let config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#);
+
+        assert!(command_implies_codex_session_list(&config));
+    }
+
+    #[test]
+    fn non_codex_agent_command_does_not_imply_session_list_support() {
+        let config = test_session_config("codebuddy.exe --acp");
+
+        assert!(!command_implies_codex_session_list(&config));
     }
 }
