@@ -24,7 +24,9 @@ interface Props {
   onPermissionSelect: (requestId: string, optionId: string | null) => void;
   turnChangeSetsByMessageId?: Record<string, TimelineTurnChangeSet>;
   onReviewFileSelect?: (path: string, changeSetId: string) => void;
+  onReviewChangeSetSelect?: (changeSetId: string) => void;
   planPanel?: ReactNode;
+  hiddenPermissionRequestIds?: ReadonlySet<string>;
 }
 
 export interface TimelineTurnChangeSet {
@@ -130,11 +132,15 @@ export function ConversationTimeline({
   onPermissionSelect,
   turnChangeSetsByMessageId = {},
   onReviewFileSelect,
+  onReviewChangeSetSelect,
   planPanel,
+  hiddenPermissionRequestIds,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const itemsRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
+  const manualScrollIntent = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
 
@@ -163,13 +169,46 @@ export function ConversationTimeline({
     const el = scrollRef.current;
     if (!el) return;
 
+    const markManualScrollIntent = () => {
+      manualScrollIntent.current = true;
+    };
+    const markManualKeyboardScrollIntent = (event: KeyboardEvent) => {
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "ArrowDown" ||
+        event.key === "PageUp" ||
+        event.key === "PageDown" ||
+        event.key === "Home" ||
+        event.key === "End" ||
+        event.key === " "
+      ) {
+        manualScrollIntent.current = true;
+      }
+    };
     const handleScroll = () => {
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-      userScrolledUp.current = !atBottom;
+      if (atBottom) {
+        userScrolledUp.current = false;
+        manualScrollIntent.current = false;
+        return;
+      }
+      if (manualScrollIntent.current) {
+        userScrolledUp.current = true;
+      }
     };
 
+    el.addEventListener("wheel", markManualScrollIntent, { passive: true });
+    el.addEventListener("touchstart", markManualScrollIntent, { passive: true });
+    el.addEventListener("pointerdown", markManualScrollIntent);
+    el.addEventListener("keydown", markManualKeyboardScrollIntent);
     el.addEventListener("scroll", handleScroll);
-    return () => el.removeEventListener("scroll", handleScroll);
+    return () => {
+      el.removeEventListener("wheel", markManualScrollIntent);
+      el.removeEventListener("touchstart", markManualScrollIntent);
+      el.removeEventListener("pointerdown", markManualScrollIntent);
+      el.removeEventListener("keydown", markManualKeyboardScrollIntent);
+      el.removeEventListener("scroll", handleScroll);
+    };
   }, []);
 
   useEffect(() => {
@@ -187,15 +226,15 @@ export function ConversationTimeline({
   ]);
 
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
+    const items = itemsRef.current;
+    if (!items || typeof ResizeObserver === "undefined") return;
     let frame = 0;
     const observer = new ResizeObserver(() => {
       if (userScrolledUp.current) return;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(scrollToBottom);
     });
-    observer.observe(el);
+    observer.observe(items);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -218,6 +257,9 @@ export function ConversationTimeline({
     [snapshot.timeline, timelineStart],
   );
   const hiddenCount = timelineStart;
+  const turnIsActive =
+    snapshot.session.status === "Streaming" ||
+    snapshot.session.status === "WaitingForTool";
 
   const visibleMessageIds = useMemo(() => {
     const ids = new Set<string>();
@@ -287,10 +329,9 @@ export function ConversationTimeline({
 
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
-
   return (
     <div className="timeline-scroll" ref={scrollRef}>
-      <div className="timeline-items">
+      <div className="timeline-items" ref={itemsRef}>
         {hiddenCount > 0 && (
           <button
             className="timeline-load-older"
@@ -318,7 +359,7 @@ export function ConversationTimeline({
               snapshot.session.status === "Streaming" &&
               isLastMessage(i);
             const changesForMessage =
-              msg.role === "Assistant" && !isStreaming
+              msg.role === "Assistant" && !isStreaming && !turnIsActive
                 ? turnChangeSetsByMessageId[msg.id]
                 : undefined;
             const renderMessage = shouldRenderMessage(msg.role, msg.body);
@@ -342,6 +383,7 @@ export function ConversationTimeline({
                     changeSetId={changesForMessage.changeSetId}
                     changes={changesForMessage.files}
                     onFileSelect={onReviewFileSelect ?? (() => {})}
+                    onReviewClick={onReviewChangeSetSelect}
                   />
                 )}
               </Fragment>
@@ -362,6 +404,7 @@ export function ConversationTimeline({
                 childToolsByParent={childToolsByParent}
                 nested={false}
                 onPermissionSelect={onPermissionSelect}
+                hiddenPermissionRequestIds={hiddenPermissionRequestIds}
               />
             );
           }

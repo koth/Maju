@@ -85,6 +85,7 @@ pub enum ClientEvent {
         id: String,
         name: String,
         options: Vec<PermissionOption>,
+        details: Option<String>,
     },
     ToolPermissionResolved {
         id: String,

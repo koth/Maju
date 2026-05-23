@@ -64,6 +64,7 @@ impl Application {
                     .session
                     .last_error()
                     .unwrap_or_else(|| "ACP 子进程意外退出".to_string());
+                let reason = humanize_acp_disconnect_reason(&reason);
                 let error = anyhow::anyhow!(reason);
                 self.push_system_message(format!("会话已断开：{error}"));
                 return Err(error);
@@ -133,6 +134,7 @@ impl Application {
             if last_error.is_none() && self.should_auto_reconnect_after_clean_exit() {
                 if let Err(error) = self.reconnect_session() {
                     let reason = format!("ACP 子进程退出且重连失败：{error}");
+                    let reason = humanize_acp_disconnect_reason(&reason);
                     self.apply_event_with_dirty_tracking(&ClientEvent::Interrupted {
                         reason: reason.clone(),
                     });
@@ -143,6 +145,7 @@ impl Application {
             }
 
             let reason = last_error.unwrap_or_else(|| "ACP 子进程意外退出".to_string());
+            let reason = humanize_acp_disconnect_reason(&reason);
             self.apply_event_with_dirty_tracking(&ClientEvent::Interrupted {
                 reason: reason.clone(),
             });
@@ -292,6 +295,7 @@ impl Application {
         // Process events and track tool lifecycle for file change detection
         let mut ui_changed = !events.is_empty();
         let mut completed_tool_ids = Vec::new();
+        let mut failed_tool_ids_without_changes = HashSet::new();
         for event in &events {
             match event {
                 ClientEvent::ToolStarted { id, raw_input, .. } => {
@@ -303,14 +307,28 @@ impl Application {
                         self.file_tracker.add_candidate(id, path);
                     }
                 }
-                ClientEvent::ToolCompleted { id, .. } | ClientEvent::ToolFailed { id, .. } => {
+                ClientEvent::ToolCompleted { id, .. } => {
                     completed_tool_ids.push(id.clone());
                     let changes = self.file_tracker.finish_recording(id);
                     had_file_changes |= self.apply_tracker_changes(id, changes);
                 }
+                ClientEvent::ToolFailed { id, .. } => {
+                    completed_tool_ids.push(id.clone());
+                    let changes = self.file_tracker.finish_recording(id);
+                    let tracker_changed = self.apply_tracker_changes(id, changes);
+                    if !tracker_changed {
+                        failed_tool_ids_without_changes.insert(id.clone());
+                    }
+                    had_file_changes |= tracker_changed;
+                }
                 _ => {}
             }
             self.apply_event_with_dirty_tracking(event);
+            if let ClientEvent::ToolFailed { id, .. } = event
+                && failed_tool_ids_without_changes.contains(id)
+            {
+                had_file_changes |= self.discard_failed_tool_speculative_diffs(id);
+            }
             if let ClientEvent::ToolDiff {
                 id,
                 path,
@@ -461,7 +479,15 @@ impl Application {
             .session
             .agent_cli
             .as_deref()
-            .is_some_and(is_codex_agent_label)
+            .is_some_and(is_protocol_session_title_agent_label)
+    }
+
+    pub(super) fn uses_claude_session_titles(&self) -> bool {
+        self.ui
+            .session
+            .agent_cli
+            .as_deref()
+            .is_some_and(is_claude_agent_label)
     }
 
     // ── Internal helpers ──

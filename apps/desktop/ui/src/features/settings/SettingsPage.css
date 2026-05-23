@@ -524,7 +524,8 @@
   font-size: 12px;
 }
 
-.settings-field input {
+.settings-field input,
+.settings-field textarea {
   width: 100%;
   min-width: 0;
   padding: 8px 10px;
@@ -536,7 +537,19 @@
   font-size: 12px;
 }
 
-.settings-field input:focus {
+.settings-field textarea {
+  min-height: 92px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.settings-provider-models-field {
+  align-items: start;
+  max-width: 720px;
+}
+
+.settings-field input:focus,
+.settings-field textarea:focus {
   outline: none;
   border-color: var(--interactive-selected-border);
   box-shadow: 0 0 0 2px rgba(125, 185, 255, 0.12);

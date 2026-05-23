@@ -7,13 +7,14 @@ use super::diff_utils::{
 };
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
-use super::{Application, current_timestamp, turn_finished_notice};
+use super::{Application, current_timestamp, humanize_acp_disconnect_reason, turn_finished_notice};
 use acp_core::{ClientEvent, diff_to_hunks};
-use std::{collections::HashMap, fs};
+use std::{collections::HashMap, fs, path::PathBuf};
 use workspace_model::{
     ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind, DiffQuality,
     FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
-    MessageRole, SessionFileChange, TimelineItem, ToolInvocation, ToolStatus, TurnFileChanges,
+    MessageRole, SessionFileChange, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
+    TurnFileChanges,
 };
 
 mod change_set_tests;

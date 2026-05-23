@@ -125,6 +125,7 @@ impl PermissionBroker {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum PermissionDecision {
     Select(String),
     Cancel,
@@ -147,6 +148,7 @@ fn decide_plan_permission(
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
+        ToolKind::SwitchMode => PermissionDecision::Ask,
         ToolKind::Read | ToolKind::Search => {
             if paths_are_inside_workspace(workspace_root, &permission_paths(request)) {
                 select_permission_option(request, true)
@@ -177,6 +179,7 @@ fn decide_build_permission(
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
+        ToolKind::SwitchMode => PermissionDecision::Ask,
         ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
             let paths = permission_paths(request);
             if paths_are_inside_workspace(workspace_root, &paths) {
@@ -257,4 +260,43 @@ fn is_markdown_path(path: &PathBuf) -> bool {
         .and_then(|extension| extension.to_str())
         .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "md" | "mdx"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::{
+        PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId,
+        ToolCallUpdate, ToolCallUpdateFields,
+    };
+
+    fn switch_mode_request() -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "exit-plan",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::SwitchMode)
+                    .title("Ready to code?".to_string()),
+            ),
+            vec![
+                PermissionOption::new("default", "Yes", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("plan", "No", PermissionOptionKind::RejectOnce),
+            ],
+        )
+    }
+
+    #[test]
+    fn switch_mode_permission_is_always_interactive() {
+        let request = switch_mode_request();
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Plan, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+    }
 }

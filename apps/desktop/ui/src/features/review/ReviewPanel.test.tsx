@@ -217,10 +217,46 @@ describe("ReviewPanel scoped change sets", () => {
     );
     expect(screen.queryAllByText("src/turn.ts")).toHaveLength(0);
     expect(screen.queryAllByText("src/conversation.ts")).toHaveLength(0);
-    expect(screen.queryByRole("button", { name: "src/manual.ts" })).toBeNull();
+    expect(screen.getByRole("button", { name: "src/manual.ts" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 
-  it("does not fall back to an older agent turn when the latest assistant turn has no files", async () => {
+  it("toggles a review file diff by clicking the file header row", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "turn-1",
+      files: [makeSummary("turn-1", "src/turn.ts")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [{ id: "turn-1-message", role: "Assistant", body: "done" }],
+          timeline: [{ Message: "turn-1-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    const header = await screen.findByRole("button", { name: "src/turn.ts" });
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("src/turn.ts 差异预览")).toBeTruthy();
+
+    fireEvent.click(header);
+
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("src/turn.ts 差异预览")).toBeNull();
+  });
+
+  it("falls back to the latest agent turn with files when the latest assistant turn has no files", async () => {
     vi.mocked(sessionListChangeSets).mockResolvedValue([
       makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z"),
     ]);
@@ -254,8 +290,10 @@ describe("ReviewPanel scoped change sets", () => {
       />,
     );
 
-    expect(await screen.findByText("上轮对话暂无文件变化")).toBeTruthy();
-    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/old.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("上轮对话暂无文件变化")).toBeNull();
   });
 
   it("shows the previous completed turn while the current turn is active", async () => {
@@ -302,7 +340,7 @@ describe("ReviewPanel scoped change sets", () => {
     expect(screen.queryByText("上轮对话暂无文件变化")).toBeNull();
   });
 
-  it("does not skip a no-change previous turn to show an older active-turn diff", async () => {
+  it("shows the nearest changed turn while the current active turn follows a no-change assistant turn", async () => {
     vi.mocked(sessionListChangeSets).mockResolvedValue([
       makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z"),
     ]);
@@ -349,8 +387,169 @@ describe("ReviewPanel scoped change sets", () => {
       />,
     );
 
-    expect(await screen.findByText("上轮对话暂无文件变化")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/old.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("上轮对话暂无文件变化")).toBeNull();
+  });
+
+  it("releases a focused historical change set when newer agent changes arrive", async () => {
+    const oldTurn = makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z");
+    const newTurn = makeChangeSet("new-turn", "AgentTurn", "2026-05-12T04:00:00Z");
+    const newerTurn = makeChangeSet("new-turn", "AgentTurn", "2026-05-12T04:01:00Z");
+
+    vi.mocked(sessionListChangeSets)
+      .mockResolvedValueOnce([oldTurn, newTurn])
+      .mockResolvedValueOnce([oldTurn, newerTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files:
+        change_set_id === "old-turn"
+          ? [makeSummary("old-turn", "src/old.ts")]
+          : [makeSummary("new-turn", "src/new.ts")],
+    }));
+
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [
+            { id: "old-turn-message", role: "Assistant", body: "old edit" },
+            { id: "new-turn-message", role: "Assistant", body: "new edit" },
+          ],
+          timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        focusRequest={{ changeSetId: "old-turn", token: 1 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/old.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/new.ts")).toHaveLength(0);
+
+    rerender(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          revision: 2,
+          messages: [
+            { id: "old-turn-message", role: "Assistant", body: "old edit" },
+            { id: "new-turn-message", role: "Assistant", body: "new edit" },
+          ],
+          timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        focusRequest={{ changeSetId: "old-turn", token: 1 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/new.ts").length).toBeGreaterThan(0),
+    );
     expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+  });
+
+  it("prioritizes pending agent changes over a focused historical change set", async () => {
+    const oldTurn = makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z");
+    const pendingTurn: ChangeSetSummary = {
+      ...makeChangeSet("pending-turn", "AgentTurn", "2026-05-12T04:00:00Z"),
+      message_id: null,
+      owner_key: "user-message:current-user",
+      status: "Pending",
+    };
+
+    vi.mocked(sessionListChangeSets).mockResolvedValue([oldTurn, pendingTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files:
+        change_set_id === "old-turn"
+          ? [makeSummary("old-turn", "src/old.ts")]
+          : [makeSummary("pending-turn", "src/pending.ts")],
+    }));
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          session: {
+            ...makeSnapshot().session,
+            status: "Streaming",
+          },
+          messages: [
+            { id: "old-turn-message", role: "Assistant", body: "old edit" },
+            { id: "current-user", role: "User", body: "new request" },
+          ],
+          timeline: [{ Message: "old-turn-message" }, { Message: "current-user" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        focusRequest={{ changeSetId: "old-turn", token: 1 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/pending.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+  });
+
+  it("ignores stale pending agent changes from a previous user turn", async () => {
+    const previousTurn = makeChangeSet(
+      "previous-turn",
+      "AgentTurn",
+      "2026-05-12T03:00:00Z",
+    );
+    const stalePendingTurn: ChangeSetSummary = {
+      ...makeChangeSet("stale-pending-turn", "AgentTurn", "2026-05-12T04:00:00Z"),
+      message_id: null,
+      owner_key: "user-message:previous-user",
+      status: "Pending",
+    };
+
+    vi.mocked(sessionListChangeSets).mockResolvedValue([previousTurn, stalePendingTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files:
+        change_set_id === "stale-pending-turn"
+          ? [makeSummary("stale-pending-turn", "src/stale.ts")]
+          : [makeSummary("previous-turn", "src/previous.ts")],
+    }));
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          session: {
+            ...makeSnapshot().session,
+            status: "Streaming",
+          },
+          messages: [
+            { id: "previous-turn-message", role: "Assistant", body: "old edit" },
+            { id: "current-user", role: "User", body: "new request" },
+          ],
+          timeline: [{ Message: "previous-turn-message" }, { Message: "current-user" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/previous.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/stale.ts")).toHaveLength(0);
   });
 
   it("opens Git rows with live scoped change set ids", async () => {

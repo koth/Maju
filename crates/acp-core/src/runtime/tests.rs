@@ -1,10 +1,11 @@
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::session_titles::{
     advertised_session_list_capability, command_implies_codex_session_list,
+    select_session_title_for_sync, supports_session_list_title_sync,
 };
 use super::*;
 use agent_client_protocol::schema::{
-    AgentCapabilities, SessionCapabilities, SessionListCapabilities,
+    AgentCapabilities, SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -127,4 +128,58 @@ fn non_codex_agent_command_does_not_imply_session_list_support() {
     let config = test_session_config("codebuddy.exe --acp");
 
     assert!(!command_implies_codex_session_list(&config));
+}
+
+#[test]
+fn claude_agent_command_disables_session_list_title_sync() {
+    let config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\claude-agent-acp.exe"#);
+
+    assert!(!supports_session_list_title_sync(&config, true));
+}
+
+#[test]
+fn claude_acp_alias_command_disables_session_list_title_sync() {
+    let config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\claude-acp.exe"#);
+
+    assert!(!supports_session_list_title_sync(&config, true));
+}
+
+#[test]
+fn codex_agent_command_can_use_session_list_title_sync_without_advertising_it() {
+    let config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#);
+
+    assert!(supports_session_list_title_sync(&config, false));
+}
+
+#[test]
+fn advertised_non_claude_agent_can_use_session_list_title_sync() {
+    let config = test_session_config("codebuddy.exe --acp");
+
+    assert!(supports_session_list_title_sync(&config, true));
+}
+
+#[test]
+fn session_title_sync_prefers_exact_session_id() {
+    let sessions = vec![
+        SessionInfo::new("other", "D:/work/kodex").title("Other title"),
+        SessionInfo::new("current", "D:/work/kodex").title(" Current title "),
+    ];
+
+    assert_eq!(
+        select_session_title_for_sync(&sessions, &SessionId::from("current")),
+        Some(("Current title".into(), "sessionId"))
+    );
+}
+
+#[test]
+fn session_title_sync_ignores_titles_from_other_sessions() {
+    let sessions = vec![
+        SessionInfo::new("sdk-session", "D:/work/kodex").title(" Claude summary "),
+        SessionInfo::new("older", "D:/work/kodex"),
+    ];
+
+    assert_eq!(
+        select_session_title_for_sync(&sessions, &SessionId::from("acp-session")),
+        None
+    );
 }

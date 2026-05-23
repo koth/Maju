@@ -4,15 +4,18 @@ use app_core::{Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_p
 use session_store::SessionStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use terminal_service::{TerminalEventSink, TerminalService};
+use tokio::sync::watch;
 use workspace_model::{
-    AgentCliId, OpenWorkspaceItem, SessionListItem, TerminalOpenRequest, TerminalResizeRequest,
-    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceSessionList,
+    AgentCliId, ClaudeWoaLoginState, ClaudeWoaLoginStatus, OpenWorkspaceItem, SessionListItem,
+    TerminalOpenRequest, TerminalResizeRequest, TerminalSession, TerminalWriteRequest, UiSnapshot,
+    WorkspaceDescriptor, WorkspaceSessionList,
 };
 
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
+    claude_woa_logins: Mutex<HashMap<String, PendingClaudeWoaLogin>>,
     lsp_service: LspService,
     terminal_service: TerminalService,
 }
@@ -33,6 +36,11 @@ struct WorkspaceMetadata {
     sessions: Vec<SessionListItem>,
 }
 
+pub struct PendingClaudeWoaLogin {
+    pub status: Arc<Mutex<ClaudeWoaLoginStatus>>,
+    pub cancel: watch::Sender<bool>,
+}
+
 impl AppState {
     pub fn new() -> Self {
         app_core::startup_perf::mark("state/new", "");
@@ -41,9 +49,45 @@ impl AppState {
         let terminal_service = TerminalService::new();
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
+            claude_woa_logins: Mutex::new(HashMap::new()),
             lsp_service,
             terminal_service,
         }
+    }
+
+    pub fn insert_claude_woa_login(
+        &self,
+        login_id: String,
+        login: PendingClaudeWoaLogin,
+    ) -> Result<(), String> {
+        let mut guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
+        guard.insert(login_id, login);
+        Ok(())
+    }
+
+    pub fn get_claude_woa_login(
+        &self,
+        login_id: &str,
+    ) -> Result<Option<ClaudeWoaLoginStatus>, String> {
+        let guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
+        let Some(login) = guard.get(login_id) else {
+            return Ok(None);
+        };
+        let status = login.status.lock().map_err(|e| e.to_string())?.clone();
+        Ok(Some(status))
+    }
+
+    pub fn cancel_claude_woa_login(&self, login_id: &str) -> Result<bool, String> {
+        let mut guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
+        let Some(login) = guard.remove(login_id) else {
+            return Ok(false);
+        };
+        let _ = login.cancel.send(true);
+        if let Ok(mut status) = login.status.lock() {
+            status.state = ClaudeWoaLoginState::Cancelled;
+            status.message = Some("WOA login cancelled".into());
+        }
+        Ok(true)
     }
 
     pub fn set_terminal_event_sink(&self, sink: TerminalEventSink) {
@@ -146,6 +190,12 @@ impl AppState {
     pub fn terminal_write(&self, request: TerminalWriteRequest) -> Result<(), String> {
         self.terminal_service
             .write(&request.terminal_id, &request.data)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn terminal_scrollback(&self, terminal_id: &str) -> Result<String, String> {
+        self.terminal_service
+            .scrollback(terminal_id)
             .map_err(|e| e.to_string())
     }
 

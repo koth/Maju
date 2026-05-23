@@ -11,8 +11,8 @@ use git_service::GitService;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use workspace_model::{
-    DiffHunk, DiffLineKind, DiffQuality, FileChangeType, SessionFileChange, ToolDiffPreview,
-    ToolStatus,
+    ChangeSetStatus, DiffHunk, DiffLineKind, DiffQuality, FileChangeType, SessionFileChange,
+    ToolDiffPreview, ToolStatus,
 };
 
 impl Application {
@@ -268,6 +268,70 @@ impl Application {
         }
     }
 
+    pub(in crate::application) fn discard_failed_tool_speculative_diffs(
+        &mut self,
+        call_id: &str,
+    ) -> bool {
+        let (paths, tool_clone) = {
+            let Some(tool) = self
+                .ui
+                .tools
+                .iter_mut()
+                .find(|tool| tool.call_id == call_id)
+            else {
+                return false;
+            };
+            let mut paths = tool
+                .diff_paths
+                .iter()
+                .map(|path| {
+                    normalize_path_for_storage(&path.display().to_string(), &self.ui.workspace.root)
+                })
+                .collect::<Vec<_>>();
+            paths.extend(tool.diff_previews.iter().map(|preview| {
+                normalize_path_for_storage(
+                    &preview.path.display().to_string(),
+                    &self.ui.workspace.root,
+                )
+            }));
+            paths.sort();
+            paths.dedup();
+
+            if paths.is_empty() {
+                return false;
+            }
+
+            tool.diff_paths.clear();
+            tool.diff_previews.clear();
+            (paths, tool.clone())
+        };
+
+        self.mark_tool_call_dirty(call_id);
+        let session_id = self.ui.session.id.to_string();
+        let seq = self.next_seq();
+        let _ = self.store.insert_tool(&session_id, &tool_clone, seq);
+
+        let before_review = self.ui.review_changes.len();
+        self.ui.review_changes.retain(|change| {
+            let path = normalize_path_for_storage(&change.path, &self.ui.workspace.root);
+            !paths.contains(&path)
+        });
+        let before_session = self.ui.session_changes.len();
+        self.ui.session_changes.retain(|change| {
+            let path = normalize_path_for_storage(&change.path, &self.ui.workspace.root);
+            !paths.contains(&path)
+        });
+
+        if before_review != self.ui.review_changes.len()
+            || before_session != self.ui.session_changes.len()
+        {
+            self.persist_file_changes();
+            self.persist_review_file_changes();
+            self.persist_current_agent_turn_change_set(None, ChangeSetStatus::Pending);
+        }
+        true
+    }
+
     /// CodeBuddy agent uses terminal commands (cat > file << 'EOF') to write files,
     /// so we can't rely on ToolDiff events from the ACP protocol. Instead, we check
     /// completed tools for edit-related patterns and read the current file content.
@@ -317,10 +381,12 @@ impl Application {
                 add_path(path);
             }
 
-            // Check summary for "Editing <path>" pattern
-            if tool.summary.starts_with("Editing ") {
-                let path = tool.summary.trim_start_matches("Editing ").to_string();
-                add_path(path);
+            // Check summary for common edit result patterns.
+            for prefix in ["Editing ", "Edited ", "已编辑 "] {
+                if let Some(path) = tool.summary.strip_prefix(prefix) {
+                    add_path(path.to_string());
+                    break;
+                }
             }
 
             // Check raw_input JSON for file_path/filePath/path fields in edit/write tools

@@ -170,6 +170,14 @@ impl Application {
     ) -> Option<ClientEvent> {
         match event {
             ClientEvent::SessionTitleUpdated { title } => self.prepare_session_title_update(title),
+            ClientEvent::SessionConfigValueChanged {
+                control_id,
+                value_id,
+                ..
+            } if control_id == "mode" => {
+                let _ = self.session.set_permission_mode(value_id);
+                Some(event.clone())
+            }
             _ => Some(event.clone()),
         }
     }
@@ -180,12 +188,28 @@ impl Application {
             return None;
         }
 
+        if self.uses_claude_session_titles() && self.title_matches_user_prompt(trimmed) {
+            return None;
+        }
+
         self.agent_title_received = true;
         self.needs_title = false;
         self.provisional_prompt_title = None;
 
         Some(ClientEvent::SessionTitleUpdated {
             title: trimmed.to_string(),
+        })
+    }
+
+    pub(super) fn title_matches_user_prompt(&self, title: &str) -> bool {
+        let normalized_title = normalize_title_for_prompt_compare(title);
+        if normalized_title.is_empty() {
+            return false;
+        }
+
+        self.ui.messages.iter().any(|message| {
+            message.role == MessageRole::User
+                && normalize_title_for_prompt_compare(&message.body) == normalized_title
         })
     }
 
@@ -217,7 +241,9 @@ impl Application {
             }
             ClientEvent::Interrupted { reason } => {
                 self.inline_think_filter.reset();
-                vec![ClientEvent::Interrupted { reason }]
+                vec![ClientEvent::Interrupted {
+                    reason: humanize_acp_disconnect_reason(&reason),
+                }]
             }
             other => vec![other],
         }

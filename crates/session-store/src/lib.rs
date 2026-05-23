@@ -397,6 +397,32 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn clear_acp_session_id(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET acp_session_id = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now_iso(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_has_activity(&self, id: &str) -> Result<bool> {
+        let message_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if message_count > 0 {
+            return Ok(true);
+        }
+
+        let tool_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tool_invocations WHERE session_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(tool_count > 0)
+    }
+
     pub fn update_session_model_mode(
         &self,
         id: &str,

@@ -4,6 +4,8 @@ import type {
   AgentInstallResult,
   AgentSettingsSnapshot,
   AppTheme,
+  ClaudeWoaChannel,
+  ClaudeWoaLoginStart,
   LspSettingsSnapshot,
   LspServerConfigInput,
 } from "../../types";
@@ -16,7 +18,12 @@ import {
   settingsResetLspServer,
   settingsSaveCodexAcpProviderKey,
   settingsSaveCodexAcpVenusKey,
+  settingsSaveClaudeWoaConfig,
   settingsSaveLspServer,
+  settingsStartClaudeWoaLogin,
+  settingsGetClaudeWoaLogin,
+  settingsCancelClaudeWoaLogin,
+  settingsRefreshClaudeWoaToken,
   settingsSelectCodexAcpProvider,
   settingsSelectCodexDefaultMode,
   settingsSelectAgent,
@@ -49,6 +56,11 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
   const [codexAcpProvider, setCodexAcpProvider] = useState<CodexAcpProvider>("venus");
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
+  const [claudeWoaChannel, setClaudeWoaChannel] = useState<ClaudeWoaChannel>("default");
+  const [claudeWoaModelsText, setClaudeWoaModelsText] = useState("");
+  const [claudeWoaLogin, setClaudeWoaLogin] = useState<ClaudeWoaLoginStart | null>(null);
+  const [claudeWoaMessage, setClaudeWoaMessage] = useState<string | null>(null);
+  const [busyClaudeWoa, setBusyClaudeWoa] = useState(false);
 
   const applyLspSnapshot = useCallback((nextSnapshot: LspSettingsSnapshot) => {
     setLspSnapshot(nextSnapshot);
@@ -92,6 +104,33 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setCodexAcpProvider(provider);
     }
   }, [snapshot?.codex_acp.provider]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    setClaudeWoaChannel(snapshot.claude_woa.channel);
+    setClaudeWoaModelsText(snapshot.settings.claude_woa.available_models.join("\n"));
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (!claudeWoaLogin) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const status = await settingsGetClaudeWoaLogin(claudeWoaLogin.login_id);
+        if (status.state === "succeeded" && status.snapshot) {
+          setSnapshot(status.snapshot);
+          setClaudeWoaLogin(null);
+          setClaudeWoaMessage("WOA 登录已完成");
+        } else if (status.state !== "pending") {
+          setClaudeWoaLogin(null);
+          setClaudeWoaMessage(status.message ?? `WOA 登录${status.state}`);
+        }
+      } catch (e) {
+        setClaudeWoaLogin(null);
+        setError(String(e));
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [claudeWoaLogin]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -222,6 +261,74 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setBusyCodexAcp(false);
     }
   }, [snapshot?.codex_acp.deepseek_key_configured, snapshot?.codex_acp.provider, snapshot?.codex_acp.venus_key_configured]);
+
+  const handleSaveClaudeWoaConfig = useCallback(async (channel = claudeWoaChannel) => {
+    setBusyClaudeWoa(true);
+    setError(null);
+    setClaudeWoaMessage(null);
+    try {
+      const nextSnapshot = await settingsSaveClaudeWoaConfig({
+        channel,
+        tokenPath: null,
+        availableModels: parseClaudeWoaModels(claudeWoaModelsText),
+      });
+      setSnapshot(nextSnapshot);
+      setClaudeWoaMessage("Claude WOA 配置已保存");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyClaudeWoa(false);
+    }
+  }, [claudeWoaChannel, claudeWoaModelsText]);
+
+  const handleStartClaudeWoaLogin = useCallback(async () => {
+    setBusyClaudeWoa(true);
+    setError(null);
+    setClaudeWoaMessage(null);
+    try {
+      await settingsSaveClaudeWoaConfig({
+        channel: claudeWoaChannel,
+        tokenPath: null,
+        availableModels: parseClaudeWoaModels(claudeWoaModelsText),
+      });
+      const login = await settingsStartClaudeWoaLogin();
+      setClaudeWoaLogin(login);
+      setClaudeWoaMessage(`打开 ${login.verification_uri} 并输入 ${login.user_code}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyClaudeWoa(false);
+    }
+  }, [claudeWoaChannel, claudeWoaModelsText]);
+
+  const handleCancelClaudeWoaLogin = useCallback(async () => {
+    if (!claudeWoaLogin) return;
+    setBusyClaudeWoa(true);
+    try {
+      await settingsCancelClaudeWoaLogin(claudeWoaLogin.login_id);
+      setClaudeWoaLogin(null);
+      setClaudeWoaMessage("WOA 登录已取消");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyClaudeWoa(false);
+    }
+  }, [claudeWoaLogin]);
+
+  const handleRefreshClaudeWoaToken = useCallback(async () => {
+    setBusyClaudeWoa(true);
+    setError(null);
+    setClaudeWoaMessage(null);
+    try {
+      const nextSnapshot = await settingsRefreshClaudeWoaToken();
+      setSnapshot(nextSnapshot);
+      setClaudeWoaMessage("WOA token 已刷新");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyClaudeWoa(false);
+    }
+  }, []);
 
   const updateLspDraft = useCallback((
     languageId: string,
@@ -517,6 +624,90 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                     </div>
                   </div>
                 )}
+                {agent.id === "claude-agent-acp" && (
+                  <div className="settings-provider-config">
+                    <div className="settings-provider-config-head">
+                      <div>
+                        <span>Claude WOA</span>
+                        <p>使用 Tencent WOA 登录，并通过 Claude Agent ACP 启动会话。</p>
+                      </div>
+                      <span className="settings-provider-active">
+                        {snapshot.claude_woa.token.exists && !snapshot.claude_woa.token.malformed ? "已登录" : "未登录"}
+                      </span>
+                    </div>
+                    <div className="settings-provider-config-path">
+                      <span>Token <code>{snapshot.claude_woa.token_path}</code></span>
+                    </div>
+                    <div className="settings-provider-options" role="radiogroup" aria-label="Claude WOA channel">
+                      {(["default", "offline"] as ClaudeWoaChannel[]).map((channel) => (
+                        <button
+                          key={channel}
+                          type="button"
+                          className={`settings-provider-option ${claudeWoaChannel === channel ? "is-selected" : ""}`}
+                          onClick={() => {
+                            setClaudeWoaChannel(channel);
+                            handleSaveClaudeWoaConfig(channel);
+                          }}
+                          disabled={busyClaudeWoa}
+                          aria-pressed={claudeWoaChannel === channel}
+                        >
+                          <span className="settings-provider-option-main">
+                            <span>{channel === "default" ? "Default" : "Offline"}</span>
+                            <span>{channel === "default" ? "codebuddy-gateway" : "codebuddy-gateway-offline"}</span>
+                          </span>
+                          <span className={`settings-row-badge ${claudeWoaChannel === channel ? "is-installed" : "is-missing"}`}>
+                            {claudeWoaChannel === channel ? "当前" : "可选"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="settings-provider-config-message">
+                      {snapshot.claude_woa.token.malformed
+                        ? snapshot.claude_woa.token.message
+                        : snapshot.claude_woa.token.exists
+                          ? `accessToken ${snapshot.claude_woa.token.access_token ?? ""} · refresh ${snapshot.claude_woa.token.refresh_needed ? "需要刷新" : "正常"}`
+                          : snapshot.claude_woa.token.message}
+                    </div>
+                    <label className="settings-field settings-provider-models-field">
+                      <span>模型列表</span>
+                      <textarea
+                        aria-label="claude_woa_models"
+                        value={claudeWoaModelsText}
+                        onChange={(event) => setClaudeWoaModelsText(event.currentTarget.value)}
+                        placeholder={"claude-sonnet-4-6[1m]\nclaude-opus-4-7[1m]"}
+                        spellCheck={false}
+                      />
+                    </label>
+                    {claudeWoaLogin && (
+                      <div className="settings-warning">
+                        <span>打开 <code>{claudeWoaLogin.verification_uri_complete ?? claudeWoaLogin.verification_uri}</code>，输入 <code>{claudeWoaLogin.user_code}</code></span>
+                      </div>
+                    )}
+                    <div className="settings-provider-config-actions">
+                      {claudeWoaMessage && <span className="settings-provider-config-message">{claudeWoaMessage}</span>}
+                      {claudeWoaLogin ? (
+                        <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleCancelClaudeWoaLogin}>
+                          取消登录
+                        </button>
+                      ) : (
+                        <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleStartClaudeWoaLogin}>
+                          {busyClaudeWoa ? "处理中..." : "WOA 登录"}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="settings-btn"
+                        disabled={busyClaudeWoa || !snapshot.claude_woa.token.exists || snapshot.claude_woa.token.malformed}
+                        onClick={handleRefreshClaudeWoaToken}
+                      >
+                        刷新 token
+                      </button>
+                      <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={() => handleSaveClaudeWoaConfig()}>
+                        保存模型列表
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -638,4 +829,15 @@ function splitArgs(value: string): string[] {
     .split(/\s+/)
     .map((arg) => arg.trim())
     .filter(Boolean);
+}
+
+function parseClaudeWoaModels(value: string): string[] {
+  const models: string[] = [];
+  for (const rawModel of value.split(/[\n,]/)) {
+    const model = rawModel.trim();
+    if (model && !models.includes(model)) {
+      models.push(model);
+    }
+  }
+  return models;
 }

@@ -1,3 +1,4 @@
+use crate::application::normalize_path_for_storage;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -195,16 +196,7 @@ impl FileChangeTracker {
     }
 
     fn normalize_candidate_path(&self, path: &str) -> String {
-        let normalized = path.replace('\\', "/");
-        let root = self.workspace_root.to_string_lossy().replace('\\', "/");
-        let root_prefix = if root.ends_with('/') {
-            root
-        } else {
-            format!("{root}/")
-        };
-        normalized
-            .strip_prefix(&root_prefix)
-            .unwrap_or(&normalized)
+        normalize_path_for_storage(path, &self.workspace_root)
             .trim_start_matches("./")
             .to_string()
     }

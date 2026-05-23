@@ -2,7 +2,12 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import { appendStreamingMessageDelta } from "./streaming-message-store";
-import type { FileChangeSummary, UiSnapshot, TimelineItem } from "../../types/index";
+import type {
+  FileChangeSummary,
+  TimelineItem,
+  ToolInvocation,
+  UiSnapshot,
+} from "../../types/index";
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
   return {
@@ -60,6 +65,33 @@ function makeTurnChangeSet(
     changeSetId,
     files,
     updatedAt: "2026-05-12T00:00:00Z",
+  };
+}
+
+function makePermissionTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
+  return {
+    id: "tool-1",
+    call_id: "permission-1",
+    parent_call_id: null,
+    name: "Permission",
+    kind: "permission",
+    summary: "Permission required",
+    status: "Running",
+    is_subagent: false,
+    detail_text: "",
+    logs: [],
+    diff_paths: [],
+    diff_previews: [],
+    raw_input: null,
+    raw_output: null,
+    terminal_output: null,
+    error: null,
+    permission_options: [
+      { id: "default", label: "Allow", kind: "AllowOnce" },
+      { id: "plan", label: "Reject", kind: "RejectOnce" },
+    ],
+    permission_decision: null,
+    ...overrides,
   };
 }
 
@@ -141,6 +173,25 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".msg")).toHaveLength(1);
     expect(container.querySelector(".msg-assistant")?.textContent).toContain("done");
+  });
+
+  it("hides permission requests that are handled by the plan approval modal", () => {
+    const permissionTool = makePermissionTool();
+    const snapshot = makeSnapshot({
+      timeline: [{ Tool: permissionTool.id }],
+      tools: [permissionTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        hiddenPermissionRequestIds={new Set([permissionTool.call_id])}
+      />,
+    );
+
+    expect(container.textContent).not.toContain("选择权限");
+    expect(container.textContent).not.toContain("Allow");
   });
 
   it("renders the active streaming assistant message as markdown", async () => {
@@ -299,9 +350,9 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelector(".timeline-items .changes-bar")).toBeTruthy();
     expect(container.textContent?.indexOf("done")).toBeLessThan(
-      container.textContent?.indexOf("1 个文件已更改") ?? -1,
+      container.textContent?.indexOf("已编辑 1 个文件") ?? -1,
     );
-    expect(container.textContent).toContain("1 个文件已更改");
+    expect(container.textContent).toContain("已编辑 1 个文件");
     expect(container.textContent).toContain(
       "apps/desktop/ui/src/features/conversation/ConversationTimeline.tsx",
     );
@@ -327,6 +378,89 @@ describe("ThinkingIndicator", () => {
 
     const { container } = render(
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".changes-bar")).toBeNull();
+  });
+
+  it("does not render live turn changes before the turn is attached to an assistant message", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Streaming",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "working" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
+    );
+
+    expect(container.querySelector(".changes-bar")).toBeNull();
+    expect(container.textContent).not.toContain("已编辑 1 个文件");
+    expect(container.textContent).not.toContain("src/live.ts");
+  });
+
+  it("does not render attached turn changes while the current turn is still active", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "WaitingForTool",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "working" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("src/attached.ts", 4, 2, "turn-msg-1"),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelector(".changes-bar")).toBeNull();
+    expect(container.textContent).not.toContain("src/attached.ts");
+  });
+
+  it("does not render live turn changes after the turn is idle", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "done" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
     );
 
     expect(container.querySelector(".changes-bar")).toBeNull();
@@ -530,6 +664,7 @@ describe("ThinkingIndicator", () => {
     Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 100 });
+    fireEvent.wheel(scroller);
     fireEvent.scroll(scroller);
 
     rerender(
@@ -541,6 +676,49 @@ describe("ThinkingIndicator", () => {
     await new Promise((resolve) => requestAnimationFrame(resolve));
 
     expect(scrollIntoView).not.toHaveBeenCalled();
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  });
+
+  it("keeps following after programmatic scroll events and content resize", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    let triggerResize = () => {};
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    class TestResizeObserver implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        triggerResize = () => callback([], {} as ResizeObserver);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = TestResizeObserver;
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "hello" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    scrollIntoView.mockClear();
+
+    const scroller = container.querySelector(".timeline-scroll") as HTMLDivElement;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 200 });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 100 });
+    fireEvent.scroll(scroller);
+
+    triggerResize();
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(scrollIntoView).toHaveBeenCalled();
+    globalThis.ResizeObserver = OriginalResizeObserver;
     delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 });

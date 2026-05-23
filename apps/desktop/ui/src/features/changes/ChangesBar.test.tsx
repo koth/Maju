@@ -26,7 +26,7 @@ describe("ChangesBar", () => {
       />,
     );
 
-    expect(screen.getByText("2 个文件已更改")).toBeTruthy();
+    expect(screen.getByText("已编辑 2 个文件")).toBeTruthy();
     expect(screen.getByText("+3")).toBeTruthy();
     expect(screen.getAllByText("-1").length).toBeGreaterThan(0);
 

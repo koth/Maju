@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
-import type { UiSnapshot, AppTheme } from "../../types";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import type { UiSnapshot, AppTheme, ToolInvocation } from "../../types";
 import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
-import { AgentPlanPanel } from "../composer/AgentPlanPanel";
+import { AgentPlanPanel, PlanApprovalModal } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
@@ -80,6 +80,10 @@ export function Workbench() {
   const [composerReferenceRequests, setComposerReferenceRequests] = useState<
     ComposerReferenceRequest[]
   >([]);
+  const [reviewFocusRequest, setReviewFocusRequest] = useState<{
+    changeSetId: string;
+    token: number;
+  } | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     rightPanelCollapsed,
@@ -155,6 +159,11 @@ export function Workbench() {
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
 
+  const handleReviewChangeSetSelect = useCallback((changeSetId: string) => {
+    setRightPanelCollapsed(false);
+    setReviewFocusRequest({ changeSetId, token: Date.now() });
+  }, [setRightPanelCollapsed]);
+
   const enqueueComposerReference = useCallback(
     (request: Omit<ComposerReferenceRequest, "id">) => {
       setComposerReferenceRequests((current) => [
@@ -171,6 +180,18 @@ export function Workbench() {
   const handleComposerReferenceConsumed = useCallback((id: string) => {
     setComposerReferenceRequests((current) => current.filter((request) => request.id !== id));
   }, []);
+
+  const pendingPlanApproval = useMemo(
+    () => (snapshot ? findPendingPlanApproval(snapshot.tools) : null),
+    [snapshot?.tools],
+  );
+  const hiddenPermissionRequestIds = useMemo(
+    () =>
+      pendingPlanApproval
+        ? new Set<string>([pendingPlanApproval.requestId])
+        : new Set<string>(),
+    [pendingPlanApproval],
+  );
 
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
@@ -261,7 +282,13 @@ export function Workbench() {
                     onReviewFileSelect={(path, changeSetId) =>
                       handleOpenDiffTab(path, "change-set", undefined, changeSetId)
                     }
-                    planPanel={<AgentPlanPanel entries={snapshot.agent_plan ?? []} />}
+                    onReviewChangeSetSelect={handleReviewChangeSetSelect}
+                    hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+                    planPanel={
+                      <AgentPlanPanel
+                        entries={snapshot.agent_plan ?? []}
+                      />
+                    }
                   />
                 </>
               ) : (
@@ -319,6 +346,7 @@ export function Workbench() {
               }
               onFileOpen={handleOpenEditorTab}
               onAddComposerReference={(path) => enqueueComposerReference({ path })}
+              focusRequest={reviewFocusRequest}
             />
           </aside>
         </div>
@@ -357,8 +385,36 @@ export function Workbench() {
             </div>
           </div>
         )}
+        <PlanApprovalModal
+          approval={pendingPlanApproval}
+          entries={snapshot.agent_plan ?? []}
+          onPermissionSelect={handlePermissionSelect}
+        />
       </div>
       </div>
     </div>
   );
+}
+
+function findPendingPlanApproval(tools: ToolInvocation[]) {
+  const tool = tools.find(
+    (tool) =>
+      tool.kind === "permission" &&
+      tool.status === "Running" &&
+      !tool.permission_decision &&
+      tool.permission_options.some((option) => option.id === "plan") &&
+      tool.permission_options.some(
+        (option) => option.id === "default" || option.kind.toLowerCase().includes("allow"),
+      ),
+  );
+
+  if (!tool) {
+    return null;
+  }
+
+  return {
+    requestId: tool.call_id,
+    planText: tool.raw_input || tool.detail_text || null,
+    options: tool.permission_options,
+  };
 }

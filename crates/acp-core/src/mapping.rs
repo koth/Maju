@@ -11,7 +11,7 @@ use anyhow::{Context, anyhow};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{OnceLock, mpsc};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, AvailableCommand, DiffHunk,
@@ -247,7 +247,18 @@ fn policy_mode_id(id: &str, label: &str) -> Option<&'static str> {
     if id == PLAN_MODE_ID || label == PLAN_MODE_ID || label.contains("plan") {
         return Some(PLAN_MODE_ID);
     }
-    if id == BUILD_MODE_ID || label == BUILD_MODE_ID || label.contains("build") {
+    if id == BUILD_MODE_ID
+        || label == BUILD_MODE_ID
+        || label.contains("build")
+        || matches!(
+            id.as_str(),
+            "default" | "acceptedits" | "auto" | "bypasspermissions"
+        )
+        || label.contains("manual")
+        || label.contains("accept")
+        || label.contains("auto")
+        || label.contains("bypass")
+    {
         return Some(BUILD_MODE_ID);
     }
     None
@@ -608,6 +619,7 @@ fn emit_codebuddy_tool_call(
     let name = tool_display_name(update);
     let kind = tool_kind_label(update);
     let summary = tool_summary(update, &name);
+    let raw_input = tool_raw_input_for_ui(update);
 
     tx.send(ClientEvent::ToolStarted {
         id: id.clone(),
@@ -616,7 +628,7 @@ fn emit_codebuddy_tool_call(
         kind,
         summary: summary.clone(),
         is_subagent,
-        raw_input: update.get("rawInput").map(format_json),
+        raw_input: raw_input.as_ref().map(format_json),
     })
     .map_err(|_| anyhow!("failed to emit CodeBuddy tool start"))?;
 
@@ -651,15 +663,15 @@ fn emit_codebuddy_tool_call_update(
     let parent_id = codebuddy_parent_tool_call_id(update);
     let is_subagent = codebuddy_is_subagent(update);
     let status = tool_call_status(update);
-    let is_partial = status.is_none();
+    let is_partial = status.is_none() && !is_stable_claude_tool_metadata_update(update);
 
     // For partial (streaming) updates, rawInput is incomplete (e.g. {"file_path": "d:/wor"}).
-    // Only extract name/summary/kind from final updates that have a status field,
-    // to avoid polluting the UI with garbage fragments.
+    // Claude Code also sends complete metadata-only updates without a status field; keep those
+    // so later file paths and titles can replace the generic initial tool card.
     let name = if is_partial {
         None
     } else {
-        explicit_tool_display_name(update)
+        tool_update_display_name(update)
     };
     let kind = if is_partial {
         None
@@ -683,7 +695,7 @@ fn emit_codebuddy_tool_call_update(
     let raw_input = if is_partial {
         None
     } else {
-        update.get("rawInput")
+        tool_raw_input_for_ui(update)
     };
 
     if !is_partial {
@@ -698,7 +710,7 @@ fn emit_codebuddy_tool_call_update(
         kind,
         summary: summary.clone(),
         is_subagent,
-        raw_input: raw_input.map(format_json),
+        raw_input: raw_input.as_ref().map(format_json),
         raw_output: raw_output.map(format_value_for_ui),
         terminal_output: terminal_output.clone(),
         is_partial,
@@ -824,11 +836,11 @@ fn read_codebuddy_workspace_text(workspace_root: &str, path: &str) -> Option<Str
     }
 
     let root = PathBuf::from(workspace_root).canonicalize().ok()?;
-    let candidate = PathBuf::from(path);
+    let candidate = PathBuf::from(normalize_unix_drive_prefix(path));
     let candidate = if candidate.is_absolute() {
         candidate
     } else {
-        root.join(Path::new(path))
+        root.join(&candidate)
     };
     let candidate = candidate.canonicalize().ok()?;
     if !candidate.starts_with(&root) || !candidate.is_file() {
@@ -836,6 +848,42 @@ fn read_codebuddy_workspace_text(workspace_root: &str, path: &str) -> Option<Str
     }
 
     fs::read_to_string(candidate).ok()
+}
+
+fn normalize_unix_drive_prefix(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    for prefix in ["/mnt/", "/cygdrive/"] {
+        if lower.starts_with(prefix) && normalized.len() > prefix.len() + 1 {
+            let drive = normalized[prefix.len()..].chars().next().unwrap();
+            let rest_start = prefix.len() + drive.len_utf8();
+            if drive.is_ascii_alphabetic() && normalized[rest_start..].starts_with('/') {
+                return format!(
+                    "{}:{}",
+                    drive.to_ascii_uppercase(),
+                    &normalized[rest_start..]
+                );
+            }
+        }
+    }
+
+    if normalized.len() > 2 && normalized.starts_with('/') {
+        let mut chars = normalized.chars();
+        let _slash = chars.next();
+        if let Some(drive) = chars.next()
+            && drive.is_ascii_alphabetic()
+            && chars.next() == Some('/')
+        {
+            let rest_start = 1 + drive.len_utf8();
+            return format!(
+                "{}:{}",
+                drive.to_ascii_uppercase(),
+                &normalized[rest_start..]
+            );
+        }
+    }
+
+    path.to_string()
 }
 
 fn edit_preview_new_text_from_raw_input(raw_input: Option<&Value>) -> Option<String> {
@@ -852,12 +900,17 @@ fn edit_preview_old_text_from_raw_input(
     new_text: Option<&str>,
 ) -> Option<String> {
     let raw_input = raw_input?;
-    if let Some(content) = edit_preview_input_content(raw_input) {
+    let before = edit_preview_before_text(raw_input);
+    let after = edit_preview_after_text(raw_input);
+    if before.is_some()
+        && after.is_some()
+        && let Some(content) = edit_preview_input_content(raw_input)
+    {
         return Some(content);
     }
 
-    let before = edit_preview_before_text(raw_input)?;
-    let after = edit_preview_after_text(raw_input)?;
+    let before = before?;
+    let after = after?;
     let new_text = new_text?;
     let replaced = new_text.replacen(after, before, 1);
     (replaced != new_text).then_some(replaced)
@@ -977,6 +1030,7 @@ fn emit_codebuddy_session_info(
             id: tool_call_id.to_string(),
             name: tool_name.clone(),
             options,
+            details: None,
         })
         .map_err(|_| anyhow!("failed to emit CodeBuddy interruption request"))?;
 
@@ -1058,6 +1112,20 @@ fn tool_display_name(update: &Value) -> String {
     explicit_tool_display_name(update).unwrap_or_else(|| "Tool".into())
 }
 
+fn tool_update_display_name(update: &Value) -> Option<String> {
+    update
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let tool_name = claude_code_tool_name(update)?;
+            let path = tool_file_path(update)?;
+            Some(format!("{tool_name} {path}"))
+        })
+        .or_else(|| explicit_tool_display_name(update))
+}
+
 fn explicit_tool_display_name(update: &Value) -> Option<String> {
     update
         .get("title")
@@ -1071,6 +1139,7 @@ fn explicit_tool_display_name(update: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
+        .or_else(|| claude_code_tool_name(update))
         .or_else(|| {
             update
                 .get("kind")
@@ -1095,6 +1164,7 @@ fn tool_kind_label(update: &Value) -> String {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
+        .or_else(|| claude_code_tool_name(update))
         .unwrap_or_else(|| "tool".into())
 }
 
@@ -1111,6 +1181,7 @@ fn tool_summary(update: &Value, fallback: &str) -> String {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
+        .or_else(|| tool_file_path(update))
         .or_else(|| {
             let text = extract_text(update.get("content"));
             (!text.trim().is_empty()).then_some(text)
@@ -1122,6 +1193,96 @@ fn tool_summary(update: &Value, fallback: &str) -> String {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn is_stable_claude_tool_metadata_update(update: &Value) -> bool {
+    if claude_code_meta(update).is_none() {
+        return false;
+    }
+
+    update
+        .get("title")
+        .and_then(Value::as_str)
+        .is_some_and(|title| !title.trim().is_empty())
+        || tool_file_path(update).is_some()
+        || update
+            .get("rawInput")
+            .and_then(Value::as_object)
+            .is_some_and(|input| !input.is_empty())
+}
+
+fn tool_raw_input_for_ui(update: &Value) -> Option<Value> {
+    let mut raw_input = update.get("rawInput").cloned();
+    let Some(path) = tool_file_path(update) else {
+        return raw_input;
+    };
+
+    match raw_input {
+        Some(Value::Object(ref mut map)) => {
+            if !map_has_string_field(map, &["file_path", "filePath", "path"]) {
+                map.insert("file_path".into(), Value::String(path));
+            }
+            raw_input
+        }
+        Some(value) => Some(value),
+        None => Some(serde_json::json!({ "file_path": path })),
+    }
+}
+
+fn tool_file_path(update: &Value) -> Option<String> {
+    update
+        .get("rawInput")
+        .and_then(|input| string_field(input, &["file_path", "filePath", "path"]))
+        .or_else(|| {
+            update
+                .get("locations")
+                .and_then(Value::as_array)
+                .and_then(|locations| {
+                    locations.iter().find_map(|location| {
+                        location
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .filter(|path| !path.trim().is_empty())
+                            .map(str::to_string)
+                    })
+                })
+        })
+        .or_else(|| {
+            claude_code_meta(update)
+                .and_then(|meta| meta.get("toolResponse"))
+                .and_then(|response| response.get("file"))
+                .and_then(|file| string_field(file, &["filePath", "file_path", "path"]))
+        })
+}
+
+fn claude_code_tool_name(update: &Value) -> Option<String> {
+    claude_code_meta(update)
+        .and_then(|meta| meta.get("toolName"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn claude_code_meta(update: &Value) -> Option<&Value> {
+    update.get("_meta").and_then(|meta| meta.get("claudeCode"))
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn map_has_string_field(map: &serde_json::Map<String, Value>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        map.get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    })
 }
 
 fn codebuddy_parent_tool_call_id(update: &Value) -> Option<String> {
@@ -1555,6 +1716,11 @@ mod tests {
             "",
             &serde_json::json!({
                 "update": {
+                    "_meta": {
+                        "claudeCode": {
+                            "toolName": "Write"
+                        }
+                    },
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": "call-edit-1",
                     "status": "completed",
@@ -1670,6 +1836,68 @@ mod tests {
         );
         assert_eq!(diffs[1].2, None);
         assert_eq!(diffs[1].3, "## Tasks\n\n- [ ] Add parser\n");
+    }
+
+    #[test]
+    fn claude_write_create_raw_input_content_is_not_treated_as_old_text() {
+        let (tx, rx) = mpsc::channel();
+        let new_text = "export const value = 1;\n";
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "claudeCode": {
+                            "toolName": "Write"
+                        }
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-write-create",
+                    "title": "Write packages/backend/scripts/migrate-vision-tags-to-structured.ts",
+                    "rawInput": {
+                        "file_path": "/d/work/ArtAssets/src/new.ts",
+                        "content": new_text
+                    },
+                    "content": [{
+                        "type": "diff",
+                        "path": "/d/work/ArtAssets/src/new.ts",
+                        "newText": new_text
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolDiff {
+                id,
+                path,
+                old_text,
+                new_text: emitted_new_text,
+            } => {
+                assert_eq!(id, "call-write-create");
+                assert_eq!(path, "/d/work/ArtAssets/src/new.ts");
+                assert_eq!(old_text, None);
+                assert_eq!(emitted_new_text, new_text);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unix_drive_prefix_paths_are_normalized_for_workspace_file_reads() {
+        assert_eq!(
+            normalize_unix_drive_prefix("/d/work/ArtAssets/docs/tags.md"),
+            "D:/work/ArtAssets/docs/tags.md"
+        );
+        assert_eq!(
+            normalize_unix_drive_prefix("/mnt/d/work/ArtAssets/docs/tags.md"),
+            "D:/work/ArtAssets/docs/tags.md"
+        );
     }
 
     #[test]
@@ -2069,6 +2297,131 @@ mod tests {
             event,
             ClientEvent::ToolCompleted { id, .. } if id == "chatcmpl-tool-1"
         )));
+    }
+
+    #[test]
+    fn claude_metadata_update_without_status_updates_tool_path() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "claudeCode": {
+                            "toolName": "Read"
+                        }
+                    },
+                    "kind": "read",
+                    "locations": [
+                        {
+                            "line": 1,
+                            "path": "D:/work/ArtAssets/packages/frontend/src/utils/display.ts"
+                        }
+                    ],
+                    "rawInput": {
+                        "file_path": "D:/work/ArtAssets/packages/frontend/src/utils/display.ts"
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "title": "Read packages/frontend/src/utils/display.ts",
+                    "toolCallId": "tooluse_read_1"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolUpdated {
+                id,
+                name,
+                kind,
+                summary,
+                raw_input,
+                is_partial,
+                ..
+            } => {
+                assert_eq!(id, "tooluse_read_1");
+                assert_eq!(
+                    name.as_deref(),
+                    Some("Read packages/frontend/src/utils/display.ts")
+                );
+                assert_eq!(kind.as_deref(), Some("read"));
+                assert_eq!(
+                    summary.as_deref(),
+                    Some("D:/work/ArtAssets/packages/frontend/src/utils/display.ts")
+                );
+                assert!(
+                    raw_input
+                        .as_deref()
+                        .is_some_and(|input| input.contains("\"file_path\"")
+                            && input.contains("packages/frontend/src/utils/display.ts"))
+                );
+                assert!(!is_partial);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn claude_tool_response_file_path_is_synthesized_as_raw_input() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "claudeCode": {
+                            "toolName": "Read",
+                            "toolResponse": {
+                                "file": {
+                                    "filePath": "D:/work/ArtAssets/packages/frontend/src/pages/AssetDetailPage.tsx",
+                                    "numLines": 618,
+                                    "startLine": 1,
+                                    "totalLines": 618
+                                },
+                                "type": "text"
+                            }
+                        }
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tooluse_read_2"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            ClientEvent::ToolUpdated {
+                name,
+                raw_input,
+                is_partial,
+                ..
+            } => {
+                assert_eq!(
+                    name.as_deref(),
+                    Some("Read D:/work/ArtAssets/packages/frontend/src/pages/AssetDetailPage.tsx")
+                );
+                assert!(
+                    raw_input
+                        .as_deref()
+                        .is_some_and(|input| input.contains("\"file_path\"")
+                            && input.contains("AssetDetailPage.tsx"))
+                );
+                assert!(!is_partial);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{append_runtime_event_log, format_stop_reason};
 use agent_client_protocol::schema::{
-    AgentCapabilities, ListSessionsRequest, SessionId, StopReason,
+    AgentCapabilities, ListSessionsRequest, SessionId, SessionInfo, StopReason,
 };
 use agent_client_protocol::{Agent, ConnectionTo};
 use anyhow::anyhow;
@@ -9,7 +9,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-const TITLE_SYNC_RETRY_DELAYS_MS: [u64; 3] = [120, 400, 900];
+const TITLE_SYNC_RETRY_DELAYS_MS: [u64; 6] = [120, 400, 900, 2_000, 5_000, 10_000];
 const TITLE_SYNC_TIMEOUT_MS: u64 = 2_000;
 
 pub(super) async fn emit_turn_finished(
@@ -45,6 +45,22 @@ pub(super) fn command_implies_codex_session_list(config: &SessionConfig) -> bool
         .contains("codex-acp")
 }
 
+pub(super) fn supports_session_list_title_sync(
+    config: &SessionConfig,
+    advertised_session_list: bool,
+) -> bool {
+    if command_uses_claude_agent_titles(config) {
+        return false;
+    }
+
+    advertised_session_list || command_implies_codex_session_list(config)
+}
+
+fn command_uses_claude_agent_titles(config: &SessionConfig) -> bool {
+    let command = config.agent_command.to_ascii_lowercase();
+    command.contains("claude-agent-acp") || command.contains("claude-acp")
+}
+
 pub(super) async fn sync_session_title_from_list(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
@@ -70,30 +86,24 @@ pub(super) async fn sync_session_title_from_list(
     .map_err(|err| anyhow!(err.to_string()))?;
     let session_count = response.sessions.len();
 
+    let title = select_session_title_for_sync(&response.sessions, session_id);
     let matched = response
         .sessions
-        .into_iter()
+        .iter()
         .find(|session| session.session_id == *session_id);
 
-    if let Some(title) = matched
-        .as_ref()
-        .and_then(|session| session.title.as_deref())
-    {
-        let trimmed = title.trim();
-        if !trimmed.is_empty() {
-            append_runtime_event_log(
-                config,
-                "session/list_title_sync",
-                &json!({
-                    "sessionId": session_id.0.as_ref(),
-                    "title": trimmed,
-                }),
-            )?;
-            let _ = tx_events.send(ClientEvent::SessionTitleUpdated {
-                title: trimmed.to_string(),
-            });
-            return Ok(true);
-        }
+    if let Some((title, matched_by)) = title {
+        append_runtime_event_log(
+            config,
+            "session/list_title_sync",
+            &json!({
+                "sessionId": session_id.0.as_ref(),
+                "title": title,
+                "matchedBy": matched_by,
+            }),
+        )?;
+        let _ = tx_events.send(ClientEvent::SessionTitleUpdated { title });
+        return Ok(true);
     }
 
     append_runtime_event_log(
@@ -103,7 +113,7 @@ pub(super) async fn sync_session_title_from_list(
             "sessionId": session_id.0.as_ref(),
             "sessionCount": session_count,
             "matched": matched.is_some(),
-            "hasTitle": matched.as_ref().and_then(|session| session.title.as_ref()).is_some(),
+            "hasTitle": matched.and_then(|session| session.title.as_ref()).is_some(),
         }),
     )?;
 
@@ -116,28 +126,52 @@ pub(super) async fn sync_session_title_from_list_after_turn(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
 ) {
-    if let Err(error) =
-        sync_session_title_from_list(config, tx_events, connection, session_id).await
-    {
-        let _ = append_runtime_event_log(
-            config,
-            "session/list_title_sync_failed",
-            &json!({ "error": error.to_string() }),
-        );
-        return;
+    match sync_session_title_from_list(config, tx_events, connection, session_id).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            let _ = append_runtime_event_log(
+                config,
+                "session/list_title_sync_failed",
+                &json!({ "error": error.to_string() }),
+            );
+            return;
+        }
     }
 
     for delay_ms in TITLE_SYNC_RETRY_DELAYS_MS {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        if let Err(error) =
-            sync_session_title_from_list(config, tx_events, connection, session_id).await
-        {
-            let _ = append_runtime_event_log(
-                config,
-                "session/list_title_sync_retry_failed",
-                &json!({ "delayMs": delay_ms, "error": error.to_string() }),
-            );
-            return;
+        match sync_session_title_from_list(config, tx_events, connection, session_id).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                let _ = append_runtime_event_log(
+                    config,
+                    "session/list_title_sync_retry_failed",
+                    &json!({ "delayMs": delay_ms, "error": error.to_string() }),
+                );
+                return;
+            }
         }
+    }
+}
+
+pub(super) fn select_session_title_for_sync(
+    sessions: &[SessionInfo],
+    session_id: &SessionId,
+) -> Option<(String, &'static str)> {
+    sessions
+        .iter()
+        .find(|session| session.session_id == *session_id)
+        .and_then(trimmed_session_title)
+        .map(|title| (title, "sessionId"))
+}
+
+fn trimmed_session_title(session: &SessionInfo) -> Option<String> {
+    let title = session.title.as_deref()?.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
     }
 }

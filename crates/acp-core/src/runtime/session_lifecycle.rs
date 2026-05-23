@@ -1,7 +1,7 @@
 use super::prompt_content::prompt_capabilities_from_acp;
 use super::session_titles::{
     advertised_session_list_capability, command_implies_codex_session_list,
-    sync_session_title_from_list,
+    supports_session_list_title_sync, sync_session_title_from_list,
 };
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{append_runtime_event_log, emit_notification, session_config_from_parts};
@@ -51,7 +51,7 @@ pub(super) async fn start_session(
         advertised_session_list_capability(&init_response.agent_capabilities);
     let codex_session_list_fallback =
         !advertised_session_list && command_implies_codex_session_list(config);
-    let supports_session_list = advertised_session_list || codex_session_list_fallback;
+    let supports_session_list = supports_session_list_title_sync(config, advertised_session_list);
     append_runtime_event_log(
         config,
         "session/capabilities",

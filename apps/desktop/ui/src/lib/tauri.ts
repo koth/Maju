@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus } from "../types";
 
 export async function startupPerfMark(stage: string, detail?: string): Promise<void> {
   try {
@@ -235,6 +235,26 @@ export async function settingsSelectCodexDefaultMode(): Promise<AgentSettingsSna
   return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode");
 }
 
+export async function settingsSaveClaudeWoaConfig(config: ClaudeWoaConfigInput): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_claude_woa_config", { config });
+}
+
+export async function settingsStartClaudeWoaLogin(): Promise<ClaudeWoaLoginStart> {
+  return invoke<ClaudeWoaLoginStart>("settings_start_claude_woa_login");
+}
+
+export async function settingsGetClaudeWoaLogin(loginId: string): Promise<ClaudeWoaLoginStatus> {
+  return invoke<ClaudeWoaLoginStatus>("settings_get_claude_woa_login", { loginId });
+}
+
+export async function settingsCancelClaudeWoaLogin(loginId: string): Promise<ClaudeWoaLoginStatus> {
+  return invoke<ClaudeWoaLoginStatus>("settings_cancel_claude_woa_login", { loginId });
+}
+
+export async function settingsRefreshClaudeWoaToken(): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_refresh_claude_woa_token");
+}
+
 export async function settingsInstallAgent(agent: AgentCliId): Promise<AgentInstallResult> {
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
 }
@@ -261,6 +281,10 @@ export async function terminalOpen(request: TerminalOpenRequest): Promise<Termin
 
 export async function terminalWrite(request: TerminalWriteRequest): Promise<void> {
   return invoke("terminal_write", { request });
+}
+
+export async function terminalScrollback(request: TerminalIdRequest): Promise<TerminalScrollback> {
+  return invoke<TerminalScrollback>("terminal_scrollback", { request });
 }
 
 export async function terminalResize(request: TerminalResizeRequest): Promise<TerminalSession> {

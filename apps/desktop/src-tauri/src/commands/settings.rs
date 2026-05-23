@@ -1,12 +1,15 @@
 use crate::lsp::{LanguageServerRegistry, probe_command};
-use crate::state::AppState;
+use crate::state::{AppState, PendingClaudeWoaLogin};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
+use tokio::sync::watch;
 use workspace_model::{
-    AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme, LspProbeResult,
+    AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme, ClaudeWoaConfigInput,
+    ClaudeWoaLoginStart, ClaudeWoaLoginState, ClaudeWoaLoginStatus, LspProbeResult,
     LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
 };
 
@@ -14,7 +17,9 @@ use workspace_model::{
 use std::os::windows::process::CommandExt;
 
 const CODEX_ACP_NPM_PACKAGE: &str = "@zed-industries/codex-acp@latest";
+const CLAUDE_AGENT_ACP_NPM_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@latest";
 const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
+const BUNDLED_CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "bundled-claude-agent-acp";
 
 #[tauri::command]
 pub fn settings_get_agent_snapshot() -> Result<AgentSettingsSnapshot, String> {
@@ -83,6 +88,174 @@ pub fn settings_select_codex_default_mode(
     app_core::settings::select_codex_default_mode(&paths).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn settings_save_claude_woa_config(
+    config: ClaudeWoaConfigInput,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_claude_woa_config(&paths, config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn settings_start_claude_woa_login(
+    state: State<'_, AppState>,
+) -> Result<ClaudeWoaLoginStart, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let settings = app_core::settings::load_app_settings(&paths);
+    let device = app_core::claude_woa::request_device_code()
+        .await
+        .map_err(|e| e.to_string())?;
+    let login_id = uuid::Uuid::new_v4().to_string();
+    let token_path = app_core::settings::claude_woa_token_path(&paths);
+    let start = ClaudeWoaLoginStart {
+        login_id: login_id.clone(),
+        verification_uri: device.verification_uri.clone(),
+        verification_uri_complete: device.verification_uri_complete.clone(),
+        user_code: device.user_code.clone(),
+        expires_at_ms: device.expires_at_ms,
+        interval_ms: device.interval_ms,
+        channel: settings.claude_woa.channel,
+        token_path: token_path.clone(),
+    };
+    let status = Arc::new(Mutex::new(ClaudeWoaLoginStatus {
+        login_id: login_id.clone(),
+        state: ClaudeWoaLoginState::Pending,
+        message: None,
+        snapshot: None,
+    }));
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    state.insert_claude_woa_login(
+        login_id.clone(),
+        PendingClaudeWoaLogin {
+            status: status.clone(),
+            cancel: cancel_tx,
+        },
+    )?;
+    tokio::spawn(poll_claude_woa_login(
+        paths,
+        device.device_code,
+        device.expires_at_ms,
+        device.interval_ms,
+        token_path,
+        status,
+        cancel_rx,
+    ));
+    Ok(start)
+}
+
+#[tauri::command]
+pub fn settings_get_claude_woa_login(
+    state: State<'_, AppState>,
+    login_id: String,
+) -> Result<ClaudeWoaLoginStatus, String> {
+    state
+        .get_claude_woa_login(&login_id)?
+        .ok_or_else(|| "WOA login not found".into())
+}
+
+#[tauri::command]
+pub fn settings_cancel_claude_woa_login(
+    state: State<'_, AppState>,
+    login_id: String,
+) -> Result<ClaudeWoaLoginStatus, String> {
+    let found = state.cancel_claude_woa_login(&login_id)?;
+    if !found {
+        return Err("WOA login not found".into());
+    }
+    Ok(ClaudeWoaLoginStatus {
+        login_id,
+        state: ClaudeWoaLoginState::Cancelled,
+        message: Some("WOA login cancelled".into()),
+        snapshot: None,
+    })
+}
+
+#[tauri::command]
+pub fn settings_refresh_claude_woa_token() -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::refresh_claude_woa_token(&paths).map_err(|e| e.to_string())
+}
+
+async fn poll_claude_woa_login(
+    paths: app_core::AppPaths,
+    device_code: String,
+    expires_at_ms: u64,
+    mut interval_ms: u64,
+    token_path: PathBuf,
+    status: Arc<Mutex<ClaudeWoaLoginStatus>>,
+    mut cancel_rx: watch::Receiver<bool>,
+) {
+    loop {
+        let now = app_core::claude_woa::now_ms();
+        if now >= expires_at_ms {
+            set_login_status(
+                &status,
+                ClaudeWoaLoginState::Expired,
+                Some("WOA device code expired".into()),
+                None,
+            );
+            return;
+        }
+        let sleep_ms = interval_ms.min(expires_at_ms.saturating_sub(now));
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {}
+            changed = cancel_rx.changed() => {
+                if changed.is_ok() && *cancel_rx.borrow() {
+                    set_login_status(&status, ClaudeWoaLoginState::Cancelled, Some("WOA login cancelled".into()), None);
+                    return;
+                }
+            }
+        }
+        match app_core::claude_woa::poll_device_token(&device_code).await {
+            Ok(app_core::claude_woa::WoaPollResult::Pending) => {}
+            Ok(app_core::claude_woa::WoaPollResult::SlowDown) => {
+                interval_ms = (interval_ms + 2_000).min(15_000);
+            }
+            Ok(app_core::claude_woa::WoaPollResult::Token(token)) => {
+                let result = app_core::claude_woa::save_token(&token_path, &token)
+                    .map(|_| app_core::settings::settings_snapshot(&paths));
+                match result {
+                    Ok(snapshot) => set_login_status(
+                        &status,
+                        ClaudeWoaLoginState::Succeeded,
+                        Some("WOA login completed".into()),
+                        Some(snapshot),
+                    ),
+                    Err(error) => set_login_status(
+                        &status,
+                        ClaudeWoaLoginState::Failed,
+                        Some(error.to_string()),
+                        None,
+                    ),
+                }
+                return;
+            }
+            Err(error) => {
+                set_login_status(
+                    &status,
+                    ClaudeWoaLoginState::Failed,
+                    Some(error.to_string()),
+                    None,
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn set_login_status(
+    status: &Arc<Mutex<ClaudeWoaLoginStatus>>,
+    state: ClaudeWoaLoginState,
+    message: Option<String>,
+    snapshot: Option<AgentSettingsSnapshot>,
+) {
+    if let Ok(mut guard) = status.lock() {
+        guard.state = state;
+        guard.message = message;
+        guard.snapshot = snapshot.map(Box::new);
+    }
+}
+
 fn ensure_no_running_codex_acp_session(state: &State<'_, AppState>) -> Result<(), String> {
     if state.has_running_codex_acp_session()? {
         return Err(
@@ -105,8 +278,18 @@ pub async fn settings_install_agent(
     } else {
         None
     };
+    let bundled_claude_agent_acp = if agent == AgentCliId::ClaudeAgentAcp {
+        bundled_claude_agent_acp_resource(&app)
+    } else {
+        None
+    };
     let result = tokio::task::spawn_blocking(move || {
-        install_agent(&install_paths, agent, bundled_codex_acp.as_deref())
+        install_agent(
+            &install_paths,
+            agent,
+            bundled_codex_acp.as_deref(),
+            bundled_claude_agent_acp.as_deref(),
+        )
     })
     .await
     .map_err(|e| format!("Installer task failed: {e}"))?;
@@ -236,9 +419,13 @@ fn install_agent(
     paths: &app_core::AppPaths,
     agent: AgentCliId,
     bundled_codex_acp: Option<&Path>,
+    bundled_claude_agent_acp: Option<&Path>,
 ) -> Result<String, String> {
     if agent == AgentCliId::CodexAcp {
         return install_codex_acp(paths, bundled_codex_acp);
+    }
+    if agent == AgentCliId::ClaudeAgentAcp {
+        return install_claude_agent_acp(paths, bundled_claude_agent_acp);
     }
 
     let (program, args) = install_command(agent);
@@ -294,7 +481,9 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
                 )
             }
         }
-        AgentCliId::CodexAcp => unreachable!("codex-acp installation is handled manually"),
+        AgentCliId::CodexAcp | AgentCliId::ClaudeAgentAcp => {
+            unreachable!("managed agents are handled separately")
+        }
     }
 }
 
@@ -307,6 +496,255 @@ fn install_codex_acp(
     }
 
     install_codex_acp_from_npm(paths)
+}
+
+fn install_claude_agent_acp(
+    paths: &app_core::AppPaths,
+    bundled_resource: Option<&Path>,
+) -> Result<String, String> {
+    if let Some(resource) = bundled_resource {
+        if resource.is_file() {
+            let target = install_managed_binary(
+                paths,
+                resource,
+                &app_core::settings::claude_agent_acp_binary_path(paths),
+            )?;
+            return Ok(format!(
+                "Claude Agent ACP 已从安装包安装到 {}",
+                target.display()
+            ));
+        }
+        if resource.join("package").is_dir() {
+            install_claude_agent_acp_package(paths, &resource.join("package"))?;
+            return Ok(format!(
+                "Claude Agent ACP 已从安装包安装到 {}",
+                app_core::settings::codex_acp_bin_dir(paths).display()
+            ));
+        }
+    }
+    install_claude_agent_acp_from_npm(paths)
+}
+
+pub(crate) fn install_bundled_claude_agent_acp_if_missing(app: &AppHandle) -> Result<(), String> {
+    let Some(resource) = bundled_claude_agent_acp_resource(app) else {
+        return Ok(());
+    };
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &resource)
+}
+
+fn install_bundled_claude_agent_acp_if_missing_with_paths(
+    paths: &app_core::AppPaths,
+    resource: &Path,
+) -> Result<(), String> {
+    if claude_agent_acp_managed_install_matches_resource(paths, resource) {
+        return Ok(());
+    }
+    install_claude_agent_acp(paths, Some(resource)).map(|_| ())
+}
+
+fn claude_agent_acp_managed_install_matches_resource(
+    paths: &app_core::AppPaths,
+    resource: &Path,
+) -> bool {
+    if resource.is_file() {
+        return managed_binary_matches_resource(
+            &app_core::settings::claude_agent_acp_binary_path(paths),
+            resource,
+        );
+    }
+    claude_agent_acp_managed_install_exists(paths)
+}
+
+fn managed_binary_matches_resource(target: &Path, source: &Path) -> bool {
+    let Ok(target_meta) = fs::metadata(target) else {
+        return false;
+    };
+    let Ok(source_meta) = fs::metadata(source) else {
+        return false;
+    };
+    if !target_meta.is_file() || !source_meta.is_file() || target_meta.len() != source_meta.len() {
+        return false;
+    }
+    let Ok(target_modified) = target_meta.modified() else {
+        return false;
+    };
+    let Ok(source_modified) = source_meta.modified() else {
+        return false;
+    };
+    target_modified >= source_modified
+}
+
+fn claude_agent_acp_managed_install_exists(paths: &app_core::AppPaths) -> bool {
+    if app_core::settings::claude_agent_acp_binary_path(paths).is_file() {
+        return true;
+    }
+    let package_dir = app_core::settings::claude_agent_acp_package_dir(paths);
+    let launcher = app_core::settings::codex_acp_bin_dir(paths).join(if cfg!(windows) {
+        "claude-agent-acp.cmd"
+    } else {
+        "claude-agent-acp"
+    });
+    launcher.is_file() && claude_agent_acp_package_is_runnable(&package_dir)
+}
+
+fn claude_agent_acp_package_is_runnable(package_dir: &Path) -> bool {
+    package_dir.join("dist").join("index.js").is_file()
+        && package_dir.join("package.json").is_file()
+        && package_dir
+            .join("node_modules")
+            .join("@agentclientprotocol")
+            .join("sdk")
+            .join("package.json")
+            .is_file()
+        && package_dir
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-agent-sdk")
+            .join("package.json")
+            .is_file()
+        && package_dir
+            .join("node_modules")
+            .join("zod")
+            .join("package.json")
+            .is_file()
+}
+
+fn install_claude_agent_acp_from_npm(paths: &app_core::AppPaths) -> Result<String, String> {
+    let temp_dir = unique_install_temp_dir_named("kodex-claude-agent-acp-install");
+    fs::create_dir_all(&temp_dir).map_err(|e| {
+        format!(
+            "Failed to create temporary installer directory {}: {e}",
+            temp_dir.display()
+        )
+    })?;
+
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let temp_prefix = temp_dir.to_string_lossy().to_string();
+    let output = Command::new(npm)
+        .args([
+            "install",
+            "--prefix",
+            &temp_prefix,
+            "--no-save",
+            "--omit=dev",
+            CLAUDE_AGENT_ACP_NPM_PACKAGE,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .no_window()
+        .output()
+        .map_err(|e| format!("Failed to start npm installer for claude-agent-acp: {e}"))?;
+
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(if details.is_empty() {
+            "claude-agent-acp installer failed without output".to_string()
+        } else {
+            details
+        });
+    }
+
+    let package = temp_dir
+        .join("node_modules")
+        .join("@agentclientprotocol")
+        .join("claude-agent-acp");
+    if !package.is_dir() {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(
+            "Downloaded package did not contain @agentclientprotocol/claude-agent-acp".into(),
+        );
+    }
+    let result = install_claude_agent_acp_package(paths, &package);
+    let _ = fs::remove_dir_all(&temp_dir);
+    result.map(|_| {
+        format!(
+            "Claude Agent ACP 已安装到 {}",
+            app_core::settings::codex_acp_bin_dir(paths).display()
+        )
+    })
+}
+
+fn install_claude_agent_acp_package(
+    paths: &app_core::AppPaths,
+    package_source: &Path,
+) -> Result<(), String> {
+    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
+    fs::create_dir_all(&bin_dir).map_err(|e| {
+        format!(
+            "Failed to create Claude Agent ACP install directory {}: {e}",
+            bin_dir.display()
+        )
+    })?;
+    let target_package = app_core::settings::claude_agent_acp_package_dir(paths);
+    if target_package.exists() {
+        fs::remove_dir_all(&target_package).map_err(|e| {
+            format!(
+                "Failed to remove previous Claude Agent ACP package {}: {e}",
+                target_package.display()
+            )
+        })?;
+    }
+    copy_dir(package_source, &target_package).map_err(|e| {
+        format!(
+            "Failed to install Claude Agent ACP package from {} to {}: {e}",
+            package_source.display(),
+            target_package.display()
+        )
+    })?;
+    if !claude_agent_acp_package_is_runnable(&target_package) {
+        return Err(format!(
+            "Claude Agent ACP package at {} is missing runtime dependencies; rebuild the bundle with node_modules included.",
+            target_package.display()
+        ));
+    }
+    write_claude_agent_acp_launcher(paths)
+}
+
+fn write_claude_agent_acp_launcher(paths: &app_core::AppPaths) -> Result<(), String> {
+    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
+    let package_dir = app_core::settings::claude_agent_acp_package_dir(paths);
+    let entry = package_dir.join("dist").join("index.js");
+    if cfg!(windows) {
+        let launcher = bin_dir.join("claude-agent-acp.cmd");
+        fs::write(
+            &launcher,
+            format!(
+                "@echo off\r\nwhere node >nul 2>nul\r\nif errorlevel 1 (\r\n  echo Claude Agent ACP requires Node.js to run the bundled package launcher. Please install Node.js or install a native claude-agent-acp binary.\r\n  exit /b 1\r\n)\r\nif not exist \"{}\" (\r\n  echo Claude Agent ACP launcher is missing bundled entrypoint: {}\r\n  exit /b 1\r\n)\r\nnode \"{}\" %*\r\n",
+                entry.to_string_lossy(),
+                entry.to_string_lossy(),
+                entry.to_string_lossy()
+            ),
+        )
+        .map_err(|e| format!("Failed to write Claude Agent ACP launcher {}: {e}", launcher.display()))?;
+    } else {
+        let launcher = bin_dir.join("claude-agent-acp");
+        fs::write(
+            &launcher,
+            format!(
+                "#!/usr/bin/env sh\nif ! command -v node >/dev/null 2>&1; then\n  echo \"Claude Agent ACP requires Node.js to run the bundled package launcher. Please install Node.js or install a native claude-agent-acp binary.\" >&2\n  exit 1\nfi\nif [ ! -f \"{}\" ]; then\n  echo \"Claude Agent ACP launcher is missing bundled entrypoint: {}\" >&2\n  exit 1\nfi\nexec node \"{}\" \"$@\"\n",
+                entry.to_string_lossy(),
+                entry.to_string_lossy(),
+                entry.to_string_lossy()
+            ),
+        )
+        .map_err(|e| format!("Failed to write Claude Agent ACP launcher {}: {e}", launcher.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&launcher)
+                .map_err(|e| format!("Failed to read launcher permissions: {e}"))?
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&launcher, permissions)
+                .map_err(|e| format!("Failed to mark launcher executable: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn install_codex_acp_from_bundled_binary(
@@ -408,6 +846,105 @@ fn install_codex_acp_binary(paths: &app_core::AppPaths, source: &Path) -> Result
     Ok(target)
 }
 
+fn install_managed_binary(
+    paths: &app_core::AppPaths,
+    source: &Path,
+    target: &Path,
+) -> Result<PathBuf, String> {
+    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
+    fs::create_dir_all(&bin_dir).map_err(|e| {
+        format!(
+            "Failed to create managed agent install directory {}: {e}",
+            bin_dir.display()
+        )
+    })?;
+    if let Err(first_error) = fs::copy(source, target) {
+        terminate_processes_using_executable(target).map_err(|terminate_error| {
+            format!(
+                "Failed to install managed agent from {} to {}: {first_error}; also failed to stop the running target process: {terminate_error}",
+                source.display(),
+                target.display(),
+            )
+        })?;
+        copy_with_retry(source, target).map_err(|retry_error| {
+            format!(
+                "Failed to install managed agent from {} to {} after stopping the running target process: {retry_error}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(target)
+            .map_err(|e| format!("Failed to read managed agent permissions: {e}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(target, permissions)
+            .map_err(|e| format!("Failed to mark managed agent executable: {e}"))?;
+    }
+    Ok(target.to_path_buf())
+}
+
+fn copy_with_retry(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    let mut last_error = None;
+    for _ in 0..20 {
+        match fs::copy(source, target) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("copy retry failed")))
+}
+
+#[cfg(windows)]
+fn terminate_processes_using_executable(target: &Path) -> Result<(), String> {
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let target = target.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$target = '{}'; Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -eq $target }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        target
+    );
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .no_window()
+        .output()
+        .map_err(|e| format!("Failed to start PowerShell to stop running agent: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if !stderr.is_empty() { stderr } else { stdout };
+        Err(if details.is_empty() {
+            "PowerShell failed without output".into()
+        } else {
+            details
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_processes_using_executable(_target: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
     let candidate = app
         .path()
@@ -418,6 +955,19 @@ fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+fn bundled_claude_agent_acp_resource(app: &AppHandle) -> Option<PathBuf> {
+    let root = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join(BUNDLED_CLAUDE_AGENT_ACP_RESOURCE_DIR);
+    let binary = root.join(claude_agent_acp_binary_name());
+    if binary.is_file() {
+        return Some(binary);
+    }
+    root.is_dir().then_some(root)
+}
+
 fn codex_acp_binary_name() -> &'static str {
     if cfg!(windows) {
         "codex-acp.exe"
@@ -426,15 +976,42 @@ fn codex_acp_binary_name() -> &'static str {
     }
 }
 
+fn claude_agent_acp_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "claude-agent-acp.exe"
+    } else {
+        "claude-agent-acp"
+    }
+}
+
 fn unique_install_temp_dir() -> PathBuf {
+    unique_install_temp_dir_named("kodex-codex-acp-install")
+}
+
+fn unique_install_temp_dir_named(prefix: &str) -> PathBuf {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "kodex-codex-acp-install-{}-{now}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("{prefix}-{}-{now}", std::process::id()))
+}
+
+fn copy_dir(source: &Path, target: &Path) -> std::io::Result<()> {
+    if target.exists() {
+        fs::remove_dir_all(target)?;
+    }
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn find_named_file(root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -481,6 +1058,10 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
         ),
         AgentCliId::CodexAcp => Some(
             "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 Venus 或 DeepSeek API key。"
+                .to_string(),
+        ),
+        AgentCliId::ClaudeAgentAcp => Some(
+            "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；使用前请在此页面完成 WOA 登录。"
                 .to_string(),
         ),
     }
@@ -615,5 +1196,203 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"bundled-codex-acp");
         assert!(message.contains("安装包"));
         let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_install_can_use_bundled_package() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-bundled-claude-agent-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = source_dir.join("package");
+        write_test_claude_agent_acp_package(&package);
+
+        let message = install_claude_agent_acp(&paths, Some(&source_dir)).unwrap();
+
+        assert!(message.contains("安装包"));
+        assert!(app_core::settings::claude_agent_acp_package_dir(&paths).is_dir());
+        let launcher = app_core::settings::codex_acp_bin_dir(&paths).join(if cfg!(windows) {
+            "claude-agent-acp.cmd"
+        } else {
+            "claude-agent-acp"
+        });
+        assert!(launcher.is_file());
+        let launcher_text = fs::read_to_string(&launcher).unwrap();
+        assert!(launcher_text.contains("requires Node.js"));
+        assert!(launcher_text.contains("dist"));
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_install_can_use_bundled_binary() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-bundled-claude-agent-acp-binary-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(claude_agent_acp_binary_name());
+        fs::write(&source, b"bundled-claude-agent-acp").unwrap();
+
+        let message = install_claude_agent_acp(&paths, Some(&source)).unwrap();
+
+        let target = app_core::settings::claude_agent_acp_binary_path(&paths);
+        assert_eq!(fs::read(&target).unwrap(), b"bundled-claude-agent-acp");
+        assert!(message.contains("安装包"));
+        assert!(!app_core::settings::claude_agent_acp_package_dir(&paths).exists());
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_startup_seed_installs_bundled_package_when_missing() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-startup-bundled-claude-agent-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = source_dir.join("package");
+        write_test_claude_agent_acp_package(&package);
+
+        install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &source_dir).unwrap();
+
+        let launcher = app_core::settings::codex_acp_bin_dir(&paths).join(if cfg!(windows) {
+            "claude-agent-acp.cmd"
+        } else {
+            "claude-agent-acp"
+        });
+        assert!(launcher.is_file());
+        assert!(
+            app_core::settings::claude_agent_acp_package_dir(&paths)
+                .join("dist")
+                .join("index.js")
+                .is_file()
+        );
+        assert!(claude_agent_acp_managed_install_exists(&paths));
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_startup_seed_installs_bundled_binary_when_missing() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-startup-bundled-claude-agent-acp-binary-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(claude_agent_acp_binary_name());
+        fs::write(&source, b"bundled-claude-agent-acp").unwrap();
+
+        install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &source).unwrap();
+
+        let target = app_core::settings::claude_agent_acp_binary_path(&paths);
+        assert_eq!(fs::read(&target).unwrap(), b"bundled-claude-agent-acp");
+        assert!(claude_agent_acp_managed_install_exists(&paths));
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_startup_seed_replaces_stale_bundled_binary() {
+        let paths = temp_paths();
+        let target = app_core::settings::claude_agent_acp_binary_path(&paths);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old").unwrap();
+
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-startup-refresh-claude-agent-acp-binary-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(claude_agent_acp_binary_name());
+        fs::write(&source, b"new bundled binary").unwrap();
+
+        install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &source).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new bundled binary");
+        assert!(claude_agent_acp_managed_install_matches_resource(
+            &paths, &source
+        ));
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn claude_agent_acp_startup_seed_reinstalls_incomplete_package() {
+        let paths = temp_paths();
+        let bin_dir = app_core::settings::codex_acp_bin_dir(&paths);
+        let target_package = app_core::settings::claude_agent_acp_package_dir(&paths);
+        fs::create_dir_all(target_package.join("dist")).unwrap();
+        fs::write(
+            target_package.join("dist").join("index.js"),
+            "console.log('old')",
+        )
+        .unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(
+            bin_dir.join(if cfg!(windows) {
+                "claude-agent-acp.cmd"
+            } else {
+                "claude-agent-acp"
+            }),
+            "node old",
+        )
+        .unwrap();
+        assert!(!claude_agent_acp_managed_install_exists(&paths));
+
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-repair-bundled-claude-agent-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_test_claude_agent_acp_package(&source_dir.join("package"));
+
+        install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &source_dir).unwrap();
+
+        assert!(claude_agent_acp_managed_install_exists(&paths));
+        assert!(
+            target_package
+                .join("node_modules")
+                .join("@anthropic-ai")
+                .join("claude-agent-sdk")
+                .join("package.json")
+                .is_file()
+        );
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    fn write_test_claude_agent_acp_package(package: &Path) {
+        fs::create_dir_all(package.join("dist")).unwrap();
+        fs::write(package.join("dist").join("index.js"), "console.log('ok')").unwrap();
+        fs::write(package.join("package.json"), "{\"type\":\"module\"}").unwrap();
+        for package_dir in [
+            package
+                .join("node_modules")
+                .join("@agentclientprotocol")
+                .join("sdk"),
+            package
+                .join("node_modules")
+                .join("@anthropic-ai")
+                .join("claude-agent-sdk"),
+            package.join("node_modules").join("zod"),
+        ] {
+            fs::create_dir_all(&package_dir).unwrap();
+            fs::write(package_dir.join("package.json"), "{}").unwrap();
+        }
     }
 }

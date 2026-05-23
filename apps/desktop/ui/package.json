@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "desktop:build": "cd ../src-tauri && tauri build --ci",
+    "claude:build": "npm --prefix ../../../kodex-claude run build",
+    "claude:stage": "node scripts/stage-claude-agent-acp.mjs",
+    "claude:binary": "npm --prefix ../../../kodex-claude run build:binary && npm run claude:stage",
+    "build:with-claude": "npm run build && npm run claude:binary",
+    "desktop:build": "npm run claude:binary && cd ../src-tauri && tauri build --ci",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

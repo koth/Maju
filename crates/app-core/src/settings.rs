@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
-    AgentCliId, AgentCliStatus, AgentSettingsSnapshot, AppSettings, AppTheme,
-    CodexAcpSettingsStatus, CodexConnectionMode, LspServerConfigInput, LspServerSettings,
+    AgentCliId, AgentCliStatus, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeWoaConfigInput,
+    ClaudeWoaSettings, ClaudeWoaSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
+    LspServerConfigInput, LspServerSettings,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -53,8 +54,8 @@ const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
     ("claude-opus-4.6", "claude-opus-4-6"),
     ("claude-sonnet-4.6", "claude-sonnet-4-6"),
     ("claude-opus-4.7", "claude-opus-4-7"),
-    ("deepseek-v4-pro", "deepseek-v4-pro"),
-    ("deepseek-v4-flash", "deepseek-v4-flash"),
+    ("deepseek-v4-pro", "deepseek-v4-pro-external"),
+    ("deepseek-v4-flash", "deepseek-v4-flash-external"),
 ];
 
 const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
@@ -101,6 +102,7 @@ fn default_settings() -> AppSettings {
         theme: AppTheme::Graphite,
         lsp_servers: BTreeMap::new(),
         codex_connection_mode: CodexConnectionMode::Managed,
+        claude_woa: ClaudeWoaSettings::default(),
     }
 }
 
@@ -129,6 +131,12 @@ const AGENTS: &[AgentCliDefinition] = &[
         id: AgentCliId::CodexAcp,
         label: "Codex",
         binary: "codex-acp",
+        acp_arg: "",
+    },
+    AgentCliDefinition {
+        id: AgentCliId::ClaudeAgentAcp,
+        label: "Claude",
+        binary: "claude-agent-acp",
         acp_arg: "",
     },
 ];
@@ -236,6 +244,7 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
         agents,
         env_override: std::env::var("ACP_AGENT_COMMAND").ok(),
         codex_acp: codex_acp_settings_status(paths),
+        claude_woa: claude_woa_settings_status(paths),
     }
 }
 
@@ -252,6 +261,7 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         theme: existing.theme,
         lsp_servers: existing.lsp_servers,
         codex_connection_mode: existing.codex_connection_mode,
+        claude_woa: existing.claude_woa,
     };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
@@ -347,6 +357,8 @@ pub fn command_for_agent_with_paths(agent: AgentCliId, paths: &AppPaths) -> Opti
             shell_words::quote(&paths.root().to_string_lossy()),
             command
         ))
+    } else if agent == AgentCliId::ClaudeAgentAcp {
+        Some(claude_agent_acp_command(paths))
     } else {
         command_for_agent(agent)
     }
@@ -366,6 +378,18 @@ pub fn detect_agent(agent: AgentCliId) -> AgentCliStatus {
 }
 
 pub fn detect_agent_with_paths(paths: &AppPaths, agent: AgentCliId) -> AgentCliStatus {
+    if agent == AgentCliId::ClaudeAgentAcp {
+        let definition = definition(agent).expect("supported agent id");
+        let detected_path = claude_agent_acp_detected_path(paths);
+        return AgentCliStatus {
+            id: definition.id,
+            label: definition.label.to_string(),
+            binary: binary_name(definition.binary),
+            installed: detected_path.is_some(),
+            detected_path,
+            selected: false,
+        };
+    }
     if agent != AgentCliId::CodexAcp {
         return detect_agent(agent);
     }
@@ -431,6 +455,10 @@ pub fn command_for_agent_label_with_paths(label: &str, paths: &AppPaths) -> Opti
 }
 
 pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, String)> {
+    if is_claude_agent_acp_command(command) {
+        return claude_agent_acp_env(paths);
+    }
+
     if !command.to_ascii_lowercase().contains("codex-acp") {
         return Vec::new();
     }
@@ -443,6 +471,25 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
     codex_active_provider_key(&config_path)
         .map(|(env_key, api_key)| vec![(env_key, api_key)])
         .unwrap_or_default()
+}
+
+pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result<()> {
+    if !is_claude_agent_acp_command(command) {
+        return Ok(());
+    }
+    let settings = load_app_settings(paths);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create WOA token runtime")?
+        .block_on(crate::claude_woa::ensure_token_ready(
+            &managed_claude_woa_settings(paths, &settings.claude_woa),
+        ))
+        .map(|_| ())
+}
+
+pub fn is_claude_agent_acp_command(command: &str) -> bool {
+    command.to_ascii_lowercase().contains("claude-agent-acp")
 }
 
 fn settings_path(paths: &AppPaths) -> PathBuf {
@@ -459,6 +506,49 @@ pub fn codex_acp_bin_dir(paths: &AppPaths) -> PathBuf {
 
 pub fn codex_acp_binary_path(paths: &AppPaths) -> PathBuf {
     codex_acp_bin_dir(paths).join(binary_name("codex-acp"))
+}
+
+pub fn claude_agent_acp_binary_path(paths: &AppPaths) -> PathBuf {
+    codex_acp_bin_dir(paths).join(binary_name("claude-agent-acp"))
+}
+
+pub fn claude_agent_acp_package_dir(paths: &AppPaths) -> PathBuf {
+    codex_acp_bin_dir(paths).join("claude-agent-acp-package")
+}
+
+pub fn claude_woa_token_path(paths: &AppPaths) -> PathBuf {
+    paths.root().join("claude-woa-token.json")
+}
+
+pub fn claude_woa_settings_status(paths: &AppPaths) -> ClaudeWoaSettingsStatus {
+    let settings = load_app_settings(paths);
+    crate::claude_woa::status(&managed_claude_woa_settings(paths, &settings.claude_woa))
+}
+
+pub fn save_claude_woa_config(
+    paths: &AppPaths,
+    input: ClaudeWoaConfigInput,
+) -> Result<AgentSettingsSnapshot> {
+    let mut settings = load_app_settings(paths);
+    settings.claude_woa = ClaudeWoaSettings {
+        channel: input.channel,
+        token_path: None,
+        available_models: sanitize_claude_available_models(input.available_models),
+    };
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn refresh_claude_woa_token(paths: &AppPaths) -> Result<AgentSettingsSnapshot> {
+    let settings = load_app_settings(paths);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create WOA token runtime")?
+        .block_on(crate::claude_woa::refresh_and_save(
+            &managed_claude_woa_settings(paths, &settings.claude_woa),
+        ))?;
+    Ok(settings_snapshot(paths))
 }
 
 pub fn codex_acp_settings_status(paths: &AppPaths) -> CodexAcpSettingsStatus {
@@ -932,6 +1022,81 @@ fn command_from_binary(binary: &str, acp_arg: &str) -> String {
     }
 }
 
+fn claude_agent_acp_command(paths: &AppPaths) -> String {
+    let settings = load_app_settings(paths);
+    let token_path = claude_woa_token_path(paths);
+    let binary = claude_agent_acp_detected_path(paths)
+        .map(|path| shell_quote_path(&path))
+        .unwrap_or_else(|| binary_name("claude-agent-acp"));
+    format!(
+        "{} --woa --woa-channel {} --woa-token-path {}",
+        binary,
+        crate::claude_woa::channel_arg(settings.claude_woa.channel),
+        shell_words::quote(&token_path.to_string_lossy())
+    )
+}
+
+fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
+    let settings = load_app_settings(paths);
+    let available_models = sanitize_claude_available_models(settings.claude_woa.available_models);
+    if available_models.is_empty() {
+        return Vec::new();
+    }
+
+    match serde_json::to_string(&json!({ "availableModels": available_models })) {
+        Ok(value) => vec![("CLAUDE_MODEL_CONFIG".to_string(), value)],
+        Err(_) => Vec::new(),
+    }
+}
+
+fn sanitize_claude_available_models(models: Vec<String>) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() || sanitized.iter().any(|existing| existing == model) {
+            continue;
+        }
+        sanitized.push(model.to_string());
+    }
+    sanitized
+}
+
+fn managed_claude_woa_settings(
+    paths: &AppPaths,
+    settings: &ClaudeWoaSettings,
+) -> ClaudeWoaSettings {
+    ClaudeWoaSettings {
+        channel: settings.channel,
+        token_path: Some(claude_woa_token_path(paths)),
+        available_models: settings.available_models.clone(),
+    }
+}
+
+fn claude_agent_acp_detected_path(paths: &AppPaths) -> Option<PathBuf> {
+    let managed = claude_agent_acp_binary_path(paths);
+    if managed.is_file() {
+        return Some(managed);
+    }
+    if cfg!(windows) {
+        let cmd = codex_acp_bin_dir(paths).join("claude-agent-acp.cmd");
+        if cmd.is_file() {
+            return Some(cmd);
+        }
+    }
+    let package_dir = claude_agent_acp_package_dir(paths);
+    if package_dir.is_dir() {
+        let launcher = codex_acp_bin_dir(paths).join(if cfg!(windows) {
+            "claude-agent-acp.cmd"
+        } else {
+            "claude-agent-acp"
+        });
+        if launcher.is_file() {
+            return Some(launcher);
+        }
+    }
+    find_binary("claude-agent-acp")
+}
+
 fn effective_lsp_server_from_definition(
     settings: &AppSettings,
     definition: &DefaultLspServerDefinition,
@@ -1057,6 +1222,12 @@ mod tests {
 
         assert_eq!(settings.selected_agent, AgentCliId::Codebuddy);
         assert_eq!(settings.theme, AppTheme::Graphite);
+        assert_eq!(
+            settings.claude_woa.channel,
+            workspace_model::ClaudeWoaChannel::Default
+        );
+        assert!(settings.claude_woa.token_path.is_none());
+        assert!(settings.claude_woa.available_models.is_empty());
     }
 
     #[test]
@@ -1069,6 +1240,7 @@ mod tests {
             theme: AppTheme::Midnight,
             lsp_servers: BTreeMap::new(),
             codex_connection_mode: CodexConnectionMode::Managed,
+            claude_woa: ClaudeWoaSettings::default(),
         };
 
         save_app_settings(&paths, &settings).unwrap();
@@ -1095,10 +1267,12 @@ mod tests {
         let codebuddy = command_for_agent(AgentCliId::Codebuddy).unwrap();
         let goose = command_for_agent(AgentCliId::Goose).unwrap();
         let codex_acp = command_for_agent(AgentCliId::CodexAcp).unwrap();
+        let claude_agent_acp = command_for_agent(AgentCliId::ClaudeAgentAcp).unwrap();
 
         assert!(codebuddy.to_lowercase().contains("codebuddy"));
         assert!(goose.to_lowercase().contains("goose"));
         assert!(codex_acp.to_lowercase().contains("codex-acp"));
+        assert!(claude_agent_acp.to_lowercase().contains("claude-agent-acp"));
         assert!(codebuddy.ends_with(" --acp"));
         assert!(goose.ends_with(" acp"));
         assert!(!codex_acp.ends_with(' '));
@@ -1109,10 +1283,130 @@ mod tests {
         let goose = command_for_agent_label("goose").unwrap();
         let codebuddy = command_for_agent_label("CodeBuddy").unwrap();
         let codex_acp = command_for_agent_label("codex-acp").unwrap();
+        let claude_agent_acp = command_for_agent_label("Claude").unwrap();
 
         assert!(goose.to_lowercase().contains("goose"));
         assert!(codebuddy.to_lowercase().contains("codebuddy"));
         assert!(codex_acp.to_lowercase().contains("codex-acp"));
+        assert!(claude_agent_acp.to_lowercase().contains("claude-agent-acp"));
+    }
+
+    #[test]
+    fn claude_woa_config_persists_channel_and_uses_managed_token_path() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let token_path = dir.path().join("woa-token.json");
+
+        let snapshot = save_claude_woa_config(
+            &paths,
+            workspace_model::ClaudeWoaConfigInput {
+                channel: workspace_model::ClaudeWoaChannel::Offline,
+                token_path: Some(token_path.display().to_string()),
+                available_models: vec![
+                    " claude-sonnet-4-6[1m] ".into(),
+                    "claude-sonnet-4-6[1m]".into(),
+                    String::new(),
+                    "claude-opus-4-7[1m]".into(),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.settings.claude_woa.channel,
+            workspace_model::ClaudeWoaChannel::Offline
+        );
+        assert_eq!(snapshot.settings.claude_woa.token_path, None);
+        assert_eq!(
+            snapshot.settings.claude_woa.available_models,
+            vec!["claude-sonnet-4-6[1m]", "claude-opus-4-7[1m]"]
+        );
+        assert_eq!(
+            snapshot.claude_woa.token_path,
+            claude_woa_token_path(&paths)
+        );
+        assert_ne!(snapshot.claude_woa.token_path, token_path);
+    }
+
+    #[test]
+    fn claude_woa_snapshot_does_not_expose_token_secrets() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let token_path = claude_woa_token_path(&paths);
+        save_claude_woa_config(
+            &paths,
+            workspace_model::ClaudeWoaConfigInput {
+                channel: workspace_model::ClaudeWoaChannel::Default,
+                token_path: Some(dir.path().join("ignored.json").display().to_string()),
+                available_models: Vec::new(),
+            },
+        )
+        .unwrap();
+        crate::claude_woa::save_token(
+            &token_path,
+            &crate::claude_woa::WoaToken {
+                access_token: "access-secret-value".into(),
+                refresh_token: Some("refresh-secret-value".into()),
+                expires_at: crate::claude_woa::now_ms() + 600_000,
+            },
+        )
+        .unwrap();
+
+        let serialized = serde_json::to_string(&settings_snapshot(&paths)).unwrap();
+
+        assert!(!serialized.contains("access-secret-value"));
+        assert!(!serialized.contains("refresh-secret-value"));
+        assert!(serialized.contains("acce...alue"));
+    }
+
+    #[test]
+    fn claude_agent_acp_command_uses_woa_args() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let token_path = claude_woa_token_path(&paths);
+        save_claude_woa_config(
+            &paths,
+            workspace_model::ClaudeWoaConfigInput {
+                channel: workspace_model::ClaudeWoaChannel::Offline,
+                token_path: Some(dir.path().join("ignored.json").display().to_string()),
+                available_models: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+
+        assert!(command.contains("claude-agent-acp"));
+        assert!(command.contains("--woa"));
+        assert!(command.contains("--woa-channel offline"));
+        assert!(command.contains("--woa-token-path"));
+        assert!(command.contains(&token_path.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn claude_agent_acp_env_includes_custom_model_list() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        save_claude_woa_config(
+            &paths,
+            workspace_model::ClaudeWoaConfigInput {
+                channel: workspace_model::ClaudeWoaChannel::Default,
+                token_path: None,
+                available_models: vec![
+                    "claude-sonnet-4-6[1m]".into(),
+                    "claude-opus-4-7[1m]".into(),
+                ],
+            },
+        )
+        .unwrap();
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "CLAUDE_MODEL_CONFIG");
+        assert!(env[0].1.contains("claude-sonnet-4-6[1m]"));
+        assert!(env[0].1.contains("claude-opus-4-7[1m]"));
     }
 
     #[test]
@@ -1200,6 +1494,7 @@ mod tests {
                 theme: AppTheme::KodexDark,
                 lsp_servers: BTreeMap::new(),
                 codex_connection_mode: CodexConnectionMode::Managed,
+                claude_woa: ClaudeWoaSettings::default(),
             },
         )
         .unwrap();
@@ -1617,6 +1912,7 @@ api_key = "old-secret"
                 theme: AppTheme::Graphite,
                 lsp_servers: BTreeMap::new(),
                 codex_connection_mode: CodexConnectionMode::Managed,
+                claude_woa: ClaudeWoaSettings::default(),
             },
         )
         .unwrap();

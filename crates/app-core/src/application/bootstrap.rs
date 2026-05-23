@@ -13,7 +13,8 @@ impl Application {
         agent_command: impl Into<String>,
         app_paths: AppPaths,
     ) -> anyhow::Result<Self> {
-        let workspace_root = workspace_root.as_ref();
+        let workspace_root = normalize_workspace_root(workspace_root.as_ref());
+        let workspace_root = workspace_root.as_path();
         let agent_command = agent_command.into();
         crate::startup_perf::mark(
             "app/bootstrap/start",
@@ -64,9 +65,18 @@ impl Application {
                 crate::settings::command_for_agent_label_with_paths(label, &app_paths)
             });
         let agent_command = persisted_agent_command.unwrap_or(agent_command);
+        crate::settings::ensure_agent_ready_for_command(&agent_command, &app_paths)?;
 
-        // Check for existing session and its ACP session ID for --resume
-        let resume_session_id = most_recent_session.and_then(|s| s.acp_session_id.clone());
+        // Check for existing session and its ACP session ID for --resume. Empty local sessions can
+        // have a transient ACP id from session/new before the agent has a durable resource.
+        let resume_session_id = most_recent_session.and_then(|session| {
+            if store.session_has_activity(&session.id).unwrap_or(false) {
+                session.acp_session_id.clone()
+            } else {
+                let _ = store.clear_acp_session_id(&session.id);
+                None
+            }
+        });
 
         // If resuming an existing session, skip replay events from session/load
         let skip_replay = resume_session_id.is_some();
@@ -173,6 +183,7 @@ impl Application {
                     .unwrap_or_else(|| crate::settings::agent_label_for_command(&agent_command))
             });
         ui.session.agent_cli = Some(agent_cli_label.clone());
+        update_initial_agent_notice(&mut ui, &agent_cli_label);
         let _ = crate::startup_perf::measure("app/bootstrap/update_session_agent_cli", "", || {
             store.update_session_agent_cli(&ui.session.id.to_string(), &agent_cli_label)
         });
@@ -231,4 +242,14 @@ impl Application {
             inline_think_filter: InlineThinkFilter::default(),
         })
     }
+}
+
+fn normalize_workspace_root(workspace_root: &Path) -> std::path::PathBuf {
+    if workspace_root.is_absolute() {
+        return workspace_root.to_path_buf();
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(workspace_root))
+        .unwrap_or_else(|_| workspace_root.to_path_buf())
 }

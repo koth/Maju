@@ -20,6 +20,7 @@ interface Props {
   childToolsByParent?: Map<string, ToolInvocation[]>;
   nested: boolean;
   onPermissionSelect: (requestId: string, optionId: string | null) => void;
+  hiddenPermissionRequestIds?: ReadonlySet<string>;
 }
 
 function ToolCallCardImpl({
@@ -27,13 +28,22 @@ function ToolCallCardImpl({
   childToolsByParent,
   nested,
   onPermissionSelect,
+  hiddenPermissionRequestIds,
 }: Props) {
+  const hiddenPermissionRequest =
+    tool.kind === "permission" &&
+    hiddenPermissionRequestIds?.has(tool.call_id);
+
   const [expanded, setExpanded] = useState(false);
   const [rawDetailsOpen, setRawDetailsOpen] = useState(false);
 
   const children = childToolsByParent?.get(tool.call_id) ?? [];
 
   const [childrenCollapsed, setChildrenCollapsed] = useState(true);
+
+  if (hiddenPermissionRequest) {
+    return null;
+  }
 
   const presentation = deriveToolPresentation(tool);
   const commandEditPaths =
@@ -301,6 +311,7 @@ function ToolCallCardImpl({
               childToolsByParent={childToolsByParent}
               nested
               onPermissionSelect={onPermissionSelect}
+              hiddenPermissionRequestIds={hiddenPermissionRequestIds}
             />
           ))}
         </div>
@@ -398,6 +409,8 @@ export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);
 function areToolCardPropsEqual(prev: Props, next: Props) {
   if (prev.nested !== next.nested) return false;
   if (prev.onPermissionSelect !== next.onPermissionSelect) return false;
+  if (prev.hiddenPermissionRequestIds !== next.hiddenPermissionRequestIds)
+    return false;
   if (!sameToolForRender(prev.tool, next.tool)) return false;
   return sameChildToolsForRender(
     prev.childToolsByParent?.get(prev.tool.call_id) ?? [],

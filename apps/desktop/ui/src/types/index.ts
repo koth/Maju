@@ -150,6 +150,11 @@ export interface TerminalIdRequest {
   terminal_id: string;
 }
 
+export interface TerminalScrollback {
+  terminal_id: string;
+  data: string;
+}
+
 export interface TerminalOutputEvent {
   terminal_id: string;
   workspace_root: string;
@@ -476,9 +481,10 @@ export interface SearchResult {
 
 // App settings types
 
-export type AgentCliId = "codebuddy" | "goose" | "codex-acp";
+export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp";
 export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest" | "light";
 export type CodexConnectionMode = "managed" | "default";
+export type ClaudeWoaChannel = "default" | "offline";
 
 export interface AppSettings {
   selected_agent: AgentCliId;
@@ -486,6 +492,13 @@ export interface AppSettings {
   theme: AppTheme;
   lsp_servers: Record<string, LspServerSettings>;
   codex_connection_mode: CodexConnectionMode;
+  claude_woa: ClaudeWoaSettings;
+}
+
+export interface ClaudeWoaSettings {
+  channel: ClaudeWoaChannel;
+  token_path: string | null;
+  available_models: string[];
 }
 
 export interface LspServerSettings {
@@ -540,6 +553,7 @@ export interface AgentSettingsSnapshot {
   agents: AgentCliStatus[];
   env_override: string | null;
   codex_acp: CodexAcpSettingsStatus;
+  claude_woa: ClaudeWoaSettingsStatus;
 }
 
 export interface CodexAcpSettingsStatus {
@@ -548,6 +562,49 @@ export interface CodexAcpSettingsStatus {
   venus_key_configured: boolean;
   deepseek_key_configured: boolean;
   config_path: string;
+}
+
+export interface ClaudeWoaSettingsStatus {
+  channel: ClaudeWoaChannel;
+  token_path: string;
+  token: ClaudeWoaTokenStatus;
+}
+
+export interface ClaudeWoaTokenStatus {
+  exists: boolean;
+  malformed: boolean;
+  access_token: string | null;
+  refresh_token: string | null;
+  expires_at: string | null;
+  valid_for_minutes: number | null;
+  refresh_needed: boolean;
+  message: string | null;
+}
+
+export interface ClaudeWoaConfigInput {
+  channel: ClaudeWoaChannel;
+  tokenPath?: string | null;
+  availableModels?: string[];
+}
+
+export type ClaudeWoaLoginState = "pending" | "succeeded" | "failed" | "expired" | "cancelled";
+
+export interface ClaudeWoaLoginStart {
+  login_id: string;
+  verification_uri: string;
+  verification_uri_complete: string | null;
+  user_code: string;
+  expires_at_ms: number;
+  interval_ms: number;
+  channel: ClaudeWoaChannel;
+  token_path: string;
+}
+
+export interface ClaudeWoaLoginStatus {
+  login_id: string;
+  state: ClaudeWoaLoginState;
+  message: string | null;
+  snapshot: AgentSettingsSnapshot | null;
 }
 
 export interface AgentInstallResult {

@@ -16,6 +16,7 @@ use workspace_model::{
 };
 
 pub type TerminalEventSink = Arc<dyn Fn(TerminalServiceEvent) + Send + Sync + 'static>;
+const TERMINAL_OUTPUT_BUFFER_LIMIT: usize = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalServiceEvent {
@@ -41,6 +42,7 @@ struct TerminalEntry {
     master: Box<dyn MasterPty + Send>,
     input_tx: mpsc::Sender<String>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    output_buffer: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +156,7 @@ impl TerminalService {
         };
 
         let seq = Arc::new(AtomicU64::new(0));
+        let output_buffer = Arc::new(Mutex::new(String::new()));
         let (input_tx, input_rx) = mpsc::channel::<String>();
         thread::spawn(move || {
             for data in input_rx {
@@ -171,6 +174,7 @@ impl TerminalService {
         let output_workspace_root = workspace_key.clone();
         let output_seq = seq.clone();
         let output_input_tx = input_tx.clone();
+        let output_buffer_for_reader = output_buffer.clone();
         thread::spawn(move || {
             let mut buffer = [0_u8; 8192];
             loop {
@@ -182,6 +186,7 @@ impl TerminalService {
                         if data.is_empty() {
                             continue;
                         }
+                        append_output_buffer(&output_buffer_for_reader, &data);
                         emit_event(
                             &output_sink,
                             TerminalServiceEvent::Output(TerminalOutputEvent {
@@ -205,6 +210,7 @@ impl TerminalService {
             master: pair.master,
             input_tx,
             killer,
+            output_buffer,
         };
         self.inner
             .lock()
@@ -228,6 +234,22 @@ impl TerminalService {
             .send(data.to_string())
             .context("failed to queue terminal input")?;
         Ok(())
+    }
+
+    pub fn scrollback(&self, terminal_id: &str) -> anyhow::Result<String> {
+        let output_buffer = {
+            let inner = self.inner.lock().map_err(|e| anyhow!(e.to_string()))?;
+            inner
+                .sessions
+                .get(terminal_id)
+                .ok_or_else(|| anyhow!("terminal not found"))?
+                .output_buffer
+                .clone()
+        };
+        Ok(output_buffer
+            .lock()
+            .map_err(|e| anyhow!(e.to_string()))?
+            .clone())
     }
 
     pub fn resize(
@@ -459,6 +481,22 @@ fn ensure_running(session: &TerminalSession) -> anyhow::Result<()> {
 fn emit_event(sink: &Option<TerminalEventSink>, event: TerminalServiceEvent) {
     if let Some(sink) = sink {
         sink(event);
+    }
+}
+
+fn append_output_buffer(buffer: &Arc<Mutex<String>>, data: &str) {
+    let Ok(mut guard) = buffer.lock() else {
+        return;
+    };
+    guard.push_str(data);
+    if guard.len() > TERMINAL_OUTPUT_BUFFER_LIMIT {
+        let remove_bytes = guard.len() - TERMINAL_OUTPUT_BUFFER_LIMIT;
+        let trim_at = guard
+            .char_indices()
+            .map(|(index, _)| index)
+            .find(|index| *index >= remove_bytes)
+            .unwrap_or(remove_bytes);
+        guard.drain(..trim_at);
     }
 }
 

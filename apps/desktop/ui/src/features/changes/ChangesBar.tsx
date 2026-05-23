@@ -6,9 +6,10 @@ interface Props {
   changeSetId: string;
   changes: FileChangeSummary[];
   onFileSelect: (path: string, changeSetId: string) => void;
+  onReviewClick?: (changeSetId: string) => void;
 }
 
-export function ChangesBar({ changeSetId, changes, onFileSelect }: Props) {
+export function ChangesBar({ changeSetId, changes, onFileSelect, onReviewClick }: Props) {
   const [expanded, setExpanded] = useState(true);
 
   const sorted = useMemo(
@@ -29,16 +30,23 @@ export function ChangesBar({ changeSetId, changes, onFileSelect }: Props) {
 
   return (
     <div className="changes-bar">
-      <div
-        className="changes-bar-header"
-      >
-        <span className="changes-bar-label">
-          {sorted.length} 个文件已更改
+      <div className="changes-bar-header">
+        <span className="changes-bar-icon" aria-hidden="true">
+          <svg viewBox="0 0 20 20" focusable="false">
+            <path d="M4.5 3.5h11v13h-11z" />
+            <path d="M7.2 8.2h5.6M10 5.8v5.6M7.6 13.2h4.8" />
+          </svg>
         </span>
-        <span className="changes-bar-totals">
-          <span className="changes-bar-added">+{totalAdded}</span>
-          <span className="changes-bar-removed">-{totalRemoved}</span>
-        </span>
+        <div className="changes-bar-summary">
+          <span className="changes-bar-label">
+            已编辑 {sorted.length} 个文件
+          </span>
+          <span className="changes-bar-totals">
+            <span className="changes-bar-added">+{totalAdded}</span>
+            <span className="changes-bar-removed">-{totalRemoved}</span>
+          </span>
+        </div>
+        <div className="changes-bar-actions">
         <button
           type="button"
           className="changes-bar-action changes-bar-action-muted"
@@ -46,6 +54,14 @@ export function ChangesBar({ changeSetId, changes, onFileSelect }: Props) {
           disabled
         >
           撤销 ↶
+        </button>
+        <button
+          type="button"
+          className="changes-bar-action changes-bar-review-action"
+          title="打开审查"
+          onClick={() => onReviewClick?.(changeSetId)}
+        >
+          审核
         </button>
         <button
           type="button"
@@ -57,6 +73,7 @@ export function ChangesBar({ changeSetId, changes, onFileSelect }: Props) {
             ›
           </span>
         </button>
+        </div>
       </div>
 
       {expanded && (

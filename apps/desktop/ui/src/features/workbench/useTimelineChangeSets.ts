@@ -39,29 +39,96 @@ function buildTimelineTurnChangeSets(
   return byMessageId;
 }
 
+function buildTimelineTurnChangeSet(
+  summary: ChangeSetSummary | null | undefined,
+  filesByChangeSetId: Record<string, FileChangeSummary[]>,
+): TimelineTurnChangeSet | null {
+  if (!summary || summary.source !== "AgentTurn" || summary.file_count === 0) {
+    return null;
+  }
+  const files = filesByChangeSetId[summary.id] ?? [];
+  if (files.length === 0) return null;
+  return {
+    changeSetId: summary.id,
+    files,
+    updatedAt: summary.updated_at,
+  };
+}
+
+function timelineTurnChangeSetSignature(
+  messageId: string,
+  changeSet: TimelineTurnChangeSet,
+) {
+  return [
+    messageId,
+    changeSet.changeSetId,
+    changeSet.updatedAt,
+    ...changeSet.files.map((file) =>
+      [
+        file.path,
+        file.change_type,
+        file.added_lines,
+        file.removed_lines,
+        file.quality,
+        file.updated_at,
+      ].join(":"),
+    ),
+  ].join(":");
+}
+
 function timelineTurnChangeSetsSignature(
   changeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
+  liveTurnChangeSet: TimelineTurnChangeSet | null,
 ) {
-  return Object.entries(changeSetsByMessageId)
-    .map(([messageId, changeSet]) =>
-      [
-        messageId,
-        changeSet.changeSetId,
-        changeSet.updatedAt,
-        ...changeSet.files.map((file) =>
-          [
-            file.path,
-            file.change_type,
-            file.added_lines,
-            file.removed_lines,
-            file.quality,
-            file.updated_at,
-          ].join(":"),
-        ),
-      ].join(":"),
+  const entries = Object.entries(changeSetsByMessageId).map(([messageId, changeSet]) =>
+    timelineTurnChangeSetSignature(messageId, changeSet),
+  );
+  if (liveTurnChangeSet) {
+    entries.push(timelineTurnChangeSetSignature("__live__", liveTurnChangeSet));
+  }
+  return entries.sort().join("|");
+}
+
+function latestPendingAgentTurnSummary(
+  summaries: ChangeSetSummary[],
+  activeTurnOwnerKey: string | null,
+) {
+  if (!activeTurnOwnerKey) return undefined;
+  return summaries
+    .filter(
+      (summary) =>
+        summary.source === "AgentTurn" &&
+        summary.message_id == null &&
+        summary.owner_key === activeTurnOwnerKey &&
+        summary.file_count > 0,
     )
-    .sort()
-    .join("|");
+    .sort((a, b) => {
+      if (a.status !== b.status) {
+        if (a.status === "Pending") return -1;
+        if (b.status === "Pending") return 1;
+      }
+      return timestampValue(b.updated_at) - timestampValue(a.updated_at);
+    })[0];
+}
+
+function activeTurnOwnerKey(snapshot: UiSnapshot | null) {
+  if (
+    snapshot?.session.status !== "Streaming" &&
+    snapshot?.session.status !== "WaitingForTool"
+  ) {
+    return null;
+  }
+
+  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+  for (let index = snapshot.timeline.length - 1; index >= 0; index -= 1) {
+    const item = snapshot.timeline[index];
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (message?.role === "User") {
+      return `user-message:${message.id}`;
+    }
+  }
+  return null;
 }
 
 interface UseTimelineChangeSetsArgs {
@@ -80,6 +147,8 @@ export function useTimelineChangeSets({
   const [timelineTurnChangeSets, setTimelineTurnChangeSets] = useState<
     Record<string, TimelineTurnChangeSet>
   >({});
+  const [liveTurnChangeSet, setLiveTurnChangeSet] =
+    useState<TimelineTurnChangeSet | null>(null);
   const [agentConversationChangeCount, setAgentConversationChangeCount] = useState(0);
   const changeSetRefreshRef = useRef<{
     workspaceRoot: string;
@@ -88,20 +157,26 @@ export function useTimelineChangeSets({
 
   const clearChangeSets = useCallback(() => {
     setTimelineTurnChangeSets({});
+    setLiveTurnChangeSet(null);
     setAgentConversationChangeCount(0);
     changeSetRefreshRef.current = null;
   }, []);
 
   const currentAgentTurnChangesSignature = useMemo(
-    () => timelineTurnChangeSetsSignature(timelineTurnChangeSets),
-    [timelineTurnChangeSets],
+    () => timelineTurnChangeSetsSignature(timelineTurnChangeSets, liveTurnChangeSet),
+    [liveTurnChangeSet, timelineTurnChangeSets],
   );
+  const activeAgentTurn =
+    snapshot?.session.status === "Streaming" ||
+    snapshot?.session.status === "WaitingForTool";
+  const activeAgentTurnOwnerKey = useMemo(() => activeTurnOwnerKey(snapshot), [snapshot]);
 
   useEffect(() => {
     const sessionId = snapshot?.session.id;
     const workspaceRoot = snapshot?.workspace.root;
     if (!workspaceReady || !sessionId || !workspaceRoot) {
       setTimelineTurnChangeSets({});
+      setLiveTurnChangeSet(null);
       setAgentConversationChangeCount(0);
       return;
     }
@@ -126,8 +201,14 @@ export function useTimelineChangeSets({
             summary.message_id != null &&
             summary.file_count > 0,
         );
+        const pendingTurnSummary = activeAgentTurn
+          ? latestPendingAgentTurnSummary(summaries, activeAgentTurnOwnerKey)
+          : undefined;
+        const summariesToLoad = pendingTurnSummary
+          ? [...turnSummaries, pendingTurnSummary]
+          : turnSummaries;
         const fileEntries = await Promise.all(
-          turnSummaries.map(async (summary) => {
+          summariesToLoad.map(async (summary) => {
             try {
               const response = await sessionListChangeSetFiles({
                 change_set_id: summary.id,
@@ -143,6 +224,9 @@ export function useTimelineChangeSets({
         setTimelineTurnChangeSets(
           buildTimelineTurnChangeSets(turnSummaries, filesByChangeSetId),
         );
+        setLiveTurnChangeSet(
+          buildTimelineTurnChangeSet(pendingTurnSummary, filesByChangeSetId),
+        );
         const conversationSummary = conversationSummaries.find(
           (summary) => summary.source === "AgentConversation" && summary.file_count > 0,
         );
@@ -151,6 +235,7 @@ export function useTimelineChangeSets({
       .catch(() => {
         if (!cancelled) {
           setTimelineTurnChangeSets({});
+          setLiveTurnChangeSet(null);
           setAgentConversationChangeCount(0);
         }
       });
@@ -158,7 +243,14 @@ export function useTimelineChangeSets({
     return () => {
       cancelled = true;
     };
-  }, [snapshot?.revision, snapshot?.session.id, snapshot?.workspace.root, workspaceReady]);
+  }, [
+    activeAgentTurn,
+    activeAgentTurnOwnerKey,
+    snapshot?.revision,
+    snapshot?.session.id,
+    snapshot?.workspace.root,
+    workspaceReady,
+  ]);
 
   useEffect(() => {
     const workspaceRoot = snapshot?.workspace.root;
@@ -196,6 +288,7 @@ export function useTimelineChangeSets({
 
   return {
     timelineTurnChangeSets,
+    liveTurnChangeSet,
     agentConversationChangeCount,
     clearChangeSets,
   };

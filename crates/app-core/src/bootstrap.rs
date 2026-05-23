@@ -35,7 +35,7 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
     let system_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role: MessageRole::System,
-        body: "CodeBuddy 将保持空闲，直到您从下方编辑器提交提示。".into(),
+        body: agent_idle_notice("智能体"),
         created_at: created_at.clone(),
     };
 
@@ -105,6 +105,27 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
     })
 }
 
+pub(crate) fn update_initial_agent_notice(ui: &mut UiSnapshot, agent_label: &str) {
+    let replacement = agent_idle_notice(agent_label);
+    for message in &mut ui.messages {
+        if message.role == MessageRole::System && is_initial_agent_notice(&message.body) {
+            message.body = replacement.clone();
+        }
+    }
+}
+
+fn agent_idle_notice(agent_label: &str) -> String {
+    format!("{agent_label} 将保持空闲，直到您从下方编辑器提交提示。")
+}
+
+fn is_initial_agent_notice(body: &str) -> bool {
+    matches!(
+        body.trim(),
+        "CodeBuddy 将保持空闲，直到您从下方编辑器提交提示。"
+            | "智能体 将保持空闲，直到您从下方编辑器提交提示。"
+    )
+}
+
 fn current_timestamp() -> String {
     use std::time::SystemTime;
     let secs = SystemTime::now()
@@ -126,5 +147,25 @@ mod tests {
         assert_eq!(ui.repository.branch, "加载中");
         assert_eq!(ui.repository.head, "待刷新");
         assert!(ui.repository.changed_files.is_empty());
+    }
+
+    #[test]
+    fn initial_agent_notice_uses_selected_agent_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = build_initial_ui(dir.path()).unwrap();
+
+        update_initial_agent_notice(&mut ui, "Claude");
+
+        assert!(
+            ui.messages
+                .iter()
+                .any(|message| message.role == MessageRole::System
+                    && message.body == "Claude 将保持空闲，直到您从下方编辑器提交提示。")
+        );
+        assert!(
+            ui.messages
+                .iter()
+                .all(|message| !message.body.contains("CodeBuddy 将保持空闲"))
+        );
     }
 }

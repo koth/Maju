@@ -261,6 +261,8 @@
   color: var(--text-strong);
   font-family: var(--font-chat);
   isolation: isolate;
+  text-align: left;
+  cursor: pointer;
 }
 
 .review-change-header::before {
@@ -272,11 +274,16 @@
 }
 
 .review-change-header:hover {
-  background: color-mix(in srgb, var(--app-bg) 86%, var(--surface-alt-bg));
+  background: color-mix(in srgb, var(--app-bg) 78%, var(--surface-alt-bg));
 }
 
 .review-change-header:hover::before {
-  background: color-mix(in srgb, var(--app-bg) 86%, var(--surface-alt-bg));
+  background: color-mix(in srgb, var(--app-bg) 78%, var(--surface-alt-bg));
+}
+
+.review-change-header:focus-visible {
+  outline: 1px solid var(--accent-hover);
+  outline-offset: -1px;
 }
 
 .review-change-path {
@@ -288,7 +295,7 @@
   background: transparent;
   color: var(--text-strong);
   font-family: var(--font-chat);
-  cursor: default;
+  cursor: inherit;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -298,38 +305,6 @@
 
 .review-change-path:hover {
   color: var(--text-strong);
-}
-
-.review-change-tooltip {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 8px;
-  z-index: 10;
-  box-sizing: border-box;
-  max-width: min(560px, calc(100% - 16px));
-  overflow: hidden;
-  padding: 4px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  background: var(--surface-bg);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.36);
-  color: var(--text-strong);
-  font-family: var(--font-chat);
-  font-size: 11px;
-  line-height: 1.4;
-  opacity: 0;
-  pointer-events: none;
-  text-overflow: ellipsis;
-  transform: translateY(-2px);
-  transition:
-    opacity 90ms ease,
-    transform 90ms ease;
-  white-space: nowrap;
-}
-
-.review-change-path:hover + .review-change-tooltip {
-  opacity: 1;
-  transform: translateY(0);
 }
 
 .review-change-stats {
@@ -353,24 +328,60 @@
   border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
-  cursor: pointer;
+  pointer-events: none;
   font-family: var(--font-chat);
   font-size: 16px;
   line-height: 1;
 }
 
-.review-change-toggle:hover {
+.review-change-header:hover .review-change-toggle {
   background: transparent;
   color: var(--text-strong);
 }
 
 .review-inline-diff {
-  overflow: hidden;
+  --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft));
+  --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted));
+  --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted));
+  overflow-x: auto;
+  overflow-y: visible;
   border-top: 0;
   background: var(--app-bg);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
+  overscroll-behavior-x: contain;
+  scrollbar-color: var(--review-diff-scrollbar-thumb) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.review-inline-diff:hover {
+  scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent;
+}
+
+.review-inline-diff::-webkit-scrollbar {
+  height: 9px;
+}
+
+.review-inline-diff::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.review-inline-diff::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: var(--review-diff-scrollbar-thumb);
+  background-clip: content-box;
+}
+
+.review-inline-diff:hover::-webkit-scrollbar-thumb {
+  background-color: var(--review-diff-scrollbar-thumb-active);
+}
+
+.review-inline-diff::-webkit-scrollbar-thumb:hover {
+  background-color: var(--review-diff-scrollbar-thumb-hover);
 }
 
 .review-pierre-diff {

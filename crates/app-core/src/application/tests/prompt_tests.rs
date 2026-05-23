@@ -124,6 +124,74 @@ fn codex_first_prompt_waits_for_protocol_title() {
 }
 
 #[test]
+fn claude_first_prompt_waits_for_protocol_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.needs_title = true;
+    app.ui.session.title = "新 ACP 会话".into();
+    app.ui.session.agent_cli = Some("Claude".into());
+    app.provisional_prompt_title = None;
+
+    app.send_prompt_background("帮我修复登录 token 刷新失败的问题")
+        .unwrap();
+
+    assert_eq!(app.ui.session.title, "新 ACP 会话");
+    assert!(app.provisional_prompt_title.is_none());
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "修复登录 token 刷新".into(),
+    });
+    assert_eq!(app.ui.session.title, "修复登录 token 刷新");
+    assert!(app.agent_title_received);
+    assert!(!app.needs_title);
+    app.session.shutdown();
+}
+
+#[test]
+fn claude_session_title_matching_user_prompt_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.needs_title = true;
+    app.agent_title_received = false;
+    app.ui.session.title = "新 ACP 会话".into();
+    app.ui.session.agent_cli = Some("Claude".into());
+    app.provisional_prompt_title = None;
+    let _ = app
+        .store
+        .update_session_title(&app.ui.session.id.to_string(), "新 ACP 会话");
+
+    app.send_prompt_background("你看下rembg现在用的什么模型")
+        .unwrap();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "你看下rembg现在用的什么模型".into(),
+    });
+
+    assert_eq!(app.ui.session.title, "新 ACP 会话");
+    assert!(!app.agent_title_received);
+    assert!(app.needs_title);
+    assert!(app.provisional_prompt_title.is_none());
+    let persisted = app
+        .store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == app.ui.session.id.to_string())
+        .unwrap();
+    assert_eq!(persisted.title, "新 ACP 会话");
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "检查 rembg 模型配置".into(),
+    });
+
+    assert_eq!(app.ui.session.title, "检查 rembg 模型配置");
+    assert!(app.agent_title_received);
+    assert!(!app.needs_title);
+    app.session.shutdown();
+}
+
+#[test]
 fn abnormal_turn_notice_explains_refusal_without_blocking_followup() {
     let notice = turn_finished_notice("refusal", Some("CodeBuddy"))
         .expect("refusal should produce a visible notice");
@@ -132,4 +200,14 @@ fn abnormal_turn_notice_explains_refusal_without_blocking_followup() {
     assert!(notice.contains("refusal"));
     assert!(notice.contains("429"));
     assert!(turn_finished_notice("end_turn", Some("CodeBuddy")).is_none());
+}
+
+#[test]
+fn context_length_disconnect_reason_is_human_readable() {
+    let reason = humanize_acp_disconnect_reason(
+        "Internal error: Requested token count exceeds the model's maximum context length of 131072 tokens.",
+    );
+
+    assert!(reason.contains("模型上下文超限"));
+    assert!(!reason.contains("Internal error"));
 }

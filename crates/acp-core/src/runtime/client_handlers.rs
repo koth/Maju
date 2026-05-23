@@ -8,10 +8,11 @@ use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{append_runtime_event_log, format_permission_options};
 use agent_client_protocol::schema::{
-    CreateTerminalRequest, KillTerminalRequest, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, TerminalOutputRequest,
-    WaitForTerminalExitRequest, WriteTextFileRequest, WriteTextFileResponse,
+    ContentBlock, CreateTerminalRequest, KillTerminalRequest, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    TerminalOutputRequest, ToolCallContent, WaitForTerminalExitRequest, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use anyhow::anyhow;
@@ -96,6 +97,7 @@ pub(super) async fn connect_agent_client(
                                 .clone()
                                 .unwrap_or_else(|| "Permission request".into()),
                             options: options.clone(),
+                            details: permission_request_details(&request),
                         });
                         let _ = tx_permissions.send(ClientEvent::ToolProgress {
                             id: request_id.clone(),
@@ -362,4 +364,33 @@ pub(super) async fn connect_agent_client(
         .map_err(|err| anyhow!(err.to_string()))?;
 
     Ok(())
+}
+
+fn permission_request_details(request: &RequestPermissionRequest) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(content) = &request.tool_call.fields.content {
+        for item in content {
+            if let ToolCallContent::Content(content) = item
+                && let ContentBlock::Text(text) = &content.content
+            {
+                let trimmed = text.text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    if parts.is_empty()
+        && let Some(raw_input) = &request.tool_call.fields.raw_input
+        && let Some(plan) = raw_input.get("plan").and_then(serde_json::Value::as_str)
+    {
+        let trimmed = plan.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }

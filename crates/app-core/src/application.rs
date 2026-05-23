@@ -1,4 +1,4 @@
-use crate::bootstrap::build_initial_ui;
+use crate::bootstrap::{build_initial_ui, update_initial_agent_notice};
 use crate::file_tracker::FileChangeTracker;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
@@ -114,6 +114,18 @@ fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<St
     }
 }
 
+fn humanize_acp_disconnect_reason(reason: &str) -> String {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("requested token count exceeds")
+        || lower.contains("maximum context length")
+        || lower.contains("context_length_exceeded")
+    {
+        return "模型上下文超限：本轮携带的历史消息或工具输出太多，超过了上游模型窗口。请新建会话或压缩上下文后重试。".into();
+    }
+
+    reason.to_string()
+}
+
 fn interrupt_incomplete_tools(tools: &mut [ToolInvocation]) -> Vec<String> {
     let mut updated_ids = Vec::new();
 
@@ -155,6 +167,26 @@ fn interrupt_incomplete_tools(tools: &mut [ToolInvocation]) -> Vec<String> {
 fn is_codex_agent_label(label: &str) -> bool {
     let normalized = label.trim().to_ascii_lowercase();
     normalized == "codex" || normalized == "codex-acp"
+}
+
+fn is_claude_agent_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "claude" | "claude-acp" | "claude-agent-acp" | "claude agent"
+    )
+}
+
+fn is_protocol_session_title_agent_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "codex" | "codex-acp" | "claude" | "claude-acp" | "claude-agent-acp" | "claude agent"
+    )
+}
+
+fn normalize_title_for_prompt_compare(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn display_codex_provider(provider: &str) -> &str {

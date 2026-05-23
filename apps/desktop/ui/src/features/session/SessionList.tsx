@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { AgentCliId, AgentSettingsSnapshot, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
@@ -52,6 +52,7 @@ export function SessionList({
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
+  const agentDropdownRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
     sessionList().then(setWorkspaceSessions).catch(() => {});
@@ -81,6 +82,29 @@ export function SessionList({
       }),
     );
   }, [activeSessionId, activeSessionTitle, activeWorkspaceRoot, currentSessionStatus]);
+
+  useEffect(() => {
+    if (!agentDropdownOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (agentDropdownRef.current?.contains(target)) return;
+      setAgentDropdownOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAgentDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [agentDropdownOpen]);
 
   const openAgentModal = useCallback(async (mode: AgentModalMode) => {
     setModalError(null);
@@ -236,10 +260,18 @@ export function SessionList({
     }
   }, [onSessionChanged, pendingSwitch, refresh]);
 
+  const handleSelectModalAgent = useCallback((agent: AgentCliId) => {
+    setSelectedAgent(agent);
+    setAgentDropdownOpen(false);
+  }, []);
+
   const modalTitle = modalMode === "workspace" ? "创建工作区" : "创建会话";
   const modalButtonText = modalMode === "workspace" ? "创建工作区" : "创建会话";
   const loadingText = modalMode === "workspace" ? "正在创建工作区..." : "正在创建会话...";
   const selectedAgentStatus = agentSnapshot?.agents.find((agent) => agent.id === selectedAgent) ?? null;
+  const selectedClaudeNeedsLogin =
+    selectedAgent === "claude-agent-acp" &&
+    (!agentSnapshot?.claude_woa.token.exists || !!agentSnapshot?.claude_woa.token.malformed);
 
   return (
     <div className="session-list">
@@ -324,7 +356,7 @@ export function SessionList({
                 </label>
                 <label className="sl-form-field">
                   <span className="sl-form-label">Agent</span>
-                  <div className="sl-agent-dropdown">
+                  <div className="sl-agent-dropdown" ref={agentDropdownRef}>
                     <button
                       type="button"
                       className={`sl-agent-select-btn ${agentDropdownOpen ? "is-open" : ""}`}
@@ -345,9 +377,16 @@ export function SessionList({
                             className={`sl-agent-dropdown-item ${selectedAgent === agent.id ? "is-selected" : ""}`}
                             disabled={!agent.installed}
                             key={agent.id}
-                            onClick={() => {
-                              setSelectedAgent(agent.id);
-                              setAgentDropdownOpen(false);
+                            onPointerDown={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              if (agent.installed) {
+                                handleSelectModalAgent(agent.id);
+                              }
+                            }}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
                             }}
                           >
                             <span>{agent.label}</span>
@@ -374,7 +413,7 @@ export function SessionList({
                       value={agent.id}
                       checked={selectedAgent === agent.id}
                       disabled={!agent.installed || isSubmitting}
-                      onChange={() => setSelectedAgent(agent.id)}
+                      onChange={() => handleSelectModalAgent(agent.id)}
                     />
                     <span className="sl-agent-label">{agent.label}</span>
                     <span className="sl-agent-meta">
@@ -388,10 +427,13 @@ export function SessionList({
             {agentSnapshot.env_override && (
               <div className="sl-agent-note">已设置 ACP_AGENT_COMMAND；本次选择会直接使用所选 Agent。</div>
             )}
+            {selectedClaudeNeedsLogin && (
+              <div className="sl-agent-error">Claude Agent ACP 需要先在设置中完成 WOA 登录。</div>
+            )}
             {modalError && <div className="sl-agent-error">{modalError}</div>}
             <div className="sl-agent-actions">
               <button type="button" className="sl-agent-cancel" onClick={closeAgentPicker} disabled={isSubmitting}>取消</button>
-              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
+              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || selectedClaudeNeedsLogin || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
                 {isSubmitting && <span className="sl-agent-spinner" aria-hidden="true" />}
                 {isSubmitting ? loadingText : modalButtonText}
               </button>
@@ -521,6 +563,7 @@ function formatAgentLabel(value?: string | null): string | null {
   if (!raw) return "未知";
   const normalized = raw.toLowerCase();
   if (normalized.includes("codebuddy")) return "CodeBuddy";
+  if (normalized.includes("claude")) return "Claude";
   if (normalized.includes("codex")) return "Codex";
   if (normalized.includes("goose")) return "goose";
   return raw;

@@ -8,6 +8,7 @@ import {
   terminalList,
   terminalOpen,
   terminalResize,
+  terminalScrollback,
   terminalTerminate,
   terminalWrite,
 } from "../../lib/tauri";
@@ -25,6 +26,7 @@ interface TerminalSurface {
   writeQueue: string[];
   writeFrame: number | null;
   writeGeneration: number;
+  hydrated: boolean;
 }
 
 interface ResizeState {
@@ -199,10 +201,11 @@ export function TerminalDock({
     });
   }, [disposeSurface]);
 
-  const enqueueSurfaceWrite = useCallback((terminalId: string, data: string) => {
+  const enqueueSurfaceWrite = useCallback((terminalId: string, data: string, force = false) => {
     if (!data) return;
     const surface = surfacesRef.current.get(terminalId);
     if (!surface) return;
+    if (!surface.hydrated && !force) return;
 
     surface.writeQueue.push(data);
     if (surface.writeFrame != null) return;
@@ -377,17 +380,29 @@ export function TerminalDock({
         writeQueue: [],
         writeFrame: null,
         writeGeneration: 0,
+        hydrated: false,
       };
       surfacesRef.current.set(terminalId, surface);
-      enqueueSurfaceWrite(terminalId, outputBuffersRef.current.get(terminalId) ?? "");
       window.requestAnimationFrame(() => {
-        fitSurface(terminalId);
+        try {
+          surface.fitAddon.fit();
+          const dims = surface.fitAddon.proposeDimensions?.();
+          sendResize(
+            terminalId,
+            dims?.cols ?? surface.terminal.cols ?? DEFAULT_COLS,
+            dims?.rows ?? surface.terminal.rows ?? DEFAULT_ROWS,
+          );
+        } catch {
+          // The dock can briefly be zero-sized while showing or resizing.
+        }
+        surface.hydrated = true;
+        enqueueSurfaceWrite(terminalId, outputBuffersRef.current.get(terminalId) ?? "", true);
         if (activeTerminalIdRef.current === terminalId) {
           focusSurface(terminalId);
         }
       });
     },
-    [appTheme, enqueueSurfaceWrite, fitSurface, focusSurface, ghosttyReady, sendResize],
+    [appTheme, enqueueSurfaceWrite, focusSurface, ghosttyReady, sendResize],
   );
 
   const handleViewportNodeChange = useCallback(
@@ -457,6 +472,30 @@ export function TerminalDock({
     }
   }, []);
 
+  const hydrateScrollback = useCallback(
+    async (terminalId: string) => {
+      try {
+        const response = await terminalScrollback({ terminal_id: terminalId });
+        const current = outputBuffersRef.current.get(terminalId) ?? "";
+        if (!response.data || current.length >= response.data.length) {
+          return;
+        }
+        const delta = response.data.startsWith(current)
+          ? response.data.slice(current.length)
+          : current.length === 0
+            ? response.data
+            : "";
+        outputBuffersRef.current.set(terminalId, trimTerminalBuffer(response.data));
+        if (delta) {
+          enqueueSurfaceWrite(terminalId, delta);
+        }
+      } catch {
+        // The terminal may have exited or been closed while the dock was restoring.
+      }
+    },
+    [enqueueSurfaceWrite],
+  );
+
   useEffect(() => {
     sessionRef.current = session;
     if (session) {
@@ -525,6 +564,7 @@ export function TerminalDock({
         (item) => item.status === "running",
       );
       if (existing.length > 0) {
+        await Promise.all(existing.map((item) => hydrateScrollback(item.terminal_id)));
         existing.forEach((item) => {
           outputBuffersRef.current.set(
             item.terminal_id,
@@ -560,7 +600,14 @@ export function TerminalDock({
     } finally {
       setOpening(false);
     }
-  }, [activeDimensions, fitTerminal, focusTerminal, upsertSession, workspaceRoot]);
+  }, [
+    activeDimensions,
+    fitTerminal,
+    focusTerminal,
+    hydrateScrollback,
+    upsertSession,
+    workspaceRoot,
+  ]);
 
   useEffect(() => {
     let disposed = false;

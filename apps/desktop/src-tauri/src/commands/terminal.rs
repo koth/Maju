@@ -1,8 +1,8 @@
 use crate::state::AppState;
 use tauri::State;
 use workspace_model::{
-    TerminalIdRequest, TerminalOpenRequest, TerminalResizeRequest, TerminalSession,
-    TerminalWriteRequest,
+    TerminalIdRequest, TerminalOpenRequest, TerminalResizeRequest, TerminalScrollback,
+    TerminalSession, TerminalWriteRequest,
 };
 
 #[tauri::command]
@@ -19,6 +19,18 @@ pub fn terminal_write(
     request: TerminalWriteRequest,
 ) -> Result<(), String> {
     state.terminal_write(request)
+}
+
+#[tauri::command]
+pub fn terminal_scrollback(
+    state: State<'_, AppState>,
+    request: TerminalIdRequest,
+) -> Result<TerminalScrollback, String> {
+    let data = state.terminal_scrollback(&request.terminal_id)?;
+    Ok(TerminalScrollback {
+        terminal_id: request.terminal_id,
+        data,
+    })
 }
 
 #[tauri::command]

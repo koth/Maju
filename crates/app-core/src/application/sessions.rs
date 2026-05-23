@@ -58,9 +58,12 @@ impl Application {
                 crate::settings::command_for_agent_label_with_paths(label, &self.app_paths)
             })
             .unwrap_or_else(|| self.agent_command.clone());
+        crate::settings::ensure_agent_ready_for_command(&session_agent_command, &self.app_paths)
+            .map_err(|e| e.to_string())?;
 
-        // Get the stored ACP session ID for resume
-        let resume_acp_id = self.store.get_acp_session_id(id).unwrap_or(None);
+        // Empty local sessions may have a transient ACP id from session/new, but no durable
+        // agent-side resource yet. Resume only after a prompt/tool has created persisted activity.
+        let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
 
         // Start a new ACP session handle
         let session = SessionHandle::start(SessionConfig {
@@ -97,6 +100,9 @@ impl Application {
         self.ui.messages = messages;
         self.ui.tools = tools;
         self.ui.timeline = timeline;
+        if let Some(agent_label) = self.ui.session.agent_cli.clone() {
+            update_initial_agent_notice(&mut self.ui, &agent_label);
+        }
         self.ui.session.status = SessionStatus::Idle;
         self.session = session;
         self.in_flight_prompt = None;
@@ -140,6 +146,8 @@ impl Application {
                 }),
             None => self.agent_command.clone(),
         };
+        crate::settings::ensure_agent_ready_for_command(&current_agent_command, &self.app_paths)
+            .map_err(|e| e.to_string())?;
         self.agent_command = current_agent_command;
 
         // Start a new ACP session handle (no resume for new session)
@@ -216,16 +224,21 @@ impl Application {
         self.ensure_codex_provider_matches_for_resume(&self.ui.session.id.to_string())?;
 
         // Try to resume the current ACP session if we have its ID
-        let resume_id = if !self.session.id.is_empty() {
+        let session_id = self.ui.session.id.to_string();
+        let has_activity = self
+            .store
+            .session_has_activity(&session_id)
+            .unwrap_or(false);
+        let resume_id = if has_activity && !self.session.id.is_empty() {
             Some(self.session.id.clone())
         } else {
-            self.store
-                .get_acp_session_id(&self.ui.session.id.to_string())
-                .unwrap_or(None)
+            self.resume_acp_session_id_for_stored_session(&session_id)
         };
 
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
+        crate::settings::ensure_agent_ready_for_command(&self.agent_command, &self.app_paths)
+            .map_err(|e| e.to_string())?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: self.ui.workspace.root.display().to_string(),
             app_data_root: self.app_paths.root().display().to_string(),
@@ -270,5 +283,14 @@ impl Application {
         self.pending_model_restore = Some(self.ui.session.model.clone());
         self.bump_revision();
         Ok(())
+    }
+
+    pub(super) fn resume_acp_session_id_for_stored_session(&self, id: &str) -> Option<String> {
+        if self.store.session_has_activity(id).unwrap_or(false) {
+            self.store.get_acp_session_id(id).unwrap_or(None)
+        } else {
+            let _ = self.store.clear_acp_session_id(id);
+            None
+        }
     }
 }

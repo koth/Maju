@@ -362,6 +362,12 @@ pub struct TerminalIdRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalScrollback {
+    pub terminal_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TerminalOutputEvent {
     pub terminal_id: String,
     pub workspace_root: String,
@@ -735,6 +741,8 @@ pub enum AgentCliId {
     Goose,
     #[serde(rename = "codex-acp")]
     CodexAcp,
+    #[serde(rename = "claude-agent-acp")]
+    ClaudeAgentAcp,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -766,6 +774,29 @@ impl Default for CodexConnectionMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeWoaChannel {
+    Default,
+    Offline,
+}
+
+impl Default for ClaudeWoaChannel {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ClaudeWoaSettings {
+    #[serde(default)]
+    pub channel: ClaudeWoaChannel,
+    #[serde(default)]
+    pub token_path: Option<PathBuf>,
+    #[serde(default)]
+    pub available_models: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
@@ -778,6 +809,8 @@ pub struct AppSettings {
     pub lsp_servers: BTreeMap<String, LspServerSettings>,
     #[serde(default)]
     pub codex_connection_mode: CodexConnectionMode,
+    #[serde(default)]
+    pub claude_woa: ClaudeWoaSettings,
 }
 
 fn default_acp_port() -> u16 {
@@ -850,6 +883,7 @@ pub struct AgentSettingsSnapshot {
     pub agents: Vec<AgentCliStatus>,
     pub env_override: Option<String>,
     pub codex_acp: CodexAcpSettingsStatus,
+    pub claude_woa: ClaudeWoaSettingsStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -859,6 +893,65 @@ pub struct CodexAcpSettingsStatus {
     pub venus_key_configured: bool,
     pub deepseek_key_configured: bool,
     pub config_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeWoaSettingsStatus {
+    pub channel: ClaudeWoaChannel,
+    pub token_path: PathBuf,
+    pub token: ClaudeWoaTokenStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeWoaTokenStatus {
+    pub exists: bool,
+    pub malformed: bool,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<String>,
+    pub valid_for_minutes: Option<i64>,
+    pub refresh_needed: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeWoaConfigInput {
+    pub channel: ClaudeWoaChannel,
+    #[serde(default)]
+    pub token_path: Option<String>,
+    #[serde(default)]
+    pub available_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeWoaLoginState {
+    Pending,
+    Succeeded,
+    Failed,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeWoaLoginStart {
+    pub login_id: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub user_code: String,
+    pub expires_at_ms: u64,
+    pub interval_ms: u64,
+    pub channel: ClaudeWoaChannel,
+    pub token_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeWoaLoginStatus {
+    pub login_id: String,
+    pub state: ClaudeWoaLoginState,
+    pub message: Option<String>,
+    pub snapshot: Option<Box<AgentSettingsSnapshot>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

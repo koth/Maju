@@ -1,5 +1,6 @@
 mod application;
 mod bootstrap;
+pub mod claude_woa;
 mod editor_files;
 mod file_tracker;
 mod paths;
@@ -1197,6 +1198,48 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
     }
 
     #[test]
+    fn switching_back_to_empty_session_starts_new_agent_session_instead_of_resume() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        wait_for_control(&mut app, SessionConfigCategory::Model);
+        let original_session_id = app.ui.session.id.to_string();
+
+        app.session_create(None).unwrap();
+        let empty_session_id = app.ui.session.id.to_string();
+        wait_for_control(&mut app, SessionConfigCategory::Model);
+
+        let store =
+            SessionStore::open(&dir.path().join("home").join(".kodex"), dir.path()).unwrap();
+        assert!(
+            store
+                .get_acp_session_id(&empty_session_id)
+                .unwrap()
+                .is_some(),
+            "session/new should have persisted a transient ACP id before any prompt"
+        );
+        assert!(
+            !store.session_has_activity(&empty_session_id).unwrap(),
+            "new session should still be locally empty before the first prompt"
+        );
+        drop(store);
+
+        app.session_switch(&original_session_id).unwrap();
+        wait_for_control(&mut app, SessionConfigCategory::Model);
+
+        app.session_switch(&empty_session_id).unwrap();
+
+        assert_eq!(app.ui.session.id.to_string(), empty_session_id);
+        let store =
+            SessionStore::open(&dir.path().join("home").join(".kodex"), dir.path()).unwrap();
+        assert_eq!(
+            store.get_acp_session_id(&empty_session_id).unwrap(),
+            None,
+            "empty sessions should clear transient ACP ids instead of resuming them"
+        );
+    }
+
+    #[test]
     fn local_mode_survives_session_config_refresh() {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
@@ -1283,6 +1326,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                 id: "perm-1".into(),
                 name: "Read".into(),
                 options: vec![],
+                details: None,
             },
         );
         let tool = ui

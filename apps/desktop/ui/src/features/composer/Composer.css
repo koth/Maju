@@ -175,6 +175,198 @@
   color: var(--warning);
 }
 
+.plan-approval-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(8px);
+}
+
+.plan-approval-modal {
+  width: min(780px, 100%);
+  max-height: min(76vh, 720px);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: #171819;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.48);
+}
+
+.plan-approval-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-muted-bg) 78%, var(--app-bg));
+}
+
+.plan-approval-eyebrow {
+  color: var(--accent-hover);
+  font-size: var(--font-size-shell-label);
+  font-weight: 700;
+  letter-spacing: var(--letter-spacing-shell);
+  text-transform: uppercase;
+}
+
+.plan-approval-title {
+  margin: 4px 0 0;
+  color: var(--text-strong);
+  font-family: var(--font-chat);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.plan-approval-count {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--font-size-shell-label);
+  font-weight: 700;
+}
+
+.plan-approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px 18px 0;
+  list-style: none;
+}
+
+.plan-approval-entry {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-muted);
+}
+
+.plan-approval-entry.is-in_progress {
+  border-color: rgba(143, 199, 189, 0.34);
+  background: rgba(106, 168, 159, 0.12);
+  color: var(--text-strong);
+}
+
+.plan-approval-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.plan-approval-content {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-approval-proposal {
+  margin: 14px 18px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-muted-bg) 78%, var(--app-bg));
+}
+
+.plan-approval-proposal-title {
+  padding: 12px 14px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.plan-approval-proposal-body {
+  --md-code-bg: rgba(255, 255, 255, 0.045);
+  --md-code-block-bg: rgba(0, 0, 0, 0.2);
+  --md-code-border: var(--border-subtle);
+  max-height: min(34vh, 320px);
+  overflow: auto;
+  padding: 10px 14px 14px;
+  color: var(--text-strong);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.plan-approval-proposal-body .md-heading:first-child {
+  margin-top: 0;
+}
+
+.plan-approval-proposal-body .md-heading {
+  margin-top: 14px;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.plan-approval-proposal-body .md-list {
+  margin-bottom: 10px;
+}
+
+.plan-approval-proposal-body .md-code-block,
+.plan-approval-proposal-body .md-table-wrap {
+  max-width: 100%;
+}
+
+.plan-approval-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 16px 18px 18px;
+}
+
+.plan-approval-action {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-chat);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.plan-approval-action:hover:not(:disabled) {
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.plan-approval-action-primary {
+  border-color: color-mix(in srgb, var(--accent-hover) 48%, transparent);
+  background: color-mix(in srgb, var(--accent-hover) 18%, transparent);
+  color: var(--accent-hover);
+}
+
+.plan-approval-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 @media (max-width: 720px) {
   .agent-plan {
     max-height: 30vh;

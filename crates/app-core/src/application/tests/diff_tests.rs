@@ -571,6 +571,136 @@ fn completed_read_tool_does_not_claim_preexisting_git_change() {
 }
 
 #[test]
+fn completed_chinese_edit_summary_enters_review_via_git_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "openspec/changes/tag-system-revamp/proposal.md";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "before\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, "after\n").unwrap();
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "edit-proposal".into(),
+        parent_call_id: None,
+        name: "Edit".into(),
+        kind: "edit".into(),
+        summary: format!("已编辑 {relative_path}"),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(app.detect_file_writes_from_tools(&["edit-proposal".into()]));
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(app.ui.session_changes.len(), 1);
+}
+
+#[test]
+fn write_create_without_old_text_enters_review_as_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let normalized_path = "packages/backend/scripts/migrate-vision-tags-to-structured.ts";
+    let new_text = "export const migrated = true;\n";
+
+    let change_type = app.tool_diff_change_type("write-create", normalized_path, None);
+    app.upsert_review_file_change(normalized_path, change_type.clone(), None, new_text.into());
+
+    assert_eq!(change_type, FileChangeType::Created);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, normalized_path);
+    assert_eq!(
+        app.ui.review_changes[0].change_type,
+        FileChangeType::Created
+    );
+    assert_eq!(app.ui.review_changes[0].old_text, None);
+    assert_eq!(app.ui.review_changes[0].new_text, new_text);
+}
+
+#[test]
+fn failed_tool_without_recorded_file_change_discards_speculative_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let change = SessionFileChange {
+        path: "docs/tags.md".into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some("before\n".into()),
+        new_text: "after\n".into(),
+        added_lines: 1,
+        removed_lines: 1,
+        timestamp: "2026-05-21T00:00:00Z".into(),
+    };
+
+    app.ui.session_changes = vec![change.clone()];
+    app.ui.review_changes = vec![change];
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "write-tags".into(),
+        parent_call_id: None,
+        name: "Write".into(),
+        kind: "Write".into(),
+        summary: "Write docs/tags.md".into(),
+        status: ToolStatus::Failed,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![PathBuf::from("docs/tags.md")],
+        diff_previews: vec![ToolDiffPreview {
+            path: PathBuf::from("docs/tags.md"),
+            hunks: vec![DiffHunk {
+                heading: "@@ -1 +1 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        content: "before".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        content: "after".into(),
+                    },
+                ],
+            }],
+        }],
+        raw_input: Some(
+            serde_json::json!({
+                "file_path": "/d/work/ArtAssets/docs/tags.md",
+            })
+            .to_string(),
+        ),
+        raw_output: None,
+        terminal_output: None,
+        error: Some("User refused permission to run tool".into()),
+        permission_options: Vec::new(),
+        permission_decision: Some("Reject".into()),
+    });
+
+    assert!(app.discard_failed_tool_speculative_diffs("write-tags"));
+    assert!(app.ui.session_changes.is_empty());
+    assert!(app.ui.review_changes.is_empty());
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "write-tags")
+        .unwrap();
+    assert!(tool.diff_paths.is_empty());
+    assert!(tool.diff_previews.is_empty());
+}
+
+#[test]
 fn missing_tool_diff_old_text_uses_session_target_as_turn_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

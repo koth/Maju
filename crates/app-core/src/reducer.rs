@@ -87,17 +87,18 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             if let Some(parent_id) = parent_id.as_deref() {
                 finalize_running_children(ui, parent_id, Some(&id));
             }
+            let display_summary = normalize_tool_summary_for_display(ui, &summary);
             let tool = ensure_tool(ui, &id, parent_id, &name, &kind, is_subagent);
             tool.name = name;
             tool.kind = kind;
-            tool.summary = summary.clone();
+            tool.summary = display_summary.clone();
             tool.status = ToolStatus::Running;
             tool.is_subagent = is_subagent;
             tool.raw_input = cap_optional_string(raw_input, MAX_TOOL_RAW_INPUT_CHARS);
             tool.raw_output = None;
             tool.terminal_output = None;
             tool.error = None;
-            push_tool_log(tool, "Requested", summary);
+            push_tool_log(tool, "Requested", display_summary);
             apply_codebuddy_task_update(ui, task_update_raw_input.as_deref());
             apply_codebuddy_todo_write(ui, todo_write_raw_input.as_deref());
             ui.session.status = SessionStatus::WaitingForTool;
@@ -117,6 +118,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             if let Some(parent_id) = parent_id.as_deref() {
                 finalize_running_children(ui, parent_id, Some(&id));
             }
+            let display_summary = summary
+                .as_deref()
+                .map(|summary| normalize_tool_summary_for_display(ui, summary));
             let (updated_tool_name, updated_raw_input) = {
                 let tool = ensure_tool(ui, &id, parent_id, "tool", "tool", is_subagent);
                 if let Some(name) = name {
@@ -128,7 +132,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 if is_subagent {
                     tool.is_subagent = true;
                 }
-                if let Some(summary) = summary {
+                if let Some(summary) = display_summary {
                     tool.summary = summary.clone();
                     if !is_partial {
                         push_tool_log(tool, "Update", summary);
@@ -160,7 +164,12 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 ui.session.status = SessionStatus::WaitingForTool;
             }
         }
-        ClientEvent::ToolPermissionRequest { id, name, options } => {
+        ClientEvent::ToolPermissionRequest {
+            id,
+            name,
+            options,
+            details,
+        } => {
             let tool = ensure_tool(ui, &id, None, &name, "permission", false);
             let summary = if options.is_empty() {
                 "等待权限".to_string()
@@ -179,6 +188,11 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.error = None;
             tool.permission_options = options;
             tool.permission_decision = None;
+            if let Some(details) = details.filter(|details| !details.trim().is_empty()) {
+                tool.detail_text = details.clone();
+                tool.raw_input = Some(details.clone());
+                push_tool_log(tool, "Plan", collapse_whitespace(&details));
+            }
             push_tool_log(tool, "Permission", summary);
             ui.session.status = SessionStatus::WaitingForTool;
         }
@@ -233,12 +247,14 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             terminal_output,
         } => {
             let fallback_name = name.as_deref().unwrap_or("tool");
+            let display_summary =
+                normalize_tool_summary_for_display(ui, &summarize_completion(&outcome));
             let (completed_tool_name, completed_raw_input) = {
                 let tool = ensure_tool(ui, &id, None, fallback_name, "tool", false);
                 if let Some(name) = name {
                     tool.name = name;
                 }
-                tool.summary = summarize_completion(&outcome);
+                tool.summary = display_summary;
                 tool.status = ToolStatus::Succeeded;
                 tool.raw_output = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS);
                 tool.terminal_output = terminal_output.map(cap_terminal_output);
@@ -422,6 +438,8 @@ fn find_recent_tool_for_path<'a>(
             || tool
                 .summary
                 .strip_prefix("Editing ")
+                .or_else(|| tool.summary.strip_prefix("Edited "))
+                .or_else(|| tool.summary.strip_prefix("已编辑 "))
                 .map(|path| normalize_change_path(path) == normalized_path)
                 .unwrap_or(false)
     })
@@ -549,6 +567,7 @@ fn normalize_change_path(path: &str) -> String {
         .or_else(|| normalized.strip_prefix("//./"))
         .unwrap_or(&normalized)
         .to_string();
+    let normalized = normalize_unix_drive_prefix(&normalized);
     if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
         let mut chars: Vec<char> = normalized.chars().collect();
         chars[0] = chars[0].to_ascii_lowercase();
@@ -556,6 +575,56 @@ fn normalize_change_path(path: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn normalize_unix_drive_prefix(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    for prefix in ["/mnt/", "/cygdrive/"] {
+        if lower.starts_with(prefix) && path.len() > prefix.len() + 1 {
+            let drive = path[prefix.len()..].chars().next().unwrap();
+            let rest_start = prefix.len() + drive.len_utf8();
+            if drive.is_ascii_alphabetic() && path[rest_start..].starts_with('/') {
+                return format!("{}:{}", drive.to_ascii_lowercase(), &path[rest_start..]);
+            }
+        }
+    }
+
+    if path.len() > 2 && path.starts_with('/') {
+        let mut chars = path.chars();
+        let _slash = chars.next();
+        if let Some(drive) = chars.next()
+            && drive.is_ascii_alphabetic()
+            && chars.next() == Some('/')
+        {
+            let rest_start = 1 + drive.len_utf8();
+            return format!("{}:{}", drive.to_ascii_lowercase(), &path[rest_start..]);
+        }
+    }
+
+    path.to_string()
+}
+
+fn workspace_relative_display_path(ui: &UiSnapshot, path: &str) -> String {
+    let normalized = normalize_change_path(path);
+    let root = normalize_change_path(&ui.workspace.root.display().to_string());
+    let root_prefix = if root.ends_with('/') {
+        root
+    } else {
+        format!("{root}/")
+    };
+    normalized
+        .strip_prefix(&root_prefix)
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn normalize_tool_summary_for_display(ui: &UiSnapshot, summary: &str) -> String {
+    for prefix in ["Editing ", "Edited ", "已编辑 "] {
+        if let Some(path) = summary.strip_prefix(prefix) {
+            return format!("{prefix}{}", workspace_relative_display_path(ui, path));
+        }
+    }
+    summary.to_string()
 }
 
 fn apply_codebuddy_task_create(ui: &mut UiSnapshot, raw_input: Option<&str>, outcome: &str) {

@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
@@ -32,7 +32,6 @@ interface TreeNode {
 
 const MAX_REVIEW_FILES = 300;
 const REVIEW_DIFF_MAX_MATRIX_CELLS = 250_000;
-const REVIEW_SPLIT_DIFF_MIN_WIDTH = 640;
 const REVIEW_DIFF_OPTIONS_BASE = {
   disableFileHeader: true,
   hunkSeparators: "line-info",
@@ -47,6 +46,9 @@ const REVIEW_DIFF_OPTIONS_BASE = {
       --diffs-light-bg: var(--app-bg) !important;
       --diffs-bg-context: var(--app-bg) !important;
       --diffs-bg-buffer: var(--app-bg) !important;
+      --review-diff-scrollbar-thumb: color-mix(in srgb, var(--app-bg) 82%, var(--text-soft)) !important;
+      --review-diff-scrollbar-thumb-active: color-mix(in srgb, var(--app-bg) 56%, var(--text-muted)) !important;
+      --review-diff-scrollbar-thumb-hover: color-mix(in srgb, var(--app-bg) 34%, var(--text-muted)) !important;
       background-color: var(--app-bg) !important;
     }
 
@@ -86,6 +88,42 @@ const REVIEW_DIFF_OPTIONS_BASE = {
       --diffs-line-bg: var(--diffs-bg) !important;
       background-color: var(--diffs-bg) !important;
       background-image: none !important;
+    }
+
+    [data-overflow="scroll"] [data-code] {
+      overflow-x: auto !important;
+      overflow-y: clip !important;
+      scrollbar-color: var(--review-diff-scrollbar-thumb) transparent !important;
+      scrollbar-width: thin !important;
+    }
+
+    :host(:hover) [data-overflow="scroll"] [data-code] {
+      scrollbar-color: var(--review-diff-scrollbar-thumb-active) transparent !important;
+    }
+
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar {
+      width: 0 !important;
+      height: 9px !important;
+    }
+
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-track {
+      background: transparent !important;
+    }
+
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
+      min-width: 36px !important;
+      border: 2px solid transparent !important;
+      border-radius: 999px !important;
+      background-color: var(--review-diff-scrollbar-thumb) !important;
+      background-clip: content-box !important;
+    }
+
+    :host(:hover) [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb {
+      background-color: var(--review-diff-scrollbar-thumb-active) !important;
+    }
+
+    [data-overflow="scroll"] [data-code]::-webkit-scrollbar-thumb:hover {
+      background-color: var(--review-diff-scrollbar-thumb-hover) !important;
     }
   `,
 } as const;
@@ -171,6 +209,7 @@ interface Props {
   onFileSelect: (path: string, changeSetId: string) => void;
   onFileOpen: (path: string) => void;
   onAddComposerReference?: (path: string) => void;
+  focusRequest?: { changeSetId: string; token: number } | null;
 }
 
 export function ReviewPanel({
@@ -182,6 +221,7 @@ export function ReviewPanel({
   onFileSelect,
   onFileOpen,
   onAddComposerReference,
+  focusRequest,
 }: Props) {
   const [tab, setTab] = useState<ReviewPanelTab>("Review");
   const [filter, setFilter] = useState("");
@@ -213,10 +253,20 @@ export function ReviewPanel({
   );
   const inActiveTurn =
     snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool";
+  const activeTurnOwner = useMemo(
+    () => activeTurnOwnerKey(snapshot, inActiveTurn),
+    [inActiveTurn, snapshot.messages, snapshot.timeline],
+  );
   const reviewTargetAssistantMessageId = useMemo(
     () => lastReviewableAssistantMessageId(snapshot.messages, snapshot.timeline, inActiveTurn),
     [inActiveTurn, snapshot.messages, snapshot.timeline],
   );
+
+  useEffect(() => {
+    if (focusRequest) {
+      setTab("Review");
+    }
+  }, [focusRequest?.token]);
 
   const grouped = useMemo(() => {
     const groups: Record<ChangeSection, ChangedFile[]> = {
@@ -308,7 +358,10 @@ export function ReviewPanel({
         <ReviewChangesView
           changeSetState={changeSetState}
           lastAssistantMessageId={reviewTargetAssistantMessageId}
+          activeTurnOwnerKey={activeTurnOwner}
           appTheme={appTheme}
+          preferredChangeSetId={focusRequest?.changeSetId ?? null}
+          preferredChangeSetToken={focusRequest?.token ?? null}
         />
       </div>
 
@@ -385,21 +438,82 @@ function ReviewTabIcon() {
 function ReviewChangesView({
   changeSetState,
   lastAssistantMessageId,
+  activeTurnOwnerKey,
   appTheme,
+  preferredChangeSetId,
+  preferredChangeSetToken,
 }: {
   changeSetState: {
     summaries: ChangeSetSummary[];
     filesById: Record<string, FileChangeSummary[]>;
   };
   lastAssistantMessageId: string | null;
+  activeTurnOwnerKey: string | null;
   appTheme: AppTheme;
+  preferredChangeSetId: string | null;
+  preferredChangeSetToken: number | null;
 }) {
   const [scope, setScope] = useState<ReviewScope>("last");
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
-  const selectedChangeSet = useMemo(
-    () => selectReviewChangeSet(changeSetState.summaries, scope, lastAssistantMessageId),
-    [changeSetState.summaries, lastAssistantMessageId, scope],
+  const changeSetSignature = useMemo(
+    () => reviewChangeSetSignature(changeSetState.summaries, changeSetState.filesById),
+    [changeSetState.filesById, changeSetState.summaries],
   );
+  const [activePreferredChangeSet, setActivePreferredChangeSet] = useState<{
+    id: string;
+    token: number;
+    consumedSignature: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    if (preferredChangeSetId && preferredChangeSetToken !== null) {
+      setScope("last");
+      setScopeMenuOpen(false);
+      setActivePreferredChangeSet({
+        id: preferredChangeSetId,
+        token: preferredChangeSetToken,
+        consumedSignature: null,
+      });
+    }
+  }, [preferredChangeSetId, preferredChangeSetToken]);
+
+  const selectedChangeSet = useMemo(
+    () =>
+      selectReviewChangeSet(
+        changeSetState.summaries,
+        changeSetState.filesById,
+        scope,
+        lastAssistantMessageId,
+        activeTurnOwnerKey,
+        activePreferredChangeSet?.id ?? null,
+      ),
+    [
+      activePreferredChangeSet?.id,
+      changeSetState.filesById,
+      changeSetState.summaries,
+      activeTurnOwnerKey,
+      lastAssistantMessageId,
+      scope,
+    ],
+  );
+
+  useEffect(() => {
+    if (!activePreferredChangeSet) return;
+    if (selectedChangeSet?.id !== activePreferredChangeSet.id) return;
+
+    if (activePreferredChangeSet.consumedSignature === null) {
+      setActivePreferredChangeSet({
+        ...activePreferredChangeSet,
+        consumedSignature: changeSetSignature,
+      });
+      return;
+    }
+
+    if (activePreferredChangeSet.consumedSignature !== changeSetSignature) {
+      setActivePreferredChangeSet(null);
+    }
+  }, [activePreferredChangeSet, changeSetSignature, selectedChangeSet?.id]);
+
   const scopedFiles = selectedChangeSet
     ? changeSetState.filesById[selectedChangeSet.id] ?? []
     : [];
@@ -499,8 +613,6 @@ function ReviewChangeCard({
   const [hydratedChange, setHydratedChange] = useState<FileChangeRecord | null>(null);
   const [hydrationFailed, setHydrationFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [diffWidth, setDiffWidth] = useState(0);
-  const diffContainerRef = useRef<HTMLDivElement | null>(null);
   const displayChange = hydratedChange ?? change;
   const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
   const diffPreview = useMemo(
@@ -513,11 +625,11 @@ function ReviewChangeCard({
   const diffOptions = useMemo(
     () => ({
       ...REVIEW_DIFF_OPTIONS_BASE,
-      diffStyle: diffWidth >= REVIEW_SPLIT_DIFF_MIN_WIDTH ? "split" : "unified",
+      diffStyle: "unified",
       theme: appTheme === "light" ? "pierre-light" : "pierre-dark",
       themeType: appTheme === "light" ? "light" : "dark",
     } as const),
-    [appTheme, diffWidth],
+    [appTheme],
   );
 
   useEffect(() => {
@@ -552,47 +664,30 @@ function ReviewChangeCard({
     needsHydration,
   ]);
 
-  useEffect(() => {
-    const node = diffContainerRef.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
-
-    setDiffWidth(node.getBoundingClientRect().width);
-    const observer = new ResizeObserver((entries) => {
-      const nextWidth = entries[0]?.contentRect.width ?? node.getBoundingClientRect().width;
-      setDiffWidth(nextWidth);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
   return (
     <article className={`review-change-card ${collapsed ? "is-collapsed" : ""}`}>
-      <div className="review-change-header" aria-label={change.path}>
+      <button
+        type="button"
+        className="review-change-header"
+        onClick={() => setCollapsed((value) => !value)}
+        aria-expanded={!collapsed}
+        aria-label={change.path}
+      >
         <span className="review-change-path">
-          {change.path}
-        </span>
-        <span className="review-change-tooltip" role="tooltip">
           {change.path}
         </span>
         <span className="review-change-stats">
           <span className="review-stat-added">+{displayChange.added_lines}</span>
           <span className="review-stat-removed">-{displayChange.removed_lines}</span>
         </span>
-        <button
-          type="button"
-          className="review-change-toggle"
-          onClick={() => setCollapsed((value) => !value)}
-          aria-label={collapsed ? "展开差异" : "收起差异"}
-          title={collapsed ? "展开差异" : "收起差异"}
-        >
+        <span className="review-change-toggle" aria-hidden="true">
           {collapsed ? "⌄" : "⌃"}
-        </button>
-      </div>
+        </span>
+      </button>
       {!collapsed && (
         <div
           className="review-inline-diff"
           aria-label={`${change.path} 差异预览`}
-          ref={diffContainerRef}
         >
           {diffPreview.kind === "patch" ? (
             <MultiFileDiff
@@ -613,22 +708,94 @@ function ReviewChangeCard({
 
 function selectReviewChangeSet(
   summaries: ChangeSetSummary[],
+  filesById: Record<string, FileChangeSummary[]>,
   scope: ReviewScope,
   lastAssistantMessageId: string | null,
+  activeTurnOwnerKey: string | null,
+  preferredChangeSetId: string | null,
 ) {
   if (scope === "manual") {
     return summaries
-      .filter((summary) => summary.source === "ManualEdit")
+      .filter((summary) => summary.source === "ManualEdit" && changeSetHasFiles(summary, filesById))
       .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at))[0];
   }
 
   const agentTurns = summaries
     .filter((summary) => summary.source === "AgentTurn")
     .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at));
-  const pending = agentTurns.find((summary) => summary.status === "Pending");
+  const pending = agentTurns.find(
+    (summary) =>
+      summary.status === "Pending" &&
+      summary.owner_key === activeTurnOwnerKey &&
+      changeSetHasFiles(summary, filesById),
+  );
   if (pending) return pending;
-  if (!lastAssistantMessageId) return undefined;
-  return agentTurns.find((summary) => summary.message_id === lastAssistantMessageId);
+  if (preferredChangeSetId) {
+    const preferred = agentTurns.find(
+      (summary) => summary.id === preferredChangeSetId && changeSetHasFiles(summary, filesById),
+    );
+    if (preferred) return preferred;
+  }
+  if (lastAssistantMessageId) {
+    const latestReviewableTurn = agentTurns.find(
+      (summary) =>
+        summary.message_id === lastAssistantMessageId && changeSetHasFiles(summary, filesById),
+    );
+    if (latestReviewableTurn) return latestReviewableTurn;
+  }
+  return agentTurns.find((summary) => changeSetHasFiles(summary, filesById));
+}
+
+function activeTurnOwnerKey(
+  snapshot: UiSnapshot,
+  inActiveTurn: boolean,
+) {
+  if (!inActiveTurn) return null;
+  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+  for (let index = snapshot.timeline.length - 1; index >= 0; index -= 1) {
+    const item = snapshot.timeline[index];
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (message?.role === "User") {
+      return `user-message:${message.id}`;
+    }
+  }
+  return null;
+}
+
+function reviewChangeSetSignature(
+  summaries: ChangeSetSummary[],
+  filesById: Record<string, FileChangeSummary[]>,
+) {
+  return summaries
+    .map((summary) =>
+      [
+        summary.id,
+        summary.source,
+        summary.status,
+        summary.updated_at,
+        summary.file_count,
+        ...((filesById[summary.id] ?? []).map((file) =>
+          [
+            file.path,
+            file.change_type,
+            file.added_lines,
+            file.removed_lines,
+            file.quality,
+            file.updated_at,
+          ].join(":"),
+        )),
+      ].join(":"),
+    )
+    .sort()
+    .join("|");
+}
+
+function changeSetHasFiles(
+  summary: ChangeSetSummary,
+  filesById: Record<string, FileChangeSummary[]>,
+) {
+  return (filesById[summary.id]?.length ?? summary.file_count) > 0;
 }
 
 function lastReviewableAssistantMessageId(

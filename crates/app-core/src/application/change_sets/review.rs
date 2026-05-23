@@ -208,6 +208,7 @@ impl Application {
                 .file_tracker
                 .was_missing_at_start(call_id, normalized_path)
                 .unwrap_or(false)
+            || self.git_head_text_for_path(normalized_path).is_none()
         {
             FileChangeType::Created
         } else {

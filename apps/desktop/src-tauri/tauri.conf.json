@@ -42,7 +42,8 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "resources/codex-acp/*": "bundled-codex-acp/"
+      "resources/codex-acp/*": "bundled-codex-acp/",
+      "resources/claude-agent-acp": "bundled-claude-agent-acp"
     },
     "windows": {
       "nsis": {

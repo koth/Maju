@@ -40,6 +40,11 @@ fn main() {
                         &error.to_string(),
                     );
                 }
+                if let Err(error) =
+                    commands::settings::install_bundled_claude_agent_acp_if_missing(app.handle())
+                {
+                    app_core::startup_perf::mark("desktop/claude_agent_acp_install_failed", &error);
+                }
                 let terminal_app = app.handle().clone();
                 app.state::<AppState>()
                     .set_terminal_event_sink(Arc::new(move |event| {
@@ -102,6 +107,11 @@ fn main() {
             commands::settings::settings_save_codex_acp_provider_key,
             commands::settings::settings_select_codex_acp_provider,
             commands::settings::settings_select_codex_default_mode,
+            commands::settings::settings_save_claude_woa_config,
+            commands::settings::settings_start_claude_woa_login,
+            commands::settings::settings_get_claude_woa_login,
+            commands::settings::settings_cancel_claude_woa_login,
+            commands::settings::settings_refresh_claude_woa_token,
             commands::settings::settings_install_agent,
             commands::settings::settings_get_lsp_snapshot,
             commands::settings::settings_save_lsp_server,
@@ -121,6 +131,7 @@ fn main() {
             commands::workspace::workspace_remove_recent,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
+            commands::terminal::terminal_scrollback,
             commands::terminal::terminal_resize,
             commands::terminal::terminal_terminate,
             commands::terminal::terminal_restart,

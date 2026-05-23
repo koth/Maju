@@ -10,8 +10,10 @@ dirs-next = "2.0"
 git-service = { path = "../git-service" }
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 shell-words.workspace = true
 session-store = { path = "../session-store" }
+tokio.workspace = true
 toml_edit.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
