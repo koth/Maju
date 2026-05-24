@@ -14,6 +14,7 @@ import { saveViewState, restoreViewState } from "./monaco-view-state";
 import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { registerLspProviders } from "./lsp-providers";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
+import { languageForPath } from "./languages";
 import {
   getModelValue,
   getOrCreateModel,
@@ -30,24 +31,6 @@ const MonacoEditor = lazy(() =>
 const MarkdownBody = lazy(() => import("../conversation/MarkdownBody"));
 
 let textmateInitStarted = false;
-
-const LANG_MAP: Record<string, string> = {
-  ts: "typescript",
-  tsx: "typescriptreact",
-  js: "javascript",
-  cjs: "javascript",
-  mjs: "javascript",
-  jsx: "javascriptreact",
-  rs: "rust",
-  json: "json",
-  md: "markdown",
-  css: "css",
-  html: "html",
-  toml: "toml",
-  yaml: "yaml",
-  yml: "yaml",
-  py: "python",
-};
 
 interface Props {
   path: string;
@@ -109,8 +92,7 @@ export function EditorView({
   }, [onSaved]);
 
   const language = useMemo(() => {
-    const ext = path.split(".").pop()?.toLowerCase() ?? "";
-    return LANG_MAP[ext] ?? "plaintext";
+    return languageForPath(path);
   }, [path]);
   const activeSnapshot = snapshot?.path === path ? snapshot : null;
   const fileKind = activeSnapshot?.kind ?? "text";

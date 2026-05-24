@@ -12,6 +12,7 @@ interface Props {
 function MarkdownBody({ content }: Props) {
   const appTheme = useCurrentAppTheme();
   const codeTheme = appTheme === "light" ? oneLight : vscDarkPlus;
+  const displayContent = repairCompactMarkdown(content);
 
   return (
     <ReactMarkdown
@@ -20,9 +21,12 @@ function MarkdownBody({ content }: Props) {
       components={{
         code({ className, children, ...props }) {
           const match = /language-(\w+)/.exec(className || "");
-          const codeString = String(children).replace(/\n$/, "");
+          const codeString = (children == null ? "" : String(children)).replace(/\n$/, "");
 
           if (match) {
+            if (codeString.trim().length === 0) {
+              return null;
+            }
             return (
               <div className="md-code-block">
                 <div className="md-code-header">
@@ -124,7 +128,7 @@ function MarkdownBody({ content }: Props) {
         },
       }}
     >
-      {content}
+      {displayContent}
     </ReactMarkdown>
   );
 }
@@ -169,4 +173,104 @@ function isMarkdownImageElement(child: ReactNode) {
     return false;
   }
   return child.props.className === "md-image" || child.type === "img" || Boolean(child.props.src);
+}
+
+function repairCompactMarkdown(content: string) {
+  const lines = content.split(/\r?\n/);
+  let inFence = false;
+  const repaired: string[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      repaired.push(line);
+      continue;
+    }
+    if (inFence) {
+      repaired.push(line);
+      continue;
+    }
+
+    const nextLine = lines[index + 1];
+    if (nextLine !== undefined) {
+      const compactTable = repairSplitCompactMarkdownTable(line, nextLine);
+      if (compactTable !== null) {
+        repaired.push(compactTable);
+        index += 1;
+        continue;
+      }
+    }
+
+    repaired.push(repairCompactMarkdownLine(line));
+  }
+
+  return repaired.join("\n");
+}
+
+function repairCompactMarkdownLine(line: string) {
+  return repairCompactMarkdownTable(line)
+    .replace(/^(\s{0,3}#{1,6})(?=\S)/u, "$1 ")
+    .replace(
+      /([^\s\n])(\d{1,2}\.\s+(?=(?:\*\*)?[\p{Script=Han}A-Za-z]))/gu,
+      "$1\n$2",
+    );
+}
+
+function repairCompactMarkdownTable(line: string) {
+  if ((!line.includes("||") && !/\|\s+\|/u.test(line)) || countChars(line, "|") < 6) {
+    return line;
+  }
+
+  const headingMatch = line.match(/^(\s{0,3}#{1,6}[^|]+)(\|.+)$/u);
+  const prefix = headingMatch ? `${headingMatch[1]}\n\n` : "";
+  const tableText = headingMatch ? headingMatch[2] : line;
+  const rows = compactMarkdownTableRows(tableText);
+
+  if (rows.length < 2 || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/u.test(rows[1])) {
+    return line;
+  }
+
+  return `${prefix}${rows.join("\n")}`;
+}
+
+function repairSplitCompactMarkdownTable(headerLine: string, bodyLine: string) {
+  if (!bodyLine.includes("|") || !/^\s*\|?\s*:?-{3,}:?\s*\|/u.test(bodyLine)) {
+    return null;
+  }
+
+  const headerMatch = headerLine.match(/^(.+?)(\|[^|]+(?:\|[^|]+)+\|?)\s*$/u);
+  if (!headerMatch) {
+    return null;
+  }
+
+  const prefix = headerMatch[1].trimEnd();
+  const headerRow = normalizeMarkdownTableRow(headerMatch[2]);
+  const rows = [headerRow, ...compactMarkdownTableRows(bodyLine)];
+  if (rows.length < 3 || !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/u.test(rows[1])) {
+    return null;
+  }
+
+  const repairedPrefix = prefix
+    ? `${prefix.replace(/^(\s{0,3}#{1,6})(?=\S)/u, "$1 ")}\n\n`
+    : "";
+  return `${repairedPrefix}${rows.join("\n")}`;
+}
+
+function compactMarkdownTableRows(tableText: string) {
+  return tableText
+    .replace(/\|\s+\|(?=\s*[^|\s])/gu, "||")
+    .split("||")
+    .map((row) => row.trim())
+    .filter(Boolean)
+    .map(normalizeMarkdownTableRow);
+}
+
+function normalizeMarkdownTableRow(row: string) {
+  const normalized = row.startsWith("|") ? row : `|${row}`;
+  return normalized.endsWith("|") ? normalized : `${normalized}|`;
+}
+
+function countChars(value: string, char: string) {
+  return [...value].filter((current) => current === char).length;
 }

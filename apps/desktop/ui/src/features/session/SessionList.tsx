@@ -269,9 +269,19 @@ export function SessionList({
   const modalButtonText = modalMode === "workspace" ? "创建工作区" : "创建会话";
   const loadingText = modalMode === "workspace" ? "正在创建工作区..." : "正在创建会话...";
   const selectedAgentStatus = agentSnapshot?.agents.find((agent) => agent.id === selectedAgent) ?? null;
-  const selectedClaudeNeedsLogin =
-    selectedAgent === "claude-agent-acp" &&
-    (!agentSnapshot?.claude_woa.token.exists || !!agentSnapshot?.claude_woa.token.malformed);
+  const selectedClaudeProfile = agentSnapshot?.claude_woa.profiles.find(
+    (profile) => profile.id === agentSnapshot.claude_woa.selected_profile_id,
+  );
+  const selectedClaudeSetupMessage =
+    selectedAgent === "claude-agent-acp" && agentSnapshot && selectedClaudeProfile
+      ? selectedClaudeProfile.id === "woa"
+        ? !agentSnapshot.claude_woa.token.exists || agentSnapshot.claude_woa.token.malformed
+          ? "Claude Agent ACP 需要先在设置中完成 WOA 登录。"
+          : null
+        : selectedClaudeProfile.requires_credential && !selectedClaudeProfile.configured
+          ? `Claude ${selectedClaudeProfile.label} 需要先在设置中保存 ${selectedClaudeProfile.credential_label ?? "API key"}。`
+          : null
+      : null;
 
   return (
     <div className="session-list">
@@ -427,13 +437,13 @@ export function SessionList({
             {agentSnapshot.env_override && (
               <div className="sl-agent-note">已设置 ACP_AGENT_COMMAND；本次选择会直接使用所选 Agent。</div>
             )}
-            {selectedClaudeNeedsLogin && (
-              <div className="sl-agent-error">Claude Agent ACP 需要先在设置中完成 WOA 登录。</div>
+            {selectedClaudeSetupMessage && (
+              <div className="sl-agent-error">{selectedClaudeSetupMessage}</div>
             )}
             {modalError && <div className="sl-agent-error">{modalError}</div>}
             <div className="sl-agent-actions">
               <button type="button" className="sl-agent-cancel" onClick={closeAgentPicker} disabled={isSubmitting}>取消</button>
-              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || selectedClaudeNeedsLogin || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
+              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || !!selectedClaudeSetupMessage || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
                 {isSubmitting && <span className="sl-agent-spinner" aria-hidden="true" />}
                 {isSubmitting ? loadingText : modalButtonText}
               </button>

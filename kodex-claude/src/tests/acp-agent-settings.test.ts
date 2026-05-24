@@ -597,6 +597,67 @@ describe("ClaudeAcpAgent settings", () => {
       ]);
     });
 
+    it("can omit the Default model for externally routed model pools", async () => {
+      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
+        availableModels: [
+          "deepseek-v4-pro",
+          "deepseek-v4-flash",
+          "kimi-for-coding",
+          "MiMo-V2.5-Pro",
+          "MiMo-V2.5",
+        ],
+        preserveDefaultModel: false,
+      });
+
+      const projectDir = path.join(tempDir, "project");
+      await fs.promises.mkdir(projectDir, { recursive: true });
+
+      mockQueryWithModels([
+        { value: "default", displayName: "Default", description: "Default model" },
+        { value: "deepseek-v4-pro", displayName: "deepseek-v4-pro", description: "" },
+        { value: "mimo-v2.5", displayName: "MiMo-V2.5", description: "" },
+      ]);
+
+      const { ClaudeAcpAgent } = await import("../acp-agent.js");
+      const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
+
+      const response = await (agent as any).createSession({
+        cwd: projectDir,
+        mcpServers: [],
+        _meta: { disableBuiltInTools: true },
+      });
+
+      const modelOption = response.configOptions.find((o: any) => o.id === "model");
+      expect(modelOption.options.map((o: any) => o.value)).toEqual([
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "kimi-for-coding",
+        "MiMo-V2.5-Pro",
+        "MiMo-V2.5",
+      ]);
+      expect(modelOption.options.map((o: any) => o.name)).toEqual([
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "kimi-for-coding",
+        "MiMo-V2.5-Pro",
+        "MiMo-V2.5",
+      ]);
+      expect(response.models.availableModels.map((m: any) => m.modelId)).toEqual([
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "kimi-for-coding",
+        "MiMo-V2.5-Pro",
+        "MiMo-V2.5",
+      ]);
+      expect(response.models.availableModels.map((m: any) => m.name)).toEqual([
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "kimi-for-coding",
+        "MiMo-V2.5-Pro",
+        "MiMo-V2.5",
+      ]);
+    });
+
     it("passes the user's exact ID to setModel when it matches an SDK alias", async () => {
       // Without the allowlist, the SDK would resolve `haiku` to a
       // date-pinned variant. Forcing setModel to receive `claude-haiku-4-5`

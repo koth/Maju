@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "./EditorView";
 import { disposeAllModels, getModelBaseVersion } from "./monaco-model-registry";
 import {
+  editorLspOpenDocument,
   editorOpenFile,
   editorSaveFile,
 } from "../../lib/tauri";
@@ -21,11 +22,13 @@ class FakeRange {
 
 class FakeModel {
   private value: string;
+  private language: string;
   private version = 1;
   private disposed = false;
 
-  constructor(value: string) {
+  constructor(value: string, language = "plaintext") {
     this.value = value;
+    this.language = language;
   }
 
   getValue() {
@@ -39,6 +42,14 @@ class FakeModel {
 
   getVersionId() {
     return this.version;
+  }
+
+  getLanguageId() {
+    return this.language;
+  }
+
+  setLanguage(language: string) {
+    this.language = language;
   }
 
   isDisposed() {
@@ -80,11 +91,14 @@ const fakeMonaco = {
   editor: {
     defineTheme: vi.fn(),
     setModelMarkers: vi.fn(),
+    setModelLanguage: vi.fn((model: FakeModel, language: string) => {
+      model.setLanguage(language);
+    }),
     getModel(uri: { toString: () => string }) {
       return modelStore.get(uri.toString()) ?? null;
     },
-    createModel(content: string, _language: string, uri: { toString: () => string }) {
-      const model = new FakeModel(content);
+    createModel(content: string, language: string, uri: { toString: () => string }) {
+      const model = new FakeModel(content, language);
       modelStore.set(uri.toString(), model);
       return model;
     },
@@ -371,6 +385,28 @@ describe("EditorView editable state", () => {
     await waitFor(() => {
       expect(textmate.registerTextMateLanguage).toHaveBeenCalledWith(fakeMonaco, "typescriptreact");
     });
+  });
+
+  it.each([
+    ["C++ headers", "include/channel.hpp", "cpp", "class Channel {};"],
+    ["C# files", "src/Program.cs", "csharp", "public class Program {}"],
+    ["Lean files", "Proof.lean", "lean", "theorem id (p : Prop) : p -> p := by intro h; exact h"],
+  ])("maps %s to the expected grammar instead of plaintext", async (_label, path, language, content) => {
+    const textmate = await import("./textmate-engine");
+    vi.mocked(editorOpenFile).mockResolvedValueOnce({
+      path,
+      content,
+      version,
+    });
+
+    render(<EditorView path={path} appTheme="kodex_dark" />);
+
+    await screen.findByLabelText("mock editor");
+    await waitFor(() => {
+      expect(textmate.registerTextMateLanguage).toHaveBeenCalledWith(fakeMonaco, language);
+    });
+    expect(editorLspOpenDocument).toHaveBeenCalledWith(path, language, content);
+    expect(currentModel?.getLanguageId()).toBe(language);
   });
 
   it("opens image files as a preview instead of a text editor", async () => {

@@ -519,10 +519,11 @@
   position: relative;
   z-index: 1;
   width: min(380px, calc(100vw - 32px));
-  border: 1px solid rgba(143, 199, 189, 0.22);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: rgba(18, 27, 33, 0.98);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--panel-bg) 96%, var(--app-bg));
+  box-shadow: var(--shadow-shell);
+  color: var(--text-strong);
   padding: 16px;
 }
 
@@ -579,9 +580,9 @@
   gap: 4px;
   margin-bottom: 12px;
   padding: 11px 12px;
-  border: 1px solid rgba(143, 199, 189, 0.16);
+  border: 1px solid var(--border);
   border-radius: 14px;
-  background: rgba(106, 168, 159, 0.07);
+  background: var(--accent-soft);
 }
 
 .sl-agent-target-label {
@@ -634,7 +635,7 @@
   padding: 9px 11px;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
-  background: rgba(215, 225, 223, 0.03);
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   font-size: 12px;
   text-overflow: ellipsis;
@@ -648,13 +649,18 @@
 .sl-directory-btn {
   min-height: 34px;
   padding: 0 11px;
-  border: 1px solid rgba(143, 199, 189, 0.24);
+  border: 1px solid var(--border-strong);
   border-radius: 7px;
   background: transparent;
   color: var(--text-strong);
   cursor: pointer;
   font-size: var(--font-size-shell-meta);
   font-weight: 600;
+}
+
+.sl-directory-btn:hover:not(:disabled) {
+  background: var(--interactive-hover);
+  border-color: var(--border-focus);
 }
 
 .sl-directory-btn:disabled {
@@ -674,9 +680,9 @@
   min-height: 38px;
   gap: 10px;
   padding: 0 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(215, 225, 223, 0.035);
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   cursor: pointer;
   font: inherit;
@@ -685,7 +691,7 @@
 
 .sl-agent-select-btn.is-open,
 .sl-agent-select-btn:focus-visible {
-  border-color: rgba(143, 199, 189, 0.48);
+  border-color: var(--border-focus);
   outline: none;
 }
 
@@ -704,7 +710,7 @@
 .sl-agent-select-main span {
   padding: 2px 6px;
   border-radius: 5px;
-  background: rgba(106, 168, 159, 0.12);
+  background: var(--accent-soft);
   color: var(--accent-hover);
   font-size: 10px;
   font-weight: 600;
@@ -722,10 +728,10 @@
   right: 0;
   left: 0;
   overflow: hidden;
-  border: 1px solid rgba(143, 199, 189, 0.22);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: rgba(18, 27, 33, 0.99);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--panel-bg) 98%, var(--app-bg));
+  box-shadow: var(--shadow-shell);
 }
 
 .sl-agent-dropdown-item {
@@ -736,7 +742,7 @@
   gap: 10px;
   padding: 10px 12px;
   border: 0;
-  border-bottom: 1px solid rgba(215, 225, 223, 0.06);
+  border-bottom: 1px solid var(--border-subtle);
   background: transparent;
   color: var(--text-strong);
   cursor: pointer;
@@ -749,7 +755,7 @@
 
 .sl-agent-dropdown-item:hover:not(:disabled),
 .sl-agent-dropdown-item.is-selected {
-  background: rgba(106, 168, 159, 0.1);
+  background: var(--interactive-selected);
 }
 
 .sl-agent-dropdown-item:disabled {
@@ -790,8 +796,8 @@
 }
 
 .sl-agent-option.is-selected {
-  border-color: rgba(143, 199, 189, 0.45);
-  background: rgba(106, 168, 159, 0.1);
+  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
 }
 
 .sl-agent-option.is-disabled {
@@ -836,8 +842,8 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  border-color: rgba(143, 199, 189, 0.34);
-  background: rgba(106, 168, 159, 0.16);
+  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
 }
 
 .sl-agent-close:disabled,

@@ -64,12 +64,11 @@ execFileSync(process.execPath, ["--experimental-sea-config", seaConfig], {
   stdio: "inherit",
 });
 
+fs.rmSync(outputBinary, { force: true });
 fs.copyFileSync(process.execPath, outputBinary);
+prepareExecutableForInjection(outputBinary);
 injectSeaBlob(outputBinary, seaBlob);
-
-if (process.platform !== "win32") {
-  fs.chmodSync(outputBinary, 0o755);
-}
+finalizeExecutable(outputBinary);
 
 console.log(`Built ${outputBinary}`);
 
@@ -97,7 +96,12 @@ function findNativeClaudeBinary() {
       : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`];
 
   for (const packageName of candidates) {
-    const candidate = path.join(packageRoot, "node_modules", ...packageName.split("/"), `claude${ext}`);
+    const candidate = path.join(
+      packageRoot,
+      "node_modules",
+      ...packageName.split("/"),
+      `claude${ext}`,
+    );
     if (fs.existsSync(candidate)) {
       return candidate;
     }
@@ -133,10 +137,40 @@ function injectSeaBlob(binary, blob) {
   if (process.platform === "darwin") {
     args.push("--macho-segment-name", "NODE_SEA");
   }
-  execFileSync(process.execPath, [path.join(packageRoot, "node_modules", "postject", "dist", "cli.js"), ...args], {
-    cwd: packageRoot,
-    stdio: "inherit",
-  });
+  execFileSync(
+    process.execPath,
+    [path.join(packageRoot, "node_modules", "postject", "dist", "cli.js"), ...args],
+    {
+      cwd: packageRoot,
+      stdio: "inherit",
+    },
+  );
+}
+
+function prepareExecutableForInjection(binary) {
+  if (process.platform !== "win32") {
+    fs.chmodSync(binary, 0o755);
+  }
+
+  if (process.platform === "darwin") {
+    execFileSync("codesign", ["--remove-signature", binary], {
+      cwd: packageRoot,
+      stdio: "inherit",
+    });
+  }
+}
+
+function finalizeExecutable(binary) {
+  if (process.platform === "darwin") {
+    execFileSync("codesign", ["--sign", "-", "--force", binary], {
+      cwd: packageRoot,
+      stdio: "inherit",
+    });
+  }
+
+  if (process.platform !== "win32") {
+    fs.chmodSync(binary, 0o755);
+  }
 }
 
 function bootstrapSource() {

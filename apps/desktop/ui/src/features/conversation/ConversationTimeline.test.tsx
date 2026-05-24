@@ -225,6 +225,89 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".streaming-cursor")).toBeTruthy();
   });
 
+  it("repairs compact numbered markdown lists from proxied model output", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body:
+            "核心功能是：\n\n1. **多渠道接入** - 支持多个 IM渠道，统一收发消息2. **LLM驱动** - 通过 providers 层抽象响应3. **工具系统** - agent 可以调用工具",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelectorAll(".msg-assistant ol li")).toHaveLength(3);
+  });
+
+  it("repairs compact headings and markdown tables from proxied model output", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body:
+            "###7.测试（基本覆盖）\n\n###总结|方面|评价||------|------||功能完整性|链路完整||风险|endpoint 变更需注意|",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant h3")?.textContent).toBe("7.测试（基本覆盖）");
+    expect(container.querySelectorAll(".msg-assistant table tr")).toHaveLength(3);
+  });
+
+  it("repairs split compact markdown tables with space-separated rows", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body:
+            "总结|方面 |评价 |\n|------|------| |功能完整性 | tool-use loop完整，guardrail + memory提取 + session管理齐全 | |代码重复 | 严重 - 三个入口函数的核心 while循环几乎是复制粘贴 | |并发安全 | process_mutex_全覆盖，安全但有吞吐量瓶颈 |",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant p")?.textContent).toBe("总结");
+    expect(container.querySelectorAll(".msg-assistant table tr")).toHaveLength(4);
+    expect(container.querySelector(".msg-assistant table")?.textContent).toContain("代码重复");
+  });
+
+  it("does not render undefined for empty fenced code blocks", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "前文\n\n```cppkabot\n```\n\n后文",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.textContent).not.toContain("undefined");
+    expect(container.querySelector(".md-code-block")).toBeNull();
+  });
+
   it("marks adjacent image-only user paragraphs so attachments can flow in one row", () => {
     const snapshot = makeSnapshot({
       timeline: [{ Message: "msg-1" }],

@@ -485,6 +485,29 @@ export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp
 export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest" | "light";
 export type CodexConnectionMode = "managed" | "default";
 export type ClaudeWoaChannel = "default" | "offline";
+export type AgentProviderFamily = "codex" | "claude";
+export type AgentProviderProxyKind =
+  | "codex_default"
+  | "responses"
+  | "completion_to_responses"
+  | "claude_woa"
+  | "claude_native"
+  | "completion_to_claude";
+
+export interface AgentProviderProfile {
+  family: AgentProviderFamily;
+  id: string;
+  label: string;
+  proxy_kind: AgentProviderProxyKind;
+  selected: boolean;
+  configured: boolean;
+  base_url: string | null;
+  default_model: string | null;
+  models: string[];
+  credential_label: string | null;
+  requires_credential: boolean;
+  help_text: string;
+}
 
 export interface AppSettings {
   selected_agent: AgentCliId;
@@ -492,6 +515,8 @@ export interface AppSettings {
   theme: AppTheme;
   lsp_servers: Record<string, LspServerSettings>;
   codex_connection_mode: CodexConnectionMode;
+  selected_codex_provider_profile_id: string | null;
+  selected_claude_provider_profile_id: string | null;
   claude_woa: ClaudeWoaSettings;
 }
 
@@ -558,6 +583,8 @@ export interface AgentSettingsSnapshot {
 
 export interface CodexAcpSettingsStatus {
   provider: "default" | "venus" | "deepseek" | string;
+  selected_profile_id: string;
+  profiles: AgentProviderProfile[];
   connection_mode: CodexConnectionMode;
   venus_key_configured: boolean;
   deepseek_key_configured: boolean;
@@ -566,6 +593,8 @@ export interface CodexAcpSettingsStatus {
 
 export interface ClaudeWoaSettingsStatus {
   channel: ClaudeWoaChannel;
+  selected_profile_id: string;
+  profiles: AgentProviderProfile[];
   token_path: string;
   token: ClaudeWoaTokenStatus;
 }

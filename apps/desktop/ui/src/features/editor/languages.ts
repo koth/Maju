@@ -1,0 +1,40 @@
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  ts: "typescript",
+  tsx: "typescriptreact",
+  js: "javascript",
+  cjs: "javascript",
+  mjs: "javascript",
+  jsx: "javascriptreact",
+  rs: "rust",
+  json: "json",
+  md: "markdown",
+  css: "css",
+  html: "html",
+  toml: "toml",
+  yaml: "yaml",
+  yml: "yaml",
+  py: "python",
+  sh: "shell",
+  bash: "shell",
+  zsh: "shell",
+  sql: "sql",
+  xml: "xml",
+  svg: "xml",
+  c: "c",
+  h: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  hh: "cpp",
+  hxx: "cpp",
+  cs: "csharp",
+  csx: "csharp",
+  lean: "lean",
+  lean4: "lean",
+};
+
+export function languageForPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return LANGUAGE_BY_EXTENSION[ext] ?? "plaintext";
+}

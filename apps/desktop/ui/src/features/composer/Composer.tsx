@@ -699,16 +699,42 @@ function SessionControlSelect({
   onOpenChange: (open: boolean) => void;
   onChange: (control: SessionConfigControl, valueId: string) => void;
 }) {
-  if (control.choices.length === 0) return null;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const choices = useMemo(() => dedupeControlChoices(control.choices), [control.choices]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) return;
+      onOpenChange(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onOpenChange(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onOpenChange, open]);
+
+  if (choices.length === 0) return null;
 
   const unavailable = disabled || !control.enabled || pending;
   const selected =
-    control.choices.find((choice) => choice.id === control.current_value_id) ??
-    control.choices[0];
+    choices.find((choice) => choice.id === control.current_value_id) ??
+    choices[0];
   const label = displayControlLabel(control);
 
   return (
     <div
+      ref={rootRef}
       className={`composer-control-select ${open ? "is-open" : ""}`}
       onBlur={(event) => {
         const nextFocus = event.relatedTarget;
@@ -731,7 +757,7 @@ function SessionControlSelect({
       </button>
       {open && !unavailable && (
         <div className="composer-control-menu" role="listbox">
-          {control.choices.map((choice) => {
+          {choices.map((choice) => {
             const selectedChoice = choice.id === control.current_value_id;
             return (
               <button
@@ -753,6 +779,16 @@ function SessionControlSelect({
       )}
     </div>
   );
+}
+
+function dedupeControlChoices(controlChoices: SessionConfigControl["choices"]) {
+  const seen = new Set<string>();
+  return controlChoices.filter((choice) => {
+    const id = choice.id.trim();
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 function displayControlLabel(control: SessionConfigControl) {

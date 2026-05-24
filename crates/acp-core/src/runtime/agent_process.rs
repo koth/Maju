@@ -35,16 +35,15 @@ impl HiddenAgentProcess {
             .to_ascii_lowercase()
             .contains("codex-acp")
         {
-            if let Some((_, api_key)) = process
-                .env
-                .iter()
-                .find(|(name, _)| name == "DEEPSEEK_API_KEY")
-            {
-                ensure_codex_api_proxy("deepseek", api_key);
-            } else if let Some((_, api_key)) =
-                process.env.iter().find(|(name, _)| name == "VENUS_API_KEY")
-            {
-                ensure_codex_api_proxy("venus", api_key);
+            for (env_key, provider) in [
+                ("DEEPSEEK_API_KEY", "deepseek"),
+                ("KIMI_CODE_API_KEY", "kimi_code"),
+                ("XIAOMI_MIMO_API_KEY", "xiaomi_mimo"),
+                ("VENUS_API_KEY", "venus"),
+            ] {
+                if let Some((_, api_key)) = process.env.iter().find(|(name, _)| name == env_key) {
+                    ensure_codex_api_proxy(provider, api_key);
+                }
             }
         }
         process.log_config = Some(config.clone());

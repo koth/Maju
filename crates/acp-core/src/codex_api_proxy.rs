@@ -8,6 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,12 @@ type ProxyBody = BoxBody<Bytes, Infallible>;
 const VENUS_CHAT_COMPLETIONS_URL: &str =
     "https://v2.open.venus.woa.com/llmproxy/v1/chat/completions";
 const DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const KIMI_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.kimi.com/coding/v1/chat/completions";
+const KIMI_UPSTREAM_MESSAGES_URL: &str = "https://api.kimi.com/coding/v1/messages";
+const MIMO_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
+    "https://token-plan-cn.xiaomimimo.com/v1/chat/completions";
+const MIMO_UPSTREAM_MESSAGES_URL: &str =
+    "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages";
 const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
 const DEEPSEEK_REASONING_PLACEHOLDER: &str = "[previous reasoning unavailable]";
 
@@ -25,6 +32,7 @@ const DEEPSEEK_REASONING_PLACEHOLDER: &str = "[previous reasoning unavailable]";
 struct CodexApiProxyConfig {
     provider: String,
     api_key: String,
+    api_keys: BTreeMap<String, String>,
 }
 
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
@@ -36,6 +44,7 @@ static DEEPSEEK_REASONING_HISTORY: OnceLock<Arc<RwLock<Vec<ReasoningHistoryEntry
 #[derive(Debug, Clone)]
 struct ReasoningHistoryEntry {
     content: String,
+    assistant_signature: String,
     reasoning_content: String,
 }
 
@@ -53,12 +62,17 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
             Arc::new(RwLock::new(CodexApiProxyConfig {
                 provider: "venus".to_string(),
                 api_key: String::new(),
+                api_keys: BTreeMap::new(),
             }))
         })
         .clone();
     if let Ok(mut current) = config.write() {
-        current.provider = normalize_proxy_provider(provider).to_string();
+        let provider = normalize_proxy_provider(provider);
+        current.provider = provider.to_string();
         current.api_key = api_key.to_string();
+        current
+            .api_keys
+            .insert(provider.to_string(), api_key.to_string());
     }
 
     let running = CODEX_API_PROXY_RUNNING
@@ -181,7 +195,18 @@ async fn proxy_codex_api_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    if request.method() != Method::POST || !request.uri().path().ends_with("/responses") {
+    if request.method() != Method::POST {
+        return Ok(response_with_status(
+            StatusCode::NOT_FOUND,
+            "not found".to_string(),
+            "text/plain; charset=utf-8",
+        ));
+    }
+    let path = request.uri().path().to_string();
+    if path.ends_with("/messages") {
+        return proxy_anthropic_messages_request(request, config).await;
+    }
+    if !path.ends_with("/responses") {
         return Ok(response_with_status(
             StatusCode::NOT_FOUND,
             "not found".to_string(),
@@ -196,14 +221,21 @@ async fn proxy_codex_api_request(
         .unwrap_or_else(|_| CodexApiProxyConfig {
             provider: "venus".to_string(),
             api_key: String::new(),
+            api_keys: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    log_responses_payload_summary("responses_request", &payload, &config.provider);
-    let chat_payload = match responses_payload_to_chat_payload(payload, &config.provider) {
+    let requested_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let provider = proxy_provider_for_model(&requested_model, &config.provider);
+    log_responses_payload_summary("responses_request", &payload, provider);
+    let chat_payload = match responses_payload_to_chat_payload(payload, provider) {
         Ok(payload) => payload,
         Err(error) => {
             append_codex_api_proxy_log(&format!("responses_to_chat_error error={error}"));
@@ -214,23 +246,28 @@ async fn proxy_codex_api_request(
             ));
         }
     };
-    if config.api_key.trim().is_empty() {
+    let api_key = api_key_for_proxy_provider(&config, provider);
+    if api_key.trim().is_empty() {
         return Ok(response_with_status(
             StatusCode::UNAUTHORIZED,
-            json!({ "error": { "message": "API key is not configured" } }).to_string(),
+            json!({ "error": { "message": format!("API key is not configured for {provider}") } })
+                .to_string(),
             "application/json",
         ));
     }
-    let chat_payload = normalize_chat_payload_for_provider(chat_payload, &config.provider);
-    if normalize_proxy_provider(&config.provider) == "deepseek" {
+    let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
+    if provider == "deepseek" {
         log_chat_payload_summary("deepseek_request", &chat_payload);
     }
-    let upstream_url = upstream_chat_completions_url(&config.provider);
+    if provider == "kimi_code" {
+        return proxy_kimi_codex_api_request(chat_payload, &api_key, requested_stream).await;
+    }
+    let upstream_url = upstream_chat_completions_url(provider);
 
     let client = reqwest::Client::new();
     let upstream = client
         .post(upstream_url)
-        .bearer_auth(config.api_key)
+        .bearer_auth(api_key)
         .header(CONTENT_TYPE, "application/json")
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
@@ -243,7 +280,11 @@ async fn proxy_codex_api_request(
         .unwrap_or("application/json")
         .to_string();
     if is_event_stream(&content_type) {
-        return Ok(streaming_chat_sse_response(upstream, status));
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
     }
 
     let body = upstream.bytes().await?;
@@ -271,18 +312,291 @@ async fn proxy_codex_api_request(
     Ok(response)
 }
 
+async fn proxy_anthropic_messages_request(
+    request: Request<Incoming>,
+    config: Arc<RwLock<CodexApiProxyConfig>>,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let body = request.into_body().collect().await?.to_bytes();
+    let config = config
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| CodexApiProxyConfig {
+            provider: "venus".to_string(),
+            api_key: String::new(),
+            api_keys: BTreeMap::new(),
+        });
+    let payload: Value = serde_json::from_slice(&body)?;
+    let requested_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let provider = proxy_provider_for_model(&requested_model, &config.provider);
+    log_anthropic_payload_summary("anthropic_messages_request", &payload);
+    let api_key = api_key_for_proxy_provider(&config, provider);
+    if api_key.trim().is_empty() {
+        return Ok(response_with_status(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": format!("API key is not configured for {provider}") } })
+                .to_string(),
+            "application/json",
+        ));
+    }
+
+    match normalize_proxy_provider(provider) {
+        "kimi_code" | "xiaomi_mimo" => {
+            proxy_native_anthropic_messages_request(payload, &api_key, provider).await
+        }
+        _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, provider).await,
+    }
+}
+
+async fn proxy_native_anthropic_messages_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let upstream_url = upstream_messages_url(provider);
+    let payload = normalize_native_anthropic_payload(payload, provider);
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header("User-Agent", "claude-code/0.2.0")
+        .header("x-api-key", api_key)
+        .body(serde_json::to_vec(&payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if is_event_stream(&content_type) {
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
+    }
+    let body = upstream.bytes().await?;
+    let status = normalize_upstream_error_status(status, body.as_ref());
+    if !status.is_success() {
+        log_suspicious_venus_response(status, &content_type, body.as_ref());
+    }
+    let mut response = Response::new(full_body(body));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
+async fn proxy_completion_to_anthropic_messages_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let requested_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let chat_payload = anthropic_payload_to_chat_payload(payload);
+    let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
+    if normalize_proxy_provider(provider) == "deepseek" {
+        log_chat_payload_summary("deepseek_anthropic_request", &chat_payload);
+    }
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(upstream_chat_completions_url(provider))
+        .bearer_auth(api_key)
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::to_vec(&chat_payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if is_event_stream(&content_type) {
+        return Ok(streaming_chat_sse_to_anthropic_response(upstream, status));
+    }
+
+    let body = upstream.bytes().await?;
+    let status = normalize_upstream_error_status(status, body.as_ref());
+    let body = if status.is_success() {
+        let chat_response: Value = serde_json::from_slice(body.as_ref())?;
+        serde_json::to_vec(&chat_response_to_anthropic_response(chat_response))?
+    } else {
+        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        body.to_vec()
+    };
+    let response_content_type = content_type;
+    if requested_stream && status.is_success() {
+        let response: Value = serde_json::from_slice(&body)?;
+        let body = anthropic_response_to_sse(&response);
+        let mut response = Response::new(full_body(Bytes::from(body)));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            CONTENT_TYPE,
+            "text/event-stream".parse().expect("valid content type"),
+        );
+        return Ok(response);
+    }
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = response_content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
 fn normalize_proxy_provider(provider: &str) -> &'static str {
     match provider.trim().to_ascii_lowercase().as_str() {
         "deepseek" => "deepseek",
+        "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
+        "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
         _ => "venus",
     }
+}
+
+fn proxy_provider_for_model<'a>(model: &str, fallback_provider: &'a str) -> &'a str {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.contains("kimi-for-coding") {
+        return "kimi_code";
+    }
+    if normalized.contains("deepseek") {
+        return "deepseek";
+    }
+    if normalized.contains("mimo") {
+        return "xiaomi_mimo";
+    }
+    normalize_proxy_provider(fallback_provider)
+}
+
+fn api_key_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -> String {
+    config.api_keys.get(provider).cloned().unwrap_or_else(|| {
+        (normalize_proxy_provider(&config.provider) == provider)
+            .then(|| config.api_key.clone())
+            .unwrap_or_default()
+    })
 }
 
 fn upstream_chat_completions_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
+        "kimi_code" => KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
+        "xiaomi_mimo" => MIMO_UPSTREAM_CHAT_COMPLETIONS_URL,
         _ => VENUS_CHAT_COMPLETIONS_URL,
     }
+}
+
+fn upstream_messages_url(provider: &str) -> &'static str {
+    match normalize_proxy_provider(provider) {
+        "kimi_code" => KIMI_UPSTREAM_MESSAGES_URL,
+        "xiaomi_mimo" => MIMO_UPSTREAM_MESSAGES_URL,
+        _ => KIMI_UPSTREAM_MESSAGES_URL,
+    }
+}
+
+fn normalize_native_anthropic_payload(mut payload: Value, provider: &str) -> Value {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
+        return payload;
+    };
+    let upstream_model = upstream_native_anthropic_model(provider, model).to_string();
+    if upstream_model == model {
+        return payload;
+    }
+    append_codex_api_proxy_log(&format!(
+        "anthropic_model_rewrite provider={} model={} upstream_model={}",
+        normalize_proxy_provider(provider),
+        model,
+        upstream_model
+    ));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("model".to_string(), Value::String(upstream_model));
+    }
+    payload
+}
+
+fn upstream_native_anthropic_model<'a>(provider: &str, model: &'a str) -> &'a str {
+    match (normalize_proxy_provider(provider), model) {
+        ("xiaomi_mimo", "MiMo-V2.5-Pro") => "mimo-v2.5-pro",
+        ("xiaomi_mimo", "MiMo-V2.5") => "mimo-v2.5",
+        _ => model,
+    }
+}
+
+fn normalize_upstream_error_status(status: StatusCode, body: &[u8]) -> StatusCode {
+    if status != StatusCode::BAD_REQUEST {
+        return status;
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return status;
+    };
+    let Some(error) = value.get("error") else {
+        return status;
+    };
+    let code = error.get("code").and_then(Value::as_str);
+    let error_type = error.get("type").and_then(Value::as_str);
+    if code == Some("429") || error_type == Some("router_queue_limitation") {
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+    status
+}
+
+async fn proxy_kimi_codex_api_request(
+    chat_payload: Value,
+    api_key: &str,
+    requested_stream: bool,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload);
+    log_anthropic_payload_summary("kimi_request", &anthropic_payload);
+
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(KIMI_UPSTREAM_MESSAGES_URL)
+        .header(CONTENT_TYPE, "application/json")
+        .header("User-Agent", "claude-code/0.2.0")
+        .header("x-api-key", api_key)
+        .body(serde_json::to_vec(&anthropic_payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = upstream.bytes().await?;
+    let mut response_content_type = content_type.clone();
+    let body = if status.is_success() {
+        let anthropic_response: Value = serde_json::from_slice(body.as_ref())?;
+        let response = anthropic_response_to_responses_response(anthropic_response);
+        if requested_stream {
+            response_content_type = "text/event-stream".to_string();
+            responses_response_to_sse(&response)
+        } else {
+            serde_json::to_vec(&response)?
+        }
+    } else {
+        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        body.to_vec()
+    };
+    log_suspicious_venus_response(status, &content_type, &body);
+
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = response_content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
 }
 
 fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::Result<Value> {
@@ -380,7 +694,8 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let reasoning_content = reasoning_content_for_text(content)
+        let reasoning_content = reasoning_content_for_assistant_message(message)
+            .or_else(|| reasoning_content_for_text(content))
             .unwrap_or_else(|| DEEPSEEK_REASONING_PLACEHOLDER.to_string());
         message["reasoning_content"] = Value::String(reasoning_content);
     }
@@ -532,6 +847,430 @@ fn response_content_to_text(value: &Value) -> String {
     }
 }
 
+fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
+    chat["stream"] = Value::Bool(false);
+    let mut system_parts = Vec::new();
+    let mut anthropic_messages = Vec::new();
+
+    if let Some(messages) = chat.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user");
+            if role == "system" || role == "developer" {
+                let system =
+                    response_content_to_text(message.get("content").unwrap_or(&Value::Null));
+                if !system.trim().is_empty() {
+                    system_parts.push(system);
+                }
+                continue;
+            }
+            if role == "tool" {
+                let tool_use_id = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("call_unknown");
+                let content =
+                    response_content_to_text(message.get("content").unwrap_or(&Value::Null));
+                anthropic_messages.push(json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content
+                    }]
+                }));
+                continue;
+            }
+
+            let mut content = Vec::new();
+            let text = response_content_to_text(message.get("content").unwrap_or(&Value::Null));
+            if !text.is_empty() {
+                content.push(json!({ "type": "text", "text": text }));
+            }
+            if role == "assistant" {
+                if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                    for tool_call in tool_calls {
+                        let id = tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("call_unknown");
+                        let function = tool_call.get("function").unwrap_or(&Value::Null);
+                        let name = function
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        content.push(json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": parse_tool_arguments(function.get("arguments"))
+                        }));
+                    }
+                }
+            }
+            if content.is_empty() {
+                continue;
+            }
+            anthropic_messages.push(json!({
+                "role": if role == "assistant" { "assistant" } else { "user" },
+                "content": content
+            }));
+        }
+    }
+
+    let mut payload = json!({
+        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String("kimi-for-coding".to_string())),
+        "max_tokens": chat.get("max_tokens").cloned().unwrap_or_else(|| Value::from(32768)),
+        "messages": anthropic_messages,
+    });
+    if !system_parts.is_empty() {
+        payload["system"] = Value::String(system_parts.join("\n"));
+    }
+    if let Some(temperature) = chat.get("temperature") {
+        payload["temperature"] = temperature.clone();
+    }
+    if let Some(tools) = chat.get("tools").and_then(Value::as_array) {
+        let converted = tools
+            .iter()
+            .filter_map(|tool| {
+                let function = tool.get("function")?;
+                let name = function.get("name").and_then(Value::as_str)?;
+                Some(json!({
+                    "name": name,
+                    "description": function.get("description").cloned().unwrap_or(Value::String(String::new())),
+                    "input_schema": function.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                }))
+            })
+            .collect::<Vec<_>>();
+        if !converted.is_empty() {
+            payload["tools"] = Value::Array(converted);
+        }
+    }
+    payload
+}
+
+fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
+    let mut messages = Vec::new();
+    if let Some(system) = anthropic.get("system") {
+        let text = response_content_to_text(system);
+        if !text.trim().is_empty() {
+            messages.push(json!({ "role": "system", "content": text }));
+        }
+    }
+    if let Some(items) = anthropic.get("messages").and_then(Value::as_array) {
+        for item in items {
+            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+            match role {
+                "assistant" => messages.push(anthropic_assistant_message_to_chat_message(item)),
+                _ => messages.extend(anthropic_user_message_to_chat_messages(item)),
+            }
+        }
+    }
+    let mut chat = json!({
+        "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String(VENUS_MODEL_FALLBACK.to_string())),
+        "messages": messages,
+        "stream": anthropic.get("stream").and_then(Value::as_bool).unwrap_or(false)
+    });
+    if let Some(tools) = anthropic_tools_to_chat_tools(anthropic.get("tools")) {
+        chat["tools"] = tools;
+    }
+    if let Some(tool_choice) =
+        anthropic_tool_choice_to_chat_tool_choice(anthropic.get("tool_choice"))
+    {
+        chat["tool_choice"] = tool_choice;
+    }
+    if let Some(max_tokens) = anthropic.get("max_tokens") {
+        chat["max_tokens"] = max_tokens.clone();
+    }
+    if let Some(temperature) = anthropic.get("temperature") {
+        chat["temperature"] = temperature.clone();
+    }
+    chat
+}
+
+const VENUS_MODEL_FALLBACK: &str = "glm-5.1";
+
+fn anthropic_assistant_message_to_chat_message(item: &Value) -> Value {
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    match item.get("content") {
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text_parts.push(text.to_string());
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let id = part
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("call_proxy");
+                        let name = part
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let input = part.get("input").cloned().unwrap_or_else(|| json!({}));
+                        tool_calls.push(json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": serde_json::to_string(&input)
+                                    .unwrap_or_else(|_| "{}".to_string())
+                            }
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(content) => {
+            let text = response_content_to_text(content);
+            if !text.is_empty() {
+                text_parts.push(text);
+            }
+        }
+        None => {}
+    }
+
+    let content = text_parts.join("\n");
+    let mut message = json!({
+        "role": "assistant",
+        "content": if content.is_empty() && !tool_calls.is_empty() {
+            Value::Null
+        } else {
+            Value::String(content)
+        }
+    });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+    if let Some(reasoning_content) = reasoning_content_for_assistant_message(&message) {
+        message["reasoning_content"] = Value::String(reasoning_content);
+    }
+    message
+}
+
+fn anthropic_user_message_to_chat_messages(item: &Value) -> Vec<Value> {
+    let Some(content) = item.get("content") else {
+        return vec![json!({ "role": "user", "content": "" })];
+    };
+    let Value::Array(parts) = content else {
+        return vec![json!({ "role": "user", "content": response_content_to_text(content) })];
+    };
+
+    let mut messages = Vec::new();
+    let mut text_parts = Vec::new();
+    for part in parts {
+        match part.get("type").and_then(Value::as_str).unwrap_or("") {
+            "text" => {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text_parts.push(text.to_string());
+                    }
+                }
+            }
+            "tool_result" => {
+                if !text_parts.is_empty() {
+                    messages.push(json!({ "role": "user", "content": text_parts.join("\n") }));
+                    text_parts.clear();
+                }
+                let tool_call_id = part
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("call_proxy");
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": part
+                        .get("content")
+                        .map(response_content_to_text)
+                        .unwrap_or_default()
+                }));
+            }
+            _ => {}
+        }
+    }
+    if !text_parts.is_empty() || messages.is_empty() {
+        messages.push(json!({ "role": "user", "content": text_parts.join("\n") }));
+    }
+    messages
+}
+
+fn anthropic_tools_to_chat_tools(value: Option<&Value>) -> Option<Value> {
+    let tools = value?.as_array()?;
+    let converted = tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?;
+            Some(json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool
+                        .get("description")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(String::new())),
+                    "parameters": tool
+                        .get("input_schema")
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                }
+            }))
+        })
+        .collect::<Vec<_>>();
+    (!converted.is_empty()).then(|| Value::Array(converted))
+}
+
+fn anthropic_tool_choice_to_chat_tool_choice(value: Option<&Value>) -> Option<Value> {
+    let value = value?;
+    match value.get("type").and_then(Value::as_str) {
+        Some("auto") => Some(Value::String("auto".to_string())),
+        Some("any") => Some(Value::String("required".to_string())),
+        Some("tool") => value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| json!({ "type": "function", "function": { "name": name } })),
+        _ => None,
+    }
+}
+
+fn remember_stream_reasoning(state: &ChatStreamState) {
+    if state.reasoning_content.trim().is_empty() {
+        return;
+    }
+    let tool_calls = state
+        .tool_calls
+        .iter()
+        .filter(|call| call.added)
+        .map(stream_tool_call_to_chat_tool_call)
+        .collect::<Vec<_>>();
+    remember_assistant_reasoning(&state.text, &tool_calls, &state.reasoning_content);
+}
+
+fn stream_tool_call_to_chat_tool_call(call: &StreamToolCall) -> Value {
+    json!({
+        "id": if call.id.is_empty() { "call_proxy" } else { &call.id },
+        "type": "function",
+        "function": {
+            "name": if call.name.is_empty() { "unknown" } else { &call.name },
+            "arguments": call.arguments
+        }
+    })
+}
+
+fn chat_response_to_anthropic_response(chat: Value) -> Value {
+    let choice = chat
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let message = choice.get("message").unwrap_or(&Value::Null);
+    let content = response_content_to_text(message.get("content").unwrap_or(&Value::Null));
+    let stop_reason = match choice.get("finish_reason").and_then(Value::as_str) {
+        Some("tool_calls") => "tool_use",
+        Some("length") => "max_tokens",
+        _ => "end_turn",
+    };
+    json!({
+        "id": chat.get("id").cloned().unwrap_or_else(|| Value::String("msg_proxy".to_string())),
+        "type": "message",
+        "role": "assistant",
+        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String(VENUS_MODEL_FALLBACK.to_string())),
+        "content": if content.is_empty() {
+            json!([])
+        } else {
+            json!([{ "type": "text", "text": content }])
+        },
+        "stop_reason": stop_reason,
+        "stop_sequence": Value::Null,
+        "usage": normalized_chat_usage(chat.get("usage"))
+    })
+}
+
+fn anthropic_response_to_sse(response: &Value) -> Vec<u8> {
+    let id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("msg_proxy");
+    let model = response
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(VENUS_MODEL_FALLBACK);
+    let text = response
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|item| item.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let mut output = String::new();
+    output.push_str(&format!(
+        "event: message_start\ndata: {}\n\n",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }
+        })
+    ));
+    output.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
+    if !text.is_empty() {
+        output.push_str(&format!(
+            "event: content_block_delta\ndata: {}\n\n",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "text_delta", "text": text }
+            })
+        ));
+    }
+    output.push_str(
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    );
+    output.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": response.get("stop_reason").and_then(Value::as_str).unwrap_or("end_turn"),
+                "stop_sequence": Value::Null
+            },
+            "usage": response.get("usage").cloned().unwrap_or_else(|| json!({ "output_tokens": 0 }))
+        })
+    ));
+    output.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    output.into_bytes()
+}
+
+fn parse_tool_arguments(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(text)) => {
+            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+        }
+        Some(value) => value.clone(),
+        None => json!({}),
+    }
+}
+
 fn responses_tools_to_chat_tools(value: Option<&Value>) -> Option<Value> {
     let tools = value?.as_array()?;
     let converted = tools
@@ -644,6 +1383,54 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
     })
 }
 
+fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
+    let mut output = Vec::new();
+    let mut text = String::new();
+    if let Some(content) = anthropic.get("content").and_then(Value::as_array) {
+        for block in content {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    if let Some(value) = block.get("text").and_then(Value::as_str) {
+                        text.push_str(value);
+                    }
+                }
+                "tool_use" => {
+                    if !text.is_empty() {
+                        output.push(response_message_item_with_reasoning(&text, None));
+                        text.clear();
+                    }
+                    let id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_kimi");
+                    output.push(json!({
+                        "id": id,
+                        "type": "function_call",
+                        "call_id": id,
+                        "name": block.get("name").and_then(Value::as_str).unwrap_or("unknown"),
+                        "arguments": block.get("input").map(|input| input.to_string()).unwrap_or_else(|| "{}".to_string()),
+                        "status": "completed"
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    if !text.is_empty() {
+        output.push(response_message_item_with_reasoning(&text, None));
+    }
+    let usage = normalized_chat_usage(anthropic.get("usage"));
+    json!({
+        "id": anthropic.get("id").cloned().unwrap_or_else(|| Value::String("resp_kimi".to_string())),
+        "object": "response",
+        "created_at": 0,
+        "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String("kimi-for-coding".to_string())),
+        "status": "completed",
+        "output": output,
+        "usage": usage,
+    })
+}
+
 fn normalized_chat_usage(value: Option<&Value>) -> Value {
     let usage = value.unwrap_or(&Value::Null);
     let input = usage
@@ -674,6 +1461,10 @@ struct ChatStreamState {
     text: String,
     reasoning_content: String,
     message_started: bool,
+    text_block_started: bool,
+    text_block_index: Option<usize>,
+    next_content_block_index: usize,
+    stop_reason: Option<String>,
     tool_calls: Vec<StreamToolCall>,
     usage: Value,
 }
@@ -684,6 +1475,7 @@ struct StreamToolCall {
     name: String,
     arguments: String,
     added: bool,
+    content_block_index: Option<usize>,
 }
 
 #[cfg(test)]
@@ -694,6 +1486,7 @@ fn chat_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
     output
 }
 
+#[cfg(test)]
 fn process_chat_sse_event(event: &str, output: &mut String, state: &mut ChatStreamState) {
     let Some(data) = sse_data_line(event) else {
         return;
@@ -722,6 +1515,9 @@ fn process_chat_sse_event(event: &str, output: &mut String, state: &mut ChatStre
     else {
         return;
     };
+    if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        state.stop_reason = Some(chat_finish_reason_to_anthropic(finish_reason).to_string());
+    }
     let delta = choice.get("delta").unwrap_or(&Value::Null);
     if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
         state.reasoning_content.push_str(reasoning_content);
@@ -742,6 +1538,7 @@ fn sse_data_line(event: &str) -> Option<&str> {
         .find_map(|line| line.strip_prefix("data:").map(str::trim_start))
 }
 
+#[cfg(test)]
 fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
     if !state.message_started {
         state.message_started = true;
@@ -786,6 +1583,7 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
     );
 }
 
+#[cfg(test)]
 fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_call: &Value) {
     let index = tool_call
         .get("index")
@@ -844,6 +1642,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     }
 }
 
+#[cfg(test)]
 fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
     let mut final_output = Vec::new();
     if state.message_started {
@@ -941,13 +1740,17 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
     output.push_str("data: [DONE]\n\n");
 }
 
-fn streaming_chat_sse_response(
+fn streaming_chat_sse_to_anthropic_response(
     upstream: reqwest::Response,
     status: StatusCode,
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
-        (upstream_stream, ChatSseStreamConverter::new(), false),
+        (
+            upstream_stream,
+            ChatAnthropicSseStreamConverter::new(),
+            false,
+        ),
         |(mut upstream_stream, mut converter, done)| async move {
             if done {
                 return None;
@@ -966,7 +1769,7 @@ fn streaming_chat_sse_response(
                     }
                     Some(Err(error)) => {
                         append_codex_api_proxy_log(&format!(
-                            "upstream_sse_read_error error={error}"
+                            "upstream_anthropic_sse_read_error error={error}"
                         ));
                         let bytes = converter.finish();
                         if bytes.is_empty() {
@@ -999,12 +1802,33 @@ fn streaming_chat_sse_response(
     response
 }
 
+fn streaming_passthrough_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+    content_type: &str,
+) -> Response<ProxyBody> {
+    let upstream_stream = upstream.bytes_stream().map(|chunk| {
+        Ok(Frame::data(chunk.unwrap_or_else(|error| {
+            Bytes::from(format!("event: error\ndata: {error}\n\n"))
+        })))
+    });
+    let body = BodyExt::boxed(StreamBody::new(upstream_stream));
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 struct ChatSseStreamConverter {
     buffer: String,
     state: ChatStreamState,
 }
 
+#[cfg(test)]
 impl ChatSseStreamConverter {
     fn new() -> Self {
         Self {
@@ -1036,6 +1860,277 @@ impl ChatSseStreamConverter {
         }
         emit_stream_done(&mut output, &mut self.state);
         output.into_bytes()
+    }
+}
+
+#[cfg(test)]
+fn chat_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
+    let mut converter = ChatAnthropicSseStreamConverter::new();
+    let mut output = converter.push_chunk(body);
+    output.extend(converter.finish());
+    output
+}
+
+#[derive(Debug)]
+struct ChatAnthropicSseStreamConverter {
+    buffer: String,
+    state: ChatStreamState,
+}
+
+impl ChatAnthropicSseStreamConverter {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            state: ChatStreamState {
+                response_id: "msg_proxy".to_string(),
+                model: VENUS_MODEL_FALLBACK.to_string(),
+                usage: normalized_chat_usage(None),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        let mut output = String::new();
+        while let Some((event, consumed)) = next_sse_event(&self.buffer) {
+            self.buffer.drain(..consumed);
+            process_chat_sse_anthropic_event(&event, &mut output, &mut self.state);
+        }
+        output.into_bytes()
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let trailing = std::mem::take(&mut self.buffer);
+        let mut output = String::new();
+        if !trailing.trim().is_empty() {
+            process_chat_sse_anthropic_event(&trailing, &mut output, &mut self.state);
+        }
+        emit_anthropic_stream_done(&mut output, &mut self.state);
+        output.into_bytes()
+    }
+}
+
+fn process_chat_sse_anthropic_event(event: &str, output: &mut String, state: &mut ChatStreamState) {
+    let Some(data) = sse_data_line(event) else {
+        return;
+    };
+    if data.trim() == "[DONE]" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+        append_codex_api_proxy_log("failed_to_parse_chat_anthropic_sse_event");
+        return;
+    };
+    if let Some(id) = value.get("id").and_then(Value::as_str) {
+        state.response_id = id.to_string();
+    }
+    if let Some(model) = value.get("model").and_then(Value::as_str) {
+        state.model = model.to_string();
+    }
+    if let Some(usage) = value.get("usage") {
+        state.usage = normalized_chat_usage(Some(usage));
+    }
+
+    let Some(choice) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    else {
+        return;
+    };
+    if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        state.stop_reason = Some(chat_finish_reason_to_anthropic(finish_reason).to_string());
+    }
+    let delta = choice.get("delta").unwrap_or(&Value::Null);
+    if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
+        state.reasoning_content.push_str(reasoning_content);
+    }
+    if let Some(content) = delta.get("content").and_then(Value::as_str) {
+        emit_anthropic_text_delta(output, state, content);
+    }
+    if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+        for tool_call in tool_calls {
+            emit_anthropic_tool_call_delta(output, state, tool_call);
+        }
+    }
+}
+
+fn ensure_anthropic_message_started(output: &mut String, state: &mut ChatStreamState) {
+    if state.message_started {
+        return;
+    }
+    state.message_started = true;
+    push_sse(
+        output,
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": state.response_id,
+                "type": "message",
+                "role": "assistant",
+                "model": state.model,
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }
+        }),
+    );
+}
+
+fn emit_anthropic_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
+    ensure_anthropic_message_started(output, state);
+    let index = if let Some(index) = state.text_block_index {
+        index
+    } else {
+        let index = state.next_content_block_index;
+        state.next_content_block_index += 1;
+        state.text_block_index = Some(index);
+        state.text_block_started = true;
+        push_sse(
+            output,
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": { "type": "text", "text": "" }
+            }),
+        );
+        index
+    };
+    state.text.push_str(delta);
+    push_sse(
+        output,
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "text_delta", "text": delta }
+        }),
+    );
+}
+
+fn emit_anthropic_tool_call_delta(
+    output: &mut String,
+    state: &mut ChatStreamState,
+    tool_call: &Value,
+) {
+    ensure_anthropic_message_started(output, state);
+    let index = tool_call
+        .get("index")
+        .and_then(Value::as_u64)
+        .unwrap_or(state.tool_calls.len() as u64) as usize;
+    while state.tool_calls.len() <= index {
+        state.tool_calls.push(StreamToolCall::default());
+    }
+    let call = &mut state.tool_calls[index];
+    if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
+        call.id = id.to_string();
+    }
+    if call.id.is_empty() {
+        call.id = format!("call_proxy_{index}");
+    }
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    if let Some(name) = function.get("name").and_then(Value::as_str) {
+        call.name.push_str(name);
+    }
+    if !call.added && !call.name.is_empty() {
+        call.added = true;
+        let block_index = state.next_content_block_index;
+        state.next_content_block_index += 1;
+        call.content_block_index = Some(block_index);
+        push_sse(
+            output,
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": {}
+                }
+            }),
+        );
+        if !call.arguments.is_empty() {
+            push_sse(
+                output,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": { "type": "input_json_delta", "partial_json": call.arguments }
+                }),
+            );
+        }
+    }
+    if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+        call.arguments.push_str(arguments);
+        if let Some(block_index) = call.content_block_index {
+            push_sse(
+                output,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": { "type": "input_json_delta", "partial_json": arguments }
+                }),
+            );
+        }
+    }
+}
+
+fn emit_anthropic_stream_done(output: &mut String, state: &mut ChatStreamState) {
+    ensure_anthropic_message_started(output, state);
+    if state.text_block_started {
+        if let Some(index) = state.text_block_index {
+            push_sse(
+                output,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": index }),
+            );
+        }
+    }
+    remember_stream_reasoning(state);
+    for call in &state.tool_calls {
+        if let Some(index) = call.content_block_index {
+            push_sse(
+                output,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": index }),
+            );
+        }
+    }
+    push_sse(
+        output,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": state
+                    .stop_reason
+                    .as_deref()
+                    .unwrap_or(if state.tool_calls.iter().any(|call| call.added) {
+                        "tool_use"
+                    } else {
+                        "end_turn"
+                    }),
+                "stop_sequence": Value::Null
+            },
+            "usage": state.usage
+        }),
+    );
+    push_sse(output, "message_stop", json!({ "type": "message_stop" }));
+}
+
+fn chat_finish_reason_to_anthropic(reason: &str) -> &str {
+    match reason {
+        "tool_calls" => "tool_use",
+        "length" => "max_tokens",
+        _ => "end_turn",
     }
 }
 
@@ -1195,25 +2290,44 @@ fn remember_message_reasoning(message: &Value) {
     let Some(reasoning_content) = message.get("reasoning_content").and_then(Value::as_str) else {
         return;
     };
-    remember_reasoning_content(content, reasoning_content);
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    remember_assistant_reasoning(content, tool_calls, reasoning_content);
 }
 
+#[cfg(test)]
 fn remember_reasoning_content(content: &str, reasoning_content: &str) {
+    remember_assistant_reasoning(content, &[], reasoning_content);
+}
+
+fn remember_assistant_reasoning(content: &str, tool_calls: &[Value], reasoning_content: &str) {
     if content.trim().is_empty() || reasoning_content.trim().is_empty() {
-        return;
+        if tool_calls.is_empty() || reasoning_content.trim().is_empty() {
+            return;
+        }
     }
+    let Some(assistant_signature) = assistant_reasoning_signature(content, tool_calls) else {
+        return;
+    };
     let history = DEEPSEEK_REASONING_HISTORY
         .get_or_init(|| Arc::new(RwLock::new(Vec::new())))
         .clone();
     let Ok(mut entries) = history.write() else {
         return;
     };
-    if let Some(existing) = entries.iter_mut().find(|entry| entry.content == content) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|entry| entry.assistant_signature == assistant_signature)
+    {
         existing.reasoning_content = reasoning_content.to_string();
         return;
     }
     entries.push(ReasoningHistoryEntry {
         content: content.to_string(),
+        assistant_signature,
         reasoning_content: reasoning_content.to_string(),
     });
     const MAX_REASONING_HISTORY_ENTRIES: usize = 128;
@@ -1236,6 +2350,53 @@ fn reasoning_content_for_text(content: &str) -> Option<String> {
         .map(|entry| entry.reasoning_content.clone())
 }
 
+fn reasoning_content_for_assistant_message(message: &Value) -> Option<String> {
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let signature = assistant_reasoning_signature(content, tool_calls)?;
+    let history = DEEPSEEK_REASONING_HISTORY.get()?.clone();
+    let entries = history.read().ok()?;
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.assistant_signature == signature)
+        .map(|entry| entry.reasoning_content.clone())
+}
+
+fn assistant_reasoning_signature(content: &str, tool_calls: &[Value]) -> Option<String> {
+    if content.trim().is_empty() && tool_calls.is_empty() {
+        return None;
+    }
+    let tool_signature = tool_calls
+        .iter()
+        .map(normalized_tool_call_signature)
+        .collect::<Vec<_>>();
+    Some(format!(
+        "{}\n{}",
+        content,
+        serde_json::to_string(&tool_signature).unwrap_or_default()
+    ))
+}
+
+fn normalized_tool_call_signature(tool_call: &Value) -> Value {
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    json!({
+        "id": tool_call.get("id").and_then(Value::as_str).unwrap_or_default(),
+        "name": function.get("name").and_then(Value::as_str).unwrap_or_default(),
+        "arguments": function
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    })
+}
+
 fn log_chat_payload_summary(label: &str, payload: &Value) {
     let model = payload
         .get("model")
@@ -1245,6 +2406,15 @@ fn log_chat_payload_summary(label: &str, payload: &Value) {
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let tool_choice = payload
+        .get("tool_choice")
+        .map(response_content_to_text)
+        .unwrap_or_default();
     let messages = payload
         .get("messages")
         .and_then(Value::as_array)
@@ -1281,7 +2451,50 @@ fn log_chat_payload_summary(label: &str, payload: &Value) {
         })
         .unwrap_or_else(|| "<no messages>".to_string());
     append_codex_api_proxy_log(&format!(
-        "{label} model={model} stream={stream} messages=[{messages}]"
+        "{label} model={model} stream={stream} tools={tools} tool_choice={tool_choice} messages=[{messages}]"
+    ));
+}
+
+fn log_anthropic_payload_summary(label: &str, payload: &Value) {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>");
+    let system_len = payload
+        .get("system")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or(0);
+    let messages = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .enumerate()
+                .map(|(index, message)| {
+                    let role = message
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<missing>");
+                    let content = message
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    format!("#{index}:{role}:blocks={content}")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "<no messages>".to_string());
+    let tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    append_codex_api_proxy_log(&format!(
+        "{label} model={model} system={system_len} messages=[{messages}] tools={tools}"
     ));
 }
 
@@ -1561,6 +2774,185 @@ mod tests {
     }
 
     #[test]
+    fn converts_chat_payload_to_kimi_anthropic_messages() {
+        let chat = json!({
+            "model": "kimi-for-coding",
+            "stream": true,
+            "max_tokens": 4096,
+            "temperature": 0.2,
+            "messages": [
+                { "role": "system", "content": "base" },
+                { "role": "user", "content": "hello" },
+                {
+                    "role": "assistant",
+                    "content": "checking",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "read_file", "arguments": "{\"path\":\"main.rs\"}" }
+                    }]
+                },
+                { "role": "tool", "tool_call_id": "call_1", "content": "file body" }
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read file",
+                    "parameters": { "type": "object", "properties": { "path": { "type": "string" } } }
+                }
+            }]
+        });
+
+        let anthropic = chat_payload_to_anthropic_payload(chat);
+
+        assert_eq!(anthropic["model"], "kimi-for-coding");
+        assert_eq!(anthropic["max_tokens"], 4096);
+        assert_eq!(anthropic["system"], "base");
+        assert_eq!(anthropic["messages"][0]["role"], "user");
+        assert_eq!(anthropic["messages"][0]["content"][0]["text"], "hello");
+        assert_eq!(anthropic["messages"][1]["role"], "assistant");
+        assert_eq!(anthropic["messages"][1]["content"][0]["text"], "checking");
+        assert_eq!(anthropic["messages"][1]["content"][1]["type"], "tool_use");
+        assert_eq!(anthropic["messages"][1]["content"][1]["name"], "read_file");
+        assert_eq!(
+            anthropic["messages"][1]["content"][1]["input"]["path"],
+            "main.rs"
+        );
+        assert_eq!(anthropic["messages"][2]["role"], "user");
+        assert_eq!(
+            anthropic["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            anthropic["messages"][2]["content"][0]["tool_use_id"],
+            "call_1"
+        );
+        assert_eq!(anthropic["tools"][0]["name"], "read_file");
+        assert_eq!(
+            anthropic["tools"][0]["input_schema"]["properties"]["path"]["type"],
+            "string"
+        );
+        assert!(anthropic.get("stream").is_none());
+    }
+
+    #[test]
+    fn converts_anthropic_tools_to_chat_completion_tools() {
+        let anthropic = json!({
+            "model": "deepseek-v4-pro",
+            "stream": true,
+            "max_tokens": 4096,
+            "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "inspect" }] }
+            ],
+            "tools": [{
+                "name": "Read",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string" }
+                    },
+                    "required": ["file_path"]
+                }
+            }],
+            "tool_choice": { "type": "auto" }
+        });
+
+        let chat = anthropic_payload_to_chat_payload(anthropic);
+
+        assert_eq!(chat["model"], "deepseek-v4-pro");
+        assert_eq!(chat["stream"], true);
+        assert_eq!(chat["messages"][0]["role"], "user");
+        assert_eq!(chat["messages"][0]["content"], "inspect");
+        assert_eq!(chat["tools"][0]["type"], "function");
+        assert_eq!(chat["tools"][0]["function"]["name"], "Read");
+        assert_eq!(
+            chat["tools"][0]["function"]["parameters"]["properties"]["file_path"]["type"],
+            "string"
+        );
+        assert_eq!(chat["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn converts_anthropic_tool_history_to_chat_completion_messages() {
+        let anthropic = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "Read",
+                        "input": { "file_path": "README.md" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "file body"
+                    }]
+                }
+            ]
+        });
+
+        let chat = anthropic_payload_to_chat_payload(anthropic);
+
+        assert_eq!(chat["messages"][0]["role"], "assistant");
+        assert!(chat["messages"][0]["content"].is_null());
+        assert_eq!(chat["messages"][0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            chat["messages"][0]["tool_calls"][0]["function"]["name"],
+            "Read"
+        );
+        assert_eq!(
+            chat["messages"][0]["tool_calls"][0]["function"]["arguments"],
+            "{\"file_path\":\"README.md\"}"
+        );
+        assert_eq!(chat["messages"][1]["role"], "tool");
+        assert_eq!(chat["messages"][1]["tool_call_id"], "call_1");
+        assert_eq!(chat["messages"][1]["content"], "file body");
+    }
+
+    #[test]
+    fn converts_kimi_anthropic_response_to_responses_response() {
+        let anthropic = json!({
+            "id": "msg_1",
+            "model": "kimi-for-coding",
+            "content": [
+                { "type": "text", "text": "I will read it." },
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "read_file",
+                    "input": { "path": "main.rs" }
+                }
+            ],
+            "usage": { "input_tokens": 12, "output_tokens": 5 }
+        });
+
+        let response = anthropic_response_to_responses_response(anthropic);
+
+        assert_eq!(response["id"], "msg_1");
+        assert_eq!(response["model"], "kimi-for-coding");
+        assert_eq!(response["output"][0]["type"], "message");
+        assert_eq!(
+            response["output"][0]["content"][0]["text"],
+            "I will read it."
+        );
+        assert_eq!(response["output"][1]["type"], "function_call");
+        assert_eq!(response["output"][1]["call_id"], "call_1");
+        assert_eq!(response["output"][1]["name"], "read_file");
+        assert_eq!(response["output"][1]["arguments"], "{\"path\":\"main.rs\"}");
+        assert_eq!(response["usage"]["input_tokens"], 12);
+        assert_eq!(response["usage"]["output_tokens"], 5);
+        assert_eq!(response["usage"]["total_tokens"], 17);
+    }
+
+    #[test]
     fn wraps_non_stream_response_as_responses_sse() {
         let response = json!({
             "id": "resp_1",
@@ -1608,6 +3000,94 @@ mod tests {
         assert!(text.contains("\"arguments\":\"{\\\"path\\\":\\\".\\\"}\""));
         assert!(text.contains("\"input_tokens\":12"));
         assert!(text.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn converts_chat_stream_to_anthropic_stream() {
+        let body = concat!(
+            "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let normalized = chat_sse_to_anthropic_sse(body.as_bytes());
+        let text = String::from_utf8(normalized).unwrap();
+
+        assert!(text.contains("event: message_start"));
+        assert!(text.contains("event: content_block_start"));
+        assert!(text.contains("event: content_block_delta"));
+        assert!(text.contains("\"type\":\"text_delta\""));
+        assert!(text.contains("\"text\":\"hello\""));
+        assert!(text.contains("event: content_block_stop"));
+        assert!(text.contains("event: message_delta"));
+        assert!(text.contains("\"stop_reason\":\"end_turn\""));
+        assert!(text.contains("\"input_tokens\":12"));
+        assert!(text.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn preserves_markdown_newlines_in_anthropic_stream() {
+        let body = concat!(
+            "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"核心功能是：\\n\\n1. 第一项\\n\"}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"2. 第二项\"}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let normalized = chat_sse_to_anthropic_sse(body.as_bytes());
+        let text = String::from_utf8(normalized).unwrap();
+
+        assert!(text.contains("核心功能是：\\n\\n1. 第一项\\n"));
+        assert!(text.contains("2. 第二项"));
+    }
+
+    #[test]
+    fn converts_chat_tool_stream_to_anthropic_tool_use() {
+        let body = concat!(
+            "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\".\\\"}\"}}]}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let normalized = chat_sse_to_anthropic_sse(body.as_bytes());
+        let text = String::from_utf8(normalized).unwrap();
+
+        assert!(text.contains("\"type\":\"tool_use\""));
+        assert!(text.contains("\"id\":\"call_1\""));
+        assert!(text.contains("\"name\":\"list_files\""));
+        assert!(text.contains("\"type\":\"input_json_delta\""));
+        assert!(text.contains("\"partial_json\":\"{\\\"path\\\":\""));
+        assert!(text.contains("\"partial_json\":\"\\\".\\\"}\""));
+        assert!(text.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[test]
+    fn restores_deepseek_reasoning_for_anthropic_tool_history() {
+        let body = concat!(
+            "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"reasoning_content\":\"tool thinking\"}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_cached_tool\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"file_path\\\":\\\"README.md\\\"}\"}}]}}]}\n\n",
+            "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let _ = chat_sse_to_anthropic_sse(body.as_bytes());
+
+        let anthropic = json!({
+            "model": "deepseek-v4-pro",
+            "messages": [{
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call_cached_tool",
+                    "name": "Read",
+                    "input": { "file_path": "README.md" }
+                }]
+            }]
+        });
+
+        let chat = anthropic_payload_to_chat_payload(anthropic);
+
+        assert_eq!(chat["messages"][0]["reasoning_content"], "tool thinking");
     }
 
     #[test]
@@ -1715,6 +3195,46 @@ mod tests {
             normalized["messages"][2]["reasoning_content"],
             "already present"
         );
+    }
+
+    #[test]
+    fn rewrites_xiaomi_anthropic_display_model_to_upstream_slug() {
+        let payload = json!({
+            "model": "MiMo-V2.5-Pro",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "stream": true
+        });
+
+        let normalized = normalize_native_anthropic_payload(payload, "xiaomi_mimo");
+
+        assert_eq!(normalized["model"], "mimo-v2.5-pro");
+    }
+
+    #[test]
+    fn leaves_non_xiaomi_anthropic_model_names_unchanged() {
+        let payload = json!({
+            "model": "kimi-for-coding",
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+
+        let normalized = normalize_native_anthropic_payload(payload, "kimi_code");
+
+        assert_eq!(normalized["model"], "kimi-for-coding");
+    }
+
+    #[test]
+    fn maps_xiaomi_router_queue_limitation_to_http_429() {
+        let body = br#"{
+            "error": {
+                "code": "429",
+                "message": "Cluster rate limit exceeded, request queued but not admitted",
+                "type": "router_queue_limitation"
+            }
+        }"#;
+
+        let status = normalize_upstream_error_status(StatusCode::BAD_REQUEST, body);
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

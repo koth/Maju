@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useMemo, useState, useRef } from "react";
 import type { SessionFileChange, FileChangeRecord, FileChangeType, AppTheme, DiffQuality } from "../../types";
 import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
+import { languageForPath } from "./languages";
 import "./DiffTab.css";
 
 const MonacoDiffEditor = lazy(() =>
@@ -9,24 +10,6 @@ const MonacoDiffEditor = lazy(() =>
 );
 
 let textmateInitStarted = false;
-
-const LANG_MAP: Record<string, string> = {
-  ts: "typescript",
-  tsx: "typescriptreact",
-  js: "javascript",
-  cjs: "javascript",
-  mjs: "javascript",
-  jsx: "javascriptreact",
-  rs: "rust",
-  json: "json",
-  md: "markdown",
-  css: "css",
-  html: "html",
-  toml: "toml",
-  yaml: "yaml",
-  yml: "yaml",
-  py: "python",
-};
 
 interface Props {
   change: SessionFileChange | FileChangeRecord;
@@ -39,8 +22,7 @@ export function DiffTab({ change, appTheme }: Props) {
   const editorRef = useRef<import("monaco-editor").editor.IStandaloneDiffEditor | null>(null);
 
   const language = useMemo(() => {
-    const ext = change.path.split(".").pop()?.toLowerCase() ?? "";
-    return LANG_MAP[ext] ?? "plaintext";
+    return languageForPath(change.path);
   }, [change.path]);
 
   const handleBeforeMount = useCallback(

@@ -3,6 +3,7 @@ import type { AppTheme } from "../../types";
 import { editorOpenFile, reviewGetDiff } from "../../lib/tauri";
 import { getAppliedAppTheme } from "../../theme";
 import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
+import { languageForPath } from "./languages";
 import "./EditorView.css";
 
 const MonacoDiffEditor = lazy(() =>
@@ -68,25 +69,7 @@ export function DiffView({ path, appTheme }: Props) {
     return <div className="editor-loading">正在加载差异...</div>;
   }
 
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const langMap: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescriptreact",
-    js: "javascript",
-    cjs: "javascript",
-    mjs: "javascript",
-    jsx: "javascriptreact",
-    rs: "rust",
-    json: "json",
-    md: "markdown",
-    css: "css",
-    html: "html",
-    toml: "toml",
-    yaml: "yaml",
-    yml: "yaml",
-    py: "python",
-  };
-  const language = langMap[ext] ?? "plaintext";
+  const language = languageForPath(path);
 
   return (
     <div className="editor-view">

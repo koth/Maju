@@ -1155,7 +1155,8 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
 
         assert_eq!(app.ui.session.id.to_string(), session_id);
         assert_eq!(app.ui.session.agent_cli.as_deref(), Some("goose"));
-        assert!(app.agent_command.to_lowercase().contains("goose"));
+        assert!(!app.agent_command.to_lowercase().contains("goose"));
+        assert!(app.agent_command.to_lowercase().contains("codebuddy"));
 
         let reopened_store = SessionStore::open(app_paths.root(), &workspace).unwrap();
         let sessions = reopened_store.list_sessions().unwrap();

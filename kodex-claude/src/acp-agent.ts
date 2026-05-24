@@ -2275,6 +2275,9 @@ export class ClaudeAcpAgent implements Agent {
           settings: {
             ...(modelConfig.modelOverrides && { modelOverrides: modelConfig.modelOverrides }),
             ...(modelConfig.availableModels && { availableModels: modelConfig.availableModels }),
+            ...(modelConfig.preserveDefaultModel !== undefined && {
+              preserveDefaultModel: modelConfig.preserveDefaultModel,
+            }),
           },
         }),
       env: mergeEnv(
@@ -2427,7 +2430,11 @@ export class ClaudeAcpAgent implements Agent {
       !userProvidedOptions?.settings ? modelConfig?.availableModels : undefined,
     );
     const allowedModels = settingsAvailableModels
-      ? applyAvailableModelsAllowlist(initializationResult.models, settingsAvailableModels)
+      ? applyAvailableModelsAllowlist(
+          initializationResult.models,
+          settingsAvailableModels,
+          modelConfig?.preserveDefaultModel !== false,
+        )
       : initializationResult.models;
 
     const models = await getAvailableModels(q, allowedModels, settingsManager, this.logger);
@@ -2850,15 +2857,22 @@ function resolveSettingsModel(
  * substituting a date-pinned variant (e.g. `haiku` →
  * `claude-haiku-4-5-20251001`) that the user may not have access to.
  *
- * Display info and capability flags are copied from the closest SDK match so
- * the UI still renders sensible names and effort levels.
+ * For regular Claude allowlists, display info and capability flags are copied
+ * from the closest SDK match so the UI still renders sensible names and effort
+ * levels. External model pools opt out of the Default model; in that mode the
+ * allowlist's exact entries are also used as display names so SDK alias
+ * matching cannot make different BYOK models appear under the same label.
  *
  * Semantics from https://code.claude.com/docs/en/model-config#restrict-model-selection:
  * - `undefined` is handled by the caller (no allowlist applied).
  * - The Default option is unaffected by `availableModels` — it always remains
  *   available, even when the allowlist is `[]`.
  */
-function applyAvailableModelsAllowlist(sdkModels: ModelInfo[], allowlist: string[]): ModelInfo[] {
+function applyAvailableModelsAllowlist(
+  sdkModels: ModelInfo[],
+  allowlist: string[],
+  preserveDefaultModel = true,
+): ModelInfo[] {
   // Default is always preserved per the docs. Synthesize one if the SDK
   // didn't surface it so downstream code (e.g. `getAvailableModels` picking
   // `models[0]` as a fallback) still has something to work with.
@@ -2867,8 +2881,8 @@ function applyAvailableModelsAllowlist(sdkModels: ModelInfo[], allowlist: string
     displayName: "Default",
     description: "",
   };
-  const result: ModelInfo[] = [defaultModel];
-  const seen = new Set<string>([defaultModel.value]);
+  const result: ModelInfo[] = preserveDefaultModel ? [defaultModel] : [];
+  const seen = new Set<string>(preserveDefaultModel ? [defaultModel.value] : []);
 
   const sdkModelsWithoutDefault = sdkModels.filter((m) => m.value !== "default");
 
@@ -2877,7 +2891,7 @@ function applyAvailableModelsAllowlist(sdkModels: ModelInfo[], allowlist: string
     if (!trimmed || seen.has(trimmed)) continue;
 
     const sdkMatch = resolveModelPreference(sdkModelsWithoutDefault, trimmed);
-    if (sdkMatch) {
+    if (sdkMatch && preserveDefaultModel) {
       result.push({ ...sdkMatch, value: trimmed });
     } else {
       result.push({ value: trimmed, displayName: trimmed, description: "" });
@@ -2885,7 +2899,7 @@ function applyAvailableModelsAllowlist(sdkModels: ModelInfo[], allowlist: string
     seen.add(trimmed);
   }
 
-  return result;
+  return result.length > 0 ? result : [defaultModel];
 }
 
 function mergeAvailableModelLists(...sources: unknown[]): string[] | undefined {
@@ -3478,15 +3492,16 @@ function inferContextWindowFromModel(model: string): number | null {
 
 function parseModelConfig(
   raw: string | undefined,
-): { modelOverrides?: Record<string, string>; availableModels?: string[] } | undefined {
+): { modelOverrides?: Record<string, string>; availableModels?: string[]; preserveDefaultModel?: boolean } | undefined {
   if (!raw) return undefined;
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("CLAUDE_MODEL_CONFIG must be a JSON object");
   }
-  const result: { modelOverrides?: Record<string, string>; availableModels?: string[] } = {};
+  const result: { modelOverrides?: Record<string, string>; availableModels?: string[]; preserveDefaultModel?: boolean } = {};
   if (parsed.modelOverrides !== undefined) result.modelOverrides = parsed.modelOverrides;
   if (parsed.availableModels !== undefined) result.availableModels = parsed.availableModels;
+  if (parsed.preserveDefaultModel !== undefined) result.preserveDefaultModel = Boolean(parsed.preserveDefaultModel);
   return Object.keys(result).length > 0 ? result : undefined;
 }
 

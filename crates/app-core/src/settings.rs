@@ -5,14 +5,22 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
-    AgentCliId, AgentCliStatus, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeWoaConfigInput,
-    ClaudeWoaSettings, ClaudeWoaSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
-    LspServerConfigInput, LspServerSettings,
+    AgentCliId, AgentCliStatus, AgentProviderFamily, AgentProviderProfile, AgentProviderProxyKind,
+    AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeWoaConfigInput, ClaudeWoaSettings,
+    ClaudeWoaSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode, LspServerConfigInput,
+    LspServerSettings,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
+const PROVIDER_SECRETS_FILE: &str = "provider-secrets.json";
 const CODEX_CONFIG_FILE: &str = "config.toml";
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
+const CODEX_DEFAULT_PROVIDER_ID: &str = "default";
+const BYOK_PROVIDER_ID: &str = "byok";
+const BYOK_PROVIDER_NAME: &str = "BYOK";
+const BYOK_API_KEY_ENV: &str = "BYOK_API_KEY";
+const BYOK_SOURCE_PROVIDER_IDS: &[&str] =
+    &[DEEPSEEK_PROVIDER_ID, KIMI_PROVIDER_ID, MIMO_PROVIDER_ID];
 const VENUS_MODEL: &str = "glm-5.1";
 const VENUS_PROVIDER_ID: &str = "venus";
 const VENUS_PROVIDER_NAME: &str = "Venus LLM";
@@ -22,8 +30,26 @@ const DEEPSEEK_MODEL: &str = "deepseek-v4-pro";
 const DEEPSEEK_PROVIDER_ID: &str = "deepseek";
 const DEEPSEEK_PROVIDER_NAME: &str = "DeepSeek";
 const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+const DEEPSEEK_UPSTREAM_HELP_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const KIMI_PROVIDER_ID: &str = "kimi_code";
+const KIMI_PROVIDER_NAME: &str = "Kimi Code";
+const KIMI_MODEL: &str = "kimi-for-coding";
+const KIMI_API_KEY_ENV: &str = "KIMI_CODE_API_KEY";
+const KIMI_CODE_OPENAI_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+const KIMI_CODE_ANTHROPIC_BASE_URL: &str = "https://api.kimi.com/coding/";
+const MIMO_PROVIDER_ID: &str = "xiaomi_mimo";
+const MIMO_PROVIDER_NAME: &str = "Xiaomi Token Plan";
+const MIMO_MODEL: &str = "MiMo-V2.5-Pro";
+const MIMO_API_KEY_ENV: &str = "XIAOMI_MIMO_API_KEY";
+const MIMO_OPENAI_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com/v1";
+const MIMO_ANTHROPIC_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com/anthropic";
+const CLAUDE_WOA_PROVIDER_ID: &str = "woa";
 const VENUS_MODEL_CONTEXT_WINDOW: i64 = 200_000;
 const VENUS_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
+const KIMI_MODEL_CONTEXT_WINDOW: i64 = 262_144;
+const KIMI_MODEL_MAX_OUTPUT_TOKENS: i64 = 32_768;
+const MIMO_MODEL_CONTEXT_WINDOW: i64 = 1_000_000;
+const MIMO_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
 const CODEX_AUTH_METHOD_API_KEY: &str = "apikey";
 const CODEX_REASONING_EFFORT_NONE: &str = "none";
 const VENUS_CATALOG_MODELS: &[&str] = &[
@@ -41,6 +67,8 @@ const VENUS_CATALOG_MODELS: &[&str] = &[
     "deepseek-v4-flash",
 ];
 const DEEPSEEK_CATALOG_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-flash"];
+const KIMI_CATALOG_MODELS: &[&str] = &[KIMI_MODEL];
+const MIMO_CATALOG_MODELS: &[&str] = &["MiMo-V2.5-Pro", "MiMo-V2.5"];
 /// Maps display model names to actual model slugs sent to the server.
 /// If a model is not in this map, the display name is used as-is.
 const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
@@ -56,6 +84,8 @@ const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
     ("claude-opus-4.7", "claude-opus-4-7"),
     ("deepseek-v4-pro", "deepseek-v4-pro-external"),
     ("deepseek-v4-flash", "deepseek-v4-flash-external"),
+    ("MiMo-V2.5-Pro", "mimo-v2.5-pro"),
+    ("MiMo-V2.5", "mimo-v2.5"),
 ];
 
 const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
@@ -71,6 +101,9 @@ const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("claude-opus-4.7", 1_000_000),
     ("deepseek-v4-pro", 1_000_000),
     ("deepseek-v4-flash", 1_000_000),
+    (KIMI_MODEL, KIMI_MODEL_CONTEXT_WINDOW),
+    ("MiMo-V2.5-Pro", MIMO_MODEL_CONTEXT_WINDOW),
+    ("MiMo-V2.5", MIMO_MODEL_CONTEXT_WINDOW),
 ];
 
 const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
@@ -86,6 +119,9 @@ const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
     ("claude-opus-4.7", 128_000),
     ("deepseek-v4-pro", 384_000),
     ("deepseek-v4-flash", 384_000),
+    (KIMI_MODEL, KIMI_MODEL_MAX_OUTPUT_TOKENS),
+    ("MiMo-V2.5-Pro", MIMO_MODEL_MAX_OUTPUT_TOKENS),
+    ("MiMo-V2.5", MIMO_MODEL_MAX_OUTPUT_TOKENS),
 ];
 const CODEX_ACP_BASE_INSTRUCTIONS: &str = r#"You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
 
@@ -95,13 +131,179 @@ When editing files, creating files, or deleting files, you MUST use the apply_pa
 
 When you need repository context, read the relevant files first. Keep responses concise, concrete, and grounded in what you actually observed or changed."#;
 
+#[derive(Debug, Clone, Copy)]
+struct ProviderProfileDefinition {
+    family: AgentProviderFamily,
+    id: &'static str,
+    label: &'static str,
+    proxy_kind: AgentProviderProxyKind,
+    base_url: Option<&'static str>,
+    default_model: Option<&'static str>,
+    models: &'static [&'static str],
+    credential_label: Option<&'static str>,
+    requires_credential: bool,
+    help_text: &'static str,
+}
+
+const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: CODEX_DEFAULT_PROVIDER_ID,
+        label: "默认",
+        proxy_kind: AgentProviderProxyKind::CodexDefault,
+        base_url: None,
+        default_model: None,
+        models: &[],
+        credential_label: None,
+        requires_credential: false,
+        help_text: "不设置 CODEX_HOME，使用用户自己的 Codex 配置。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: VENUS_PROVIDER_ID,
+        label: "Venus",
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: None,
+        default_model: Some(VENUS_MODEL),
+        models: VENUS_CATALOG_MODELS,
+        credential_label: Some("Venus API key"),
+        requires_credential: true,
+        help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 Venus chat completions。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: BYOK_PROVIDER_ID,
+        label: BYOK_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: None,
+        default_model: None,
+        models: &[],
+        credential_label: None,
+        requires_credential: false,
+        help_text: "用户自带 Key 的共享模型池，通过本机 proxy 按模型路由。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: DEEPSEEK_PROVIDER_ID,
+        label: "DeepSeek",
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: Some(DEEPSEEK_UPSTREAM_HELP_URL),
+        default_model: Some(DEEPSEEK_MODEL),
+        models: DEEPSEEK_CATALOG_MODELS,
+        credential_label: Some("DeepSeek API key"),
+        requires_credential: true,
+        help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 DeepSeek chat completions。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: KIMI_PROVIDER_ID,
+        label: "Kimi Code",
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: Some(KIMI_CODE_OPENAI_BASE_URL),
+        default_model: Some(KIMI_MODEL),
+        models: KIMI_CATALOG_MODELS,
+        credential_label: Some("Kimi API key"),
+        requires_credential: true,
+        help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 Kimi Code Anthropic Messages。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: MIMO_PROVIDER_ID,
+        label: MIMO_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: Some(MIMO_OPENAI_BASE_URL),
+        default_model: Some(MIMO_MODEL),
+        models: MIMO_CATALOG_MODELS,
+        credential_label: Some("Xiaomi Token Plan API key"),
+        requires_credential: true,
+        help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 Xiaomi Token Plan chat completions。",
+    },
+];
+
+const CLAUDE_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: CLAUDE_WOA_PROVIDER_ID,
+        label: "WOA",
+        proxy_kind: AgentProviderProxyKind::ClaudeWoa,
+        base_url: Some("codebuddy-gateway"),
+        default_model: None,
+        models: &[],
+        credential_label: None,
+        requires_credential: false,
+        help_text: "使用 Tencent WOA 登录，并通过 Claude Agent ACP 启动会话。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: VENUS_PROVIDER_ID,
+        label: "Venus",
+        proxy_kind: AgentProviderProxyKind::CompletionToClaude,
+        base_url: None,
+        default_model: Some("claude-sonnet-4.6"),
+        models: &["claude-sonnet-4.6", "claude-opus-4.6"],
+        credential_label: Some("Venus API key"),
+        requires_credential: true,
+        help_text: "通过 completion-to-Claude 代理对接 Venus。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: BYOK_PROVIDER_ID,
+        label: BYOK_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::ClaudeNative,
+        base_url: None,
+        default_model: None,
+        models: &[],
+        credential_label: None,
+        requires_credential: false,
+        help_text: "用户自带 Key 的共享模型池，通过本机 proxy 按模型路由。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: DEEPSEEK_PROVIDER_ID,
+        label: "DeepSeek",
+        proxy_kind: AgentProviderProxyKind::CompletionToClaude,
+        base_url: Some(DEEPSEEK_UPSTREAM_HELP_URL),
+        default_model: Some(DEEPSEEK_MODEL),
+        models: DEEPSEEK_CATALOG_MODELS,
+        credential_label: Some("DeepSeek API key"),
+        requires_credential: true,
+        help_text: "通过 completion-to-Claude 代理对接 DeepSeek。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: KIMI_PROVIDER_ID,
+        label: "Kimi Code",
+        proxy_kind: AgentProviderProxyKind::ClaudeNative,
+        base_url: Some(KIMI_CODE_ANTHROPIC_BASE_URL),
+        default_model: Some(KIMI_MODEL),
+        models: KIMI_CATALOG_MODELS,
+        credential_label: Some("Kimi API key"),
+        requires_credential: true,
+        help_text: "通过 Kimi Code Anthropic-compatible Messages API 对接 Claude Agent ACP。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: MIMO_PROVIDER_ID,
+        label: MIMO_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::ClaudeNative,
+        base_url: Some(MIMO_ANTHROPIC_BASE_URL),
+        default_model: Some(MIMO_MODEL),
+        models: MIMO_CATALOG_MODELS,
+        credential_label: Some("Xiaomi Token Plan API key"),
+        requires_credential: true,
+        help_text: "通过 Xiaomi Token Plan Anthropic-compatible Messages API 对接 Claude Agent ACP。",
+    },
+];
+
 fn default_settings() -> AppSettings {
     AppSettings {
-        selected_agent: AgentCliId::Codebuddy,
+        selected_agent: AgentCliId::ClaudeAgentAcp,
         acp_port: 0,
         theme: AppTheme::Graphite,
         lsp_servers: BTreeMap::new(),
         codex_connection_mode: CodexConnectionMode::Managed,
+        selected_codex_provider_profile_id: None,
+        selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
         claude_woa: ClaudeWoaSettings::default(),
     }
 }
@@ -116,16 +318,10 @@ struct AgentCliDefinition {
 
 const AGENTS: &[AgentCliDefinition] = &[
     AgentCliDefinition {
-        id: AgentCliId::Codebuddy,
-        label: "CodeBuddy",
-        binary: "codebuddy",
-        acp_arg: "--acp",
-    },
-    AgentCliDefinition {
-        id: AgentCliId::Goose,
-        label: "goose",
-        binary: "goose",
-        acp_arg: "acp",
+        id: AgentCliId::ClaudeAgentAcp,
+        label: "Claude",
+        binary: "claude-agent-acp",
+        acp_arg: "",
     },
     AgentCliDefinition {
         id: AgentCliId::CodexAcp,
@@ -134,10 +330,10 @@ const AGENTS: &[AgentCliDefinition] = &[
         acp_arg: "",
     },
     AgentCliDefinition {
-        id: AgentCliId::ClaudeAgentAcp,
-        label: "Claude",
-        binary: "claude-agent-acp",
-        acp_arg: "",
+        id: AgentCliId::Codebuddy,
+        label: "CodeBuddy",
+        binary: "codebuddy",
+        acp_arg: "--acp",
     },
 ];
 
@@ -220,10 +416,15 @@ pub const DEFAULT_LSP_SERVERS: &[DefaultLspServerDefinition] = &[
 
 pub fn load_app_settings(paths: &AppPaths) -> AppSettings {
     let path = settings_path(paths);
-    std::fs::read_to_string(path)
+    let mut settings = std::fs::read_to_string(&path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_else(default_settings)
+        .unwrap_or_else(default_settings);
+    let migrated = migrate_app_settings(paths, &mut settings);
+    if migrated && path.exists() {
+        let _ = save_app_settings(paths, &settings);
+    }
+    settings
 }
 
 pub fn save_app_settings(paths: &AppPaths, settings: &AppSettings) -> Result<()> {
@@ -234,6 +435,60 @@ pub fn save_app_settings(paths: &AppPaths, settings: &AppSettings) -> Result<()>
     let content = serde_json::to_string_pretty(settings)?;
     std::fs::write(&path, content)
         .with_context(|| format!("failed to write app settings {}", path.display()))
+}
+
+fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+
+    if settings.selected_agent == AgentCliId::Goose {
+        settings.selected_agent = if detect_agent_with_paths(paths, AgentCliId::CodexAcp).installed
+        {
+            AgentCliId::CodexAcp
+        } else {
+            AgentCliId::Codebuddy
+        };
+        changed = true;
+    }
+
+    if settings.selected_codex_provider_profile_id.is_none() {
+        settings.selected_codex_provider_profile_id =
+            Some(infer_legacy_codex_provider_profile_id(paths, settings).to_string());
+        changed = true;
+    }
+    if settings
+        .selected_codex_provider_profile_id
+        .as_deref()
+        .is_some_and(codex_is_byok_source)
+    {
+        settings.selected_codex_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
+        changed = true;
+    }
+
+    if settings.selected_claude_provider_profile_id.is_none() {
+        settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
+        changed = true;
+    }
+    if settings
+        .selected_claude_provider_profile_id
+        .as_deref()
+        .is_some_and(claude_is_byok_source)
+    {
+        settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
+        changed = true;
+    }
+
+    changed
+}
+
+fn infer_legacy_codex_provider_profile_id(
+    paths: &AppPaths,
+    settings: &AppSettings,
+) -> &'static str {
+    if settings.codex_connection_mode == CodexConnectionMode::Default {
+        return CODEX_DEFAULT_PROVIDER_ID;
+    }
+    normalize_codex_provider(&codex_active_provider(&codex_config_path(paths)))
+        .unwrap_or(VENUS_PROVIDER_ID)
 }
 
 pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
@@ -261,6 +516,8 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         theme: existing.theme,
         lsp_servers: existing.lsp_servers,
         codex_connection_mode: existing.codex_connection_mode,
+        selected_codex_provider_profile_id: existing.selected_codex_provider_profile_id,
+        selected_claude_provider_profile_id: existing.selected_claude_provider_profile_id,
         claude_woa: existing.claude_woa,
     };
     save_app_settings(paths, &settings)?;
@@ -468,9 +725,14 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
 
     let config_path = codex_config_path(paths);
     let _ = ensure_codex_acp_env_key(&config_path);
-    codex_active_provider_key(&config_path)
-        .map(|(env_key, api_key)| vec![(env_key, api_key)])
-        .unwrap_or_default()
+    let provider_keys = codex_provider_keys(&config_path);
+    if provider_keys.is_empty() {
+        codex_active_provider_key(&config_path)
+            .map(|(env_key, api_key)| vec![(env_key, api_key)])
+            .unwrap_or_default()
+    } else {
+        provider_keys
+    }
 }
 
 pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result<()> {
@@ -478,6 +740,27 @@ pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result
         return Ok(());
     }
     let settings = load_app_settings(paths);
+    let selected_profile_id = selected_claude_provider_profile_id(&settings);
+    if selected_profile_id != CLAUDE_WOA_PROVIDER_ID {
+        if selected_profile_id == BYOK_PROVIDER_ID {
+            if !configured_claude_byok_source_keys(paths).is_empty() {
+                return Ok(());
+            }
+            anyhow::bail!("请先在 BYOK 模型池中保存至少一个 API key");
+        }
+        if provider_secret(paths, AgentProviderFamily::Claude, &selected_profile_id)
+            .map(|secret| !secret.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "请先填写并保存 {} API key",
+            profile_definition(AgentProviderFamily::Claude, &selected_profile_id)
+                .map(|profile| profile.label)
+                .unwrap_or("Claude provider")
+        );
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -494,6 +777,59 @@ pub fn is_claude_agent_acp_command(command: &str) -> bool {
 
 fn settings_path(paths: &AppPaths) -> PathBuf {
     paths.config_dir().join(SETTINGS_FILE)
+}
+
+fn provider_secrets_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir().join(PROVIDER_SECRETS_FILE)
+}
+
+fn provider_secret_key(family: AgentProviderFamily, profile_id: &str) -> String {
+    let family = match family {
+        AgentProviderFamily::Codex => "codex",
+        AgentProviderFamily::Claude => "claude",
+    };
+    format!("{family}:{profile_id}")
+}
+
+fn load_provider_secrets(paths: &AppPaths) -> BTreeMap<String, String> {
+    std::fs::read_to_string(provider_secrets_path(paths))
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_provider_secrets(paths: &AppPaths, secrets: &BTreeMap<String, String>) -> Result<()> {
+    let dir = paths.config_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create config directory {}", dir.display()))?;
+    let path = provider_secrets_path(paths);
+    let content = serde_json::to_string_pretty(secrets)?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("failed to write provider secrets {}", path.display()))
+}
+
+fn provider_secret(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    profile_id: &str,
+) -> Option<String> {
+    let mut secrets = load_provider_secrets(paths);
+    secrets.remove(&provider_secret_key(family, profile_id))
+}
+
+fn save_provider_secret(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    profile_id: &str,
+    secret: &str,
+) -> Result<()> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        anyhow::bail!("api_key cannot be empty");
+    }
+    let mut secrets = load_provider_secrets(paths);
+    secrets.insert(provider_secret_key(family, profile_id), secret.to_string());
+    save_provider_secrets(paths, &secrets)
 }
 
 pub fn codex_config_path(paths: &AppPaths) -> PathBuf {
@@ -522,7 +858,12 @@ pub fn claude_woa_token_path(paths: &AppPaths) -> PathBuf {
 
 pub fn claude_woa_settings_status(paths: &AppPaths) -> ClaudeWoaSettingsStatus {
     let settings = load_app_settings(paths);
-    crate::claude_woa::status(&managed_claude_woa_settings(paths, &settings.claude_woa))
+    let mut status =
+        crate::claude_woa::status(&managed_claude_woa_settings(paths, &settings.claude_woa));
+    let selected_profile_id = selected_claude_provider_profile_id(&settings);
+    status.selected_profile_id = selected_profile_id.clone();
+    status.profiles = provider_profiles(paths, AgentProviderFamily::Claude, &selected_profile_id);
+    status
 }
 
 pub fn save_claude_woa_config(
@@ -553,9 +894,13 @@ pub fn refresh_claude_woa_token(paths: &AppPaths) -> Result<AgentSettingsSnapsho
 
 pub fn codex_acp_settings_status(paths: &AppPaths) -> CodexAcpSettingsStatus {
     let config_path = codex_config_path(paths);
-    let connection_mode = load_app_settings(paths).codex_connection_mode;
+    let settings = load_app_settings(paths);
+    let connection_mode = settings.codex_connection_mode;
+    let selected_profile_id = selected_codex_provider_profile_id(paths, &settings);
     CodexAcpSettingsStatus {
-        provider: codex_current_provider(paths),
+        provider: selected_profile_id.clone(),
+        selected_profile_id: selected_profile_id.clone(),
+        profiles: provider_profiles(paths, AgentProviderFamily::Codex, &selected_profile_id),
         connection_mode,
         venus_key_configured: codex_venus_key_configured(&config_path),
         deepseek_key_configured: codex_deepseek_key_configured(&config_path),
@@ -564,17 +909,191 @@ pub fn codex_acp_settings_status(paths: &AppPaths) -> CodexAcpSettingsStatus {
 }
 
 pub fn codex_current_provider(paths: &AppPaths) -> String {
-    if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
-        "default".to_string()
+    let settings = load_app_settings(paths);
+    selected_codex_provider_profile_id(paths, &settings)
+}
+
+fn selected_codex_provider_profile_id(paths: &AppPaths, settings: &AppSettings) -> String {
+    let candidate = settings
+        .selected_codex_provider_profile_id
+        .as_deref()
+        .unwrap_or_else(|| infer_legacy_codex_provider_profile_id(paths, settings));
+    if codex_is_byok_source(candidate) {
+        return BYOK_PROVIDER_ID.to_string();
+    }
+    if profile_definition(AgentProviderFamily::Codex, candidate).is_some() {
+        candidate.to_string()
     } else {
-        codex_active_provider(&codex_config_path(paths))
+        infer_legacy_codex_provider_profile_id(paths, settings).to_string()
     }
 }
 
+fn selected_claude_provider_profile_id(settings: &AppSettings) -> String {
+    let candidate = settings
+        .selected_claude_provider_profile_id
+        .as_deref()
+        .unwrap_or(CLAUDE_WOA_PROVIDER_ID);
+    if claude_is_byok_source(candidate) {
+        return BYOK_PROVIDER_ID.to_string();
+    }
+    if profile_definition(AgentProviderFamily::Claude, candidate).is_some() {
+        candidate.to_string()
+    } else {
+        CLAUDE_WOA_PROVIDER_ID.to_string()
+    }
+}
+
+fn provider_profiles(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    selected_profile_id: &str,
+) -> Vec<AgentProviderProfile> {
+    profile_definitions(family)
+        .iter()
+        .map(|definition| provider_profile(paths, definition, selected_profile_id))
+        .collect()
+}
+
+fn provider_profile(
+    paths: &AppPaths,
+    definition: &ProviderProfileDefinition,
+    selected_profile_id: &str,
+) -> AgentProviderProfile {
+    let models = if definition.id == BYOK_PROVIDER_ID {
+        match definition.family {
+            AgentProviderFamily::Codex => configured_codex_byok_models(paths),
+            AgentProviderFamily::Claude => configured_claude_byok_models(paths),
+        }
+    } else {
+        definition
+            .models
+            .iter()
+            .map(|model| (*model).to_string())
+            .collect()
+    };
+    AgentProviderProfile {
+        family: definition.family,
+        id: definition.id.to_string(),
+        label: definition.label.to_string(),
+        proxy_kind: definition.proxy_kind,
+        selected: definition.id == selected_profile_id,
+        configured: provider_profile_configured(paths, definition),
+        base_url: definition.base_url.map(str::to_string),
+        default_model: definition.default_model.map(str::to_string),
+        models,
+        credential_label: definition.credential_label.map(str::to_string),
+        requires_credential: definition.requires_credential,
+        help_text: definition.help_text.to_string(),
+    }
+}
+
+fn provider_profile_configured(paths: &AppPaths, definition: &ProviderProfileDefinition) -> bool {
+    if definition.id == BYOK_PROVIDER_ID {
+        return BYOK_SOURCE_PROVIDER_IDS
+            .iter()
+            .any(|provider| byok_source_secret(paths, definition.family, provider).is_some());
+    }
+    if !definition.requires_credential {
+        return true;
+    }
+    match definition.family {
+        AgentProviderFamily::Codex => codex_provider_key(&codex_config_path(paths), definition.id)
+            .map(|key| !key.trim().is_empty())
+            .unwrap_or(false),
+        AgentProviderFamily::Claude => provider_secret(paths, definition.family, definition.id)
+            .map(|secret| !secret.trim().is_empty())
+            .unwrap_or(false),
+    }
+}
+
+fn profile_definitions(family: AgentProviderFamily) -> &'static [ProviderProfileDefinition] {
+    match family {
+        AgentProviderFamily::Codex => CODEX_PROVIDER_PROFILES,
+        AgentProviderFamily::Claude => CLAUDE_PROVIDER_PROFILES,
+    }
+}
+
+fn profile_definition(
+    family: AgentProviderFamily,
+    profile_id: &str,
+) -> Option<&'static ProviderProfileDefinition> {
+    profile_definitions(family)
+        .iter()
+        .find(|definition| definition.id == profile_id)
+}
+
 pub fn select_codex_default_mode(paths: &AppPaths) -> Result<AgentSettingsSnapshot> {
+    select_agent_provider_profile(paths, AgentProviderFamily::Codex, CODEX_DEFAULT_PROVIDER_ID)
+}
+
+pub fn select_agent_provider_profile(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    profile_id: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let normalized_profile_id = match family {
+        AgentProviderFamily::Codex if codex_is_byok_source(profile_id) => BYOK_PROVIDER_ID,
+        AgentProviderFamily::Claude if claude_is_byok_source(profile_id) => BYOK_PROVIDER_ID,
+        _ => profile_id,
+    };
+    let definition = profile_definition(family, normalized_profile_id)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported provider profile: {profile_id}"))?;
     let mut settings = load_app_settings(paths);
-    settings.codex_connection_mode = CodexConnectionMode::Default;
+    match family {
+        AgentProviderFamily::Codex => {
+            settings.selected_codex_provider_profile_id = Some(definition.id.to_string());
+            settings.codex_connection_mode =
+                if definition.proxy_kind == AgentProviderProxyKind::CodexDefault {
+                    CodexConnectionMode::Default
+                } else {
+                    CodexConnectionMode::Managed
+                };
+            if definition.id == BYOK_PROVIDER_ID {
+                write_codex_byok_channel_config(paths)?;
+            }
+            if definition.requires_credential {
+                let Some(api_key) = codex_provider_key(&codex_config_path(paths), definition.id)
+                else {
+                    save_app_settings(paths, &settings)?;
+                    return Ok(settings_snapshot(paths));
+                };
+                if !api_key.trim().is_empty() {
+                    write_codex_acp_provider_config(paths, definition.id, &api_key)?;
+                }
+            }
+        }
+        AgentProviderFamily::Claude => {
+            settings.selected_claude_provider_profile_id = Some(definition.id.to_string());
+        }
+    }
     save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn save_agent_provider_secret(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    profile_id: &str,
+    secret: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let definition = profile_definition(family, profile_id)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported provider profile: {profile_id}"))?;
+    if !definition.requires_credential {
+        anyhow::bail!("{} does not require a credential", definition.label);
+    }
+    match family {
+        AgentProviderFamily::Codex => {
+            if definition.id == VENUS_PROVIDER_ID {
+                write_codex_acp_provider_config(paths, definition.id, secret)?;
+                save_codex_managed_mode_with_profile(paths, definition.id)?;
+            } else {
+                save_codex_byok_source_secret(paths, definition.id, secret)?;
+            }
+        }
+        AgentProviderFamily::Claude => {
+            save_provider_secret(paths, family, definition.id, secret)?;
+        }
+    }
     Ok(settings_snapshot(paths))
 }
 
@@ -582,9 +1101,12 @@ pub fn save_codex_acp_venus_key(
     paths: &AppPaths,
     venus_key: &str,
 ) -> Result<AgentSettingsSnapshot> {
-    write_codex_acp_provider_config(paths, VENUS_PROVIDER_ID, venus_key)?;
-    save_codex_managed_mode(paths)?;
-    Ok(settings_snapshot(paths))
+    save_agent_provider_secret(
+        paths,
+        AgentProviderFamily::Codex,
+        VENUS_PROVIDER_ID,
+        venus_key,
+    )
 }
 
 pub fn write_codex_acp_venus_config(paths: &AppPaths, venus_key: &str) -> Result<()> {
@@ -596,8 +1118,9 @@ pub fn save_codex_acp_provider_key(
     provider: &str,
     api_key: &str,
 ) -> Result<AgentSettingsSnapshot> {
+    let provider = normalize_codex_provider(provider)?;
     write_codex_acp_provider_config(paths, provider, api_key)?;
-    save_codex_managed_mode(paths)?;
+    save_codex_managed_mode_with_profile(paths, provider)?;
     Ok(settings_snapshot(paths))
 }
 
@@ -615,17 +1138,57 @@ pub fn select_codex_acp_provider(
     }
 
     write_codex_acp_provider_config(paths, provider, &api_key)?;
-    save_codex_managed_mode(paths)?;
+    save_codex_managed_mode_with_profile(paths, provider)?;
     Ok(settings_snapshot(paths))
 }
 
-fn save_codex_managed_mode(paths: &AppPaths) -> Result<()> {
+fn save_codex_managed_mode_with_profile(paths: &AppPaths, profile_id: &str) -> Result<()> {
     let mut settings = load_app_settings(paths);
-    if settings.codex_connection_mode != CodexConnectionMode::Managed {
-        settings.codex_connection_mode = CodexConnectionMode::Managed;
-        save_app_settings(paths, &settings)?;
-    }
+    settings.codex_connection_mode = CodexConnectionMode::Managed;
+    settings.selected_codex_provider_profile_id = Some(
+        if codex_is_byok_source(profile_id) {
+            BYOK_PROVIDER_ID
+        } else {
+            profile_id
+        }
+        .to_string(),
+    );
+    save_app_settings(paths, &settings)?;
     Ok(())
+}
+
+fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
+    paths.ensure_root()?;
+    let path = codex_config_path(paths);
+    let mut doc = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+        content
+            .parse::<DocumentMut>()
+            .with_context(|| format!("failed to parse Codex config {}", path.display()))?
+    } else {
+        DocumentMut::new()
+    };
+
+    let default_model = configured_codex_byok_models(paths)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| model_slug(KIMI_MODEL).to_string());
+    doc["model"] = value(model_slug(&default_model));
+    doc["model_provider"] = value(BYOK_PROVIDER_ID);
+    doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
+    doc["model_context_window"] = value(model_context_window(&default_model));
+    doc["model_max_output_tokens"] = value(model_max_output_tokens(&default_model));
+    doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+    doc["model_catalog_json"] = value(
+        codex_model_catalog_path(paths)
+            .to_string_lossy()
+            .to_string(),
+    );
+    write_codex_byok_provider_table(&mut doc);
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+    write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)
 }
 
 pub fn write_codex_acp_provider_config(
@@ -653,7 +1216,8 @@ pub fn write_codex_acp_provider_config(
 
     let default_model = default_model_for_provider(provider);
     doc["model"] = value(default_model);
-    doc["model_provider"] = value(provider);
+    let active_provider = codex_channel_provider_for_source(provider);
+    doc["model_provider"] = value(active_provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
     doc["model_context_window"] = value(model_context_window(default_model));
     doc["model_max_output_tokens"] = value(model_max_output_tokens(default_model));
@@ -664,10 +1228,129 @@ pub fn write_codex_acp_provider_config(
             .to_string(),
     );
     write_codex_provider_table(&mut doc, provider, key);
-    write_codex_acp_model_catalog(paths, provider)?;
+    if active_provider == BYOK_PROVIDER_ID {
+        write_codex_byok_provider_table(&mut doc);
+    }
 
     std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("failed to write Codex config {}", path.display()))
+        .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+    write_codex_acp_model_catalog(paths, active_provider)
+}
+
+fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str) -> Result<()> {
+    let provider = normalize_codex_provider(provider)?;
+    if provider == VENUS_PROVIDER_ID || provider == BYOK_PROVIDER_ID {
+        anyhow::bail!("{} is not a BYOK model source", provider_label(provider));
+    }
+    let key = api_key.trim();
+    if key.is_empty() {
+        anyhow::bail!("api_key cannot be empty");
+    }
+
+    paths.ensure_root()?;
+    let path = codex_config_path(paths);
+    let mut doc = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+        content
+            .parse::<DocumentMut>()
+            .with_context(|| format!("failed to parse Codex config {}", path.display()))?
+    } else {
+        DocumentMut::new()
+    };
+
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .and_then(|provider| normalize_codex_provider(provider).ok())
+        .unwrap_or(VENUS_PROVIDER_ID);
+
+    write_codex_provider_table(&mut doc, provider, key);
+    write_codex_byok_provider_table(&mut doc);
+
+    if active_provider == BYOK_PROVIDER_ID || codex_is_byok_source(active_provider) {
+        doc["model_provider"] = value(BYOK_PROVIDER_ID);
+        let active_model = doc
+            .get("model")
+            .and_then(|item| item.as_str())
+            .unwrap_or_else(|| default_model_for_provider(provider))
+            .to_string();
+        if doc.get("preferred_auth_method").is_none() {
+            doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
+        }
+        if doc.get("model_context_window").is_none() {
+            doc["model_context_window"] = value(model_context_window(&active_model));
+        }
+        if doc.get("model_max_output_tokens").is_none() {
+            doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model));
+        }
+        if doc.get("model_reasoning_effort").is_none() {
+            doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+        }
+        if doc.get("model_catalog_json").is_none() {
+            doc["model_catalog_json"] = value(
+                codex_model_catalog_path(paths)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+    if active_provider == BYOK_PROVIDER_ID || codex_is_byok_source(active_provider) {
+        write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)?;
+    }
+    Ok(())
+}
+
+fn codex_channel_provider_for_source(provider: &str) -> &'static str {
+    if provider == VENUS_PROVIDER_ID {
+        VENUS_PROVIDER_ID
+    } else {
+        BYOK_PROVIDER_ID
+    }
+}
+
+fn codex_is_byok_source(provider: &str) -> bool {
+    BYOK_SOURCE_PROVIDER_IDS.contains(&provider)
+}
+
+fn claude_is_byok_source(provider: &str) -> bool {
+    BYOK_SOURCE_PROVIDER_IDS.contains(&provider)
+}
+
+fn configured_codex_byok_models(paths: &AppPaths) -> Vec<String> {
+    let mut models = Vec::new();
+    let config_path = codex_config_path(paths);
+    for provider in BYOK_SOURCE_PROVIDER_IDS {
+        if codex_provider_key(&config_path, provider)
+            .filter(|key| !key.trim().is_empty())
+            .is_none()
+        {
+            continue;
+        }
+        for model in catalog_models_for_provider(provider) {
+            let model = (*model).to_string();
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
+
+fn byok_source_secret(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    provider: &str,
+) -> Option<String> {
+    provider_secret(paths, family, provider)
+        .filter(|secret| !secret.trim().is_empty())
+        .or_else(|| {
+            codex_provider_key(&codex_config_path(paths), provider)
+                .filter(|secret| !secret.trim().is_empty())
+        })
 }
 
 fn codex_venus_key_configured(path: &Path) -> bool {
@@ -696,8 +1379,32 @@ fn codex_active_provider(path: &Path) -> String {
         .to_string()
 }
 
+fn codex_provider_keys(path: &Path) -> Vec<(String, String)> {
+    let mut providers = Vec::new();
+    if codex_active_provider(path) == BYOK_PROVIDER_ID {
+        providers.push(BYOK_PROVIDER_ID);
+    }
+    providers.extend([
+        VENUS_PROVIDER_ID,
+        DEEPSEEK_PROVIDER_ID,
+        KIMI_PROVIDER_ID,
+        MIMO_PROVIDER_ID,
+    ]);
+    providers
+        .into_iter()
+        .filter_map(|provider| {
+            codex_provider_key(path, provider)
+                .filter(|key| !key.trim().is_empty())
+                .map(|key| (env_key_for_provider(provider).to_string(), key))
+        })
+        .collect()
+}
+
 fn codex_active_provider_key(path: &Path) -> Option<(String, String)> {
     let provider = codex_active_provider(path);
+    if provider == BYOK_PROVIDER_ID {
+        return None;
+    }
     let env_key = env_key_for_provider(&provider).to_string();
     codex_provider_key(path, &provider).map(|key| (env_key, key))
 }
@@ -728,6 +1435,45 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         .and_then(|item| item.as_str())
         .and_then(|provider| normalize_codex_provider(provider).ok())
         .unwrap_or(VENUS_PROVIDER_ID);
+    if provider == BYOK_PROVIDER_ID || codex_is_byok_source(provider) {
+        let mut changed = false;
+        if provider != BYOK_PROVIDER_ID {
+            doc["model_provider"] = value(BYOK_PROVIDER_ID);
+            changed = true;
+        }
+        write_codex_byok_provider_table(&mut doc);
+        let active_model = doc
+            .get("model")
+            .and_then(|item| item.as_str())
+            .unwrap_or_else(|| default_model_for_provider(provider))
+            .to_string();
+        let active_model_slug = model_slug(&active_model).to_string();
+        if active_model_slug != active_model {
+            doc["model"] = value(active_model_slug.clone());
+            changed = true;
+        }
+        if !provider_field_eq(&doc, provider, "base_url", &venus_base_url()) {
+            doc["model_providers"][provider]["base_url"] = value(venus_base_url());
+            changed = true;
+        }
+        if doc.get("model_context_window").is_none() {
+            doc["model_context_window"] = value(model_context_window(&active_model_slug));
+            changed = true;
+        }
+        if doc.get("model_max_output_tokens").is_none() {
+            doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model_slug));
+            changed = true;
+        }
+        if let Some(parent) = path.parent() {
+            let paths = AppPaths::from_root(parent);
+            let _ = write_codex_acp_model_catalog(&paths, BYOK_PROVIDER_ID);
+        }
+        if changed {
+            std::fs::write(path, doc.to_string())
+                .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+        }
+        return Ok(());
+    }
     let Some(api_key) = codex_provider_key_from_doc(&doc, provider) else {
         return Ok(());
     };
@@ -832,35 +1578,70 @@ fn write_codex_provider_table(doc: &mut DocumentMut, provider: &str, api_key: &s
     provider_table.insert("api_key", value(api_key));
 }
 
+fn write_codex_byok_provider_table(doc: &mut DocumentMut) {
+    if doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .is_none()
+    {
+        doc.insert("model_providers", Item::Table(Table::new()));
+    }
+    let providers = doc["model_providers"]
+        .as_table_mut()
+        .expect("model_providers should be a table");
+    providers.insert(BYOK_PROVIDER_ID, Item::Table(Table::new()));
+    let provider_table = providers
+        .get_mut(BYOK_PROVIDER_ID)
+        .and_then(|item| item.as_table_mut())
+        .expect("byok provider should be a table");
+    provider_table.insert("name", value(BYOK_PROVIDER_NAME));
+    provider_table.insert("base_url", value(base_url_for_provider(BYOK_PROVIDER_ID)));
+    provider_table.insert("wire_api", value(wire_api_for_provider(BYOK_PROVIDER_ID)));
+    provider_table.insert("env_key", value(BYOK_API_KEY_ENV));
+    provider_table.insert("api_key", value("byok"));
+}
+
 fn venus_base_url() -> String {
     acp_core::codex_api_proxy_base_url()
 }
 
 fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
+        BYOK_PROVIDER_ID => Ok(BYOK_PROVIDER_ID),
         VENUS_PROVIDER_ID => Ok(VENUS_PROVIDER_ID),
         DEEPSEEK_PROVIDER_ID => Ok(DEEPSEEK_PROVIDER_ID),
+        KIMI_PROVIDER_ID | "kimi" | "kimi-code" => Ok(KIMI_PROVIDER_ID),
+        MIMO_PROVIDER_ID | "mimo" | "xiaomi-mimo" => Ok(MIMO_PROVIDER_ID),
         other => anyhow::bail!("Unsupported Codex provider: {other}"),
     }
 }
 
 fn default_model_for_provider(provider: &str) -> &'static str {
     match provider {
+        BYOK_PROVIDER_ID => model_slug(VENUS_MODEL),
         DEEPSEEK_PROVIDER_ID => model_slug(DEEPSEEK_MODEL),
+        KIMI_PROVIDER_ID => model_slug(KIMI_MODEL),
+        MIMO_PROVIDER_ID => model_slug(MIMO_MODEL),
         _ => model_slug(VENUS_MODEL),
     }
 }
 
 fn provider_name(provider: &str) -> &'static str {
     match provider {
+        BYOK_PROVIDER_ID => BYOK_PROVIDER_NAME,
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_PROVIDER_NAME,
+        KIMI_PROVIDER_ID => KIMI_PROVIDER_NAME,
+        MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
         _ => VENUS_PROVIDER_NAME,
     }
 }
 
 fn provider_label(provider: &str) -> &'static str {
     match provider {
+        BYOK_PROVIDER_ID => "BYOK",
         DEEPSEEK_PROVIDER_ID => "DeepSeek",
+        KIMI_PROVIDER_ID => "Kimi Code",
+        MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
         _ => "Venus",
     }
 }
@@ -871,13 +1652,17 @@ fn wire_api_for_provider(_provider: &str) -> &'static str {
 
 fn env_key_for_provider(provider: &str) -> &'static str {
     match provider {
+        BYOK_PROVIDER_ID => BYOK_API_KEY_ENV,
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_API_KEY_ENV,
+        KIMI_PROVIDER_ID => KIMI_API_KEY_ENV,
+        MIMO_PROVIDER_ID => MIMO_API_KEY_ENV,
         _ => VENUS_API_KEY_ENV,
     }
 }
 
 fn base_url_for_provider(provider: &str) -> String {
     match provider {
+        BYOK_PROVIDER_ID => venus_base_url(),
         DEEPSEEK_PROVIDER_ID => venus_base_url(),
         _ => venus_base_url(),
     }
@@ -889,7 +1674,8 @@ fn codex_model_catalog_path(paths: &AppPaths) -> PathBuf {
 
 fn write_codex_acp_model_catalog(paths: &AppPaths, provider: &str) -> Result<()> {
     let path = codex_model_catalog_path(paths);
-    let models = catalog_models_for_provider(provider)
+    let catalog_models = catalog_models_for_provider_with_paths(paths, provider);
+    let models = catalog_models
         .iter()
         .enumerate()
         .map(|(priority, model)| codex_acp_model_catalog_entry(model, provider, priority))
@@ -902,9 +1688,31 @@ fn write_codex_acp_model_catalog(paths: &AppPaths, provider: &str) -> Result<()>
         .with_context(|| format!("failed to write Codex model catalog {}", path.display()))
 }
 
+fn catalog_models_for_provider_with_paths(paths: &AppPaths, provider: &str) -> Vec<&'static str> {
+    if provider != BYOK_PROVIDER_ID {
+        return catalog_models_for_provider(provider).to_vec();
+    }
+    let config_path = codex_config_path(paths);
+    let mut models = Vec::new();
+    for provider in [DEEPSEEK_PROVIDER_ID, KIMI_PROVIDER_ID, MIMO_PROVIDER_ID] {
+        if codex_provider_key(&config_path, provider)
+            .filter(|key| !key.trim().is_empty())
+            .is_some()
+        {
+            models.extend(catalog_models_for_provider(provider));
+        }
+    }
+    if models.is_empty() {
+        models.push(VENUS_MODEL);
+    }
+    models
+}
+
 fn catalog_models_for_provider(provider: &str) -> &'static [&'static str] {
     match provider {
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_CATALOG_MODELS,
+        KIMI_PROVIDER_ID => KIMI_CATALOG_MODELS,
+        MIMO_PROVIDER_ID => MIMO_CATALOG_MODELS,
         _ => VENUS_CATALOG_MODELS,
     }
 }
@@ -917,7 +1725,7 @@ fn codex_acp_model_catalog_entry(
     let slug = model_slug(model);
     let context_window = model_context_window(model);
     let max_output_tokens = model_max_output_tokens(model);
-    let is_deepseek = provider == DEEPSEEK_PROVIDER_ID;
+    let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
     json!({
         "slug": slug,
         "display_name": model,
@@ -1024,10 +1832,14 @@ fn command_from_binary(binary: &str, acp_arg: &str) -> String {
 
 fn claude_agent_acp_command(paths: &AppPaths) -> String {
     let settings = load_app_settings(paths);
-    let token_path = claude_woa_token_path(paths);
     let binary = claude_agent_acp_detected_path(paths)
         .map(|path| shell_quote_path(&path))
         .unwrap_or_else(|| binary_name("claude-agent-acp"));
+    let selected_profile_id = selected_claude_provider_profile_id(&settings);
+    if selected_profile_id != CLAUDE_WOA_PROVIDER_ID {
+        return binary;
+    }
+    let token_path = claude_woa_token_path(paths);
     format!(
         "{} --woa --woa-channel {} --woa-token-path {}",
         binary,
@@ -1038,14 +1850,146 @@ fn claude_agent_acp_command(paths: &AppPaths) -> String {
 
 fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     let settings = load_app_settings(paths);
-    let available_models = sanitize_claude_available_models(settings.claude_woa.available_models);
+    let selected_profile_id = selected_claude_provider_profile_id(&settings);
+    let selected_profile = profile_definition(AgentProviderFamily::Claude, &selected_profile_id);
+    let mut available_models = if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
+        sanitize_claude_available_models(settings.claude_woa.available_models)
+    } else if selected_profile_id == BYOK_PROVIDER_ID {
+        configured_claude_byok_models(paths)
+    } else {
+        selected_profile
+            .map(|profile| {
+                profile
+                    .models
+                    .iter()
+                    .map(|model| (*model).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    for model in configured_claude_byok_models(paths) {
+        if !available_models.contains(&model) {
+            available_models.push(model);
+        }
+    }
+    let mut env = Vec::new();
     if available_models.is_empty() {
-        return Vec::new();
+    } else if let Ok(value) = serde_json::to_string(&claude_model_config(&available_models)) {
+        env.push(("CLAUDE_MODEL_CONFIG".to_string(), value));
     }
 
-    match serde_json::to_string(&json!({ "availableModels": available_models })) {
-        Ok(value) => vec![("CLAUDE_MODEL_CONFIG".to_string(), value)],
-        Err(_) => Vec::new(),
+    if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
+        return env;
+    }
+
+    if selected_profile_id == BYOK_PROVIDER_ID {
+        let configured_sources = configured_claude_byok_source_keys(paths);
+        for (provider, key) in &configured_sources {
+            acp_core::ensure_codex_api_proxy(provider, key);
+        }
+        if let Some(default_model) = available_models.first() {
+            env.push(("ANTHROPIC_MODEL".to_string(), default_model.clone()));
+        }
+        env.push(("ANTHROPIC_API_KEY".to_string(), "byok".to_string()));
+        env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), "byok".to_string()));
+        env.push(("AUTH_TOKEN".to_string(), "byok".to_string()));
+        env.push((
+            "ANTHROPIC_BASE_URL".to_string(),
+            claude_provider_proxy_base_url(),
+        ));
+        env.push((
+            "CLAUDE_PROVIDER_PROXY_KIND".to_string(),
+            "byok_proxy".to_string(),
+        ));
+        return env;
+    }
+
+    let Some(profile) = selected_profile else {
+        return env;
+    };
+    if let Some(secret) = provider_secret(paths, AgentProviderFamily::Claude, profile.id) {
+        env.push(("ANTHROPIC_API_KEY".to_string(), secret.clone()));
+        env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), secret.clone()));
+        env.push(("AUTH_TOKEN".to_string(), secret));
+    }
+    if let Some(base_url) = profile.base_url {
+        env.push(("ANTHROPIC_BASE_URL".to_string(), base_url.to_string()));
+    }
+    if let Some(model) = profile.default_model {
+        env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
+    }
+    env.push((
+        "CLAUDE_PROVIDER_PROXY_KIND".to_string(),
+        claude_proxy_kind_env(profile.proxy_kind).to_string(),
+    ));
+    env
+}
+
+fn configured_claude_byok_models(paths: &AppPaths) -> Vec<String> {
+    let mut models = Vec::new();
+    for profile in CLAUDE_PROVIDER_PROFILES.iter().filter(|profile| {
+        profile.id != CLAUDE_WOA_PROVIDER_ID
+            && profile.id != VENUS_PROVIDER_ID
+            && profile.id != BYOK_PROVIDER_ID
+            && profile.requires_credential
+    }) {
+        if byok_source_secret(paths, AgentProviderFamily::Claude, profile.id).is_none() {
+            continue;
+        }
+        for model in profile.models {
+            let model = (*model).to_string();
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+    }
+    models
+}
+
+fn configured_claude_byok_source_keys(paths: &AppPaths) -> Vec<(&'static str, String)> {
+    BYOK_SOURCE_PROVIDER_IDS
+        .iter()
+        .filter_map(|provider| {
+            byok_source_secret(paths, AgentProviderFamily::Claude, provider)
+                .map(|secret| (*provider, secret))
+        })
+        .collect()
+}
+
+fn claude_model_config(available_models: &[String]) -> serde_json::Value {
+    let model_overrides = available_models
+        .iter()
+        .filter_map(|model| {
+            let slug = model_slug(model);
+            (slug != model).then(|| (model.clone(), serde_json::Value::String(slug.to_string())))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut config = serde_json::Map::new();
+    config.insert("availableModels".to_string(), json!(available_models));
+    config.insert("preserveDefaultModel".to_string(), json!(false));
+    if !model_overrides.is_empty() {
+        config.insert(
+            "modelOverrides".to_string(),
+            serde_json::Value::Object(model_overrides),
+        );
+    }
+    serde_json::Value::Object(config)
+}
+
+fn claude_provider_proxy_base_url() -> String {
+    let base_url = acp_core::codex_api_proxy_base_url();
+    base_url
+        .strip_suffix("/v1")
+        .unwrap_or(base_url.as_str())
+        .to_string()
+}
+
+fn claude_proxy_kind_env(proxy_kind: AgentProviderProxyKind) -> &'static str {
+    match proxy_kind {
+        AgentProviderProxyKind::ClaudeNative => "claude_native",
+        AgentProviderProxyKind::CompletionToClaude => "completion_to_claude",
+        AgentProviderProxyKind::ClaudeWoa => "claude_woa",
+        _ => "unsupported",
     }
 }
 
@@ -1214,14 +2158,18 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn missing_settings_default_to_codebuddy() {
+    fn missing_settings_default_to_claude_byok() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
         let settings = load_app_settings(&paths);
 
-        assert_eq!(settings.selected_agent, AgentCliId::Codebuddy);
+        assert_eq!(settings.selected_agent, AgentCliId::ClaudeAgentAcp);
         assert_eq!(settings.theme, AppTheme::Graphite);
+        assert_eq!(
+            settings.selected_claude_provider_profile_id.as_deref(),
+            Some(BYOK_PROVIDER_ID)
+        );
         assert_eq!(
             settings.claude_woa.channel,
             workspace_model::ClaudeWoaChannel::Default
@@ -1235,11 +2183,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
         let settings = AppSettings {
-            selected_agent: AgentCliId::Goose,
+            selected_agent: AgentCliId::Codebuddy,
             acp_port: 0,
             theme: AppTheme::Midnight,
             lsp_servers: BTreeMap::new(),
             codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(VENUS_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(CLAUDE_WOA_PROVIDER_ID.to_string()),
             claude_woa: ClaudeWoaSettings::default(),
         };
 
@@ -1250,7 +2200,103 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_default_to_codebuddy() {
+    fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let settings = AppSettings {
+            selected_agent: AgentCliId::Goose,
+            acp_port: 0,
+            theme: AppTheme::Midnight,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: None,
+            selected_claude_provider_profile_id: None,
+            claude_woa: ClaudeWoaSettings::default(),
+        };
+
+        save_app_settings(&paths, &settings).unwrap();
+        let loaded = load_app_settings(&paths);
+
+        assert_eq!(loaded.selected_agent, AgentCliId::Codebuddy);
+        assert_eq!(
+            loaded.selected_codex_provider_profile_id.as_deref(),
+            Some(VENUS_PROVIDER_ID)
+        );
+        assert_eq!(
+            loaded.selected_claude_provider_profile_id.as_deref(),
+            Some(BYOK_PROVIDER_ID)
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_omits_goose_and_lists_provider_profiles() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let snapshot = settings_snapshot(&paths);
+
+        assert!(
+            !snapshot
+                .agents
+                .iter()
+                .any(|agent| agent.id == AgentCliId::Goose)
+        );
+        assert_eq!(
+            snapshot.agents.first().map(|agent| agent.id),
+            Some(AgentCliId::ClaudeAgentAcp)
+        );
+        assert!(
+            snapshot
+                .agents
+                .first()
+                .map(|agent| agent.selected)
+                .unwrap_or(false)
+        );
+        assert_eq!(snapshot.claude_woa.selected_profile_id, BYOK_PROVIDER_ID);
+        assert_eq!(snapshot.codex_acp.profiles.len(), 6);
+        assert_eq!(snapshot.claude_woa.profiles.len(), 6);
+        assert!(snapshot.codex_acp.profiles.iter().any(|profile| {
+            profile.id == KIMI_PROVIDER_ID
+                && profile.proxy_kind == AgentProviderProxyKind::CompletionToResponses
+                && profile.default_model.as_deref() == Some(KIMI_MODEL)
+        }));
+        assert!(snapshot.codex_acp.profiles.iter().any(|profile| {
+            profile.id == MIMO_PROVIDER_ID
+                && profile.label == MIMO_PROVIDER_NAME
+                && profile.proxy_kind == AgentProviderProxyKind::CompletionToResponses
+                && profile.base_url.as_deref() == Some(MIMO_OPENAI_BASE_URL)
+                && profile
+                    .models
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    == MIMO_CATALOG_MODELS
+        }));
+        assert!(snapshot.claude_woa.profiles.iter().any(|profile| {
+            profile.id == KIMI_PROVIDER_ID
+                && profile.proxy_kind == AgentProviderProxyKind::ClaudeNative
+                && profile.base_url.as_deref() == Some(KIMI_CODE_ANTHROPIC_BASE_URL)
+        }));
+        assert!(snapshot.claude_woa.profiles.iter().any(|profile| {
+            profile.id == MIMO_PROVIDER_ID
+                && profile.proxy_kind == AgentProviderProxyKind::ClaudeNative
+                && profile.base_url.as_deref() == Some(MIMO_ANTHROPIC_BASE_URL)
+        }));
+    }
+
+    #[test]
+    fn unsupported_provider_profile_is_rejected() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let error = select_agent_provider_profile(&paths, AgentProviderFamily::Codex, "missing")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Unsupported provider profile"));
+    }
+
+    #[test]
+    fn invalid_settings_default_to_claude_byok() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
         std::fs::create_dir_all(paths.config_dir()).unwrap();
@@ -1258,37 +2304,38 @@ mod tests {
 
         let settings = load_app_settings(&paths);
 
-        assert_eq!(settings.selected_agent, AgentCliId::Codebuddy);
+        assert_eq!(settings.selected_agent, AgentCliId::ClaudeAgentAcp);
+        assert_eq!(
+            settings.selected_claude_provider_profile_id.as_deref(),
+            Some(BYOK_PROVIDER_ID)
+        );
         assert_eq!(settings.theme, AppTheme::Graphite);
     }
 
     #[test]
     fn command_for_agent_uses_selected_binary_name() {
         let codebuddy = command_for_agent(AgentCliId::Codebuddy).unwrap();
-        let goose = command_for_agent(AgentCliId::Goose).unwrap();
         let codex_acp = command_for_agent(AgentCliId::CodexAcp).unwrap();
         let claude_agent_acp = command_for_agent(AgentCliId::ClaudeAgentAcp).unwrap();
 
         assert!(codebuddy.to_lowercase().contains("codebuddy"));
-        assert!(goose.to_lowercase().contains("goose"));
         assert!(codex_acp.to_lowercase().contains("codex-acp"));
         assert!(claude_agent_acp.to_lowercase().contains("claude-agent-acp"));
         assert!(codebuddy.ends_with(" --acp"));
-        assert!(goose.ends_with(" acp"));
         assert!(!codex_acp.ends_with(' '));
+        assert!(command_for_agent(AgentCliId::Goose).is_none());
     }
 
     #[test]
     fn command_for_agent_label_resolves_persisted_labels() {
-        let goose = command_for_agent_label("goose").unwrap();
         let codebuddy = command_for_agent_label("CodeBuddy").unwrap();
         let codex_acp = command_for_agent_label("codex-acp").unwrap();
         let claude_agent_acp = command_for_agent_label("Claude").unwrap();
 
-        assert!(goose.to_lowercase().contains("goose"));
         assert!(codebuddy.to_lowercase().contains("codebuddy"));
         assert!(codex_acp.to_lowercase().contains("codex-acp"));
         assert!(claude_agent_acp.to_lowercase().contains("claude-agent-acp"));
+        assert!(command_for_agent_label("goose").is_none());
     }
 
     #[test]
@@ -1364,6 +2411,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
         let token_path = claude_woa_token_path(&paths);
+        select_agent_provider_profile(&paths, AgentProviderFamily::Claude, CLAUDE_WOA_PROVIDER_ID)
+            .unwrap();
         save_claude_woa_config(
             &paths,
             workspace_model::ClaudeWoaConfigInput {
@@ -1387,6 +2436,8 @@ mod tests {
     fn claude_agent_acp_env_includes_custom_model_list() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        select_agent_provider_profile(&paths, AgentProviderFamily::Claude, CLAUDE_WOA_PROVIDER_ID)
+            .unwrap();
         save_claude_woa_config(
             &paths,
             workspace_model::ClaudeWoaConfigInput {
@@ -1452,7 +2503,7 @@ mod tests {
         let status = codex_acp_settings_status(&paths);
 
         assert!(command.starts_with("CODEX_HOME="));
-        assert_eq!(status.provider, DEEPSEEK_PROVIDER_ID);
+        assert_eq!(status.provider, BYOK_PROVIDER_ID);
         assert_eq!(status.connection_mode, CodexConnectionMode::Managed);
     }
 
@@ -1494,6 +2545,8 @@ mod tests {
                 theme: AppTheme::KodexDark,
                 lsp_servers: BTreeMap::new(),
                 codex_connection_mode: CodexConnectionMode::Managed,
+                selected_codex_provider_profile_id: Some(VENUS_PROVIDER_ID.to_string()),
+                selected_claude_provider_profile_id: Some(CLAUDE_WOA_PROVIDER_ID.to_string()),
                 claude_woa: ClaudeWoaSettings::default(),
             },
         )
@@ -1543,9 +2596,11 @@ mod tests {
             doc["model_providers"][VENUS_PROVIDER_ID]["name"].as_str(),
             Some(VENUS_PROVIDER_NAME)
         );
-        assert_eq!(
-            doc["model_providers"][VENUS_PROVIDER_ID]["base_url"].as_str(),
-            Some(venus_base_url().as_str())
+        assert!(
+            doc["model_providers"][VENUS_PROVIDER_ID]["base_url"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("http://127.0.0.1:")
         );
         assert_eq!(
             doc["model_catalog_json"].as_str(),
@@ -1601,8 +2656,8 @@ mod tests {
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         assert!(content.contains("[model_providers.deepseek]"));
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(DEEPSEEK_MODEL));
-        assert_eq!(doc["model_provider"].as_str(), Some(DEEPSEEK_PROVIDER_ID));
+        assert_eq!(doc["model"].as_str(), Some(model_slug(DEEPSEEK_MODEL)));
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
         assert_eq!(
             doc["model_max_output_tokens"].as_integer(),
             Some(model_max_output_tokens(DEEPSEEK_MODEL))
@@ -1611,9 +2666,11 @@ mod tests {
             doc["model_providers"][DEEPSEEK_PROVIDER_ID]["name"].as_str(),
             Some(DEEPSEEK_PROVIDER_NAME)
         );
-        assert_eq!(
-            doc["model_providers"][DEEPSEEK_PROVIDER_ID]["base_url"].as_str(),
-            Some(venus_base_url().as_str())
+        assert!(
+            doc["model_providers"][DEEPSEEK_PROVIDER_ID]["base_url"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("http://127.0.0.1:")
         );
         assert_eq!(
             doc["model_providers"][DEEPSEEK_PROVIDER_ID]["wire_api"].as_str(),
@@ -1635,7 +2692,10 @@ mod tests {
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(slugs, vec!["deepseek-v4-pro", "deepseek-v4-flash"]);
+        assert_eq!(
+            slugs,
+            vec!["deepseek-v4-pro-external", "deepseek-v4-flash-external"]
+        );
         assert_eq!(
             catalog["models"][0]["input_modalities"].as_array().unwrap(),
             &vec![serde_json::Value::String("text".to_string())]
@@ -1656,9 +2716,249 @@ mod tests {
             );
         }
         let status = codex_acp_settings_status(&paths);
-        assert_eq!(status.provider, DEEPSEEK_PROVIDER_ID);
+        assert_eq!(status.provider, BYOK_PROVIDER_ID);
         assert!(!status.venus_key_configured);
         assert!(status.deepseek_key_configured);
+    }
+
+    #[test]
+    fn codex_provider_profiles_generate_expected_config() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        select_agent_provider_profile(
+            &paths,
+            AgentProviderFamily::Codex,
+            CODEX_DEFAULT_PROVIDER_ID,
+        )
+        .unwrap();
+        let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+        assert!(!command.starts_with("CODEX_HOME="));
+
+        for (provider, env_key, model) in [
+            (
+                VENUS_PROVIDER_ID,
+                VENUS_API_KEY_ENV,
+                model_slug(VENUS_MODEL),
+            ),
+            (
+                DEEPSEEK_PROVIDER_ID,
+                DEEPSEEK_API_KEY_ENV,
+                model_slug(DEEPSEEK_MODEL),
+            ),
+            (KIMI_PROVIDER_ID, KIMI_API_KEY_ENV, model_slug(KIMI_MODEL)),
+            (MIMO_PROVIDER_ID, MIMO_API_KEY_ENV, model_slug(MIMO_MODEL)),
+        ] {
+            let secret = format!("{provider}-secret");
+            let snapshot =
+                save_agent_provider_secret(&paths, AgentProviderFamily::Codex, provider, &secret)
+                    .unwrap();
+            assert!(
+                snapshot
+                    .codex_acp
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == provider && profile.configured)
+            );
+            if provider == VENUS_PROVIDER_ID {
+                assert_eq!(snapshot.codex_acp.selected_profile_id, provider);
+            } else {
+                assert_ne!(snapshot.codex_acp.selected_profile_id, provider);
+                let snapshot =
+                    select_agent_provider_profile(&paths, AgentProviderFamily::Codex, provider)
+                        .unwrap();
+                assert_eq!(snapshot.codex_acp.selected_profile_id, BYOK_PROVIDER_ID);
+            }
+
+            let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+            let doc = content.parse::<DocumentMut>().unwrap();
+            if provider == VENUS_PROVIDER_ID {
+                assert_eq!(doc["model"].as_str(), Some(model));
+            } else {
+                let configured_models = configured_codex_byok_models(&paths)
+                    .into_iter()
+                    .map(|model| model_slug(&model).to_string())
+                    .collect::<Vec<_>>();
+                assert!(configured_models.contains(&doc["model"].as_str().unwrap().to_string()));
+            }
+            let expected_channel_provider = codex_channel_provider_for_source(provider);
+            assert_eq!(
+                doc["model_provider"].as_str(),
+                Some(expected_channel_provider)
+            );
+            if expected_channel_provider == BYOK_PROVIDER_ID {
+                assert_eq!(
+                    doc["model_providers"][BYOK_PROVIDER_ID]["base_url"].as_str(),
+                    Some(venus_base_url().as_str())
+                );
+            }
+            assert_eq!(
+                doc["model_providers"][provider]["env_key"].as_str(),
+                Some(env_key)
+            );
+            assert_eq!(
+                doc["model_providers"][provider]["wire_api"].as_str(),
+                Some(VENUS_WIRE_API)
+            );
+            assert_eq!(
+                doc["model_providers"][provider]["api_key"].as_str(),
+                Some(secret.as_str())
+            );
+            if provider == KIMI_PROVIDER_ID && doc["model"].as_str() == Some(KIMI_MODEL) {
+                assert_eq!(doc["model"].as_str(), Some(KIMI_MODEL));
+                assert_eq!(
+                    doc["model_context_window"].as_integer(),
+                    Some(KIMI_MODEL_CONTEXT_WINDOW)
+                );
+                assert_eq!(
+                    doc["model_max_output_tokens"].as_integer(),
+                    Some(KIMI_MODEL_MAX_OUTPUT_TOKENS)
+                );
+            }
+            let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+            let env = agent_env_for_command(&command, &paths);
+            assert!(env.contains(&(env_key.to_string(), secret)));
+        }
+    }
+
+    #[test]
+    fn saving_codex_byok_source_key_preserves_selected_byok_channel() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Codex,
+            DEEPSEEK_PROVIDER_ID,
+            "deepseek-secret",
+        )
+        .unwrap();
+        select_agent_provider_profile(&paths, AgentProviderFamily::Codex, DEEPSEEK_PROVIDER_ID)
+            .unwrap();
+
+        let snapshot = save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Codex,
+            MIMO_PROVIDER_ID,
+            "mimo-secret",
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.codex_acp.selected_profile_id, BYOK_PROVIDER_ID);
+        assert!(
+            snapshot
+                .codex_acp
+                .profiles
+                .iter()
+                .any(|profile| profile.id == MIMO_PROVIDER_ID && profile.configured)
+        );
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(model_slug(DEEPSEEK_MODEL)));
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
+        assert_eq!(
+            doc["model_providers"][MIMO_PROVIDER_ID]["api_key"].as_str(),
+            Some("mimo-secret")
+        );
+
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&model_slug(DEEPSEEK_MODEL)));
+        assert!(slugs.contains(&model_slug(MIMO_MODEL)));
+    }
+
+    #[test]
+    fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        save_app_settings(
+            &paths,
+            &AppSettings {
+                selected_agent: AgentCliId::CodexAcp,
+                acp_port: 0,
+                theme: AppTheme::KodexDark,
+                lsp_servers: BTreeMap::new(),
+                codex_connection_mode: CodexConnectionMode::Managed,
+                selected_codex_provider_profile_id: Some(KIMI_PROVIDER_ID.to_string()),
+                selected_claude_provider_profile_id: Some(CLAUDE_WOA_PROVIDER_ID.to_string()),
+                claude_woa: ClaudeWoaSettings::default(),
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            codex_config_path(&paths),
+            format!(
+                r#"
+model = "{kimi_model}"
+model_provider = "{kimi_provider}"
+preferred_auth_method = "apikey"
+model_catalog_json = "{catalog_path}"
+
+[model_providers.{deepseek_provider}]
+name = "DeepSeek"
+base_url = "http://127.0.0.1:17851/v1"
+wire_api = "responses"
+env_key = "DEEPSEEK_API_KEY"
+api_key = "deepseek-secret"
+
+[model_providers.{kimi_provider}]
+name = "Kimi Code"
+base_url = "http://127.0.0.1:17851/v1"
+wire_api = "responses"
+env_key = "KIMI_CODE_API_KEY"
+api_key = "kimi-secret"
+
+[model_providers.{mimo_provider}]
+name = "Xiaomi Token Plan"
+base_url = "http://127.0.0.1:17851/v1"
+wire_api = "responses"
+env_key = "XIAOMI_MIMO_API_KEY"
+api_key = "mimo-secret"
+"#,
+                kimi_model = KIMI_MODEL,
+                kimi_provider = KIMI_PROVIDER_ID,
+                catalog_path = codex_model_catalog_path(&paths).to_string_lossy(),
+                deepseek_provider = DEEPSEEK_PROVIDER_ID,
+                mimo_provider = MIMO_PROVIDER_ID,
+            ),
+        )
+        .unwrap();
+
+        let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+
+        assert!(env.contains(&(BYOK_API_KEY_ENV.to_string(), "byok".to_string())));
+        assert!(env.contains(&(
+            DEEPSEEK_API_KEY_ENV.to_string(),
+            "deepseek-secret".to_string()
+        )));
+        assert!(env.contains(&(KIMI_API_KEY_ENV.to_string(), "kimi-secret".to_string())));
+        assert!(env.contains(&(MIMO_API_KEY_ENV.to_string(), "mimo-secret".to_string())));
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(KIMI_MODEL));
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
+
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let slugs = models
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&model_slug(DEEPSEEK_MODEL)));
+        assert!(slugs.contains(&model_slug(KIMI_MODEL)));
+        assert!(slugs.contains(&model_slug(MIMO_MODEL)));
+        assert!(models.iter().any(|model| {
+            model["display_name"].as_str() == Some(MIMO_MODEL)
+                && model["slug"].as_str() == Some("mimo-v2.5-pro")
+        }));
     }
 
     #[test]
@@ -1666,6 +2966,21 @@ mod tests {
         assert_eq!(model_context_window("glm-5.1"), 200_000);
         assert_eq!(model_max_output_tokens("glm-5.1"), 128_000);
         assert_eq!(model_context_window("gpt-5.2"), 400_000);
+        assert_eq!(model_context_window(KIMI_MODEL), KIMI_MODEL_CONTEXT_WINDOW);
+        assert_eq!(
+            model_max_output_tokens(KIMI_MODEL),
+            KIMI_MODEL_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(model_slug("MiMo-V2.5-Pro"), "mimo-v2.5-pro");
+        assert_eq!(model_slug("MiMo-V2.5"), "mimo-v2.5");
+        assert_eq!(model_context_window("MiMo-V2.5-Pro"), 1_000_000);
+        assert_eq!(model_max_output_tokens("MiMo-V2.5-Pro"), 128_000);
+        assert_eq!(model_context_window("mimo-v2.5-pro"), 1_000_000);
+        assert_eq!(model_max_output_tokens("mimo-v2.5-pro"), 128_000);
+        assert_eq!(model_context_window("MiMo-V2.5"), 1_000_000);
+        assert_eq!(model_max_output_tokens("MiMo-V2.5"), 128_000);
+        assert_eq!(model_context_window("mimo-v2.5"), 1_000_000);
+        assert_eq!(model_max_output_tokens("mimo-v2.5"), 128_000);
         assert_eq!(model_max_output_tokens("gpt-5.2"), 128_000);
         assert_eq!(model_context_window("gpt-5.3"), 128_000);
         assert_eq!(model_max_output_tokens("gpt-5.3"), 16_384);
@@ -1809,6 +3124,146 @@ name = "Other"
     }
 
     #[test]
+    fn generic_provider_secret_snapshot_is_redacted() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let snapshot = save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            DEEPSEEK_PROVIDER_ID,
+            "deepseek-secret",
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+
+        assert!(
+            snapshot
+                .claude_woa
+                .profiles
+                .iter()
+                .any(|profile| profile.id == DEEPSEEK_PROVIDER_ID && profile.configured)
+        );
+        assert!(!serialized.contains("deepseek-secret"));
+    }
+
+    #[test]
+    fn claude_byok_profiles_keep_woa_channel_and_extend_model_list() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        select_agent_provider_profile(&paths, AgentProviderFamily::Claude, CLAUDE_WOA_PROVIDER_ID)
+            .unwrap();
+        let woa_command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        assert!(woa_command.contains("--woa"));
+
+        for provider in [
+            VENUS_PROVIDER_ID,
+            DEEPSEEK_PROVIDER_ID,
+            KIMI_PROVIDER_ID,
+            MIMO_PROVIDER_ID,
+        ] {
+            let secret = format!("{provider}-secret");
+            save_agent_provider_secret(&paths, AgentProviderFamily::Claude, provider, &secret)
+                .unwrap();
+        }
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        assert!(command.contains("claude-agent-acp"));
+        assert!(command.contains("--woa"));
+        assert!(!command.contains("secret"));
+
+        let env = agent_env_for_command(&command, &paths);
+        assert!(!env.iter().any(|(name, _)| name == "ANTHROPIC_API_KEY"));
+        assert!(
+            !env.iter()
+                .any(|(name, _)| name == "CLAUDE_PROVIDER_PROXY_KIND")
+        );
+        let (_, model_config) = env
+            .iter()
+            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+            .unwrap();
+        assert!(!model_config.contains("claude-sonnet-4.6"));
+        assert!(model_config.contains(DEEPSEEK_MODEL));
+        assert!(model_config.contains(KIMI_MODEL));
+        assert!(model_config.contains(MIMO_MODEL));
+    }
+
+    #[test]
+    fn claude_byok_channel_uses_shared_model_pool_and_local_proxy() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        for provider in [DEEPSEEK_PROVIDER_ID, KIMI_PROVIDER_ID, MIMO_PROVIDER_ID] {
+            save_agent_provider_secret(
+                &paths,
+                AgentProviderFamily::Codex,
+                provider,
+                &format!("{provider}-secret"),
+            )
+            .unwrap();
+        }
+        let snapshot =
+            select_agent_provider_profile(&paths, AgentProviderFamily::Claude, BYOK_PROVIDER_ID)
+                .unwrap();
+        assert_eq!(snapshot.claude_woa.selected_profile_id, BYOK_PROVIDER_ID);
+        assert!(snapshot.claude_woa.profiles.iter().any(|profile| {
+            profile.id == BYOK_PROVIDER_ID
+                && profile.configured
+                && profile.models.contains(&DEEPSEEK_MODEL.to_string())
+                && profile.models.contains(&KIMI_MODEL.to_string())
+                && profile.models.contains(&MIMO_MODEL.to_string())
+        }));
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        assert!(!command.contains("--woa"));
+        ensure_agent_ready_for_command(&command, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+
+        assert!(env.contains(&("ANTHROPIC_API_KEY".to_string(), "byok".to_string())));
+        assert!(
+            env.iter().any(|(name, value)| name == "ANTHROPIC_BASE_URL"
+                && value.starts_with("http://127.0.0.1:"))
+        );
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == "ANTHROPIC_MODEL" && value == DEEPSEEK_MODEL)
+        );
+        let (_, model_config) = env
+            .iter()
+            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+            .unwrap();
+        let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
+        let available_models = model_config["availableModels"].as_array().unwrap();
+        assert!(available_models.contains(&serde_json::Value::String(DEEPSEEK_MODEL.to_string())));
+        assert!(available_models.contains(&serde_json::Value::String(KIMI_MODEL.to_string())));
+        assert!(available_models.contains(&serde_json::Value::String(MIMO_MODEL.to_string())));
+        assert_eq!(
+            model_config["modelOverrides"][MIMO_MODEL].as_str(),
+            Some(model_slug(MIMO_MODEL))
+        );
+        assert_eq!(model_config["preserveDefaultModel"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn legacy_claude_byok_source_selection_migrates_to_byok_channel() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let mut settings = default_settings();
+        settings.selected_claude_provider_profile_id = Some(MIMO_PROVIDER_ID.to_string());
+        save_app_settings(&paths, &settings).unwrap();
+
+        let loaded = load_app_settings(&paths);
+
+        assert_eq!(
+            loaded.selected_claude_provider_profile_id.as_deref(),
+            Some(BYOK_PROVIDER_ID)
+        );
+        let content = std::fs::read_to_string(settings_path(&paths)).unwrap();
+        assert!(content.contains("\"selected_claude_provider_profile_id\": \"byok\""));
+    }
+
+    #[test]
     fn codex_acp_agent_env_reads_saved_venus_key() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -1835,10 +3290,13 @@ name = "Other"
 
         assert_eq!(
             env,
-            vec![(
-                DEEPSEEK_API_KEY_ENV.to_string(),
-                "deepseek-secret".to_string()
-            )]
+            vec![
+                (BYOK_API_KEY_ENV.to_string(), "byok".to_string()),
+                (
+                    DEEPSEEK_API_KEY_ENV.to_string(),
+                    "deepseek-secret".to_string()
+                )
+            ]
         );
         assert!(!command.contains("deepseek-secret"));
     }
@@ -1912,6 +3370,8 @@ api_key = "old-secret"
                 theme: AppTheme::Graphite,
                 lsp_servers: BTreeMap::new(),
                 codex_connection_mode: CodexConnectionMode::Managed,
+                selected_codex_provider_profile_id: Some(VENUS_PROVIDER_ID.to_string()),
+                selected_claude_provider_profile_id: Some(CLAUDE_WOA_PROVIDER_ID.to_string()),
                 claude_woa: ClaudeWoaSettings::default(),
             },
         )

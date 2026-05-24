@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus } from "../types";
 
 export async function startupPerfMark(stage: string, detail?: string): Promise<void> {
   try {
@@ -233,6 +233,21 @@ export async function settingsSelectCodexAcpProvider(provider: string): Promise<
 
 export async function settingsSelectCodexDefaultMode(): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode");
+}
+
+export async function settingsSelectAgentProviderProfile(
+  family: AgentProviderFamily,
+  profileId: string,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_agent_provider_profile", { family, profileId });
+}
+
+export async function settingsSaveAgentProviderSecret(
+  family: AgentProviderFamily,
+  profileId: string,
+  secret: string,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_agent_provider_secret", { family, profileId, secret });
 }
 
 export async function settingsSaveClaudeWoaConfig(config: ClaudeWoaConfigInput): Promise<AgentSettingsSnapshot> {

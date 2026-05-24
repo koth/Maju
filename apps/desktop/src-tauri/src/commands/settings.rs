@@ -8,9 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::watch;
 use workspace_model::{
-    AgentCliId, AgentInstallResult, AgentSettingsSnapshot, AppTheme, ClaudeWoaConfigInput,
-    ClaudeWoaLoginStart, ClaudeWoaLoginState, ClaudeWoaLoginStatus, LspProbeResult,
-    LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
+    AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
+    ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginState, ClaudeWoaLoginStatus,
+    LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
 };
 
 #[cfg(windows)]
@@ -86,6 +86,39 @@ pub fn settings_select_codex_default_mode(
     ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::select_codex_default_mode(&paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_select_agent_provider_profile(
+    state: State<'_, AppState>,
+    family: AgentProviderFamily,
+    profile_id: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    if family == AgentProviderFamily::Codex {
+        ensure_no_running_codex_acp_session(&state)?;
+    }
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::select_agent_provider_profile(&paths, family, &profile_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_save_agent_provider_secret(
+    state: State<'_, AppState>,
+    family: AgentProviderFamily,
+    profile_id: String,
+    secret: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    if family == AgentProviderFamily::Codex && codex_secret_updates_active_channel(&profile_id) {
+        ensure_no_running_codex_acp_session(&state)?;
+    }
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_agent_provider_secret(&paths, family, &profile_id, &secret)
+        .map_err(|e| e.to_string())
+}
+
+fn codex_secret_updates_active_channel(profile_id: &str) -> bool {
+    profile_id == "venus"
 }
 
 #[tauri::command]
@@ -576,16 +609,16 @@ fn managed_binary_matches_resource(target: &Path, source: &Path) -> bool {
 }
 
 fn claude_agent_acp_managed_install_exists(paths: &app_core::AppPaths) -> bool {
-    if app_core::settings::claude_agent_acp_binary_path(paths).is_file() {
-        return true;
-    }
     let package_dir = app_core::settings::claude_agent_acp_package_dir(paths);
     let launcher = app_core::settings::codex_acp_bin_dir(paths).join(if cfg!(windows) {
         "claude-agent-acp.cmd"
     } else {
         "claude-agent-acp"
     });
-    launcher.is_file() && claude_agent_acp_package_is_runnable(&package_dir)
+    if package_dir.exists() {
+        return launcher.is_file() && claude_agent_acp_package_is_runnable(&package_dir);
+    }
+    app_core::settings::claude_agent_acp_binary_path(paths).is_file()
 }
 
 fn claude_agent_acp_package_is_runnable(package_dir: &Path) -> bool {
@@ -1061,7 +1094,7 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
                 .to_string(),
         ),
         AgentCliId::ClaudeAgentAcp => Some(
-            "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；使用前请在此页面完成 WOA 登录。"
+            "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；默认使用 BYOK 通道，请先保存至少一个 BYOK 模型 API key，或切换到 Venus / WOA。"
                 .to_string(),
         ),
     }

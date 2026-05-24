@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "./SettingsPage";
 import {
@@ -6,17 +6,15 @@ import {
   settingsGetLspSnapshot,
   settingsProbeLspServer,
   settingsResetLspServer,
-  settingsSaveCodexAcpProviderKey,
-  settingsSaveCodexAcpVenusKey,
+  settingsSaveAgentProviderSecret,
   settingsSaveClaudeWoaConfig,
   settingsSaveLspServer,
-  settingsSelectCodexAcpProvider,
-  settingsSelectCodexDefaultMode,
+  settingsSelectAgentProviderProfile,
   settingsStartClaudeWoaLogin,
   settingsRefreshClaudeWoaToken,
   settingsGetClaudeWoaLogin,
 } from "../../lib/tauri";
-import type { AgentSettingsSnapshot, LspSettingsSnapshot } from "../../types";
+import type { AgentProviderProfile, AgentSettingsSnapshot, LspSettingsSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
@@ -33,6 +31,8 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveCodexAcpVenusKey: vi.fn(),
     settingsSelectCodexAcpProvider: vi.fn(),
     settingsSelectCodexDefaultMode: vi.fn(),
+    settingsSelectAgentProviderProfile: vi.fn(),
+    settingsSaveAgentProviderSecret: vi.fn(),
     settingsSaveClaudeWoaConfig: vi.fn(),
     settingsStartClaudeWoaLogin: vi.fn(),
     settingsGetClaudeWoaLogin: vi.fn(),
@@ -43,6 +43,62 @@ vi.mock("../../lib/tauri", async () => {
   };
 });
 
+function providerProfile(
+  family: "codex" | "claude",
+  id: string,
+  label: string,
+  proxyKind: AgentProviderProfile["proxy_kind"],
+  selected: boolean,
+  configured: boolean,
+  requiresCredential: boolean,
+): AgentProviderProfile {
+  const isXiaomiTokenPlan = id === "xiaomi_mimo";
+  return {
+    family,
+    id,
+    label,
+    proxy_kind: proxyKind,
+    selected,
+    configured,
+    base_url: isXiaomiTokenPlan
+      ? family === "codex"
+        ? "https://token-plan-cn.xiaomimimo.com/v1"
+        : "https://token-plan-cn.xiaomimimo.com/anthropic"
+      : id === "default"
+        ? null
+        : `https://${id}.example/v1/chat/completions`,
+    default_model: isXiaomiTokenPlan
+      ? "MiMo-V2.5-Pro"
+      : id === "default" || id === "woa"
+        ? null
+        : `${id}-model`,
+    models: isXiaomiTokenPlan ? ["MiMo-V2.5-Pro", "MiMo-V2.5"] : [],
+    credential_label: requiresCredential ? `${label} API key` : null,
+    requires_credential: requiresCredential,
+    help_text: `${label} help`,
+  };
+}
+
+function codexProfiles(selected = "venus", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
+  return [
+    providerProfile("codex", "default", "默认", "codex_default", selected === "default", true, false),
+    providerProfile("codex", "venus", "Venus", "completion_to_responses", selected === "venus", !!configured.venus, true),
+    providerProfile("codex", "deepseek", "DeepSeek", "completion_to_responses", selected === "deepseek", !!configured.deepseek, true),
+    providerProfile("codex", "kimi_code", "Kimi Code", "completion_to_responses", selected === "kimi_code", !!configured.kimi_code, true),
+    providerProfile("codex", "xiaomi_mimo", "Xiaomi Token Plan", "completion_to_responses", selected === "xiaomi_mimo", !!configured.xiaomi_mimo, true),
+  ];
+}
+
+function claudeProfiles(selected = "woa", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
+  return [
+    providerProfile("claude", "woa", "WOA", "claude_woa", selected === "woa", true, false),
+    providerProfile("claude", "venus", "Venus", "completion_to_claude", selected === "venus", !!configured.venus, true),
+    providerProfile("claude", "deepseek", "DeepSeek", "completion_to_claude", selected === "deepseek", !!configured.deepseek, true),
+    providerProfile("claude", "kimi_code", "Kimi Code", "claude_native", selected === "kimi_code", !!configured.kimi_code, true),
+    providerProfile("claude", "xiaomi_mimo", "Xiaomi Token Plan", "claude_native", selected === "xiaomi_mimo", !!configured.xiaomi_mimo, true),
+  ];
+}
+
 const agentSnapshot: AgentSettingsSnapshot = {
   settings: {
     selected_agent: "codebuddy",
@@ -50,6 +106,8 @@ const agentSnapshot: AgentSettingsSnapshot = {
     theme: "graphite",
     lsp_servers: {},
     codex_connection_mode: "managed",
+    selected_codex_provider_profile_id: "venus",
+    selected_claude_provider_profile_id: "woa",
     claude_woa: {
       channel: "default",
       token_path: null,
@@ -85,6 +143,8 @@ const agentSnapshot: AgentSettingsSnapshot = {
   env_override: null,
   codex_acp: {
     provider: "venus",
+    selected_profile_id: "venus",
+    profiles: codexProfiles("venus"),
     connection_mode: "managed",
     venus_key_configured: false,
     deepseek_key_configured: false,
@@ -92,6 +152,8 @@ const agentSnapshot: AgentSettingsSnapshot = {
   },
   claude_woa: {
     channel: "default",
+    selected_profile_id: "woa",
+    profiles: claudeProfiles("woa"),
     token_path: "C:\\Users\\yvonchen\\.kodex\\claude-woa-token.json",
     token: {
       exists: false,
@@ -127,6 +189,11 @@ function lspSnapshot(command = "typescript-language-server", enabled = true): Ls
   };
 }
 
+async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
+  const tab = await screen.findByRole("tab", { name: label });
+  fireEvent.click(tab);
+}
+
 describe("SettingsPage LSP settings", () => {
   beforeEach(() => {
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot);
@@ -138,42 +205,49 @@ describe("SettingsPage LSP settings", () => {
     });
     vi.mocked(settingsSaveLspServer).mockResolvedValue(lspSnapshot("custom-ts-lsp"));
     vi.mocked(settingsResetLspServer).mockResolvedValue(lspSnapshot());
-    vi.mocked(settingsSaveCodexAcpVenusKey).mockResolvedValue({
-      ...agentSnapshot,
-      codex_acp: {
-        ...agentSnapshot.codex_acp,
-        venus_key_configured: true,
-      },
+    vi.mocked(settingsSaveAgentProviderSecret).mockImplementation(async (family, profileId) => {
+      if (family === "codex") {
+        return {
+          ...agentSnapshot,
+          codex_acp: {
+            ...agentSnapshot.codex_acp,
+            provider: profileId,
+            selected_profile_id: profileId,
+            profiles: codexProfiles(profileId, { [profileId]: true }),
+            venus_key_configured: profileId === "venus",
+            deepseek_key_configured: profileId === "deepseek",
+          },
+        };
+      }
+      return {
+        ...agentSnapshot,
+        claude_woa: {
+          ...agentSnapshot.claude_woa,
+          profiles: claudeProfiles("woa", { [profileId]: true }),
+        },
+      };
     });
-    vi.mocked(settingsSaveCodexAcpProviderKey).mockResolvedValue({
-      ...agentSnapshot,
-      codex_acp: {
-        ...agentSnapshot.codex_acp,
-        provider: "deepseek",
-        deepseek_key_configured: true,
-      },
-    });
-    vi.mocked(settingsSelectCodexAcpProvider).mockResolvedValue({
-      ...agentSnapshot,
-      codex_acp: {
-        ...agentSnapshot.codex_acp,
-        provider: "venus",
-        venus_key_configured: true,
-        deepseek_key_configured: true,
-      },
-    });
-    vi.mocked(settingsSelectCodexDefaultMode).mockResolvedValue({
+    vi.mocked(settingsSelectAgentProviderProfile).mockImplementation(async (family, profileId) => ({
       ...agentSnapshot,
       settings: {
         ...agentSnapshot.settings,
-        codex_connection_mode: "default",
+        selected_codex_provider_profile_id:
+          family === "codex" ? profileId : agentSnapshot.settings.selected_codex_provider_profile_id,
+        selected_claude_provider_profile_id:
+          family === "claude" ? profileId : agentSnapshot.settings.selected_claude_provider_profile_id,
       },
       codex_acp: {
         ...agentSnapshot.codex_acp,
-        provider: "default",
-        connection_mode: "default",
+        provider: family === "codex" ? profileId : agentSnapshot.codex_acp.provider,
+        selected_profile_id: family === "codex" ? profileId : agentSnapshot.codex_acp.selected_profile_id,
+        profiles: family === "codex" ? codexProfiles(profileId) : agentSnapshot.codex_acp.profiles,
       },
-    });
+      claude_woa: {
+        ...agentSnapshot.claude_woa,
+        selected_profile_id: family === "claude" ? profileId : agentSnapshot.claude_woa.selected_profile_id,
+        profiles: family === "claude" ? claudeProfiles(profileId) : agentSnapshot.claude_woa.profiles,
+      },
+    }));
     vi.mocked(settingsSaveClaudeWoaConfig).mockResolvedValue(agentSnapshot);
     vi.mocked(settingsStartClaudeWoaLogin).mockResolvedValue({
       login_id: "login-1",
@@ -208,6 +282,14 @@ describe("SettingsPage LSP settings", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("shows Claude first in the agent settings tabs", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    const tabs = await screen.findAllByRole("tab");
+
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Claude", "Codex", "CodeBuddy"]);
   });
 
   it("loads, probes, saves, disables, and resets a language server", async () => {
@@ -251,77 +333,161 @@ describe("SettingsPage LSP settings", () => {
   it("renders codex-acp configuration and saves Venus key without echoing it", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("Codex");
+    await openAgentSettingsTab("Codex");
+    expect(screen.queryByText("goose")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("byok_provider_profile")).toBeInTheDocument();
     expect(screen.getAllByText("未配置").length).toBeGreaterThan(0);
     expect(screen.getByText("C:\\Users\\yvonchen\\.kodex\\config.toml")).toBeInTheDocument();
 
-    const saveButton = screen.getByRole("button", { name: "保存 Venus key" });
+    const saveButton = screen.getByRole("button", { name: "保存 Codex Venus key" });
     expect(saveButton).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("codex_acp_api_key"), { target: { value: "venus-secret" } });
+    fireEvent.change(screen.getByLabelText("codex_venus_api_key"), { target: { value: "venus-secret" } });
     expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
-    await waitFor(() => expect(settingsSaveCodexAcpVenusKey).toHaveBeenCalledWith("venus-secret"));
-    await screen.findByText("Venus API key 已保存");
-    expect(screen.getByLabelText("codex_acp_api_key")).toHaveValue("");
+    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "venus", "venus-secret"));
+    expect(settingsSaveAgentProviderSecret).not.toHaveBeenCalledWith("claude", "venus", "venus-secret");
+    await screen.findByText("Venus API key 已保存，Codex 通道已切换到 Venus");
+    expect(screen.getByLabelText("codex_venus_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("venus-secret")).not.toBeInTheDocument();
   });
 
   it("saves DeepSeek provider key without echoing it", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("Codex");
-    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/ }));
+    await openAgentSettingsTab("Codex");
+    fireEvent.change(screen.getByLabelText("byok_provider_profile"), { target: { value: "deepseek" } });
 
     const saveButton = screen.getByRole("button", { name: "保存 DeepSeek key" });
-    fireEvent.change(screen.getByLabelText("codex_acp_api_key"), { target: { value: "deepseek-secret" } });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "deepseek-secret" } });
     fireEvent.click(saveButton);
 
     await waitFor(() =>
-      expect(settingsSaveCodexAcpProviderKey).toHaveBeenCalledWith("deepseek", "deepseek-secret"),
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "deepseek", "deepseek-secret"),
     );
-    await screen.findByText("DeepSeek API key 已保存");
-    expect(screen.getByLabelText("codex_acp_api_key")).toHaveValue("");
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "deepseek", "deepseek-secret");
+    await screen.findByText("DeepSeek API key 已更新，后续新建会话生效");
+    expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("deepseek-secret")).not.toBeInTheDocument();
   });
 
-  it("switches to an already configured Codex provider without requiring a new key", async () => {
+  it("adds a Kimi Code key to the shared BYOK model pool without echoing it", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await screen.findByText("BYOK 模型池");
+    fireEvent.change(screen.getByLabelText("byok_provider_profile"), { target: { value: "kimi_code" } });
+
+    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "kimi-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Kimi Code key" }));
+
+    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "kimi_code", "kimi-secret"));
+    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "kimi_code", "kimi-secret"));
+    await screen.findByText("Kimi Code API key 已更新，后续新建会话生效");
+    expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
+    expect(screen.queryByDisplayValue("kimi-secret")).not.toBeInTheDocument();
+  });
+
+  it("lets BYOK source selection diverge from the current Codex channel", async () => {
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
       ...agentSnapshot,
       codex_acp: {
         ...agentSnapshot.codex_acp,
         provider: "deepseek",
+        selected_profile_id: "deepseek",
+        profiles: codexProfiles("deepseek", { deepseek: true }),
+      },
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    const sourceSelect = screen.getByLabelText("byok_provider_profile");
+    expect(sourceSelect).toHaveValue("deepseek");
+
+    fireEvent.change(sourceSelect, { target: { value: "xiaomi_mimo" } });
+    expect(sourceSelect).toHaveValue("xiaomi_mimo");
+    expect(screen.getByText("模型：MiMo-V2.5-Pro、MiMo-V2.5")).toBeInTheDocument();
+    expect(screen.getByText("https://token-plan-cn.xiaomimimo.com/v1")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "mimo-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Xiaomi Token Plan key" }));
+
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "xiaomi_mimo", "mimo-secret"),
+    );
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "xiaomi_mimo", "mimo-secret");
+    await screen.findByText("Xiaomi Token Plan API key 已更新，后续新建会话生效");
+    expect(sourceSelect).toHaveValue("xiaomi_mimo");
+  });
+
+  it("shows configured BYOK providers as a single shared model pool", async () => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "deepseek",
+        selected_profile_id: "deepseek",
+        profiles: codexProfiles("deepseek", { venus: true, deepseek: true }),
         venus_key_configured: true,
         deepseek_key_configured: true,
       },
     });
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("当前：DeepSeek");
-    fireEvent.click(screen.getByRole("button", { name: /Venus/ }));
-
-    await waitFor(() => expect(settingsSelectCodexAcpProvider).toHaveBeenCalledWith("venus"));
-    await screen.findByText("已切换为 Venus 配置");
-    expect(settingsSaveCodexAcpVenusKey).not.toHaveBeenCalled();
+    await openAgentSettingsTab("Codex");
+    await screen.findByText("1/3 已配置");
+    expect(screen.getByText("DeepSeek · 已配置")).toBeInTheDocument();
+    expect(screen.getByText("Kimi Code · 未配置")).toBeInTheDocument();
+    expect(screen.queryByText("Venus · 已配置")).not.toBeInTheDocument();
+    expect(settingsSaveAgentProviderSecret).not.toHaveBeenCalled();
   });
 
-  it("selects default Codex mode without requiring an API key", async () => {
+  it("describes Codex and Claude as channels backed by BYOK models", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("Codex");
-    fireEvent.click(screen.getByRole("button", { name: /默认/ }));
+    await openAgentSettingsTab("Codex");
+    expect(screen.getByText("Codex 通道")).toBeInTheDocument();
+    const codexChannel = screen.getByRole("radiogroup", { name: "Codex channel" });
+    expect(within(codexChannel).getByRole("button", { name: /默认/ })).toBeInTheDocument();
+    await openAgentSettingsTab("Claude");
+    expect(screen.getByText("Claude 通道")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /WOA/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: /Venus/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/BYOK/).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("codex_provider_profile")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("claude_provider_profile")).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => expect(settingsSelectCodexDefaultMode).toHaveBeenCalled());
-    await screen.findByText("已切换为默认 Codex 配置");
-    expect(screen.getByText(/启动时不设置/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("codex_acp_api_key")).not.toBeInTheDocument();
+  it("saves a Claude Venus key without adding Venus to the BYOK pool", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Claude");
+    await screen.findByText("Claude 通道");
+    const claudeChannel = screen.getByRole("radiogroup", { name: "Claude channel" });
+    fireEvent.click(within(claudeChannel).getByRole("button", { name: /Venus/ }));
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("claude", "venus"));
+
+    const saveButton = screen.getByRole("button", { name: "保存 Claude Venus key" });
+    expect(saveButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("claude_venus_api_key"), { target: { value: "claude-venus-secret" } });
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "venus", "claude-venus-secret"),
+    );
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("claude", "venus"));
+    await screen.findByText("Venus API key 已保存，Claude 通道已切换到 Venus");
+    expect(screen.getByLabelText("claude_venus_api_key")).toHaveValue("");
+    expect(screen.queryByText("Venus · 未配置")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("claude-venus-secret")).not.toBeInTheDocument();
   });
 
   it("starts Claude WOA login without exposing token secrets", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("Claude");
+    await openAgentSettingsTab("Claude");
     fireEvent.click(screen.getByRole("button", { name: "WOA 登录" }));
 
     await waitFor(() =>
@@ -341,7 +507,7 @@ describe("SettingsPage LSP settings", () => {
   it("saves a custom Claude WOA model list", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
-    await screen.findByText("Claude");
+    await openAgentSettingsTab("Claude");
     fireEvent.change(screen.getByLabelText("claude_woa_models"), {
       target: {
         value: " claude-sonnet-4-6[1m]\nclaude-opus-4-7[1m]\nclaude-sonnet-4-6[1m]\n",

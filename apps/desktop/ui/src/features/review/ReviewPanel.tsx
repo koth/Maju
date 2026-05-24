@@ -319,25 +319,34 @@ export function ReviewPanel({
     <div className="review-panel">
       <div className="review-tabs">
         <button
+          type="button"
           className={`review-tab ${tab === "Review" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Review")}
+          title="审查"
+          aria-label="审查"
         >
           <ReviewTabIcon />
-          审查
+          <span className="review-tab-label">审查</span>
         </button>
         <button
+          type="button"
           className={`review-tab ${tab === "Diff" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Diff")}
+          title="Git"
+          aria-label="Git"
         >
           <GitTabIcon />
-          Git
+          <span className="review-tab-label">Git</span>
         </button>
         <button
+          type="button"
           className={`review-tab ${tab === "Files" ? "review-tab-active" : ""}`}
           onClick={() => setTab("Files")}
+          title="所有文件"
+          aria-label="所有文件"
         >
           <FolderTreeIcon className="review-tab-icon" />
-          所有文件
+          <span className="review-tab-label">文件</span>
         </button>
         <div className="review-tabs-spacer" />
         {tab !== "Review" && (

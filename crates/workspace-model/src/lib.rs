@@ -776,6 +776,41 @@ impl Default for CodexConnectionMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentProviderFamily {
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderProxyKind {
+    CodexDefault,
+    Responses,
+    CompletionToResponses,
+    ClaudeWoa,
+    ClaudeNative,
+    CompletionToClaude,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProviderProfile {
+    pub family: AgentProviderFamily,
+    pub id: String,
+    pub label: String,
+    pub proxy_kind: AgentProviderProxyKind,
+    pub selected: bool,
+    pub configured: bool,
+    pub base_url: Option<String>,
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    pub credential_label: Option<String>,
+    pub requires_credential: bool,
+    pub help_text: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ClaudeWoaChannel {
     Default,
     Offline,
@@ -809,6 +844,10 @@ pub struct AppSettings {
     pub lsp_servers: BTreeMap<String, LspServerSettings>,
     #[serde(default)]
     pub codex_connection_mode: CodexConnectionMode,
+    #[serde(default)]
+    pub selected_codex_provider_profile_id: Option<String>,
+    #[serde(default)]
+    pub selected_claude_provider_profile_id: Option<String>,
     #[serde(default)]
     pub claude_woa: ClaudeWoaSettings,
 }
@@ -889,6 +928,9 @@ pub struct AgentSettingsSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexAcpSettingsStatus {
     pub provider: String,
+    pub selected_profile_id: String,
+    #[serde(default)]
+    pub profiles: Vec<AgentProviderProfile>,
     pub connection_mode: CodexConnectionMode,
     pub venus_key_configured: bool,
     pub deepseek_key_configured: bool,
@@ -898,6 +940,9 @@ pub struct CodexAcpSettingsStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClaudeWoaSettingsStatus {
     pub channel: ClaudeWoaChannel,
+    pub selected_profile_id: String,
+    #[serde(default)]
+    pub profiles: Vec<AgentProviderProfile>,
     pub token_path: PathBuf,
     pub token: ClaudeWoaTokenStatus,
 }

@@ -98,6 +98,8 @@ pub fn status(settings: &ClaudeWoaSettings) -> ClaudeWoaSettingsStatus {
     let token = token_status(&token_path, settings.channel, now_ms());
     ClaudeWoaSettingsStatus {
         channel: settings.channel,
+        selected_profile_id: String::new(),
+        profiles: Vec::new(),
         token_path,
         token,
     }

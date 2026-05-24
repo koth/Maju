@@ -491,6 +491,8 @@ impl Default for LanguageServerRegistry {
                 theme: workspace_model::AppTheme::KodexDark,
                 lsp_servers: std::collections::BTreeMap::new(),
                 codex_connection_mode: workspace_model::CodexConnectionMode::Managed,
+                selected_codex_provider_profile_id: None,
+                selected_claude_provider_profile_id: None,
                 claude_woa: workspace_model::ClaudeWoaSettings::default(),
             })
             .into_iter()

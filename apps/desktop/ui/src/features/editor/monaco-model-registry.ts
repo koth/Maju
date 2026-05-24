@@ -1,5 +1,6 @@
 import type * as monaco from "monaco-editor";
 import type { EditorFileVersion } from "../../types";
+import { languageForPath } from "./languages";
 
 interface CachedModel {
   model: monaco.editor.ITextModel;
@@ -14,39 +15,12 @@ function pathToUri(path: string): string {
   return `file:///${path.replace(/\\/g, "/")}`;
 }
 
-function guessLanguage(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescriptreact",
-    js: "javascript",
-    cjs: "javascript",
-    mjs: "javascript",
-    jsx: "javascriptreact",
-    rs: "rust",
-    json: "json",
-    md: "markdown",
-    css: "css",
-    html: "html",
-    toml: "toml",
-    yaml: "yaml",
-    yml: "yaml",
-    py: "python",
-    sh: "shell",
-    bash: "shell",
-    sql: "sql",
-    xml: "xml",
-    svg: "xml",
-  };
-  return map[ext] ?? "plaintext";
-}
-
 export function getOrCreateModel(
   monacoInstance: typeof monaco,
   path: string,
   content: string,
 ): monaco.editor.ITextModel {
-  const language = guessLanguage(path);
+  const language = languageForPath(path);
   const cached = models.get(path);
   if (cached && !cached.model.isDisposed()) {
     ensureModelLanguage(monacoInstance, cached.model, language);
