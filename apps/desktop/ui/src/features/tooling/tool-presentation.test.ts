@@ -95,6 +95,34 @@ describe("deriveToolPresentation", () => {
     );
   });
 
+  it("summarizes zsh -lc strings by their inner command", () => {
+    const tool = makeTool({
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command: '/bin/zsh -lc "ls -la reports/"',
+      }),
+    });
+
+    const presentation = deriveToolPresentation(tool);
+
+    expect(presentation.command).toBe("ls -la reports/");
+  });
+
+  it("summarizes zsh command arrays by their inner command", () => {
+    const tool = makeTool({
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        args: ["/bin/zsh", "-lc", "git status --short"],
+      }),
+    });
+
+    const presentation = deriveToolPresentation(tool);
+
+    expect(presentation.command).toBe("git status --short");
+  });
+
   it("extracts command from backtick tool names", () => {
     const presentation = deriveToolPresentation(
       makeTool({

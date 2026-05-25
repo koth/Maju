@@ -203,8 +203,8 @@ function commandValue(value: unknown): string | null {
   }
   if (Array.isArray(value)) {
     const rawParts = value.filter((part): part is string => typeof part === "string");
-    const powershellSummary = powershellArraySummary(rawParts);
-    if (powershellSummary) return powershellSummary;
+    const wrapperSummary = shellWrapperArraySummary(rawParts);
+    if (wrapperSummary) return wrapperSummary;
     const parts = rawParts.map(quoteShellArgIfNeeded);
     return parts.length > 0 ? summarizeCommand(parts.join(" ")) : null;
   }
@@ -212,19 +212,23 @@ function commandValue(value: unknown): string | null {
 }
 
 function summarizeCommand(command: string): string {
-  return powershellStringSummary(command) ?? normalizeDisplayCommand(command);
+  return normalizeToolCommand(command);
 }
 
-function powershellStringSummary(command: string): string | null {
-  return powershellArraySummary(tokenizeCommandLine(command));
+export function normalizeToolCommand(command: string): string {
+  return shellWrapperStringSummary(command) ?? normalizeDisplayCommand(command);
 }
 
-function powershellArraySummary(parts: string[]): string | null {
-  if (parts.length < 3 || !isPowerShellExecutable(parts[0])) return null;
+function shellWrapperStringSummary(command: string): string | null {
+  return shellWrapperArraySummary(tokenizeCommandLine(command));
+}
+
+function shellWrapperArraySummary(parts: string[]): string | null {
+  if (parts.length < 3 || !isShellWrapperExecutable(parts[0])) return null;
 
   const commandIndex = parts.findIndex((part) => {
     const normalized = stripOuterQuotes(part).trim().toLowerCase();
-    return normalized === "-command" || normalized === "-c" || normalized === "/c";
+    return normalized === "-command" || normalized === "-c" || normalized === "-lc" || normalized === "/c";
   });
 
   if (commandIndex < 0 || commandIndex + 1 >= parts.length) return null;
@@ -233,14 +237,22 @@ function powershellArraySummary(parts: string[]): string | null {
   return innerCommand.length > 0 ? innerCommand : null;
 }
 
-function isPowerShellExecutable(value: string): boolean {
+function isShellWrapperExecutable(value: string): boolean {
   const normalized = stripOuterQuotes(value).replace(/\\/g, "/").toLowerCase();
   const baseName = normalized.split("/").pop() ?? normalized;
   return (
     baseName === "pwsh" ||
     baseName === "pwsh.exe" ||
     baseName === "powershell" ||
-    baseName === "powershell.exe"
+    baseName === "powershell.exe" ||
+    baseName === "bash" ||
+    baseName === "sh" ||
+    baseName === "zsh" ||
+    baseName === "dash" ||
+    baseName === "ksh" ||
+    baseName === "fish" ||
+    baseName === "cmd" ||
+    baseName === "cmd.exe"
   );
 }
 
@@ -381,11 +393,11 @@ function quoteShellArgIfNeeded(value: string): string {
 }
 
 function looksLikeCommand(text: string): boolean {
-  const trimmed = text.trim();
+  const trimmed = normalizeToolCommand(text.trim());
   if (!trimmed) return false;
   if (trimmed.startsWith("`") && trimmed.endsWith("`")) return true;
   if (/[;&|]/.test(trimmed)) return true;
-  return /^(?:bash|sh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
+  return /^(?:bash|sh|zsh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
     trimmed
   );
 }

@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
 import type { DiffHunk, ToolDiffPreview, ToolInvocation, ToolStatus } from "../../types";
-import { deriveToolPresentation, type ToolPresentation } from "./tool-presentation";
+import { deriveToolPresentation, normalizeToolCommand, type ToolPresentation } from "./tool-presentation";
 import "./ToolCallCard.css";
 
 const MAX_OUTPUT_LINES = 5;
@@ -809,12 +809,12 @@ function looksLikePath(text: string): boolean {
 }
 
 function looksLikeCommand(text: string): boolean {
-  const trimmed = text.trim();
+  const trimmed = normalizeToolCommand(text.trim());
   if (!trimmed) return false;
   if (looksLikeJsonPayload(trimmed)) return false;
   if (trimmed.startsWith("`") && trimmed.endsWith("`")) return true;
   if (/[;&|]/.test(trimmed)) return true;
-  return /^(?:bash|sh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
+  return /^(?:bash|sh|zsh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
     trimmed
   );
 }
@@ -860,7 +860,7 @@ function extractCommandDetail(tool: ToolInvocation, trackedDiffPaths: string[]):
       const input = JSON.parse(tool.raw_input);
 
       if (input.command) {
-        return String(input.command);
+        return normalizeToolCommand(String(input.command));
       }
 
       if (input.file_path || input.filePath || input.path) {

@@ -256,8 +256,10 @@ async fn proxy_codex_api_request(
         ));
     }
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
-    if provider == "deepseek" {
-        log_chat_payload_summary("deepseek_request", &chat_payload);
+    match normalize_proxy_provider(provider) {
+        "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
+        "xiaomi_mimo" => log_chat_payload_summary("xiaomi_request", &chat_payload),
+        _ => {}
     }
     if provider == "kimi_code" {
         return proxy_kimi_codex_api_request(chat_payload, &api_key, requested_stream).await;
@@ -280,6 +282,12 @@ async fn proxy_codex_api_request(
         .unwrap_or("application/json")
         .to_string();
     if is_event_stream(&content_type) {
+        if status.is_success() {
+            append_codex_api_proxy_log(&format!(
+                "codex_stream_convert provider={provider} upstream=chat_completions downstream=responses"
+            ));
+            return Ok(streaming_chat_sse_response(upstream, status));
+        }
         return Ok(streaming_passthrough_response(
             upstream,
             status,
@@ -1486,7 +1494,6 @@ fn chat_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
     output
 }
 
-#[cfg(test)]
 fn process_chat_sse_event(event: &str, output: &mut String, state: &mut ChatStreamState) {
     let Some(data) = sse_data_line(event) else {
         return;
@@ -1538,7 +1545,6 @@ fn sse_data_line(event: &str) -> Option<&str> {
         .find_map(|line| line.strip_prefix("data:").map(str::trim_start))
 }
 
-#[cfg(test)]
 fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
     if !state.message_started {
         state.message_started = true;
@@ -1583,7 +1589,6 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
     );
 }
 
-#[cfg(test)]
 fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_call: &Value) {
     let index = tool_call
         .get("index")
@@ -1642,7 +1647,6 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     }
 }
 
-#[cfg(test)]
 fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
     let mut final_output = Vec::new();
     if state.message_started {
@@ -1740,6 +1744,64 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
     output.push_str("data: [DONE]\n\n");
 }
 
+fn streaming_chat_sse_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+) -> Response<ProxyBody> {
+    let upstream_stream = upstream.bytes_stream();
+    let stream = futures::stream::unfold(
+        (upstream_stream, ChatSseStreamConverter::new(), false),
+        |(mut upstream_stream, mut converter, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match upstream_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        let bytes = converter.push_chunk(&chunk);
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, false),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        append_codex_api_proxy_log(&format!(
+                            "upstream_chat_sse_read_error error={error}"
+                        ));
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                    None => {
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
+    *response.status_mut() = status;
+    if let Ok(value) = "text/event-stream".parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}
+
 fn streaming_chat_sse_to_anthropic_response(
     upstream: reqwest::Response,
     status: StatusCode,
@@ -1821,14 +1883,12 @@ fn streaming_passthrough_response(
     response
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 struct ChatSseStreamConverter {
     buffer: String,
     state: ChatStreamState,
 }
 
-#[cfg(test)]
 impl ChatSseStreamConverter {
     fn new() -> Self {
         Self {
@@ -2298,7 +2358,6 @@ fn remember_message_reasoning(message: &Value) {
     remember_assistant_reasoning(content, tool_calls, reasoning_content);
 }
 
-#[cfg(test)]
 fn remember_reasoning_content(content: &str, reasoning_content: &str) {
     remember_assistant_reasoning(content, &[], reasoning_content);
 }
