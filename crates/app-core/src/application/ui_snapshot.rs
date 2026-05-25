@@ -1,4 +1,5 @@
 use super::Application;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use workspace_model::{
     ChatMessageDelta, DiffLineKind, RepositorySnapshot, SessionFileChange, ToolDiffPreview,
@@ -33,7 +34,7 @@ fn lightweight_tool_invocation(tool: &ToolInvocation) -> ToolInvocation {
     next.raw_input = next
         .raw_input
         .as_deref()
-        .map(|value| capped_snapshot_string(value, SNAPSHOT_TOOL_RAW_CHARS));
+        .map(|value| cap_snapshot_tool_raw_input(value, SNAPSHOT_TOOL_RAW_CHARS));
     next.raw_output = next
         .raw_output
         .as_deref()
@@ -75,6 +76,116 @@ fn capped_snapshot_string(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn cap_snapshot_tool_raw_input(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let Ok(parsed) = serde_json::from_str::<Value>(value) else {
+        return capped_snapshot_string(value, max_chars);
+    };
+    let Some(object) = parsed.as_object() else {
+        return capped_snapshot_string(value, max_chars);
+    };
+
+    let mut retained = Map::new();
+    for key in TOOL_RAW_INPUT_PRIORITY_KEYS {
+        if let Some(field) = object.get(*key) {
+            retained.insert((*key).to_string(), cap_json_value(field.clone(), 1024));
+        }
+    }
+
+    for (key, field) in object {
+        if retained.contains_key(key) {
+            continue;
+        }
+        if should_keep_tool_raw_input_field(field) {
+            retained.insert(key.clone(), cap_json_value(field.clone(), 512));
+        }
+    }
+
+    retained.insert("_truncated".into(), Value::Bool(true));
+    let serialized = serde_json::to_string(&Value::Object(retained));
+    let Ok(serialized) = serialized else {
+        return capped_snapshot_string(value, max_chars);
+    };
+    if serialized.chars().count() <= max_chars {
+        return serialized;
+    }
+
+    let mut compact = Map::new();
+    for key in TOOL_RAW_INPUT_PRIORITY_KEYS {
+        if let Some(field) = object.get(*key) {
+            compact.insert((*key).to_string(), cap_json_value(field.clone(), 256));
+        }
+    }
+    compact.insert("_truncated".into(), Value::Bool(true));
+    serde_json::to_string(&Value::Object(compact))
+        .ok()
+        .filter(|serialized| serialized.chars().count() <= max_chars)
+        .unwrap_or_else(|| capped_snapshot_string(value, max_chars))
+}
+
+const TOOL_RAW_INPUT_PRIORITY_KEYS: &[&str] = &[
+    "description",
+    "command",
+    "cmd",
+    "shell_command",
+    "command_line",
+    "args",
+    "file_path",
+    "filePath",
+    "path",
+    "pattern",
+    "include",
+    "url",
+    "query",
+    "prompt",
+    "old_string",
+    "oldString",
+    "new_string",
+    "newString",
+    "before",
+    "after",
+    "oldText",
+    "newText",
+    "replacement",
+    "parent_tool_call_id",
+    "subagent_type",
+];
+
+fn should_keep_tool_raw_input_field(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => text.chars().count() <= 256,
+        Value::Array(items) => {
+            items.len() <= 16
+                && items.iter().all(|item| {
+                    matches!(item, Value::String(_) | Value::Number(_) | Value::Bool(_))
+                })
+        }
+        Value::Object(_) => false,
+    }
+}
+
+fn cap_json_value(value: Value, max_chars: usize) -> Value {
+    match value {
+        Value::String(text) => {
+            let mut output = text;
+            cap_string_in_place(&mut output, max_chars);
+            Value::String(output)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .take(16)
+                .map(|item| cap_json_value(item, max_chars / 2))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn cap_string_in_place(value: &mut String, max_chars: usize) {
     if value.chars().count() <= max_chars {
         return;
@@ -95,6 +206,44 @@ fn looks_like_bogus_whole_file_preview(preview: &ToolDiffPreview) -> bool {
         }
     }
     added >= 100 && (removed == 0 || added > removed * 4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_raw_input_cap_preserves_structured_fields() {
+        let raw_input = serde_json::json!({
+            "content": "x".repeat(SNAPSHOT_TOOL_RAW_CHARS + 2048),
+            "file_path": "openspec/changes/accelerate-pipeline-execution/tasks.md",
+            "command": "openspec instructions tasks --change \"accelerate-pipeline-execution\" --json",
+            "description": "Generate tasks",
+        })
+        .to_string();
+
+        let capped = cap_snapshot_tool_raw_input(&raw_input, SNAPSHOT_TOOL_RAW_CHARS);
+        assert!(capped.len() < SNAPSHOT_TOOL_RAW_CHARS);
+
+        let parsed: Value = serde_json::from_str(&capped).expect("capped raw input stays JSON");
+        assert_eq!(
+            parsed.get("file_path").and_then(Value::as_str),
+            Some("openspec/changes/accelerate-pipeline-execution/tasks.md")
+        );
+        assert_eq!(
+            parsed.get("command").and_then(Value::as_str),
+            Some("openspec instructions tasks --change \"accelerate-pipeline-execution\" --json")
+        );
+        assert_eq!(
+            parsed.get("description").and_then(Value::as_str),
+            Some("Generate tasks")
+        );
+        assert_eq!(
+            parsed.get("_truncated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(parsed.get("content").is_none());
+    }
 }
 
 impl Application {

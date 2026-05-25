@@ -1852,7 +1852,7 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     let settings = load_app_settings(paths);
     let selected_profile_id = selected_claude_provider_profile_id(&settings);
     let selected_profile = profile_definition(AgentProviderFamily::Claude, &selected_profile_id);
-    let mut available_models = if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
+    let available_models = if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
         sanitize_claude_available_models(settings.claude_woa.available_models)
     } else if selected_profile_id == BYOK_PROVIDER_ID {
         configured_claude_byok_models(paths)
@@ -1867,11 +1867,6 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
             })
             .unwrap_or_default()
     };
-    for model in configured_claude_byok_models(paths) {
-        if !available_models.contains(&model) {
-            available_models.push(model);
-        }
-    }
     let mut env = Vec::new();
     if available_models.is_empty() {
     } else if let Ok(value) = serde_json::to_string(&claude_model_config(&available_models)) {
@@ -3148,7 +3143,7 @@ name = "Other"
     }
 
     #[test]
-    fn claude_byok_profiles_keep_woa_channel_and_extend_model_list() {
+    fn claude_woa_channel_does_not_include_byok_models() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
@@ -3179,14 +3174,7 @@ name = "Other"
             !env.iter()
                 .any(|(name, _)| name == "CLAUDE_PROVIDER_PROXY_KIND")
         );
-        let (_, model_config) = env
-            .iter()
-            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
-            .unwrap();
-        assert!(!model_config.contains("claude-sonnet-4.6"));
-        assert!(model_config.contains(DEEPSEEK_MODEL));
-        assert!(model_config.contains(KIMI_MODEL));
-        assert!(model_config.contains(MIMO_MODEL));
+        assert!(!env.iter().any(|(name, _)| name == "CLAUDE_MODEL_CONFIG"));
     }
 
     #[test]

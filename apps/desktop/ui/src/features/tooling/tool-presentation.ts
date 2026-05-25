@@ -175,7 +175,11 @@ function commandFromRawInput(rawInput: string | null): string | null {
       null
     );
   }
-  return looksLikeCommand(rawInput) ? rawInput.trim() : null;
+  const trimmed = rawInput.trim();
+  if (looksLikeJsonPayload(trimmed) || trimmed.includes("\n")) {
+    return null;
+  }
+  return looksLikeCommand(trimmed) ? trimmed : null;
 }
 
 function commandFromRawOutput(rawOutput: string | null): string | null {
@@ -384,4 +388,9 @@ function looksLikeCommand(text: string): boolean {
   return /^(?:bash|sh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
     trimmed
   );
+}
+
+function looksLikeJsonPayload(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
 }

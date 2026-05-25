@@ -91,7 +91,11 @@ import {
   toolUpdateFromToolResult,
 } from "./tools.js";
 import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
-import { buildWoaEnv, ensureWoaToken, WoaConfig } from "./woa/index.js";
+import {
+  buildWoaEnv,
+  ensureWoaToken,
+  WoaConfig,
+} from "./woa/index.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
@@ -178,6 +182,21 @@ function titleFromSessionInfo(info: SDKSessionInfo | undefined): string | null {
     return customTitle;
   }
   return null;
+}
+
+function titleInputFromSessionInfo(info: SDKSessionInfo | undefined): string | null {
+  if (!info) {
+    return null;
+  }
+  const input = info.firstPrompt ?? info.summary;
+  if (!input) {
+    return null;
+  }
+  const normalized = sanitizeTitle(input);
+  if (!normalized) {
+    return null;
+  }
+  return truncateTitle(normalized, TITLE_SUMMARY_INPUT_LENGTH, "");
 }
 
 /**
@@ -279,6 +298,16 @@ type Session = {
   titleSummaryStarted?: boolean;
   /** Last title emitted to the client, used to avoid duplicate title updates. */
   lastEmittedTitle?: string;
+};
+
+type QueryWithTitleHelpers = Query & {
+  generateSessionTitle?: (
+    description: string,
+    options?: { persist?: boolean },
+  ) => Promise<string | null | undefined>;
+  askSideQuestion?: (
+    question: string,
+  ) => Promise<{ response: string; synthetic?: boolean } | null | undefined>;
 };
 
 /** Compute a stable fingerprint of the session-defining params so we can
@@ -1853,6 +1882,7 @@ export class ClaudeAcpAgent implements Agent {
           generatedEmitted = await this.generateAndSendSessionTitle(
             sessionId,
             new Date(info.lastModified).toISOString(),
+            info,
           );
         }
         continue;
@@ -1870,8 +1900,9 @@ export class ClaudeAcpAgent implements Agent {
   private async generateAndSendSessionTitle(
     sessionId: string,
     updatedAt = new Date().toISOString(),
+    sessionInfo?: SDKSessionInfo,
   ): Promise<boolean> {
-    const title = await this.generateSessionTitle(sessionId);
+    const title = await this.generateSessionTitle(sessionId, sessionInfo);
     if (!title) {
       return false;
     }
@@ -1879,18 +1910,44 @@ export class ClaudeAcpAgent implements Agent {
     return true;
   }
 
-  private async generateSessionTitle(sessionId: string): Promise<string | null> {
+  private async generateSessionTitle(
+    sessionId: string,
+    sessionInfo?: SDKSessionInfo,
+  ): Promise<string | null> {
     const session = this.sessions[sessionId];
     if (!session || session.generatedTitle) {
       return session?.generatedTitle ?? null;
     }
-    if (this.woaConfig?.enabled) {
-      return null;
-    }
-    if (session.titleSummaryStarted || !session.titlePrompt) {
+    const titlePrompt = session.titlePrompt ?? titleInputFromSessionInfo(sessionInfo);
+    if (session.titleSummaryStarted || !titlePrompt) {
       return null;
     }
     session.titleSummaryStarted = true;
+
+    const description = [
+      "User request:",
+      titlePrompt,
+      ...(session.titleAssistantResult
+        ? ["", "Assistant result:", session.titleAssistantResult]
+        : []),
+    ].join("\n");
+
+    const liveTitle = await this.generateLiveSessionTitle(sessionId, session, description);
+    if (liveTitle) {
+      return liveTitle;
+    }
+    if (this.woaConfig?.enabled) {
+      const sideQuestionTitle = await this.generateLiveSideQuestionSessionTitle(
+        sessionId,
+        session,
+        titlePrompt,
+      );
+      if (sideQuestionTitle) {
+        return sideQuestionTitle;
+      }
+      session.titleSummaryStarted = false;
+      return null;
+    }
 
     const prompt = [
       "Generate a concise conversation title for a coding agent session.",
@@ -1899,7 +1956,7 @@ export class ClaudeAcpAgent implements Agent {
       "Keep it under 12 words.",
       "",
       "<user_request>",
-      session.titlePrompt,
+      titlePrompt,
       "</user_request>",
       "",
       "<assistant_result>",
@@ -1942,6 +1999,7 @@ export class ClaudeAcpAgent implements Agent {
         }
         const title = cleanGeneratedTitle(message.result);
         if (!title) {
+          session.titleSummaryStarted = false;
           return null;
         }
         session.generatedTitle = title;
@@ -1964,7 +2022,89 @@ export class ClaudeAcpAgent implements Agent {
       titleQuery?.close();
     }
 
+    session.titleSummaryStarted = false;
     return null;
+  }
+
+  private async generateLiveSessionTitle(
+    sessionId: string,
+    session: Session,
+    description: string,
+  ): Promise<string | null> {
+    const generateSessionTitle = (session.query as QueryWithTitleHelpers).generateSessionTitle;
+    if (typeof generateSessionTitle !== "function") {
+      return null;
+    }
+
+    try {
+      const title = cleanGeneratedTitle(
+        await generateSessionTitle.call(session.query, description, { persist: true }),
+      );
+      if (!title) {
+        return null;
+      }
+      session.generatedTitle = title;
+      return title;
+    } catch (error) {
+      this.logger.error(
+        `Session ${sessionId}: failed to generate Claude session title via live session: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private async generateLiveSideQuestionSessionTitle(
+    sessionId: string,
+    session: Session,
+    titlePrompt: string,
+  ): Promise<string | null> {
+    const askSideQuestion = (session.query as QueryWithTitleHelpers).askSideQuestion;
+    if (typeof askSideQuestion !== "function") {
+      return null;
+    }
+
+    const question = [
+      "Generate a concise conversation title for this coding agent session.",
+      "Return only the title, with no quotes, no markdown, and no extra text.",
+      "Use the same language as the user's request when possible.",
+      "Keep it under 12 words.",
+      "",
+      "<user_request>",
+      titlePrompt,
+      "</user_request>",
+      "",
+      "<assistant_result>",
+      session.titleAssistantResult ?? "",
+      "</assistant_result>",
+    ].join("\n");
+
+    try {
+      const response = await askSideQuestion.call(session.query, question);
+      const title = cleanGeneratedTitle(response?.response);
+      if (!title) {
+        return null;
+      }
+      session.generatedTitle = title;
+      try {
+        await renameSession(sessionId, title, { dir: session.cwd });
+      } catch (error) {
+        this.logger.error(
+          `Session ${sessionId}: failed to persist generated Claude session title: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      return title;
+    } catch (error) {
+      this.logger.error(
+        `Session ${sessionId}: failed to generate Claude session title via side question: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
   }
 
   private async sendSessionTitleUpdate(

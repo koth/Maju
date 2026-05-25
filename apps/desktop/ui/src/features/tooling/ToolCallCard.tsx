@@ -665,6 +665,11 @@ function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): s
     return truncate(trackedDiffPaths[trackedDiffPaths.length - 1].replace(/\\/g, "/"), 80);
   }
 
+  const logPath = pathFromToolLogs(tool);
+  if (logPath) {
+    return truncate(logPath, 80);
+  }
+
   const namePath = extractPathFromToolName(tool.name);
   if (namePath) {
     return displayPath(namePath);
@@ -747,6 +752,7 @@ function extractInputTitle(tool: ToolInvocation): string | null {
     }
     if (
       tool.raw_input &&
+      !looksLikeJsonPayload(tool.raw_input) &&
       looksLikePath(tool.raw_input) &&
       !looksLikeCommand(tool.raw_input)
     ) {
@@ -768,6 +774,10 @@ function isGenericTitle(text: string): boolean {
   const lower = text.trim().toLowerCase();
   return (
     lower === "tool" ||
+    lower === "bash" ||
+    lower === "shell" ||
+    lower === "terminal" ||
+    lower === "command" ||
     lower === "completed" ||
     lower === "succeeded" ||
     lower === "executing" ||
@@ -801,6 +811,7 @@ function looksLikePath(text: string): boolean {
 function looksLikeCommand(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
+  if (looksLikeJsonPayload(trimmed)) return false;
   if (trimmed.startsWith("`") && trimmed.endsWith("`")) return true;
   if (/[;&|]/.test(trimmed)) return true;
   return /^(?:bash|sh|cmd|powershell|pwsh|npm|pnpm|yarn|bun|cargo|git|ls|dir|cd|mkdir|rm|cp|mv|python|node|npx)\b/i.test(
@@ -811,12 +822,18 @@ function looksLikeCommand(text: string): boolean {
 function looksLikeDisplayPayload(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
+  if (looksLikeJsonPayload(trimmed)) return true;
   if (trimmed.includes("\n")) return true;
   if (/^\d+\s*[→:|]\s*/.test(trimmed)) return true;
   if (/^#{1,6}\s+/.test(trimmed)) return true;
   if (/^(?:import|export|function|class|const|let|var|use|pub)\s/.test(trimmed)) return true;
   if (/^Successfully\s+(?:edited|wrote|updated)\s+file:/i.test(trimmed)) return true;
   return false;
+}
+
+function looksLikeJsonPayload(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
 }
 
 /** Returns true for strings that look like tool completion output, not a description */
@@ -954,6 +971,39 @@ function firstDisplayPath(value: string | null): string | null {
   return path ? displayPath(path) : null;
 }
 
+function pathFromToolLogs(tool: ToolInvocation): string | null {
+  for (const entry of [...tool.logs].reverse()) {
+    const path = pathFromLogText(entry.body);
+    if (path) return path;
+  }
+  return null;
+}
+
+function pathFromLogText(text: string): string | null {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const labeled = trimmed.match(
+      /^(?:Requested\s+)?(?:Write|Read|Edit|Update|编辑|已编辑)\s+(.+)$/i,
+    );
+    if (labeled) {
+      const value = displayPath(labeled[1]);
+      if (looksLikePath(value) && !looksLikeJsonPayload(value)) {
+        return value;
+      }
+    }
+
+    const pathMatch = trimmed.match(
+      /(?:[a-zA-Z]:[\\/][^\s`'"]+|\/[a-zA-Z](?:\/[^\s`'"]+)+|(?:[\w.-]+[\\/])+(?:[\w .@()[\]-]+))/,
+    );
+    if (pathMatch) {
+      return displayPath(pathMatch[0]);
+    }
+  }
+  return null;
+}
+
 function parseJsonValue(raw: string): unknown | null {
   try {
     return JSON.parse(raw);
@@ -994,7 +1044,20 @@ function commandHeaderTitle(
     const target = extractExplorationCommandTarget(command);
     if (target) return truncate(displayPath(target), 96);
   }
-  return truncate(command ?? commandToolLabel(tool), 96);
+  return truncate(command ?? commandSummaryTitle(tool) ?? commandToolLabel(tool), 96);
+}
+
+function commandSummaryTitle(tool: ToolInvocation): string | null {
+  const summary = tool.summary.trim();
+  if (
+    summary &&
+    !isGenericTitle(summary) &&
+    !looksLikeToolOutput(summary) &&
+    !looksLikeDisplayPayload(summary)
+  ) {
+    return summary;
+  }
+  return pathFromToolLogs(tool);
 }
 
 function classifyCommandPresentation(command: string | null): ToolCategory {
@@ -1215,6 +1278,7 @@ function getTrackedDiffPaths(tool: ToolInvocation, commandEditPaths: string[] = 
     ...commandEditPaths,
     ...tool.diff_paths,
     ...(rawInputFilePath(tool) ? [rawInputFilePath(tool)!] : []),
+    ...(pathFromToolLogs(tool) ? [pathFromToolLogs(tool)!] : []),
   ]);
 }
 

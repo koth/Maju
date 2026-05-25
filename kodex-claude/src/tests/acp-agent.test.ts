@@ -1519,7 +1519,7 @@ describe("stop reason propagation", () => {
     };
   }
 
-  function injectSession(agent: ClaudeAcpAgent, messages: any[]) {
+  function injectSession(agent: ClaudeAcpAgent, messages: any[], queryOverrides: object = {}) {
     const input = new Pushable<any>();
     async function* messageGenerator() {
       // Wait for the prompt to push its user message so we can replay it
@@ -1537,8 +1537,9 @@ describe("stop reason propagation", () => {
       }
       yield* messages;
     }
+    const queryInstance = Object.assign(messageGenerator(), queryOverrides);
     agent.sessions["test-session"] = {
-      query: messageGenerator() as any,
+      query: queryInstance as any,
       input,
       cancelled: false,
       cwd: "/test",
@@ -1684,27 +1685,22 @@ describe("stop reason propagation", () => {
       lastModified: 1_700_000_000_000,
       cwd: "/test",
     });
-    const titleQuery = (async function* () {
-      yield {
-        type: "result",
-        subtype: "success",
-        is_error: false,
-        result: "Fix login token refresh",
-      };
-    })() as any;
-    titleQuery.close = vi.fn();
-    vi.mocked(query).mockReturnValueOnce(titleQuery);
+    vi.mocked(query).mockClear();
     vi.mocked(renameSession).mockClear();
-    vi.mocked(renameSession).mockResolvedValue(undefined);
-    injectSession(agent, [
-      createResultMessage({
-        subtype: "success",
-        stop_reason: null,
-        is_error: false,
-        result: "Updated the auth service and added token refresh tests.",
-      }),
-      { type: "system", subtype: "session_state_changed", state: "idle" },
-    ]);
+    const generateSessionTitle = vi.fn().mockResolvedValue("Fix login token refresh");
+    injectSession(
+      agent,
+      [
+        createResultMessage({
+          subtype: "success",
+          stop_reason: null,
+          is_error: false,
+          result: "Updated the auth service and added token refresh tests.",
+        }),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      { generateSessionTitle },
+    );
 
     const response = await agent.prompt({
       sessionId: "test-session",
@@ -1722,25 +1718,17 @@ describe("stop reason propagation", () => {
         ),
       ).toBe(true);
     });
-    expect(query).toHaveBeenCalledWith(
-      expect.objectContaining({
-        prompt: expect.stringContaining("修复登录 token 刷新失败的问题"),
-        options: expect.objectContaining({
-          cwd: "/test",
-          maxTurns: 1,
-          persistSession: false,
-          tools: [],
-        }),
-      }),
-    );
     await vi.waitFor(() => {
-      expect(renameSession).toHaveBeenCalledWith("test-session", "Fix login token refresh", {
-        dir: "/test",
-      });
+      expect(generateSessionTitle).toHaveBeenCalledWith(
+        expect.stringContaining("修复登录 token 刷新失败的问题"),
+        { persist: true },
+      );
     });
+    expect(query).not.toHaveBeenCalled();
+    expect(renameSession).not.toHaveBeenCalled();
   });
 
-  it("does not run a separate title query in WOA mode", async () => {
+  it("uses the live Claude title generator in WOA mode instead of a separate query", async () => {
     const updates: SessionNotification[] = [];
     const mockClient = {
       sessionUpdate: async (notification: SessionNotification) => {
@@ -1759,15 +1747,20 @@ describe("stop reason propagation", () => {
       lastModified: 1_700_000_000_000,
       cwd: "/test",
     });
-    injectSession(agent, [
-      createResultMessage({
-        subtype: "success",
-        stop_reason: null,
-        is_error: false,
-        result: "Updated the auth service and added token refresh tests.",
-      }),
-      { type: "system", subtype: "session_state_changed", state: "idle" },
-    ]);
+    const generateSessionTitle = vi.fn().mockResolvedValue("Fix WOA token refresh");
+    injectSession(
+      agent,
+      [
+        createResultMessage({
+          subtype: "success",
+          stop_reason: null,
+          is_error: false,
+          result: "Updated the auth service and added token refresh tests.",
+        }),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      { generateSessionTitle },
+    );
 
     const response = await agent.prompt({
       sessionId: "test-session",
@@ -1776,9 +1769,131 @@ describe("stop reason propagation", () => {
 
     expect(response.stopReason).toBe("end_turn");
     expect(query).not.toHaveBeenCalled();
+    expect(generateSessionTitle).toHaveBeenCalledWith(
+      expect.stringContaining("修复登录 token 刷新失败的问题"),
+      { persist: true },
+    );
     expect(
       updates.some((notification) => notification.update.sessionUpdate === "session_info_update"),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("falls back to a live side question title in WOA mode", async () => {
+    const updates: SessionNotification[] = [];
+    const mockClient = {
+      sessionUpdate: async (notification: SessionNotification) => {
+        updates.push(notification);
+      },
+    } as unknown as AgentSideConnection;
+    const agent = new ClaudeAcpAgent(mockClient, {
+      logger: { log: () => {}, error: () => {} },
+      woa: { enabled: true, channel: "default", tokenPath: "/test/token.json" },
+    });
+    vi.mocked(getSessionInfo).mockClear();
+    vi.mocked(query).mockClear();
+    vi.mocked(renameSession).mockClear();
+    vi.mocked(getSessionInfo).mockResolvedValue({
+      sessionId: "test-session",
+      summary: "需要加一下流水线，每个stage的耗时日志",
+      lastModified: 1_700_000_000_000,
+      cwd: "/test",
+    });
+    const generateSessionTitle = vi.fn().mockRejectedValue(new Error("WOA rejected title helper"));
+    const askSideQuestion = vi.fn().mockResolvedValue({
+      response: "记录流水线阶段耗时",
+      synthetic: true,
+    });
+    injectSession(
+      agent,
+      [
+        createResultMessage({
+          subtype: "success",
+          stop_reason: null,
+          is_error: false,
+          result: "Added stage timing logs to the pipeline.",
+        }),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      { generateSessionTitle, askSideQuestion },
+    );
+
+    const response = await agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "需要加一下流水线，每个stage的耗时日志" }],
+    });
+
+    expect(response.stopReason).toBe("end_turn");
+    expect(query).not.toHaveBeenCalled();
+    expect(generateSessionTitle).toHaveBeenCalled();
+    expect(askSideQuestion).toHaveBeenCalledWith(
+      expect.stringContaining("需要加一下流水线，每个stage的耗时日志"),
+    );
+    expect(renameSession).toHaveBeenCalledWith("test-session", "记录流水线阶段耗时", {
+      dir: "/test",
+    });
+    expect(
+      updates.some(
+        (notification) =>
+          notification.update.sessionUpdate === "session_info_update" &&
+          notification.update.title === "记录流水线阶段耗时",
+      ),
+    ).toBe(true);
+  });
+
+  it("uses SDK session info as title input when the in-memory prompt is missing", async () => {
+    const updates: SessionNotification[] = [];
+    const mockClient = {
+      sessionUpdate: async (notification: SessionNotification) => {
+        updates.push(notification);
+      },
+    } as unknown as AgentSideConnection;
+    const agent = new ClaudeAcpAgent(mockClient, {
+      logger: { log: () => {}, error: () => {} },
+      woa: { enabled: true, channel: "default", tokenPath: "/test/token.json" },
+    });
+    vi.mocked(getSessionInfo).mockClear();
+    vi.mocked(query).mockClear();
+    vi.mocked(getSessionInfo).mockResolvedValue({
+      sessionId: "test-session",
+      summary: "ok，我如果一次提交十几个渲染任务，能统计出来总耗时吗",
+      firstPrompt: "需要加一下流水线，每个stage的耗时日志",
+      lastModified: 1_700_000_000_000,
+      cwd: "/test",
+    });
+    const generateSessionTitle = vi.fn().mockResolvedValue("记录流水线阶段耗时");
+    injectSession(
+      agent,
+      [
+        createResultMessage({
+          subtype: "success",
+          stop_reason: null,
+          is_error: false,
+          result: "Updated the title sync path.",
+        }),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      { generateSessionTitle },
+    );
+    agent.sessions["test-session"]!.titlePrompt = undefined;
+
+    const response = await agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "/model claude-opus-4-6[1m]" }],
+    });
+
+    expect(response.stopReason).toBe("end_turn");
+    expect(query).not.toHaveBeenCalled();
+    expect(generateSessionTitle).toHaveBeenCalledWith(
+      expect.stringContaining("需要加一下流水线，每个stage的耗时日志"),
+      { persist: true },
+    );
+    expect(
+      updates.some(
+        (notification) =>
+          notification.update.sessionUpdate === "session_info_update" &&
+          notification.update.title === "记录流水线阶段耗时",
+      ),
+    ).toBe(true);
   });
 
   it("should return max_tokens when success result has stop_reason max_tokens", async () => {

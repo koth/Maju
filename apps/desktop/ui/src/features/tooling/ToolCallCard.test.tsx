@@ -669,6 +669,50 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.textContent).toContain("成功");
   });
 
+  it("uses command summary instead of truncated JSON fragments in the shell header", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "Terminal",
+      summary: 'openspec status --change "accelerate-pipeline-execution" --json',
+      raw_input:
+        '{"content":"## ADDED Requirements\\nsource mask | result mask\\nmore text"',
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      'openspec status --change "accelerate-pipeline-execution" --json',
+    );
+  });
+
+  it("uses edit paths from tool logs when raw_input was truncated before file_path", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Write",
+      summary: "{",
+      raw_input:
+        '{"content":"## ADDED Requirements\\nsource mask | result mask\\nmore text"',
+      logs: [
+        {
+          title: "Update",
+          body: "编辑 openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md",
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md",
+    );
+  });
+
   it("hides raw JSON from primary command output when terminal output exists", () => {
     const tool = makeTool({
       status: "Succeeded",

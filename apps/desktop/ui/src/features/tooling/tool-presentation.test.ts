@@ -44,6 +44,20 @@ describe("deriveToolPresentation", () => {
     expect(presentation.toolLabel).toBe("Shell");
   });
 
+  it("does not treat truncated JSON raw_input as a command", () => {
+    const tool = makeTool({
+      kind: "execute",
+      name: "Terminal",
+      raw_input:
+        '{"content":"## ADDED Requirements\\nsource mask | result mask\\nmore text"',
+    });
+
+    const presentation = deriveToolPresentation(tool);
+
+    expect(presentation.presentationKind).toBe("command");
+    expect(presentation.command).toBeNull();
+  });
+
   it("summarizes PowerShell -Command strings by their inner command", () => {
     const tool = makeTool({
       kind: "execute",

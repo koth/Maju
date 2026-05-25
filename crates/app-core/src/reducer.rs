@@ -1,5 +1,5 @@
 use acp_core::{ClientEvent, diff_to_hunks};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
     DiffLineKind, FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
@@ -94,7 +94,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.summary = display_summary.clone();
             tool.status = ToolStatus::Running;
             tool.is_subagent = is_subagent;
-            tool.raw_input = cap_optional_string(raw_input, MAX_TOOL_RAW_INPUT_CHARS);
+            tool.raw_input = cap_tool_raw_input(raw_input);
             tool.raw_output = None;
             tool.terminal_output = None;
             tool.error = None;
@@ -138,7 +138,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                         push_tool_log(tool, "Update", summary);
                     }
                 }
-                if let Some(raw_input) = cap_optional_string(raw_input, MAX_TOOL_RAW_INPUT_CHARS) {
+                if let Some(raw_input) = cap_tool_raw_input(raw_input) {
                     tool.raw_input = Some(raw_input);
                 }
                 if let Some(raw_output) = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS)
@@ -1097,6 +1097,123 @@ fn cap_optional_string(value: Option<String>, max_chars: usize) -> Option<String
     value.map(|value| cap_string(value, max_chars))
 }
 
+fn cap_tool_raw_input(value: Option<String>) -> Option<String> {
+    value.map(|value| cap_structured_tool_raw_input(value, MAX_TOOL_RAW_INPUT_CHARS))
+}
+
+fn cap_structured_tool_raw_input(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value;
+    }
+
+    let Ok(parsed) = serde_json::from_str::<Value>(&value) else {
+        return cap_string(value, max_chars);
+    };
+    let Some(object) = parsed.as_object() else {
+        return cap_string(value, max_chars);
+    };
+
+    let mut retained = Map::new();
+    for key in TOOL_RAW_INPUT_PRIORITY_KEYS {
+        if let Some(field) = object.get(*key) {
+            retained.insert((*key).to_string(), cap_json_value(field.clone(), 2048));
+        }
+    }
+
+    for (key, field) in object {
+        if retained.contains_key(key) {
+            continue;
+        }
+        if should_keep_tool_raw_input_field(field) {
+            retained.insert(key.clone(), cap_json_value(field.clone(), 1024));
+        }
+    }
+
+    retained.insert("_truncated".into(), Value::Bool(true));
+    retained.insert(
+        "_omittedChars".into(),
+        Value::Number(serde_json::Number::from(
+            value.chars().count().saturating_sub(max_chars),
+        )),
+    );
+
+    let serialized = serde_json::to_string(&Value::Object(retained));
+    let Ok(serialized) = serialized else {
+        return cap_string(value, max_chars);
+    };
+    if serialized.chars().count() <= max_chars {
+        return serialized;
+    }
+
+    let mut compact = Map::new();
+    for key in TOOL_RAW_INPUT_PRIORITY_KEYS {
+        if let Some(field) = object.get(*key) {
+            compact.insert((*key).to_string(), cap_json_value(field.clone(), 256));
+        }
+    }
+    compact.insert("_truncated".into(), Value::Bool(true));
+    serde_json::to_string(&Value::Object(compact))
+        .ok()
+        .filter(|serialized| serialized.chars().count() <= max_chars)
+        .unwrap_or_else(|| cap_string(value, max_chars))
+}
+
+const TOOL_RAW_INPUT_PRIORITY_KEYS: &[&str] = &[
+    "description",
+    "command",
+    "cmd",
+    "shell_command",
+    "command_line",
+    "args",
+    "file_path",
+    "filePath",
+    "path",
+    "pattern",
+    "include",
+    "url",
+    "query",
+    "prompt",
+    "old_string",
+    "oldString",
+    "new_string",
+    "newString",
+    "before",
+    "after",
+    "oldText",
+    "newText",
+    "replacement",
+    "parent_tool_call_id",
+    "subagent_type",
+];
+
+fn should_keep_tool_raw_input_field(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => text.chars().count() <= 512,
+        Value::Array(items) => {
+            items.len() <= 16
+                && items.iter().all(|item| {
+                    matches!(item, Value::String(_) | Value::Number(_) | Value::Bool(_))
+                })
+        }
+        Value::Object(_) => false,
+    }
+}
+
+fn cap_json_value(value: Value, max_chars: usize) -> Value {
+    match value {
+        Value::String(text) => Value::String(cap_string(text, max_chars)),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .take(16)
+                .map(|item| cap_json_value(item, max_chars / 2))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 fn cap_terminal_output(mut output: TerminalOutput) -> TerminalOutput {
     output.output = cap_string(output.output, MAX_TOOL_RAW_OUTPUT_CHARS);
     output
@@ -1264,5 +1381,38 @@ mod tests {
 
         assert_eq!(ui.messages.len(), 1);
         assert_eq!(ui.messages[0].body, "first\n\nsecond");
+    }
+
+    #[test]
+    fn caps_tool_raw_input_without_losing_structured_title_fields() {
+        let raw_input = serde_json::json!({
+            "content": "x".repeat(MAX_TOOL_RAW_INPUT_CHARS + 2048),
+            "file_path": "openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md",
+            "command": "openspec status --change \"accelerate-pipeline-execution\" --json",
+            "description": "Check OpenSpec status",
+        })
+        .to_string();
+
+        let capped = cap_tool_raw_input(Some(raw_input)).expect("raw input should be retained");
+        assert!(capped.len() < MAX_TOOL_RAW_INPUT_CHARS);
+
+        let parsed: Value = serde_json::from_str(&capped).expect("capped raw input stays JSON");
+        assert_eq!(
+            parsed.get("file_path").and_then(Value::as_str),
+            Some("openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md")
+        );
+        assert_eq!(
+            parsed.get("command").and_then(Value::as_str),
+            Some("openspec status --change \"accelerate-pipeline-execution\" --json")
+        );
+        assert_eq!(
+            parsed.get("description").and_then(Value::as_str),
+            Some("Check OpenSpec status")
+        );
+        assert_eq!(
+            parsed.get("_truncated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(parsed.get("content").is_none());
     }
 }
