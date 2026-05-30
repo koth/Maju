@@ -31,7 +31,22 @@ pub(super) fn extract_title_from_prompt(prompt: &str) -> String {
 }
 
 pub(super) fn is_placeholder_session_title(title: &str) -> bool {
-    matches!(title.trim(), "" | "新会话" | "New Session" | "新 ACP 会话")
+    matches!(
+        title.trim(),
+        "" | "新会话"
+            | "新 ACP 会话"
+            | "新聊天"
+            | "新对话"
+            | "未命名会话"
+            | "无标题"
+            | "New Session"
+            | "New Chat"
+            | "New Conversation"
+            | "Untitled"
+            | "Untitled Session"
+            | "Untitled Chat"
+            | "Untitled Conversation"
+    )
 }
 
 /// Try to extract a refined title from the assistant's first response.

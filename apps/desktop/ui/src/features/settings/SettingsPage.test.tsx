@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "./SettingsPage";
 import {
+  openExternalUrl,
   settingsGetAgentSnapshot,
   settingsGetLspSnapshot,
   settingsProbeLspServer,
@@ -20,6 +21,7 @@ vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
   return {
     ...actual,
+    openExternalUrl: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
     settingsDetectAgents: vi.fn(),
     settingsSelectAgent: vi.fn(),
@@ -53,6 +55,7 @@ function providerProfile(
   requiresCredential: boolean,
 ): AgentProviderProfile {
   const isXiaomiTokenPlan = id === "xiaomi_mimo";
+  const isTimiAi = id === "timiai";
   return {
     family,
     id,
@@ -60,19 +63,29 @@ function providerProfile(
     proxy_kind: proxyKind,
     selected,
     configured,
-    base_url: isXiaomiTokenPlan
+    base_url: isTimiAi
+      ? "http://api.timiai.woa.com/ai_api_manage/llmproxy"
+      : isXiaomiTokenPlan
       ? family === "codex"
         ? "https://token-plan-cn.xiaomimimo.com/v1"
         : "https://token-plan-cn.xiaomimimo.com/anthropic"
       : id === "default"
         ? null
         : `https://${id}.example/v1/chat/completions`,
-    default_model: isXiaomiTokenPlan
+    default_model: isTimiAi
+      ? family === "codex"
+        ? "gpt-5.5"
+        : "claude-opus-4.8"
+      : isXiaomiTokenPlan
       ? "MiMo-V2.5-Pro"
       : id === "default" || id === "woa"
         ? null
         : `${id}-model`,
-    models: isXiaomiTokenPlan ? ["MiMo-V2.5-Pro", "MiMo-V2.5"] : [],
+    models: isTimiAi
+      ? ["gpt-5.5", "gpt-5.4", "claude-opus-4.8", "deepseek-v4-pro"]
+      : isXiaomiTokenPlan
+        ? ["MiMo-V2.5-Pro", "MiMo-V2.5"]
+        : [],
     credential_label: requiresCredential ? `${label} API key` : null,
     requires_credential: requiresCredential,
     help_text: `${label} help`,
@@ -82,6 +95,8 @@ function providerProfile(
 function codexProfiles(selected = "venus", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
   return [
     providerProfile("codex", "default", "默认", "codex_default", selected === "default", true, false),
+    providerProfile("codex", "woa", "WOA", "responses", selected === "woa", true, false),
+    providerProfile("codex", "timiai", "TimiAI", "responses", selected === "timiai", !!configured.timiai, true),
     providerProfile("codex", "venus", "Venus", "completion_to_responses", selected === "venus", !!configured.venus, true),
     providerProfile("codex", "deepseek", "DeepSeek", "completion_to_responses", selected === "deepseek", !!configured.deepseek, true),
     providerProfile("codex", "kimi_code", "Kimi Code", "completion_to_responses", selected === "kimi_code", !!configured.kimi_code, true),
@@ -92,6 +107,7 @@ function codexProfiles(selected = "venus", configured: Partial<Record<string, bo
 function claudeProfiles(selected = "woa", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
   return [
     providerProfile("claude", "woa", "WOA", "claude_woa", selected === "woa", true, false),
+    providerProfile("claude", "timiai", "TimiAI", "claude_native", selected === "timiai", !!configured.timiai, true),
     providerProfile("claude", "venus", "Venus", "completion_to_claude", selected === "venus", !!configured.venus, true),
     providerProfile("claude", "deepseek", "DeepSeek", "completion_to_claude", selected === "deepseek", !!configured.deepseek, true),
     providerProfile("claude", "kimi_code", "Kimi Code", "claude_native", selected === "kimi_code", !!configured.kimi_code, true),
@@ -111,7 +127,7 @@ const agentSnapshot: AgentSettingsSnapshot = {
     claude_woa: {
       channel: "default",
       token_path: null,
-      available_models: [],
+      available_models: ["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"],
     },
   },
   agents: [
@@ -223,7 +239,8 @@ describe("SettingsPage LSP settings", () => {
         ...agentSnapshot,
         claude_woa: {
           ...agentSnapshot.claude_woa,
-          profiles: claudeProfiles("woa", { [profileId]: true }),
+          selected_profile_id: profileId,
+          profiles: claudeProfiles(profileId, { [profileId]: true }),
         },
       };
     });
@@ -292,6 +309,28 @@ describe("SettingsPage LSP settings", () => {
     expect(tabs.map((tab) => tab.textContent)).toEqual(["Claude", "Codex", "CodeBuddy"]);
   });
 
+  it("shows a startup warning and keeps the user on the requested settings tab", async () => {
+    const onStartupNoticeDismissed = vi.fn();
+    render(
+      <SettingsPage
+        initialAgentTab="codex-acp"
+        startupNotice={{ kind: "codex_byok" }}
+        onBack={vi.fn()}
+        onStartupNoticeDismissed={onStartupNoticeDismissed}
+      />,
+    );
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Codex BYOK 还没设置好" });
+    expect(within(dialog).getByText(/不能正常使用/)).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "去设置" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(onStartupNoticeDismissed).toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "Codex" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Codex 通道")).toBeInTheDocument();
+  });
+
   it("loads, probes, saves, disables, and resets a language server", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
@@ -351,6 +390,44 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("Venus API key 已保存，Codex 通道已切换到 Venus");
     expect(screen.getByLabelText("codex_venus_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("venus-secret")).not.toBeInTheDocument();
+  });
+
+  it("switches Codex to WOA provider", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    fireEvent.click(screen.getByRole("button", { name: /WOA/ }));
+
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "woa"));
+    await screen.findByText("Codex 通道已切换到 WOA");
+    expect(screen.getAllByText(/CodeBuddy Codex gateway/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "WOA 登录" })).toBeInTheDocument();
+    expect(screen.getByText("Run WOA login to create a token.")).toBeInTheDocument();
+  });
+
+  it("saves a shared TimiAI key from the Codex channel", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    const codexChannel = screen.getByRole("radiogroup", { name: "Codex channel" });
+    fireEvent.click(within(codexChannel).getByRole("button", { name: /TimiAI/ }));
+
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "timiai"));
+    await screen.findByText("Codex 通道已切换到 TimiAI");
+    expect(screen.getAllByText(/llmproxy\/responses/).length).toBeGreaterThan(0);
+
+    const saveButton = screen.getByRole("button", { name: "保存 Codex TimiAI key" });
+    expect(saveButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("codex_timiai_api_key"), { target: { value: "timiai-secret" } });
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "timiai", "timiai-secret"),
+    );
+    await screen.findByText("TimiAI key 已保存，Codex / Claude 可共用");
+    expect(screen.getByLabelText("codex_timiai_api_key")).toHaveValue("");
+    expect(screen.queryByText("TimiAI · 未配置")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("timiai-secret")).not.toBeInTheDocument();
   });
 
   it("saves DeepSeek provider key without echoing it", async () => {
@@ -484,6 +561,27 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.queryByDisplayValue("claude-venus-secret")).not.toBeInTheDocument();
   });
 
+  it("saves the shared TimiAI key from the Claude channel", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Claude");
+    const claudeChannel = screen.getByRole("radiogroup", { name: "Claude channel" });
+    fireEvent.click(within(claudeChannel).getByRole("button", { name: /TimiAI/ }));
+
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("claude", "timiai"));
+    await screen.findByText("Claude 通道已切换到 TimiAI");
+    expect(screen.getByText(/llmproxy\/v1\/messages/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("claude_timiai_api_key"), { target: { value: "timiai-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存 Claude TimiAI key" }));
+
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "timiai", "timiai-secret"),
+    );
+    await screen.findByText("TimiAI key 已保存，Codex / Claude 可共用");
+    expect(screen.getByLabelText("claude_timiai_api_key")).toHaveValue("");
+  });
+
   it("starts Claude WOA login without exposing token secrets", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
@@ -494,13 +592,15 @@ describe("SettingsPage LSP settings", () => {
       expect(settingsSaveClaudeWoaConfig).toHaveBeenCalledWith({
         channel: "default",
         tokenPath: null,
-        availableModels: [],
+        availableModels: ["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"],
       }),
     );
     await waitFor(() => expect(settingsStartClaudeWoaLogin).toHaveBeenCalled());
     await waitFor(() => {
       expect(screen.getAllByText(/ABCD-EFGH/).length).toBeGreaterThan(0);
     });
+    fireEvent.click(screen.getByRole("button", { name: "https://copilot.code.woa.com/login" }));
+    await waitFor(() => expect(openExternalUrl).toHaveBeenCalledWith("https://copilot.code.woa.com/login"));
     expect(screen.queryByText(/access-secret/)).not.toBeInTheDocument();
   });
 

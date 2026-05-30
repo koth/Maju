@@ -76,6 +76,7 @@ pub struct Application {
     /// When true, discard replay events from session/load until user sends first prompt
     skip_replay: bool,
     pending_model_restore: Option<String>,
+    authoritative_model_selection: Option<String>,
     file_tracker: FileChangeTracker,
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
@@ -166,7 +167,7 @@ fn interrupt_incomplete_tools(tools: &mut [ToolInvocation]) -> Vec<String> {
 
 fn is_codex_agent_label(label: &str) -> bool {
     let normalized = label.trim().to_ascii_lowercase();
-    normalized == "codex" || normalized == "codex-acp"
+    normalized == "codex" || normalized == "codex-acp" || normalized == "kodex-acp"
 }
 
 fn is_claude_agent_label(label: &str) -> bool {
@@ -174,14 +175,6 @@ fn is_claude_agent_label(label: &str) -> bool {
     matches!(
         normalized.as_str(),
         "claude" | "claude-acp" | "claude-agent-acp" | "claude agent"
-    )
-}
-
-fn is_protocol_session_title_agent_label(label: &str) -> bool {
-    let normalized = label.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "codex" | "codex-acp" | "claude" | "claude-acp" | "claude-agent-acp" | "claude agent"
     )
 }
 

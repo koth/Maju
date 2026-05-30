@@ -84,6 +84,12 @@ export type UserPromptContent =
       uri?: string | null;
       mime_type: string | null;
       name: string;
+    }
+  | {
+      type: "workspace_file";
+      path: string;
+      start_line?: number | null;
+      end_line?: number | null;
     };
 
 export interface AgentPlanEntry {
@@ -579,6 +585,18 @@ export interface AgentSettingsSnapshot {
   env_override: string | null;
   codex_acp: CodexAcpSettingsStatus;
   claude_woa: ClaudeWoaSettingsStatus;
+}
+
+export type InitialSetupRecommendation = "woa" | "codex_byok";
+
+export interface IoaEnvironmentStatus {
+  is_company_export_ip: boolean;
+  is_internal: boolean;
+  company_environment: boolean;
+  recommended_setup: InitialSetupRecommendation;
+  detected: boolean;
+  timestamp_ms: number;
+  message: string | null;
 }
 
 export interface CodexAcpSettingsStatus {

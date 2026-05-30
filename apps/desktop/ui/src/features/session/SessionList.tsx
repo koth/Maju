@@ -110,11 +110,8 @@ export function SessionList({
     setModalError(null);
     setAgentDropdownOpen(false);
     const snapshot = await settingsGetAgentSnapshot();
-    const defaultAgent = snapshot.settings.selected_agent;
-    const defaultInstalled = snapshot.agents.some((agent) => agent.id === defaultAgent && agent.installed);
-    const fallbackAgent = snapshot.agents.find((agent) => agent.installed)?.id ?? defaultAgent;
     setAgentSnapshot(snapshot);
-    setSelectedAgent(defaultInstalled ? defaultAgent : fallbackAgent);
+    setSelectedAgent(defaultAgentForNewWork(snapshot));
     setModalMode(mode);
     setAgentDropdownOpen(false);
   }, []);
@@ -454,6 +451,37 @@ export function SessionList({
       )}
     </div>
   );
+}
+
+function defaultAgentForNewWork(snapshot: AgentSettingsSnapshot): AgentCliId {
+  const defaultAgent = snapshot.settings.selected_agent;
+  const defaultInstalled = snapshot.agents.some(
+    (agent) => agent.id === defaultAgent && agent.installed,
+  );
+  const codebuddyInstalled = snapshot.agents.some(
+    (agent) => agent.id === "codebuddy" && agent.installed,
+  );
+  if (
+    defaultAgent === "claude-agent-acp" &&
+    codebuddyInstalled &&
+    !claudeAgentReady(snapshot)
+  ) {
+    return "codebuddy";
+  }
+  return defaultInstalled
+    ? defaultAgent
+    : snapshot.agents.find((agent) => agent.installed)?.id ?? defaultAgent;
+}
+
+function claudeAgentReady(snapshot: AgentSettingsSnapshot) {
+  const selectedProfile = snapshot.claude_woa.profiles.find(
+    (profile) => profile.id === snapshot.claude_woa.selected_profile_id,
+  );
+  if (!selectedProfile) return false;
+  if (selectedProfile.id === "woa") {
+    return snapshot.claude_woa.token.exists && !snapshot.claude_woa.token.malformed;
+  }
+  return !selectedProfile.requires_credential || selectedProfile.configured;
 }
 
 function WorkspaceSection({

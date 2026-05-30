@@ -51,10 +51,13 @@ export function ensureStreamingMessageBody(id: string, body: string) {
     state.body = body;
     return state.body;
   }
+  if (state.body.length > body.length && state.body.startsWith(body)) {
+    return state.body;
+  }
   if (body.length > state.body.length && body.startsWith(state.body)) {
     state.pending += body.slice(state.body.length);
     state.body = body;
-      flushPending(state);
+    flushPending(state);
     return state.body;
   }
   if (body !== state.body) {

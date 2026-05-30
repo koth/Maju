@@ -21,10 +21,10 @@ mod tests {
     use acp_core::ClientEvent;
     use session_store::SessionStore;
     use workspace_model::{
-        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffLineKind, FileChangeType,
-        MessageRole, SessionConfigCategory, SessionConfigChoice, SessionConfigControl,
-        SessionConfigSource, SessionConfigState, SessionFileChange, TerminalOutput, ThinkingStatus,
-        TimelineItem, ToolStatus, UserPromptContent,
+        AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, DiffHunk, DiffLine,
+        DiffLineKind, FileChangeType, MessageRole, SessionConfigCategory, SessionConfigChoice,
+        SessionConfigControl, SessionConfigSource, SessionConfigState, SessionFileChange,
+        TerminalOutput, ThinkingStatus, TimelineItem, ToolStatus, UserPromptContent,
     };
 
     use tempfile::tempdir;
@@ -178,6 +178,45 @@ mod tests {
         assert!(app.ui.messages.iter().any(|message| message.role
             == workspace_model::MessageRole::Assistant
             && message.body.contains("Real ACP session connected")));
+    }
+
+    #[test]
+    fn background_prompt_displays_workspace_mentions_before_text() {
+        let dir = tempdir().unwrap();
+        let referenced_dir = dir.path().join("packages/backend");
+        std::fs::create_dir_all(&referenced_dir).unwrap();
+        std::fs::write(
+            referenced_dir.join(".env"),
+            (1..=24)
+                .map(|line| format!("KEY_{line}=value"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut app = test_app(&dir);
+        wait_for_image_prompt_capability(&mut app);
+
+        app.send_prompt_content_background(vec![
+            UserPromptContent::workspace_file("packages/backend/.env", Some(21), Some(21)),
+            UserPromptContent::text("打标签用的key，默认是这里的吗"),
+        ])
+        .unwrap();
+
+        let user_message = app
+            .ui
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == workspace_model::MessageRole::User)
+            .unwrap();
+        assert_eq!(
+            user_message.body,
+            "@packages/backend/.env#L21\n\n打标签用的key，默认是这里的吗"
+        );
+
+        while app.has_in_flight_prompt() {
+            app.poll_prompt_progress();
+        }
     }
 
     #[test]
@@ -777,6 +816,61 @@ mod tests {
         assert_eq!(
             ui.session_changes[0].new_text,
             "before\nnew section\nfinal\n"
+        );
+    }
+
+    #[test]
+    fn reducer_attaches_raw_unified_diff_preview_to_tool_card() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiffPreview {
+                id: "edit-raw-diff".into(),
+                path: "src/main.rs".into(),
+                hunks: vec![DiffHunk {
+                    heading: "@@ -1,2 +1,3 @@".into(),
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Context,
+                            content: "fn main() {".into(),
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Removed,
+                            content: "    old();".into(),
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Added,
+                            content: "    new();".into(),
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Added,
+                            content: "    done();".into(),
+                        },
+                    ],
+                }],
+            },
+        );
+
+        assert_eq!(ui.tools.len(), 1);
+        assert_eq!(ui.tools[0].diff_previews.len(), 1);
+        let lines = &ui.tools[0].diff_previews[0].hunks[0].lines;
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.kind == DiffLineKind::Added)
+                .count(),
+            2
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.kind == DiffLineKind::Removed)
+                .count(),
+            1
         );
     }
 

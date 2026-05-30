@@ -1,6 +1,8 @@
 use super::codebuddy::send_codebuddy_interruption_resolution;
 use super::permissions::PermissionBroker;
-use super::prompt_content::{prompt_contains_file, prompt_contains_image, prompt_content_to_acp};
+use super::prompt_content::{
+    prompt_contains_file, prompt_contains_image, prompt_content_to_acp, prompt_title_text,
+};
 use super::session_titles::emit_turn_finished;
 use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
@@ -48,10 +50,24 @@ pub(super) async fn run_command_loop(
                     continue;
                 }
 
-                let content_blocks = prompt
-                    .into_iter()
-                    .filter_map(prompt_content_to_acp)
-                    .collect::<Vec<_>>();
+                let title_source = prompt_title_text(&prompt);
+                let mut content_blocks = Vec::new();
+                let mut prompt_error = None;
+                for content in prompt {
+                    match prompt_content_to_acp(content, &config.workspace_root) {
+                        Ok(blocks) => content_blocks.extend(blocks),
+                        Err(error) => {
+                            prompt_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if let Some(error) = prompt_error {
+                    let _ = tx_events.send(ClientEvent::Interrupted {
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
                 if content_blocks.is_empty() {
                     let _ = tx_events.send(ClientEvent::Interrupted {
                         reason: "Prompt cannot be empty".into(),
@@ -100,6 +116,7 @@ pub(super) async fn run_command_loop(
                                     &session.connection(),
                                     session.session_id(),
                                     supports_session_list,
+                                    title_source.as_deref(),
                                     reason,
                                 )
                                 .await?;
@@ -181,6 +198,7 @@ pub(super) async fn run_command_loop(
                                 &session.connection(),
                                 session.session_id(),
                                 supports_session_list,
+                                title_source.as_deref(),
                                 reason,
                             )
                             .await?;
@@ -219,6 +237,7 @@ pub(super) async fn run_command_loop(
                                 &session.connection(),
                                 session.session_id(),
                                 supports_session_list,
+                                title_source.as_deref(),
                                 reason,
                             )
                             .await?;

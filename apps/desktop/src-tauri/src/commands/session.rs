@@ -78,7 +78,7 @@ pub fn session_create(
     let default_agent = agent.or_else(|| {
         app_core::AppPaths::resolve()
             .ok()
-            .map(|paths| app_core::settings::load_app_settings(&paths).selected_agent)
+            .map(|paths| app_core::settings::default_agent_for_new_work(&paths))
     });
     state.with_workspace_app(workspace_root, |app| app.session_create(default_agent))?;
     save_open_workspace_state(&state)

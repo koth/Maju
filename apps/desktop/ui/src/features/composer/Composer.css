@@ -22,6 +22,25 @@
     0 0 0 3px rgba(106, 168, 159, 0.13);
 }
 
+.composer-plan-slot {
+  flex-shrink: 0;
+  width: var(--conversation-column-width);
+  min-width: var(--conversation-column-min);
+  max-width: var(--conversation-column-max);
+  margin: 0 auto;
+  padding: 0 0 8px;
+}
+
+.composer-plan-slot + .composer {
+  padding-top: 0;
+}
+
+.composer-plan-slot .agent-plan {
+  max-height: min(30vh, 220px);
+  margin: 0;
+  border-radius: 12px;
+}
+
 .agent-plan {
   width: 100%;
   max-height: min(34vh, 260px);
@@ -182,14 +201,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: 32px;
   background: rgba(0, 0, 0, 0.48);
   backdrop-filter: blur(8px);
 }
 
 .plan-approval-modal {
-  width: min(780px, 100%);
-  max-height: min(76vh, 720px);
+  display: flex;
+  flex-direction: column;
+  width: min(1080px, calc(100vw - 64px));
+  max-height: min(88vh, 900px);
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 18px;
@@ -236,12 +257,13 @@
 
 .plan-approval-list {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
   gap: 6px;
-  max-height: 180px;
+  max-height: min(22vh, 220px);
   margin: 0;
   overflow: auto;
-  padding: 14px 18px 0;
+  padding: 16px 22px 0;
   list-style: none;
 }
 
@@ -287,7 +309,11 @@
 }
 
 .plan-approval-proposal {
-  margin: 14px 18px 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  margin: 16px 22px 0;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   background: color-mix(in srgb, var(--surface-muted-bg) 78%, var(--app-bg));
@@ -304,7 +330,9 @@
   --md-code-bg: rgba(255, 255, 255, 0.045);
   --md-code-block-bg: rgba(0, 0, 0, 0.2);
   --md-code-border: var(--border-subtle);
-  max-height: min(34vh, 320px);
+  flex: 1 1 auto;
+  min-height: min(46vh, 460px);
+  max-height: min(58vh, 620px);
   overflow: auto;
   padding: 10px 14px 14px;
   color: var(--text-strong);
@@ -333,9 +361,10 @@
 
 .plan-approval-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 10px;
   justify-content: flex-end;
-  padding: 16px 18px 18px;
+  padding: 16px 22px 20px;
 }
 
 .plan-approval-action {
@@ -368,6 +397,33 @@
 }
 
 @media (max-width: 720px) {
+  .plan-approval-backdrop {
+    padding: 16px;
+  }
+
+  .plan-approval-modal {
+    width: 100%;
+    max-height: calc(100vh - 32px);
+  }
+
+  .plan-approval-list {
+    max-height: 20vh;
+    padding-inline: 16px;
+  }
+
+  .plan-approval-proposal {
+    margin-inline: 16px;
+  }
+
+  .plan-approval-proposal-body {
+    min-height: 0;
+    max-height: 48vh;
+  }
+
+  .plan-approval-actions {
+    padding-inline: 16px;
+  }
+
   .agent-plan {
     max-height: 30vh;
     border-radius: 16px;
@@ -397,6 +453,8 @@
 /* Input area — relative container for the send button */
 .composer-input-wrap {
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Slash command menu */
@@ -478,6 +536,11 @@
   padding: 14px 58px 12px 14px;
 }
 
+.composer-textarea.has-attachments {
+  min-height: 54px;
+  padding-top: 8px;
+}
+
 .composer-textarea::placeholder {
   color: #7f898c;
 }
@@ -485,8 +548,9 @@
 .composer-attachment-strip {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-start;
   gap: 8px;
-  padding: 0 6px 8px;
+  padding: 0 58px 0 0;
 }
 
 .composer-attachment-chip {
@@ -504,16 +568,62 @@
   font-weight: 500;
 }
 
-.composer-attachment-chip img,
+.composer-reference-chip {
+  max-width: min(420px, 100%);
+  min-height: 34px;
+  padding: 5px 6px 5px 10px;
+  border-color: rgba(103, 193, 166, 0.24);
+  background: rgba(103, 193, 166, 0.075);
+}
+
+.composer-reference-mention {
+  min-width: 0;
+  overflow: hidden;
+  color: #9ae5c8;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-image-attachment {
+  position: relative;
+  flex: 0 0 auto;
+  width: 72px;
+  height: 72px;
+}
+
+.composer-image-preview-btn {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: #151617;
+  cursor: zoom-in;
+}
+
+.composer-image-preview-btn:hover,
+.composer-image-preview-btn:focus-visible {
+  border-color: var(--border-strong);
+}
+
+.composer-image-preview-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
 .composer-file-glyph {
   width: 34px;
   height: 34px;
   flex-shrink: 0;
   border-radius: var(--radius-md);
-}
-
-.composer-attachment-chip img {
-  object-fit: cover;
 }
 
 .composer-file-glyph {
@@ -533,7 +643,7 @@
   white-space: nowrap;
 }
 
-.composer-attachment-chip button {
+.composer-attachment-remove {
   width: 22px;
   height: 22px;
   flex-shrink: 0;
@@ -546,9 +656,59 @@
   line-height: 1;
 }
 
-.composer-attachment-chip button:hover {
+.composer-image-remove {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  background: rgba(28, 30, 31, 0.92);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.26);
+}
+
+.composer-attachment-remove:hover {
   border-color: var(--border-strong);
   color: var(--text-strong);
+}
+
+.composer-image-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(5, 6, 7, 0.76);
+  backdrop-filter: blur(5px);
+}
+
+.composer-image-preview-original {
+  max-width: min(92vw, 1400px);
+  max-height: 86vh;
+  border-radius: 8px;
+  object-fit: contain;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.46);
+}
+
+.composer-image-preview-close {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(28, 30, 31, 0.86);
+  color: #eef4f2;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.composer-image-preview-close:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(42, 45, 46, 0.94);
 }
 
 .composer-attachment-input {
@@ -931,6 +1091,23 @@
 
 :root[data-theme="light"] .composer-attachment-chip {
   background: var(--surface-muted-bg);
+}
+
+:root[data-theme="light"] .composer-reference-chip {
+  border-color: rgba(28, 128, 101, 0.22);
+  background: rgba(28, 128, 101, 0.07);
+}
+
+:root[data-theme="light"] .composer-reference-mention {
+  color: #1c8065;
+}
+
+:root[data-theme="light"] .composer-image-preview-btn {
+  background: #f7f7f5;
+}
+
+:root[data-theme="light"] .composer-image-remove {
+  background: rgba(255, 255, 255, 0.94);
 }
 
 :root[data-theme="light"] .composer-utility-btn,

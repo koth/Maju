@@ -47,6 +47,12 @@ impl Application {
         Ok(entry)
     }
 
+    pub fn delete_workspace_file(&mut self, path: &str) -> Result<(), String> {
+        crate::workspace_files::delete_file(&self.ui.workspace.root, path)?;
+        self.refresh_repository();
+        Ok(())
+    }
+
     pub fn resolve_workspace_entry_for_shell(&self, path: &str) -> Result<PathBuf, String> {
         crate::workspace_files::resolve_existing_path(&self.ui.workspace.root, path)
     }

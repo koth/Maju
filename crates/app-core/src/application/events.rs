@@ -16,6 +16,30 @@ impl Application {
                 self.persist_current_codex_provider_if_needed();
             }
             ClientEvent::MessageChunk { .. } => {}
+            ClientEvent::ContextCompacted { .. } => {
+                let msg_data = self
+                    .ui
+                    .timeline
+                    .last()
+                    .and_then(|item| match item {
+                        TimelineItem::Message(id) => Some(id),
+                        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+                    })
+                    .and_then(|id| {
+                        self.ui
+                            .messages
+                            .iter()
+                            .find(|m| m.id == *id && m.role == MessageRole::System)
+                    })
+                    .map(|m| (m.id.to_string(), m.body.clone()));
+
+                if let Some((id_str, body)) = msg_data {
+                    let seq = self.next_seq();
+                    let _ = self
+                        .store
+                        .insert_message(&session_id, &id_str, "System", &body, seq);
+                }
+            }
             ClientEvent::TurnFinished { .. } => {
                 // Persist the final assistant message if not already persisted
                 let msg_data = self
@@ -123,7 +147,8 @@ impl Application {
             | ClientEvent::ToolProgress { id, .. }
             | ClientEvent::ToolCompleted { id, .. }
             | ClientEvent::ToolFailed { id, .. }
-            | ClientEvent::ToolDiff { id, .. } => {
+            | ClientEvent::ToolDiff { id, .. }
+            | ClientEvent::ToolDiffPreview { id, .. } => {
                 self.mark_tool_call_dirty(id);
             }
             ClientEvent::ToolStarted { id, parent_id, .. }
@@ -138,6 +163,7 @@ impl Application {
             }
             ClientEvent::SessionStarted { .. }
             | ClientEvent::ThinkingActivity { .. }
+            | ClientEvent::ContextCompacted { .. }
             | ClientEvent::MessageChunk { .. }
             | ClientEvent::SessionConfigUpdated { .. }
             | ClientEvent::PromptCapabilitiesUpdated { .. }
@@ -170,6 +196,11 @@ impl Application {
     ) -> Option<ClientEvent> {
         match event {
             ClientEvent::SessionTitleUpdated { title } => self.prepare_session_title_update(title),
+            ClientEvent::SessionConfigUpdated { state } => {
+                Some(ClientEvent::SessionConfigUpdated {
+                    state: self.prepare_session_config_update(state),
+                })
+            }
             ClientEvent::SessionConfigValueChanged {
                 control_id,
                 value_id,
@@ -182,9 +213,44 @@ impl Application {
         }
     }
 
+    pub(super) fn prepare_session_config_update(
+        &self,
+        state: &workspace_model::SessionConfigState,
+    ) -> workspace_model::SessionConfigState {
+        let mut state = state.clone();
+        if self.pending_model_restore.is_some() {
+            return state;
+        }
+
+        let Some(selected_model) = self.authoritative_model_selection.as_deref() else {
+            return state;
+        };
+
+        for control in &mut state.controls {
+            if control.category != workspace_model::SessionConfigCategory::Model {
+                continue;
+            }
+
+            if let Some(choice) = control
+                .choices
+                .iter()
+                .find(|choice| choice.id == selected_model || choice.label == selected_model)
+            {
+                control.current_value_id = choice.id.clone();
+                control.current_value_label = choice.label.clone();
+            }
+        }
+
+        state
+    }
+
     pub(super) fn prepare_session_title_update(&mut self, title: &str) -> Option<ClientEvent> {
         let trimmed = title.trim();
         if trimmed.is_empty() {
+            return None;
+        }
+
+        if is_placeholder_session_title(trimmed) {
             return None;
         }
 

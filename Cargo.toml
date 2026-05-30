@@ -9,6 +9,7 @@ members = [
     "crates/workspace-model",
     "tools/mock-acp-agent",
 ]
+exclude = ["codex-acp"]
 resolver = "2"
 
 [workspace.package]

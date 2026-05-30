@@ -2,8 +2,9 @@ use super::diff_utils::{
     canonical_text_diff, edit_input_after_text, edit_input_before_text,
     expand_tool_diff_fragment_from_disk, is_file_write_tool_identity,
     is_trustworthy_review_change_text, looks_like_fragment_to_full_file_text,
-    looks_like_whole_file_addition_hunks, sanitize_session_file_changes, tool_diff_hunks,
-    tool_diff_hunks_for_tracker_change, tool_event_hint_paths, tool_hunks_for_tracker_update,
+    looks_like_whole_file_addition_hunks, reverse_apply_unified_diff,
+    sanitize_session_file_changes, tool_diff_hunks, tool_diff_hunks_for_tracker_change,
+    tool_event_hint_paths, tool_hunks_for_tracker_update,
 };
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
@@ -13,8 +14,9 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use workspace_model::{
     ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind, DiffQuality,
     FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
-    MessageRole, SessionFileChange, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
-    TurnFileChanges,
+    MessageRole, SessionConfigCategory, SessionConfigChoice, SessionConfigControl,
+    SessionConfigSource, SessionConfigState, SessionFileChange, TimelineItem, ToolDiffPreview,
+    ToolInvocation, ToolStatus, TurnFileChanges,
 };
 
 mod change_set_tests;
@@ -60,4 +62,64 @@ fn test_app(dir: &tempfile::TempDir) -> Application {
         crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
     )
     .unwrap()
+}
+
+#[test]
+fn stale_model_config_refresh_preserves_user_selected_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.ui.session_config = model_config_state(
+        SessionConfigSource::ConfigOption,
+        "gpt-5.4",
+        &["gpt-5.4", "gpt-5.5"],
+    );
+    app.ui.session.model = "gpt-5.4".into();
+    app.authoritative_model_selection = Some("gpt-5.4".into());
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: model_config_state(
+            SessionConfigSource::ConfigOption,
+            "gpt-5.5",
+            &["gpt-5.4", "gpt-5.5"],
+        ),
+    });
+
+    assert_eq!(app.ui.session.model, "gpt-5.4");
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(model_control.current_value_id, "gpt-5.4");
+}
+
+fn model_config_state(
+    source: SessionConfigSource,
+    current: &str,
+    choices: &[&str],
+) -> SessionConfigState {
+    SessionConfigState {
+        hydrated: true,
+        controls: vec![SessionConfigControl {
+            id: "model".into(),
+            label: "Model".into(),
+            description: None,
+            category: SessionConfigCategory::Model,
+            source,
+            current_value_id: current.into(),
+            current_value_label: current.into(),
+            choices: choices
+                .iter()
+                .map(|choice| SessionConfigChoice {
+                    id: (*choice).into(),
+                    label: (*choice).into(),
+                    description: None,
+                })
+                .collect(),
+            enabled: true,
+        }],
+    }
 }

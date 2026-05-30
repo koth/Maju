@@ -106,6 +106,22 @@ const fakeMonaco = {
 };
 
 let currentModel: FakeModel | null = null;
+let currentSelection = {
+  isEmpty: () => true,
+  startLineNumber: 1,
+  startColumn: 1,
+  endLineNumber: 1,
+  endColumn: 1,
+};
+let selectionListener: (() => void) | null = null;
+
+interface FakeEditorAction {
+  id: string;
+  label: string;
+  precondition?: string;
+  contextMenuGroupId?: string;
+  run: () => void;
+}
 
 function createFakeEditor() {
   return {
@@ -113,10 +129,20 @@ function createFakeEditor() {
       currentModel = model;
     }),
     getModel: () => currentModel,
-    getSelection: () => ({ isEmpty: () => true }),
+    getSelection: () => currentSelection,
     hasTextFocus: () => true,
     onDidDispose: vi.fn(),
-    onDidChangeCursorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+    onDidChangeCursorSelection: vi.fn((listener: () => void) => {
+      selectionListener = listener;
+      return {
+        dispose: vi.fn(() => {
+          if (selectionListener === listener) {
+            selectionListener = null;
+          }
+        }),
+      };
+    }),
+    addAction: vi.fn((_action: FakeEditorAction) => ({ dispose: vi.fn() })),
     saveViewState: vi.fn(() => null),
     restoreViewState: vi.fn(),
     revealLineNearTop: vi.fn(),
@@ -128,6 +154,11 @@ function createFakeEditor() {
 }
 
 let fakeEditor = createFakeEditor();
+
+function setFakeSelection(selection: typeof currentSelection) {
+  currentSelection = selection;
+  selectionListener?.();
+}
 
 vi.mock("@monaco-editor/react", () => ({
   default: function MockMonacoEditor(props: {
@@ -206,6 +237,14 @@ describe("EditorView editable state", () => {
     vi.clearAllMocks();
     modelStore.clear();
     currentModel = null;
+    currentSelection = {
+      isEmpty: () => true,
+      startLineNumber: 1,
+      startColumn: 1,
+      endLineNumber: 1,
+      endColumn: 1,
+    };
+    selectionListener = null;
     fakeEditor = createFakeEditor();
     vi.mocked(editorOpenFile).mockResolvedValue({
       path: "src/main.ts",
@@ -248,6 +287,45 @@ describe("EditorView editable state", () => {
     await screen.findByLabelText("mock editor");
 
     await waitFor(() => expect(getModelBaseVersion("src/main.ts")).toEqual(version));
+  });
+
+  it("adds selected editor lines to the composer from Monaco's context menu", async () => {
+    const onAddComposerReference = vi.fn();
+    render(
+      <EditorView
+        path="src/main.ts"
+        appTheme="kodex_dark"
+        onAddComposerReference={onAddComposerReference}
+      />,
+    );
+
+    await screen.findByLabelText("mock editor");
+    const action = fakeEditor.addAction.mock.calls.find(
+      ([registeredAction]) => registeredAction.id === "kodex.send-selection-to-composer",
+    )?.[0];
+
+    expect(action).toMatchObject({
+      label: "发送选区到 Composer",
+      precondition: "editorHasSelection",
+      contextMenuGroupId: "navigation",
+    });
+
+    setFakeSelection({
+      isEmpty: () => false,
+      startLineNumber: 4,
+      startColumn: 1,
+      endLineNumber: 9,
+      endColumn: 1,
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "引用选区" })).not.toBeDisabled());
+    action?.run();
+
+    expect(onAddComposerReference).toHaveBeenCalledWith({
+      path: "src/main.ts",
+      startLine: 4,
+      endLine: 8,
+    });
   });
 
   it("does not reopen the same file when parent callbacks refresh", async () => {

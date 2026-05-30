@@ -1,7 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
-import { appendStreamingMessageDelta } from "./streaming-message-store";
+import {
+  appendStreamingMessageDelta,
+  ensureStreamingMessageBody,
+  replaceStreamingMessageBody,
+} from "./streaming-message-store";
 import type {
   FileChangeSummary,
   TimelineItem,
@@ -225,6 +229,222 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".streaming-cursor")).toBeTruthy();
   });
 
+  it("does not let stale snapshot bodies overwrite newer streaming deltas", () => {
+    replaceStreamingMessageBody("stream-store-heading", "\n\n##xxxx\n\n#### yy");
+
+    expect(ensureStreamingMessageBody("stream-store-heading", "\n\n##")).toBe(
+      "\n\n##xxxx\n\n#### yy",
+    );
+  });
+
+  it("renders streamed compact heading deltas as markdown", async () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Streaming",
+      },
+      timeline: [{ Message: "streaming-heading" }],
+      messages: [{ id: "streaming-heading", role: "Assistant", body: "\n\n##" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    appendStreamingMessageDelta("streaming-heading", "xxxx\n\n#### yy");
+
+    await waitFor(() => {
+      expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("xxxx");
+      expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("yy");
+    });
+    expect(container.querySelector(".msg-assistant")?.textContent).not.toContain("##xxxx");
+  });
+
+  it("preserves assistant soft line breaks while rendering each line as markdown", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "第一行\n**第二行**\n`第三行`",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelectorAll(".msg-assistant .md-line-break")).toHaveLength(2);
+    expect(container.querySelector(".msg-assistant .md-bold")?.textContent).toBe("第二行");
+    expect(container.querySelector(".msg-assistant .md-inline-code")?.textContent).toBe("第三行");
+  });
+
+  it("keeps pasted user terminal output as soft line breaks instead of per-line paragraphs", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "User",
+          body:
+            "4: 00007FF711A48D46 v8::Function::Experimental_IsNopFunction+3302\n" +
+            "5: 00007FF7118A54A0 v8::internal::StrongRootAllocatorBase::StrongRootAllocatorBase+33904\n" +
+            "6: 00007FF7118A1B2A v8::internal::StrongRootAllocatorBase::StrongRootAllocatorBase+19194",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelectorAll(".msg-user .md-paragraph")).toHaveLength(1);
+    expect(container.querySelectorAll(".msg-user .md-line-break")).toHaveLength(2);
+  });
+
+  it("repairs compact headings without spaces across heading levels", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "前文\n##概览\n####细节",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant p")?.textContent).toBe("前文");
+    expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("概览");
+    expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("细节");
+  });
+
+  it("restores escaped markdown line breaks before parsing headings", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "\"\\n\\n##xxxx\\n\\n#### yy\"",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("xxxx");
+    expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("yy");
+  });
+
+  it("parses compact headings after leading blank lines", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "\n\n##xxxx\n\n#### yy",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("xxxx");
+    expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("yy");
+    expect(container.querySelector(".msg-assistant")?.textContent).not.toContain("##xxxx");
+  });
+
+  it("repairs compact fenced code blocks from dropped whitespace chunks", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body:
+            "来自 `docs/tags.md`：\n\n```textassets.subjectasset_structured_tags```\n\n" +
+            "例如：\n\n```textassets.subject =角色asset_structured_tags:\n- style = 半写实- style = 奇幻- 性别 = 女-视图 = 半身```\n\n" +
+            "可以关闭：\n\n```bashpnpm --filter @artassets/backend offline-tag-assets -- --no-legacy-tags```\n\n" +
+            "不会写：\n\n```textvision:subject:*\nvision:style:*\nvision:mood:*\n```",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    const codeBlocks = container.querySelectorAll(".msg-assistant .md-code-block");
+    expect(codeBlocks).toHaveLength(4);
+    expect(codeBlocks[0].textContent).toContain("assets.subject");
+    expect(codeBlocks[0].textContent).toContain("asset_structured_tags");
+    expect(codeBlocks[1].textContent).toContain("assets.subject = 角色");
+    expect(codeBlocks[1].textContent).toContain("- style = 半写实");
+    expect(codeBlocks[1].textContent).toContain("- 视图 = 半身");
+    expect(codeBlocks[2].textContent).toContain(
+      "pnpm --filter @artassets/backend offline-tag-assets -- --no-legacy-tags",
+    );
+    expect(container.querySelector(".msg-assistant")?.textContent).not.toContain("半身```");
+  });
+
+  it("repairs escaped compact heading markers at line starts", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "\n\n\\#\\#xxxx\n\n\\#### yy",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("xxxx");
+    expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("yy");
+    expect(container.querySelector(".msg-assistant")?.textContent).not.toContain("##xxxx");
+  });
+
+  it("unwraps quoted markdown with literal line breaks before parsing headings", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "\"\n\n##xxxx\n\n#### yy\"",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-assistant h2.md-heading")?.textContent).toBe("xxxx");
+    expect(container.querySelector(".msg-assistant h4.md-heading")?.textContent).toBe("yy");
+  });
+
   it("repairs compact numbered markdown lists from proxied model output", () => {
     const snapshot = makeSnapshot({
       timeline: [{ Message: "msg-1" }],
@@ -308,7 +528,7 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".md-code-block")).toBeNull();
   });
 
-  it("marks adjacent image-only user paragraphs so attachments can flow in one row", () => {
+  it("renders user image attachments outside the text bubble", () => {
     const snapshot = makeSnapshot({
       timeline: [{ Message: "msg-1" }],
       messages: [
@@ -326,11 +546,10 @@ describe("ThinkingIndicator", () => {
     );
 
     const userMessage = container.querySelector(".msg-user");
-    expect(userMessage?.querySelectorAll(".md-image")).toHaveLength(2);
-    expect(userMessage?.querySelectorAll(".md-image-paragraph")).toHaveLength(2);
-    expect(userMessage?.querySelector(".md-paragraph:not(.md-image-paragraph)")?.textContent).toBe(
-      "看看这两张图",
-    );
+    expect(userMessage?.querySelectorAll(".msg-user-image")).toHaveLength(2);
+    expect(userMessage?.querySelector(".msg-user-image-strip")).toBeTruthy();
+    expect(userMessage?.querySelector(".msg-user-bubble")?.textContent).toBe("› 看看这两张图");
+    expect(userMessage?.querySelector(".msg-user-bubble .md-image")).toBeNull();
   });
 
   it("windows long timelines so initial render only mounts the latest entries", () => {
@@ -355,21 +574,6 @@ describe("ThinkingIndicator", () => {
     fireEvent.click(getByRole("button", { name: /显示更早/ }));
     expect(container.textContent).toContain("message 0");
     expect(container.querySelectorAll(".msg")).toHaveLength(120);
-  });
-
-  it("renders the plan panel inside the timeline flow", () => {
-    const snapshot = makeSnapshot();
-    const { container } = render(
-      <ConversationTimeline
-        snapshot={snapshot}
-        onPermissionSelect={() => {}}
-        planPanel={<section className="test-plan-panel">plan lives here</section>}
-      />,
-    );
-
-    expect(container.querySelector(".timeline-items .test-plan-panel")?.textContent).toBe(
-      "plan lives here",
-    );
   });
 
   it("renders per-turn changes under the matching assistant message", () => {
@@ -524,6 +728,45 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).not.toContain("src/attached.ts");
   });
 
+  it("keeps previous turn changes visible while a new turn is active", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Streaming",
+      },
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }, { Message: "msg-3" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "previous done" },
+        { id: "msg-2", role: "User", body: "next prompt" },
+        { id: "msg-3", role: "Assistant", body: "working" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("src/previous.ts", 4, 2, "turn-msg-1"),
+          ]),
+          "msg-3": makeTurnChangeSet("turn-msg-3", [
+            makeFileSummary("src/current.ts", 8, 1, "turn-msg-3"),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
+    expect(container.textContent).toContain("src/previous.ts");
+    expect(container.textContent).not.toContain("src/current.ts");
+  });
+
   it("does not render live turn changes after the turn is idle", () => {
     const snapshot = makeSnapshot({
       session: {
@@ -656,39 +899,6 @@ describe("ThinkingIndicator", () => {
 
     fireEvent.click(getByText("src/file.ts"));
     expect(onReviewFileSelect).toHaveBeenCalledWith("src/file.ts", "turn-msg-1");
-  });
-
-  it("follows plan updates to the bottom when already near bottom", async () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
-    const snapshot = makeSnapshot();
-    const { rerender } = render(
-      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
-    );
-
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    scrollIntoView.mockClear();
-
-    rerender(
-      <ConversationTimeline
-        snapshot={{
-          ...snapshot,
-          revision: 2,
-          agent_plan: [
-            { id: "plan-1", content: "Do the work", status: "in_progress", priority: "medium" },
-          ],
-        }}
-        onPermissionSelect={() => {}}
-        planPanel={<section className="test-plan-panel">Do the work</section>}
-      />,
-    );
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-
-    expect(scrollIntoView).toHaveBeenCalled();
-    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
   });
 
   it("follows streaming chunks when already near bottom", async () => {

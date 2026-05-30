@@ -1,3 +1,4 @@
+use super::{normalize_path_for_storage, normalize_tracked_path};
 use acp_core::diff_to_hunks;
 use workspace_model::{DiffHunk, DiffLineKind, DiffQuality, FileChangeType, SessionFileChange};
 
@@ -166,6 +167,184 @@ pub(super) fn edit_input_after_text(input: &serde_json::Value) -> Option<&str> {
         .or_else(|| input.get("new_string"))
         .or_else(|| input.get("newString"))
         .and_then(|value| value.as_str())
+}
+
+pub(super) fn edit_input_unified_diff_for_path<'a>(
+    input: &'a serde_json::Value,
+    normalized_path: &str,
+    workspace_root: &std::path::Path,
+) -> Option<&'a str> {
+    let changes = input.get("changes")?.as_object()?;
+    for (path, change) in changes {
+        let display_path = change
+            .get("move_path")
+            .or_else(|| change.get("movePath"))
+            .and_then(|value| value.as_str())
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(path);
+        if normalize_path_for_storage(display_path, workspace_root) != normalized_path
+            && normalize_tracked_path(display_path) != normalized_path
+        {
+            continue;
+        }
+        if let Some(diff) = change
+            .get("unified_diff")
+            .or_else(|| change.get("unifiedDiff"))
+            .and_then(|value| value.as_str())
+        {
+            return Some(diff);
+        }
+    }
+    None
+}
+
+pub(super) fn reverse_apply_unified_diff(new_text: &str, unified_diff: &str) -> Option<String> {
+    reverse_apply_parsed_unified_hunks(new_text, parse_unified_diff_hunks(unified_diff)?)
+}
+
+pub(super) fn reverse_apply_diff_hunks(new_text: &str, hunks: &[DiffHunk]) -> Option<String> {
+    let parsed = hunks
+        .iter()
+        .map(|hunk| {
+            let mut old_side = Vec::new();
+            let mut new_side = Vec::new();
+            for line in &hunk.lines {
+                match line.kind {
+                    DiffLineKind::Context => {
+                        old_side.push(line.content.clone());
+                        new_side.push(line.content.clone());
+                    }
+                    DiffLineKind::Removed => old_side.push(line.content.clone()),
+                    DiffLineKind::Added => new_side.push(line.content.clone()),
+                }
+            }
+            Some(ParsedUnifiedHunk {
+                new_start: parse_unified_new_start(&hunk.heading).unwrap_or(1),
+                old_side,
+                new_side,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    reverse_apply_parsed_unified_hunks(new_text, parsed)
+}
+
+fn reverse_apply_parsed_unified_hunks(
+    new_text: &str,
+    mut hunks: Vec<ParsedUnifiedHunk>,
+) -> Option<String> {
+    let mut lines = split_text_lines(new_text);
+    let trailing_newline = new_text.ends_with('\n');
+    hunks.sort_by_key(|hunk| hunk.new_start);
+    for hunk in hunks.into_iter().rev() {
+        let index = hunk
+            .new_start
+            .checked_sub(1)
+            .filter(|index| *index <= lines.len())?;
+        let replacement_index = if lines[index..].starts_with(&hunk.new_side) {
+            index
+        } else {
+            find_unique_slice(&lines, &hunk.new_side)?
+        };
+        lines.splice(
+            replacement_index..replacement_index + hunk.new_side.len(),
+            hunk.old_side,
+        );
+    }
+
+    Some(join_text_lines(&lines, trailing_newline))
+}
+
+struct ParsedUnifiedHunk {
+    new_start: usize,
+    old_side: Vec<String>,
+    new_side: Vec<String>,
+}
+
+fn parse_unified_diff_hunks(unified_diff: &str) -> Option<Vec<ParsedUnifiedHunk>> {
+    let mut hunks = Vec::<ParsedUnifiedHunk>::new();
+    let mut current: Option<ParsedUnifiedHunk> = None;
+
+    for line in unified_diff.lines() {
+        if line.starts_with("@@") {
+            if let Some(hunk) = current.take() {
+                hunks.push(hunk);
+            }
+            current = Some(ParsedUnifiedHunk {
+                new_start: parse_unified_new_start(line)?,
+                old_side: Vec::new(),
+                new_side: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
+        if line.starts_with("\\ No newline") {
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let (kind, content) = line.split_at(1);
+        match kind {
+            " " => {
+                hunk.old_side.push(content.to_string());
+                hunk.new_side.push(content.to_string());
+            }
+            "-" => hunk.old_side.push(content.to_string()),
+            "+" => hunk.new_side.push(content.to_string()),
+            _ => {}
+        }
+    }
+
+    if let Some(hunk) = current {
+        hunks.push(hunk);
+    }
+    (!hunks.is_empty()).then_some(hunks)
+}
+
+fn parse_unified_new_start(header: &str) -> Option<usize> {
+    let plus = header.find('+')?;
+    let rest = &header[plus + 1..];
+    let end = rest
+        .find(|ch: char| ch == ',' || ch.is_whitespace() || ch == '@')
+        .unwrap_or(rest.len());
+    rest[..end].parse::<usize>().ok()
+}
+
+fn split_text_lines(text: &str) -> Vec<String> {
+    let normalized = normalize_diff_text_for_session_change(text);
+    let body = normalized.strip_suffix('\n').unwrap_or(&normalized);
+    if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split('\n').map(str::to_string).collect()
+    }
+}
+
+fn join_text_lines(lines: &[String], trailing_newline: bool) -> String {
+    let mut text = lines.join("\n");
+    if trailing_newline {
+        text.push('\n');
+    }
+    text
+}
+
+fn find_unique_slice(lines: &[String], needle: &[String]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > lines.len() {
+        return None;
+    }
+    let mut found = None;
+    for index in 0..=lines.len() - needle.len() {
+        if &lines[index..index + needle.len()] == needle {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
 }
 
 pub(super) fn tool_event_hint_paths(raw_input: Option<&str>) -> Vec<String> {
@@ -620,6 +799,13 @@ pub(super) fn tool_hunks_for_tracker_update(
         Vec::new()
     } else if let Some(hunks) = exact_edit_hunks {
         hunks
+    } else if let (Some(existing), true) = (
+        existing_tool_hunks.as_ref(),
+        !tracker_hunks.is_empty() && !looks_like_whole_file_addition_hunks(tracker_hunks),
+    ) && !looks_like_whole_file_addition_hunks(existing)
+        && changed_line_count(tracker_hunks) <= changed_line_count(existing)
+    {
+        tracker_hunks.to_vec()
     } else if let Some(hunks) = existing_tool_hunks
         && !looks_like_whole_file_addition_hunks(&hunks)
     {
@@ -631,6 +817,14 @@ pub(super) fn tool_hunks_for_tracker_update(
     }
 }
 
+fn changed_line_count(hunks: &[DiffHunk]) -> usize {
+    hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
+        .count()
+}
+
 pub(super) fn looks_like_fragment_to_full_file_text(old_text: &str, new_text: &str) -> bool {
     let old_lines = old_text.lines().count();
     let new_lines = new_text.lines().count();
@@ -640,14 +834,38 @@ pub(super) fn looks_like_fragment_to_full_file_text(old_text: &str, new_text: &s
 pub(super) fn looks_like_whole_file_addition_hunks(hunks: &[DiffHunk]) -> bool {
     let mut added = 0;
     let mut removed = 0;
-    for line in hunks.iter().flat_map(|hunk| &hunk.lines) {
-        match line.kind {
-            DiffLineKind::Added => added += 1,
-            DiffLineKind::Removed => removed += 1,
-            DiffLineKind::Context => {}
+    for hunk in hunks {
+        if let (Some(old_count), Some(new_count)) = (
+            parse_unified_range_count(&hunk.heading, '-'),
+            parse_unified_range_count(&hunk.heading, '+'),
+        ) && new_count >= 100
+            && (old_count == 0 || new_count > old_count.saturating_mul(4))
+        {
+            return true;
+        }
+        for line in &hunk.lines {
+            match line.kind {
+                DiffLineKind::Added => added += 1,
+                DiffLineKind::Removed => removed += 1,
+                DiffLineKind::Context => {}
+            }
         }
     }
     added >= 100 && (removed == 0 || added > removed * 4)
+}
+
+fn parse_unified_range_count(header: &str, marker: char) -> Option<usize> {
+    let marker_index = header.find(marker)?;
+    let rest = &header[marker_index + marker.len_utf8()..];
+    let end = rest
+        .find(|ch: char| ch.is_whitespace() || ch == '@')
+        .unwrap_or(rest.len());
+    let range = &rest[..end];
+    if range.is_empty() {
+        return None;
+    }
+    let count = range.split_once(',').map(|(_, count)| count).unwrap_or("1");
+    count.parse::<usize>().ok()
 }
 
 pub(super) fn tool_diff_hunks_for_detected_write(

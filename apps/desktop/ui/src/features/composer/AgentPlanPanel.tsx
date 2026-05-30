@@ -1,4 +1,4 @@
-import type { AgentPlanEntry, PermissionOption } from "../../types";
+import type { AgentPlanEntry, PermissionOption, UiSnapshot } from "../../types";
 import MarkdownBody from "../conversation/MarkdownBody";
 import "./Composer.css";
 
@@ -55,6 +55,15 @@ export function AgentPlanPanel({ entries }: Props) {
         ))}
       </ol>
     </section>
+  );
+}
+
+export function shouldShowAgentPlanNearComposer(
+  snapshot: Pick<UiSnapshot, "agent_plan" | "session">,
+) {
+  return (
+    snapshot.agent_plan.length > 0 &&
+    (snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool")
   );
 }
 

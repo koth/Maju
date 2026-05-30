@@ -78,11 +78,16 @@ function isStreamingDeltaOnlyPatch(patch: UiSnapshotPatch) {
   );
 }
 
-function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
+export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnapshot {
   let changed = false;
   const messages = snapshot.messages.map((message) => {
     const streamingBody = getStreamingMessageBody(message.id);
-    if (streamingBody == null || streamingBody === message.body) {
+    if (
+      streamingBody == null ||
+      streamingBody === message.body ||
+      streamingBody.length <= message.body.length ||
+      !streamingBody.startsWith(message.body)
+    ) {
       return message;
     }
     changed = true;

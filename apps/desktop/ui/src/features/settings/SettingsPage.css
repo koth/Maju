@@ -236,7 +236,7 @@
   padding: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--panel) 50%, var(--app-bg));
+  background: color-mix(in srgb, var(--panel-bg) 50%, var(--app-bg));
 }
 
 .settings-agent-tab {
@@ -321,7 +321,7 @@
   padding: 14px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--panel) 64%, var(--app-bg));
+  background: color-mix(in srgb, var(--panel-bg) 64%, var(--app-bg));
 }
 
 .settings-provider-config-head {
@@ -545,6 +545,22 @@
   color: var(--text-strong);
 }
 
+.settings-inline-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.settings-inline-link:hover {
+  color: var(--text-strong);
+}
+
 .settings-link-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -581,6 +597,53 @@
 .settings-success {
   color: var(--success);
   background: var(--success-soft, rgba(106, 168, 159, 0.14));
+}
+
+.settings-startup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(3, 5, 7, 0.78);
+  backdrop-filter: blur(2px);
+}
+
+.settings-startup-dialog {
+  width: min(460px, calc(100vw - 48px));
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-bg, #151719);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.65);
+}
+
+.settings-startup-kicker {
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.settings-startup-dialog h2 {
+  margin: 7px 0 8px;
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.settings-startup-dialog p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.settings-startup-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .settings-page code {

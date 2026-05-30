@@ -75,6 +75,26 @@ pub(crate) fn rename(root: &Path, path: &str, new_name: &str) -> Result<FileEntr
     file_entry_from_path(&root, &canonical_target)
 }
 
+pub(crate) fn delete_file(root: &Path, path: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("Cannot delete workspace root".to_string());
+    }
+
+    let root = canonical_workspace_root(root)?;
+    let target = resolve_existing_workspace_path(&root, path)?;
+    let metadata =
+        std::fs::metadata(&target).map_err(|e| format!("Cannot inspect '{path}': {e}"))?;
+
+    if metadata.is_dir() {
+        return Err("Cannot delete directories from the file tree".to_string());
+    }
+    if !metadata.is_file() {
+        return Err("Unsupported filesystem entry".to_string());
+    }
+
+    std::fs::remove_file(&target).map_err(|e| format!("Cannot delete '{path}': {e}"))
+}
+
 pub(crate) fn resolve_existing_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     let root = canonical_workspace_root(root)?;
     resolve_existing_workspace_path(&root, path)
@@ -192,5 +212,27 @@ mod tests {
         let err = resolve_existing_path(&root, "../outside.txt").unwrap_err();
 
         assert!(err.contains("Path traversal"));
+    }
+
+    #[test]
+    fn delete_file_removes_workspace_file() {
+        let root = temp_workspace("delete-file");
+        let file = root.join("a.txt");
+        fs::write(&file, "hello").unwrap();
+
+        delete_file(&root, "a.txt").unwrap();
+
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn delete_file_rejects_directories() {
+        let root = temp_workspace("delete-dir");
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        let err = delete_file(&root, "src").unwrap_err();
+
+        assert!(err.contains("Cannot delete directories"));
+        assert!(root.join("src").is_dir());
     }
 }

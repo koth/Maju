@@ -16,9 +16,12 @@ function MarkdownBody({ content }: Props) {
 
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkPreserveLineBreaks]}
       urlTransform={safeMarkdownUrl}
       components={{
+        br() {
+          return <br className="md-line-break" />;
+        },
         code({ className, children, ...props }) {
           const match = /language-(\w+)/.exec(className || "");
           const codeString = (children == null ? "" : String(children)).replace(/\n$/, "");
@@ -84,6 +87,15 @@ function MarkdownBody({ content }: Props) {
         },
         h3({ children }) {
           return <h3 className="md-heading md-h3">{children}</h3>;
+        },
+        h4({ children }) {
+          return <h4 className="md-heading md-h4">{children}</h4>;
+        },
+        h5({ children }) {
+          return <h5 className="md-heading md-h5">{children}</h5>;
+        },
+        h6({ children }) {
+          return <h6 className="md-heading md-h6">{children}</h6>;
         },
         blockquote({ children }) {
           return <blockquote className="md-blockquote">{children}</blockquote>;
@@ -176,7 +188,7 @@ function isMarkdownImageElement(child: ReactNode) {
 }
 
 function repairCompactMarkdown(content: string) {
-  const lines = content.split(/\r?\n/);
+  const lines = repairCompactCodeFences(normalizeMarkdownInput(content)).split(/\r?\n/);
   let inFence = false;
   const repaired: string[] = [];
 
@@ -208,13 +220,222 @@ function repairCompactMarkdown(content: string) {
   return repaired.join("\n");
 }
 
+const COMPACT_FENCE_LANGUAGES = [
+  "typescript",
+  "javascript",
+  "powershell",
+  "markdown",
+  "python",
+  "tsx",
+  "jsx",
+  "bash",
+  "shell",
+  "rust",
+  "json",
+  "yaml",
+  "toml",
+  "diff",
+  "text",
+  "sql",
+  "css",
+  "html",
+  "sh",
+  "md",
+].sort((left, right) => right.length - left.length);
+
+function repairCompactCodeFences(content: string) {
+  const repaired: string[] = [];
+  let activeCompactFence: CompactFenceState | null = null;
+
+  for (const line of content.split(/\r?\n/)) {
+    if (activeCompactFence) {
+      if (line.trim() === activeCompactFence.marker) {
+        repaired.push(`${activeCompactFence.indent}${activeCompactFence.marker}`);
+        activeCompactFence = null;
+        continue;
+      }
+
+      const hasInlineClose =
+        line.endsWith(activeCompactFence.marker) &&
+        !line.trimStart().startsWith(activeCompactFence.marker);
+      const contentLine = hasInlineClose
+        ? line.slice(0, -activeCompactFence.marker.length)
+        : line;
+      const repairedContent = repairCompactFenceContent(
+        activeCompactFence.language,
+        contentLine,
+      );
+      if (repairedContent.length > 0) {
+        repaired.push(...repairedContent.split("\n"));
+      }
+      if (hasInlineClose) {
+        repaired.push(`${activeCompactFence.indent}${activeCompactFence.marker}`);
+        activeCompactFence = null;
+      }
+      continue;
+    }
+
+    const result = repairCompactCodeFenceLine(line);
+    repaired.push(...result.lines);
+    activeCompactFence = result.openFence ?? null;
+  }
+
+  return repaired.join("\n");
+}
+
+interface CompactFenceState {
+  marker: string;
+  language: string;
+  indent: string;
+}
+
+function repairCompactCodeFenceLine(line: string) {
+  const match = line.match(/^(\s*)(`{3,}|~{3,})([A-Za-z][\w+-]*\S.*)$/u);
+  if (!match) {
+    return { lines: [line] };
+  }
+
+  const [, indent, marker, tail] = match;
+  const split = splitCompactFenceTail(tail);
+  if (!split) {
+    return { lines: [line] };
+  }
+
+  const closingMarker = marker[0].repeat(marker.length);
+  const hasInlineClose = split.content.endsWith(closingMarker);
+  const content = hasInlineClose
+    ? split.content.slice(0, -closingMarker.length)
+    : split.content;
+  const repairedContent = repairCompactFenceContent(split.language, content).split("\n");
+  const opening = `${indent}${marker}${split.language}`;
+  return hasInlineClose
+    ? { lines: [opening, ...repairedContent, `${indent}${closingMarker}`] }
+    : {
+        lines: [opening, ...repairedContent],
+        openFence: { marker: closingMarker, language: split.language, indent },
+      };
+}
+
+function splitCompactFenceTail(tail: string) {
+  const lower = tail.toLowerCase();
+  for (const language of COMPACT_FENCE_LANGUAGES) {
+    if (!lower.startsWith(language) || tail.length <= language.length) {
+      continue;
+    }
+    const content = tail.slice(language.length);
+    if (/^\s/u.test(content)) {
+      continue;
+    }
+    return {
+      language: tail.slice(0, language.length),
+      content,
+    };
+  }
+  return null;
+}
+
+function repairCompactFenceContent(language: string, content: string) {
+  const trimmed = content.trim();
+  if (!/^(text|markdown|md)$/iu.test(language)) {
+    return trimmed;
+  }
+
+  return trimmed
+    .replace(/([^\s\n])(?=asset_structured_tags\b)/gu, "$1\n")
+    .replace(/([^\s\n])(?=asset_search_documents\b)/gu, "$1\n")
+    .replace(/([^\s\n])(?=vision:[a-z_]+:)/giu, "$1\n")
+    .replace(/([^\s\n])(-\s*)/gu, "$1\n$2")
+    .replace(/(^|\n)-(?=\S)/gu, "$1- ")
+    .replace(/=([^\s\n])/gu, "= $1");
+}
+
+function normalizeMarkdownInput(content: string) {
+  return normalizeEscapedMarkdownLineBreaks(unwrapStringifiedMarkdown(content));
+}
+
 function repairCompactMarkdownLine(line: string) {
-  return repairCompactMarkdownTable(line)
-    .replace(/^(\s{0,3}#{1,6})(?=\S)/u, "$1 ")
-    .replace(
-      /([^\s\n])(\d{1,2}\.\s+(?=(?:\*\*)?[\p{Script=Han}A-Za-z]))/gu,
-      "$1\n$2",
-    );
+  return repairCompactHeadingLine(repairCompactMarkdownTable(line)).replace(
+    /([^\s\n])(\d{1,2}\.\s+(?=(?:\*\*)?[\p{Script=Han}A-Za-z]))/gu,
+    "$1\n$2",
+  );
+}
+
+function repairCompactHeadingLine(line: string) {
+  const match = line.match(/^([\u200B\u200C\u200D\uFEFF]*[ \t]{0,3})(.*)$/u);
+  if (!match) {
+    return line;
+  }
+
+  const prefix = match[1].replace(/[\u200B\u200C\u200D\uFEFF]/gu, "");
+  const rest = match[2];
+  const plainHeading = rest.match(/^(#{1,6})(?!#)([^\S\r\n]*)(\S.*)$/u);
+  if (plainHeading) {
+    return `${prefix}${plainHeading[1]} ${plainHeading[3]}`;
+  }
+
+  const escapedEachHeading = rest.match(/^((?:\\#){1,6})(?!\\#|#)([^\S\r\n]*)(\S.*)$/u);
+  if (escapedEachHeading) {
+    return `${prefix}${escapedEachHeading[1].replace(/\\/gu, "")} ${escapedEachHeading[3]}`;
+  }
+
+  const escapedFirstHeading = rest.match(/^\\(#{1,6})(?!#)([^\S\r\n]*)(\S.*)$/u);
+  if (escapedFirstHeading) {
+    return `${prefix}${escapedFirstHeading[1]} ${escapedFirstHeading[3]}`;
+  }
+
+  return line;
+}
+
+function normalizeEscapedMarkdownLineBreaks(content: string) {
+  if (!content.includes("\\n")) {
+    return content;
+  }
+  if (!looksLikeMarkdownBlock(content)) {
+    return content;
+  }
+  return escapedMarkdownLineBreaksAsNewlines(content);
+}
+
+function escapedMarkdownLineBreaksAsNewlines(content: string) {
+  return content.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n");
+}
+
+function unwrapStringifiedMarkdown(content: string) {
+  const trimmed = content.trim();
+  if (trimmed.length < 2 || !isWrappedInMatchingQuotes(trimmed)) {
+    return content;
+  }
+
+  if (trimmed.startsWith("\"")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (typeof parsed === "string" && looksLikeMarkdownBlock(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Some proxied outputs include literal newlines inside surrounding quotes.
+    }
+  }
+
+  const inner = trimmed.slice(1, -1);
+  if (looksLikeMarkdownBlock(inner)) {
+    return inner;
+  }
+  return content;
+}
+
+function isWrappedInMatchingQuotes(value: string) {
+  return (
+    (value.startsWith("\"") && value.endsWith("\"")) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  );
+}
+
+function looksLikeMarkdownBlock(content: string) {
+  const normalized = escapedMarkdownLineBreaksAsNewlines(content);
+  return /(?:^|\n)\s{0,3}(?:#{1,6}(?!#)\s*\S|[-*+]\s|\d{1,2}\.\s|>|```|~~~|\|)/u.test(
+    normalized,
+  );
 }
 
 function repairCompactMarkdownTable(line: string) {
@@ -273,4 +494,48 @@ function normalizeMarkdownTableRow(row: string) {
 
 function countChars(value: string, char: string) {
   return [...value].filter((current) => current === char).length;
+}
+
+type MarkdownAstNode = {
+  type?: string;
+  value?: string;
+  children?: MarkdownAstNode[];
+};
+
+function remarkPreserveLineBreaks() {
+  return (tree: MarkdownAstNode) => {
+    preserveLineBreaksInChildren(tree);
+  };
+}
+
+function preserveLineBreaksInChildren(node: MarkdownAstNode) {
+  if (!Array.isArray(node.children)) {
+    return;
+  }
+
+  const children: MarkdownAstNode[] = [];
+  for (const child of node.children) {
+    if (child.type === "text" && typeof child.value === "string" && child.value.includes("\n")) {
+      children.push(...splitMarkdownTextOnLineBreaks(child));
+      continue;
+    }
+
+    preserveLineBreaksInChildren(child);
+    children.push(child);
+  }
+  node.children = children;
+}
+
+function splitMarkdownTextOnLineBreaks(node: MarkdownAstNode) {
+  const parts = (node.value ?? "").split("\n");
+  const nodes: MarkdownAstNode[] = [];
+  parts.forEach((part, index) => {
+    if (index > 0) {
+      nodes.push({ type: "break" });
+    }
+    if (part.length > 0) {
+      nodes.push({ ...node, value: part });
+    }
+  });
+  return nodes;
 }

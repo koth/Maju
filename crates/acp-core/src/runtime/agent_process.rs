@@ -9,13 +9,19 @@ use agent_client_protocol::{Client, ConnectTo, Lines, Role};
 use anyhow::anyhow;
 use futures::channel::mpsc as futures_mpsc;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+
+const CODEX_WOA_API_KEY_ENVS: &[&str] = &["AUTH_TOKEN", "CODEX_WOA_API_KEY"];
+const CODEX_WOA_GIT_REPOS_ENVS: &[&str] = &["CODEX_INTERNAL_GIT_REPOS", "CODEX_WOA_GIT_REPOS"];
+const CODEX_WOA_GIT_REPOS_ENV: &str = "CODEX_INTERNAL_GIT_REPOS";
+const CODEX_WOA_GITHUB_REPOS_HEADER: &str = "TechPlatform/MachineLearning";
 
 pub(super) struct HiddenAgentProcess {
     pub(super) command: PathBuf,
@@ -30,11 +36,9 @@ impl HiddenAgentProcess {
     pub(super) fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
         let mut process = Self::from_command(&config.agent_command, &config.workspace_root)?;
         process.env.extend(config.agent_env.clone());
-        if config
-            .agent_command
-            .to_ascii_lowercase()
-            .contains("codex-acp")
-        {
+        append_codex_woa_workspace_env(&mut process.env, Path::new(&config.workspace_root));
+        let agent_command = config.agent_command.to_ascii_lowercase();
+        if agent_command.contains("codex-acp") || agent_command.contains("kodex-acp") {
             for (env_key, provider) in [
                 ("DEEPSEEK_API_KEY", "deepseek"),
                 ("KIMI_CODE_API_KEY", "kimi_code"),
@@ -88,6 +92,126 @@ impl HiddenAgentProcess {
         self.shutdown_signal = shutdown_signal;
         self
     }
+}
+
+fn append_codex_woa_workspace_env(env: &mut Vec<(String, String)>, workspace_root: &Path) {
+    if !CODEX_WOA_API_KEY_ENVS
+        .iter()
+        .any(|name| env_has_non_empty(env, name))
+        || CODEX_WOA_GIT_REPOS_ENVS
+            .iter()
+            .any(|name| env_has_non_empty(env, name))
+    {
+        return;
+    }
+    let header = codex_woa_git_repos_header(workspace_root)
+        .unwrap_or_else(|| codex_woa_default_git_repos_header().to_string());
+    env.push((CODEX_WOA_GIT_REPOS_ENV.to_string(), header));
+}
+
+fn env_has_non_empty(env: &[(String, String)], name: &str) -> bool {
+    env.iter()
+        .any(|(key, value)| key == name && !value.trim().is_empty())
+}
+
+pub(super) fn codex_woa_git_repos_header(workspace_root: &Path) -> Option<String> {
+    let config_path = find_git_config_path(workspace_root)?;
+    let content = std::fs::read_to_string(config_path).ok()?;
+    parse_git_config_codex_woa_repos_header(&content)
+}
+
+pub(super) fn codex_woa_default_git_repos_header() -> &'static str {
+    CODEX_WOA_GITHUB_REPOS_HEADER
+}
+
+pub(super) fn parse_git_config_codex_woa_repos_header(content: &str) -> Option<String> {
+    let repos = parse_git_config_woa_repos(&content);
+    if !repos.is_empty() {
+        return Some(repos.join(","));
+    }
+    git_config_has_github_remote(content).then(|| CODEX_WOA_GITHUB_REPOS_HEADER.to_string())
+}
+
+fn find_git_config_path(workspace_root: &Path) -> Option<PathBuf> {
+    let mut current = workspace_root;
+    loop {
+        let dot_git = current.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git.join("config"));
+        }
+        if dot_git.is_file() {
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let git_dir = content.trim().strip_prefix("gitdir:")?.trim();
+            let git_dir = Path::new(git_dir);
+            let git_dir = if git_dir.is_absolute() {
+                git_dir.to_path_buf()
+            } else {
+                current.join(git_dir)
+            };
+            return Some(git_dir.join("config"));
+        }
+        current = current.parent()?;
+    }
+}
+
+pub(super) fn parse_git_config_woa_repos(content: &str) -> Vec<String> {
+    let mut repos = BTreeSet::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "url" {
+            continue;
+        }
+        if let Some(repo) = normalize_woa_remote_path(value) {
+            repos.insert(repo);
+        }
+    }
+
+    repos.into_iter().collect()
+}
+
+pub(super) fn normalize_woa_remote_path(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let remote = remote.strip_prefix("git+").unwrap_or(remote);
+    let path = if let Some(rest) = remote.strip_prefix("git@git.woa.com:") {
+        rest
+    } else if let Some(rest) = remote.strip_prefix("ssh://git@git.woa.com/") {
+        rest
+    } else if let Some(rest) = remote.strip_prefix("https://git.woa.com/") {
+        rest
+    } else if let Some(rest) = remote.strip_prefix("http://git.woa.com/") {
+        rest
+    } else {
+        return None;
+    };
+    let path = path.trim_start_matches('/').trim_end_matches(".git").trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn git_config_has_github_remote(content: &str) -> bool {
+    content.lines().any(|line| {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        key.trim() == "url" && remote_is_github(value)
+    })
+}
+
+fn remote_is_github(remote: &str) -> bool {
+    let remote = remote.trim();
+    let remote = remote.strip_prefix("git+").unwrap_or(remote);
+    remote.starts_with("git@github.com:")
+        || remote.starts_with("ssh://git@github.com/")
+        || remote.starts_with("https://github.com/")
+        || remote.starts_with("http://github.com/")
 }
 
 impl ConnectTo<Client> for HiddenAgentProcess {
@@ -221,10 +345,13 @@ impl TcpAgentProcess {
     pub(super) fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
         let parsed =
             HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
+        let mut env = parsed.env;
+        env.extend(config.agent_env.clone());
+        append_codex_woa_workspace_env(&mut env, Path::new(&config.workspace_root));
         Ok(Self {
             command: parsed.command,
             args: parsed.args,
-            env: parsed.env,
+            env,
             current_dir: parsed.current_dir,
             port: config.acp_port,
             log_config: config.clone(),

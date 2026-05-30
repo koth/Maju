@@ -54,6 +54,13 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             }
             push_message(ui, role, content);
         }
+        ClientEvent::ContextCompacted { message } => {
+            push_standalone_message(
+                ui,
+                workspace_model::MessageRole::System,
+                context_compacted_notice(&message),
+            );
+        }
         ClientEvent::ToolMessageChunk { id, content } => {
             finalize_running_children(ui, &id, None);
             let tool = ensure_tool(ui, &id, None, "tool", "tool", false);
@@ -364,6 +371,42 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 upsert_session_change(ui, path, old_text, new_text);
             }
         }
+        ClientEvent::ToolDiffPreview { id, path, hunks } => {
+            let normalized_path = normalize_change_path(&path);
+            let path_buf = std::path::PathBuf::from(&path);
+            let tool = ensure_tool(ui, &id, None, "Edit", "edit", false);
+            if !hunks.is_empty() {
+                if !tool.diff_paths.iter().any(|existing| {
+                    normalize_change_path(&existing.display().to_string()) == normalized_path
+                }) {
+                    tool.diff_paths.push(path_buf.clone());
+                }
+                if let Some(preview) = tool.diff_previews.iter_mut().find(|preview| {
+                    normalize_change_path(&preview.path.display().to_string()) == normalized_path
+                }) {
+                    preview.path = path_buf;
+                    preview.hunks = hunks.clone();
+                } else {
+                    tool.diff_previews.push(ToolDiffPreview {
+                        path: path_buf,
+                        hunks: hunks.clone(),
+                    });
+                }
+            }
+            tool.summary = format!("正在编辑 {path}");
+            if !matches!(tool.status, ToolStatus::Succeeded | ToolStatus::Failed) {
+                tool.status = ToolStatus::Running;
+            }
+            tool.error = None;
+            push_tool_log(tool, "编辑", path.clone());
+            ui.session.status = SessionStatus::WaitingForTool;
+
+            if let Some(changed_file) = ui.repository.changed_files.iter_mut().find(|file| {
+                normalize_change_path(&file.path.display().to_string()) == normalized_path
+            }) {
+                changed_file.hunks = hunks;
+            }
+        }
         ClientEvent::Interrupted { reason } => {
             ui.agent_plan.clear();
             ui.session.status = workspace_model::SessionStatus::Interrupted;
@@ -410,6 +453,25 @@ fn push_message(ui: &mut UiSnapshot, role: workspace_model::MessageRole, content
     ui.messages.push(message);
 }
 
+fn push_standalone_message(
+    ui: &mut UiSnapshot,
+    role: workspace_model::MessageRole,
+    content: String,
+) {
+    let Some(content) = new_message_content(role.clone(), content) else {
+        return;
+    };
+
+    let message = ChatMessage {
+        id: uuid::Uuid::new_v4(),
+        role,
+        body: content,
+        created_at: chrono_now_iso(),
+    };
+    ui.timeline.push(TimelineItem::Message(message.id));
+    ui.messages.push(message);
+}
+
 fn new_message_content(role: workspace_model::MessageRole, content: String) -> Option<String> {
     if role == workspace_model::MessageRole::User {
         return Some(content);
@@ -420,6 +482,15 @@ fn new_message_content(role: workspace_model::MessageRole, content: String) -> O
     }
 
     Some(content.trim_start_matches(['\r', '\n']).to_string())
+}
+
+fn context_compacted_notice(message: &str) -> String {
+    let message = message.trim();
+    if message.is_empty() {
+        "上下文已压缩".into()
+    } else {
+        message.to_string()
+    }
 }
 
 fn is_internal_session_metadata(content: &str) -> bool {
@@ -1381,6 +1452,33 @@ mod tests {
 
         assert_eq!(ui.messages.len(), 1);
         assert_eq!(ui.messages[0].body, "first\n\nsecond");
+    }
+
+    #[test]
+    fn context_compaction_notice_is_a_standalone_system_message() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::MessageChunk {
+                role: MessageRole::System,
+                content: "普通系统消息".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ContextCompacted {
+                message: "上下文已压缩".into(),
+            },
+        );
+
+        assert_eq!(ui.messages.len(), 2);
+        assert_eq!(ui.messages[1].role, MessageRole::System);
+        assert_eq!(ui.messages[1].body, "上下文已压缩");
+        assert!(matches!(
+            ui.timeline.as_slice(),
+            [TimelineItem::Message(_), TimelineItem::Message(_)]
+        ));
     }
 
     #[test]

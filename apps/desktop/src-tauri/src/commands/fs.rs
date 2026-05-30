@@ -18,6 +18,11 @@ pub fn fs_rename(
 }
 
 #[tauri::command]
+pub fn fs_delete_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.with_app(|app| app.delete_workspace_file(&path))
+}
+
+#[tauri::command]
 pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Result<(), String> {
     state.with_app(|app| {
         let target = app.resolve_workspace_entry_for_shell(&path)?;

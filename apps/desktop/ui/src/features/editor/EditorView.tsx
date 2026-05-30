@@ -42,7 +42,6 @@ interface Props {
   onSaved?: () => void;
   onAddComposerReference?: (request: {
     path: string;
-    text: string;
     startLine: number;
     endLine: number;
   }) => void;
@@ -68,7 +67,6 @@ export function EditorView({
   const [sourceMode, setSourceMode] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [selectionReference, setSelectionReference] = useState<{
-    text: string;
     startLine: number;
     endLine: number;
   } | null>(null);
@@ -77,11 +75,14 @@ export function EditorView({
   const prevPathRef = useRef<string | null>(null);
   const decorationsRef = useRef<monacoEditor.IEditorDecorationsCollection | null>(null);
   const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const composerReferenceActionRef = useRef<{ dispose: () => void } | null>(null);
   const lspChangeTimerRef = useRef<number | null>(null);
   const editorDisposedRef = useRef(false);
   const openRequestSeqRef = useRef(0);
   const onDirtyChangeRef = useRef(onDirtyChange);
   const onSavedRef = useRef(onSaved);
+  const onAddComposerReferenceRef = useRef(onAddComposerReference);
+  const pathRef = useRef(path);
 
   useEffect(() => {
     onDirtyChangeRef.current = onDirtyChange;
@@ -90,6 +91,14 @@ export function EditorView({
   useEffect(() => {
     onSavedRef.current = onSaved;
   }, [onSaved]);
+
+  useEffect(() => {
+    onAddComposerReferenceRef.current = onAddComposerReference;
+  }, [onAddComposerReference]);
+
+  useEffect(() => {
+    pathRef.current = path;
+  }, [path]);
 
   const language = useMemo(() => {
     return languageForPath(path);
@@ -100,6 +109,19 @@ export function EditorView({
   const isImageFile = fileKind === "image";
   const isRenderableDocument = isTextFile && (language === "markdown" || language === "html");
   const isSourceMode = isTextFile && (!isRenderableDocument || sourceMode);
+
+  const addCurrentSelectionToComposer = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor || editorDisposedRef.current) return;
+    const selection = editor.getSelection();
+    const range = selection ? selectionLineRange(selection) : null;
+    if (!range) return;
+    onAddComposerReferenceRef.current?.({
+      path: pathRef.current,
+      startLine: range.startLine,
+      endLine: range.endLine,
+    });
+  }, []);
 
   const safeSetEditorModel = useCallback((model: monacoEditor.ITextModel) => {
     const editor = editorRef.current;
@@ -273,26 +295,35 @@ export function EditorView({
         }
         selectionDisposableRef.current?.dispose();
         selectionDisposableRef.current = null;
+        composerReferenceActionRef.current?.dispose();
+        composerReferenceActionRef.current = null;
         editorDisposedRef.current = true;
       });
       selectionDisposableRef.current?.dispose();
       const updateSelectionReference = () => {
-        const model = editor.getModel();
         const selection = editor.getSelection();
-        if (!model || !selection || selection.isEmpty()) {
+        const range = selection ? selectionLineRange(selection) : null;
+        if (!range) {
           setSelectionReference(null);
           return;
         }
-        const text = model.getValueInRange(selection);
-        if (!text.trim()) {
-          setSelectionReference(null);
-          return;
-        }
-        const startLine = Math.min(selection.startLineNumber, selection.endLineNumber);
-        const endLine = Math.max(selection.startLineNumber, selection.endLineNumber);
-        setSelectionReference({ text, startLine, endLine });
+        setSelectionReference(range);
       };
       selectionDisposableRef.current = editor.onDidChangeCursorSelection(updateSelectionReference);
+      composerReferenceActionRef.current?.dispose();
+      composerReferenceActionRef.current = null;
+      if (onAddComposerReferenceRef.current) {
+        composerReferenceActionRef.current = editor.addAction({
+          id: "kodex.send-selection-to-composer",
+          label: "发送选区到 Composer",
+          precondition: "editorHasSelection",
+          contextMenuGroupId: "navigation",
+          contextMenuOrder: 1.5,
+          run: () => {
+            addCurrentSelectionToComposer();
+          },
+        });
+      }
       const model = getOrCreateModel(monacoInstance, path, content);
       updateModelBaseVersion(path, activeSnapshot?.version);
       safeSetEditorModel(model);
@@ -336,7 +367,15 @@ export function EditorView({
         });
       }
     },
-    [path, content, lineNumber, searchQuery, safeSetEditorModel, activeSnapshot?.version],
+    [
+      path,
+      content,
+      lineNumber,
+      searchQuery,
+      safeSetEditorModel,
+      activeSnapshot?.version,
+      addCurrentSelectionToComposer,
+    ],
   );
 
   useEffect(() => {
@@ -484,6 +523,8 @@ export function EditorView({
     return () => {
       selectionDisposableRef.current?.dispose();
       selectionDisposableRef.current = null;
+      composerReferenceActionRef.current?.dispose();
+      composerReferenceActionRef.current = null;
     };
   }, []);
 
@@ -537,12 +578,7 @@ export function EditorView({
               }
               onClick={() => {
                 if (!selectionReference) return;
-                onAddComposerReference({
-                  path,
-                  text: selectionReference.text,
-                  startLine: selectionReference.startLine,
-                  endLine: selectionReference.endLine,
-                });
+                addCurrentSelectionToComposer();
               }}
             >
               引用选区
@@ -623,6 +659,26 @@ export function EditorView({
       )}
     </div>
   );
+}
+
+interface SelectionLineRangeSource {
+  isEmpty: () => boolean;
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
+function selectionLineRange(selection: SelectionLineRangeSource) {
+  if (selection.isEmpty()) return null;
+  const startLine = Math.min(selection.startLineNumber, selection.endLineNumber);
+  let endLine = Math.max(selection.startLineNumber, selection.endLineNumber);
+
+  if (endLine > startLine && selection.endColumn === 1) {
+    endLine -= 1;
+  }
+  if (endLine < startLine) return null;
+  return { startLine, endLine };
 }
 
 function diagnosticToMarker(

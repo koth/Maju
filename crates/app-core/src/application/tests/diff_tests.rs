@@ -78,6 +78,63 @@ fn tracker_tool_diff_preserves_existing_acp_preview() {
 }
 
 #[test]
+fn tracker_tool_diff_prefers_verified_narrower_diff_over_raw_preview() {
+    let raw_preview = vec![
+        DiffHunk {
+            heading: "@@ -10,2 +10,2 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    content: "pending = partitionSidebarAssets(filteredAssets)".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    content: "pending = partitionSidebarAssets(assets)".into(),
+                },
+            ],
+        },
+        DiffHunk {
+            heading: "@@ -20,2 +20,2 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    content: "readyPendingAssets = pendingAssets.filter(isReady)".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    content: "readyPendingAssets = filteredAssets.filter(isReady)".into(),
+                },
+            ],
+        },
+    ];
+    let verified = vec![DiffHunk {
+        heading: "@@ -10,2 +10,2 @@".into(),
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Removed,
+                content: "pending = partitionSidebarAssets(filteredAssets)".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "pending = partitionSidebarAssets(assets)".into(),
+            },
+        ],
+    }];
+
+    let hunks = tool_hunks_for_tracker_update(
+        false,
+        None,
+        Some(raw_preview),
+        None,
+        Some("full file before"),
+        "full file after",
+        &verified,
+    );
+
+    assert_eq!(hunks, verified);
+}
+
+#[test]
 fn tracker_tool_diff_prefers_codebuddy_old_new_string_exact_hunks() {
     let input = serde_json::json!({
         "file_path": "D:/work/InfiniteCanvasOL/smokeTest/tests/app-smoke.spec.ts",
@@ -240,6 +297,16 @@ fn canonical_diff_records_quality_for_unavailable_inputs() {
     );
     assert_eq!(binary.quality, DiffQuality::BinarySkipped);
     assert!(binary.hunks.is_empty());
+}
+
+#[test]
+fn reverse_apply_unified_diff_recovers_old_file_text() {
+    let after = "import A\nkeep\nnew_two\n";
+    let patch = "@@ -1,3 +1,3 @@\n-import OldA\n+import A\n keep\n-old_two\n+new_two\n";
+
+    let before = reverse_apply_unified_diff(after, patch).unwrap();
+
+    assert_eq!(before, "import OldA\nkeep\nold_two\n");
 }
 
 #[test]
@@ -828,4 +895,246 @@ fn late_codebuddy_edit_prefers_exact_turn_diff_over_git_cumulative_diff() {
     );
     assert_eq!(diff.old_text.as_deref(), Some(before_turn.as_str()));
     assert_eq!(diff.new_text.as_deref(), Some(after_turn.as_str()));
+}
+
+#[test]
+fn late_codebuddy_unified_diff_recovers_turn_base_when_git_diff_is_smaller() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "src/main.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let git_head = "import A\nkeep\nold_two\n";
+    let before_turn = "import OldA\nkeep\nold_two\n";
+    let after_turn = "import A\nkeep\nnew_two\n";
+    fs::write(&file_path, git_head).unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, before_turn).unwrap();
+
+    let mut app = test_app(&dir);
+    fs::write(&file_path, after_turn).unwrap();
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "edit-main".into(),
+        parent_call_id: None,
+        name: "Edit".into(),
+        kind: "Edit".into(),
+        summary: format!("Edited {relative_path}"),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: Some(
+            serde_json::json!({
+                "changes": {
+                    "src/main.ts": {
+                        "type": "update",
+                        "move_path": null,
+                        "unified_diff": "@@ -1,3 +1,3 @@\n-import OldA\n+import A\n keep\n-old_two\n+new_two\n"
+                    }
+                }
+            })
+            .to_string(),
+        ),
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(app.detect_file_writes_from_tools(&["edit-main".into()]));
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some(before_turn)
+    );
+    assert_eq!(app.ui.review_changes[0].new_text, after_turn);
+    assert_eq!(
+        (
+            app.ui.review_changes[0].added_lines,
+            app.ui.review_changes[0].removed_lines,
+        ),
+        (2, 2)
+    );
+}
+
+#[test]
+fn review_uses_landed_tool_preview_instead_of_narrow_exact_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/GalleryPage.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = [
+        "const query = search.trim();",
+        "{!isOnline && query.trim() && (",
+        "  <span>old offline helper</span>",
+        ")}",
+        "const filler = 1;",
+        "const more = 2;",
+        "{boosts.length < 5 && (",
+        "  <button>Add boost</button>",
+        ")}",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "const query = search.trim();",
+        "{!isOnline && (",
+        "  <span>new offline helper</span>",
+        ")}",
+        "const filler = 1;",
+        "const more = 2;",
+        "{boosts.length < 5 && query.trim() && (",
+        "  <button>Add boost</button>",
+        ")}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &after).unwrap();
+
+    let mut app = test_app(&dir);
+    let landed_hunks = diff_to_hunks(Some(&before), &after);
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "edit-gallery".into(),
+        parent_call_id: None,
+        name: "Edit".into(),
+        kind: "Edit".into(),
+        summary: format!("Edited {relative_path}"),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![relative_path.into()],
+        diff_previews: vec![ToolDiffPreview {
+            path: relative_path.into(),
+            hunks: landed_hunks.clone(),
+        }],
+        raw_input: Some(
+            serde_json::json!({
+                "file_path": relative_path,
+                "old_string": "{!isOnline && query.trim() && (",
+                "new_string": "{!isOnline && (",
+            })
+            .to_string(),
+        ),
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(app.apply_tracker_changes(
+        "edit-gallery",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(before.clone()),
+            new_text: after.clone(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let review_change = &app.ui.review_changes[0];
+    assert_eq!(review_change.path, relative_path);
+    assert_eq!(review_change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(review_change.new_text, after);
+    assert_eq!(
+        (review_change.added_lines, review_change.removed_lines),
+        (3, 3)
+    );
+
+    let tool_hunks = &app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "edit-gallery")
+        .unwrap()
+        .diff_previews[0]
+        .hunks;
+    let tool_changed_lines = tool_hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
+        .count();
+    assert_eq!(tool_changed_lines, 6);
+}
+
+#[test]
+fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "frontend/src/components/layout/TopBar.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = [
+        "type Props = {",
+        "  targetSimilaritySort?: TargetSimilaritySort",
+        "  completionSort?: boolean",
+        "  showArmourGroups?: boolean",
+        "}",
+        "",
+        "function TopBar(props: Props) {",
+        "  const {",
+        "    targetSimilaritySort,",
+        "    completionSort,",
+        "    showArmourGroups,",
+        "    onCycleTargetSimilaritySort,",
+        "    onToggleCompletionSort,",
+        "    onToggleArmourGroups,",
+        "  } = props",
+        "",
+        "  return (",
+        "    <button>相似度</button>",
+        "    {onToggleCompletionSort ? <button>完成顺序</button> : null}",
+        "  )",
+        "}",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "type Props = {",
+        "  targetSimilaritySort?: TargetSimilaritySort",
+        "  showArmourGroups?: boolean",
+        "}",
+        "",
+        "function TopBar(props: Props) {",
+        "  const {",
+        "    targetSimilaritySort,",
+        "    showArmourGroups,",
+        "    onCycleTargetSimilaritySort,",
+        "    onToggleArmourGroups,",
+        "  } = props",
+        "",
+        "  return (",
+        "    <button>相似度</button>",
+        "  )",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &after).unwrap();
+
+    let mut app = test_app(&dir);
+    let hunks = diff_to_hunks(Some(&before), &after);
+
+    assert!(app.apply_tool_diff_preview_to_review(relative_path, relative_path, &hunks));
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    assert_eq!(change.added_lines, 0);
+    assert_eq!(change.removed_lines, 4);
 }

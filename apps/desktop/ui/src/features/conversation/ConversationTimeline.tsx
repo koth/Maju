@@ -1,5 +1,4 @@
 import { Fragment, useRef, useEffect, useMemo, useState, memo } from "react";
-import type { ReactNode } from "react";
 import type { FileChangeSummary, MessageRole } from "../../types";
 import type { UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
@@ -25,7 +24,6 @@ interface Props {
   turnChangeSetsByMessageId?: Record<string, TimelineTurnChangeSet>;
   onReviewFileSelect?: (path: string, changeSetId: string) => void;
   onReviewChangeSetSelect?: (changeSetId: string) => void;
-  planPanel?: ReactNode;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
 }
 
@@ -45,6 +43,11 @@ interface MessageRowProps {
 interface StreamingMarkdownProps {
   id: string;
   body: string;
+}
+
+interface UserMessageImage {
+  alt: string;
+  src: string;
 }
 
 const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: StreamingMarkdownProps) {
@@ -90,6 +93,32 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: Streamin
 
 const MessageRow = memo(function MessageRow({ id, role, body, streaming }: MessageRowProps) {
   if (role === "User") {
+    const { text, images } = splitUserMessageBody(body);
+    if (images.length > 0) {
+      return (
+        <div key={id} className="msg msg-user msg-user-stacked">
+          <div className="msg-user-image-strip" aria-label="附加的图片">
+            {images.map((image, index) => (
+              <img
+                key={`${image.src}-${index}`}
+                className="msg-user-image"
+                src={image.src}
+                alt={image.alt || "附加的图片"}
+              />
+            ))}
+          </div>
+          {text.trim().length > 0 && (
+            <div className="msg-user-bubble">
+              <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
+              <div className="msg-content msg-content-user">
+                <MarkdownBody content={text} />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     return (
       <div key={id} className="msg msg-user">
         <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
@@ -127,13 +156,43 @@ function shouldRenderMessage(role: MessageRole, body: string) {
   return role === "User" || body.trim().length > 0;
 }
 
+function splitUserMessageBody(body: string): { text: string; images: UserMessageImage[] } {
+  const blocks = body.split(/\n{2,}/);
+  const textBlocks: string[] = [];
+  const images: UserMessageImage[] = [];
+
+  for (const block of blocks) {
+    const image = parseImageOnlyBlock(block);
+    if (image) {
+      images.push(image);
+    } else {
+      textBlocks.push(block);
+    }
+  }
+
+  return {
+    text: textBlocks.join("\n\n").trim(),
+    images,
+  };
+}
+
+function parseImageOnlyBlock(block: string): UserMessageImage | null {
+  const match = block.trim().match(
+    /^!\[([^\]]*)\]\((data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+)\)$/i,
+  );
+  if (!match) return null;
+  return {
+    alt: match[1],
+    src: match[2],
+  };
+}
+
 export function ConversationTimeline({
   snapshot,
   onPermissionSelect,
   turnChangeSetsByMessageId = {},
   onReviewFileSelect,
   onReviewChangeSetSelect,
-  planPanel,
   hiddenPermissionRequestIds,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -220,7 +279,6 @@ export function ConversationTimeline({
     snapshot.timeline.length,
     snapshot.messages.length,
     snapshot.tools.length,
-    snapshot.agent_plan.length,
     turnChangesSignature,
     snapshot.thinking_status,
   ]);
@@ -260,6 +318,17 @@ export function ConversationTimeline({
   const turnIsActive =
     snapshot.session.status === "Streaming" ||
     snapshot.session.status === "WaitingForTool";
+  const activeTurnStartIndex = useMemo(() => {
+    if (!turnIsActive) return -1;
+    const allMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+    for (let index = snapshot.timeline.length - 1; index >= 0; index -= 1) {
+      const item = snapshot.timeline[index];
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      const message = allMessagesById.get(item.Message);
+      if (message?.role === "User") return index;
+    }
+    return -1;
+  }, [snapshot.messages, snapshot.timeline, turnIsActive]);
 
   const visibleMessageIds = useMemo(() => {
     const ids = new Set<string>();
@@ -358,8 +427,10 @@ export function ConversationTimeline({
               msg.role === "Assistant" &&
               snapshot.session.status === "Streaming" &&
               isLastMessage(i);
+            const isCurrentTurnMessage =
+              turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
             const changesForMessage =
-              msg.role === "Assistant" && !isStreaming && !turnIsActive
+              msg.role === "Assistant" && !isStreaming && !isCurrentTurnMessage
                 ? turnChangeSetsByMessageId[msg.id]
                 : undefined;
             const renderMessage = shouldRenderMessage(msg.role, msg.body);
@@ -417,7 +488,6 @@ export function ConversationTimeline({
             <span className="thinking-text">思考中</span>
           </div>
         )}
-        {planPanel}
         <div className="timeline-bottom-sentinel" ref={bottomSentinelRef} aria-hidden="true" />
       </div>
     </div>

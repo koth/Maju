@@ -1,9 +1,13 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { UiSnapshot, AppTheme, ToolInvocation } from "../../types";
 import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
-import { AgentPlanPanel, PlanApprovalModal } from "../composer/AgentPlanPanel";
+import {
+  AgentPlanPanel,
+  PlanApprovalModal,
+  shouldShowAgentPlanNearComposer,
+} from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
@@ -13,7 +17,7 @@ import { TabBar } from "./TabBar";
 import { GlobalChrome } from "./GlobalChrome";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadSidebarShell } from "./ThreadSidebarShell";
-import { SettingsPage } from "../settings/SettingsPage";
+import { SettingsPage, type AgentSettingsTab, type SettingsStartupNotice } from "../settings/SettingsPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import { useWorkbenchSnapshot } from "./useWorkbenchSnapshot";
@@ -22,6 +26,10 @@ import { useTimelineChangeSets } from "./useTimelineChangeSets";
 import { useWorkbenchTabs } from "./useWorkbenchTabs";
 import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
+import {
+  latestReviewableTurnChangeSet,
+  reviewableTurnChangeSetSignature,
+} from "./autoReview";
 import "./Workbench.css";
 
 export function Workbench() {
@@ -47,6 +55,7 @@ export function Workbench() {
   });
   const {
     timelineTurnChangeSets,
+    liveTurnChangeSet,
     agentConversationChangeCount,
     clearChangeSets,
   } = useTimelineChangeSets({
@@ -84,6 +93,8 @@ export function Workbench() {
     changeSetId: string;
     token: number;
   } | null>(null);
+  const autoReviewSignatureRef = useRef<string | null>(null);
+  const reviewFocusSeqRef = useRef(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     rightPanelCollapsed,
@@ -102,7 +113,24 @@ export function Workbench() {
     handleTerminalDockHeightChange,
   } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsStartupNotice, setSettingsStartupNotice] = useState<SettingsStartupNotice | null>(null);
+  const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab | null>(null);
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
+
+  const handleOpenSettings = useCallback((options?: {
+    startupNotice?: SettingsStartupNotice;
+    initialAgentTab?: AgentSettingsTab;
+  }) => {
+    setSettingsStartupNotice(options?.startupNotice ?? null);
+    setSettingsInitialAgentTab(options?.initialAgentTab ?? null);
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+    setSettingsStartupNotice(null);
+    setSettingsInitialAgentTab(null);
+  }, []);
 
   useEffect(() => {
     settingsGetAgentSnapshot()
@@ -116,10 +144,10 @@ export function Workbench() {
   }, [clampStoredRightPanelWidth]);
 
   useEffect(() => {
-    const handleOpenSettings = () => setSettingsOpen(true);
-    window.addEventListener("kodex:open-settings", handleOpenSettings);
-    return () => window.removeEventListener("kodex:open-settings", handleOpenSettings);
-  }, []);
+    const handleOpenSettingsEvent = () => handleOpenSettings();
+    window.addEventListener("kodex:open-settings", handleOpenSettingsEvent);
+    return () => window.removeEventListener("kodex:open-settings", handleOpenSettingsEvent);
+  }, [handleOpenSettings]);
 
   const handleWorkspaceOpened = useCallback((nextSnapshot: UiSnapshot) => {
     void startupPerfMark("workbench/handle_workspace_opened", "");
@@ -161,8 +189,33 @@ export function Workbench() {
 
   const handleReviewChangeSetSelect = useCallback((changeSetId: string) => {
     setRightPanelCollapsed(false);
-    setReviewFocusRequest({ changeSetId, token: Date.now() });
+    reviewFocusSeqRef.current += 1;
+    setReviewFocusRequest({ changeSetId, token: reviewFocusSeqRef.current });
   }, [setRightPanelCollapsed]);
+
+  const autoReviewTarget = useMemo(
+    () => latestReviewableTurnChangeSet(timelineTurnChangeSets, liveTurnChangeSet),
+    [liveTurnChangeSet, timelineTurnChangeSets],
+  );
+  const autoReviewSignature = useMemo(
+    () =>
+      autoReviewTarget
+        ? reviewableTurnChangeSetSignature(snapshot?.session.id ?? "", autoReviewTarget)
+        : null,
+    [autoReviewTarget, snapshot?.session.id],
+  );
+
+  useEffect(() => {
+    if (!autoReviewTarget || !autoReviewSignature) return;
+    if (autoReviewSignatureRef.current === autoReviewSignature) return;
+    autoReviewSignatureRef.current = autoReviewSignature;
+    setRightPanelCollapsed(false);
+    reviewFocusSeqRef.current += 1;
+    setReviewFocusRequest({
+      changeSetId: autoReviewTarget.changeSetId,
+      token: reviewFocusSeqRef.current,
+    });
+  }, [autoReviewSignature, autoReviewTarget, setRightPanelCollapsed]);
 
   const enqueueComposerReference = useCallback(
     (request: Omit<ComposerReferenceRequest, "id">) => {
@@ -193,9 +246,28 @@ export function Workbench() {
     [pendingPlanApproval],
   );
 
+  if (settingsOpen) {
+    return (
+      <div className="workbench">
+        <SettingsPage
+          initialAgentTab={settingsInitialAgentTab ?? undefined}
+          startupNotice={settingsStartupNotice}
+          onBack={handleCloseSettings}
+          onStartupNoticeDismissed={() => setSettingsStartupNotice(null)}
+          onThemeChange={setAppTheme}
+        />
+      </div>
+    );
+  }
+
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
-    return <WelcomeLauncher onWorkspaceOpened={handleWorkspaceOpened} />;
+    return (
+      <WelcomeLauncher
+        onWorkspaceOpened={handleWorkspaceOpened}
+        onOpenSettings={handleOpenSettings}
+      />
+    );
   }
 
   if (!snapshot) {
@@ -208,15 +280,8 @@ export function Workbench() {
     );
   }
 
-  if (settingsOpen) {
-    return (
-      <div className="workbench">
-        <SettingsPage onBack={() => setSettingsOpen(false)} onThemeChange={setAppTheme} />
-      </div>
-    );
-  }
-
   const agentLabel = snapshot.session.agent_cli || "智能体";
+  const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
 
   return (
     <div className="workbench">
@@ -240,7 +305,7 @@ export function Workbench() {
             activeSessionTitle={snapshot.session.title}
             activeWorkspaceRoot={snapshot.workspace.root}
             currentSessionStatus={snapshot.session.status}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={handleOpenSettings}
             onSessionChanged={handleSessionChanged}
             onWorkspaceChanged={handleWorkspaceChanged}
           />
@@ -284,11 +349,6 @@ export function Workbench() {
                     }
                     onReviewChangeSetSelect={handleReviewChangeSetSelect}
                     hiddenPermissionRequestIds={hiddenPermissionRequestIds}
-                    planPanel={
-                      <AgentPlanPanel
-                        entries={snapshot.agent_plan ?? []}
-                      />
-                    }
                   />
                 </>
               ) : (
@@ -312,6 +372,11 @@ export function Workbench() {
                     />
                   )}
                 </section>
+              )}
+              {showComposerPlan && (
+                <div className="composer-plan-slot">
+                  <AgentPlanPanel entries={snapshot.agent_plan} />
+                </div>
               )}
               <Composer
                 snapshot={snapshot}

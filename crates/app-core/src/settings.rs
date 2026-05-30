@@ -3,18 +3,23 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
     AgentCliId, AgentCliStatus, AgentProviderFamily, AgentProviderProfile, AgentProviderProxyKind,
     AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeWoaConfigInput, ClaudeWoaSettings,
-    ClaudeWoaSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode, LspServerConfigInput,
-    LspServerSettings,
+    ClaudeWoaSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
+    InitialSetupRecommendation, IoaEnvironmentStatus, LspServerConfigInput, LspServerSettings,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
 const PROVIDER_SECRETS_FILE: &str = "provider-secrets.json";
 const CODEX_CONFIG_FILE: &str = "config.toml";
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
+const IOA_ENV_DETECT_URL: &str = "https://cloud.tencent.com/auth-api/common/platform";
+const IOA_ENV_DETECT_MAX_ATTEMPTS: usize = 3;
+const IOA_ENV_DETECT_RETRY_DELAY: Duration = Duration::from_secs(2);
+const IOA_ENV_DETECT_TIMEOUT: Duration = Duration::from_secs(3);
 const CODEX_DEFAULT_PROVIDER_ID: &str = "default";
 const BYOK_PROVIDER_ID: &str = "byok";
 const BYOK_PROVIDER_NAME: &str = "BYOK";
@@ -43,7 +48,51 @@ const MIMO_MODEL: &str = "MiMo-V2.5-Pro";
 const MIMO_API_KEY_ENV: &str = "XIAOMI_MIMO_API_KEY";
 const MIMO_OPENAI_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com/v1";
 const MIMO_ANTHROPIC_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com/anthropic";
+const TIMIAI_PROVIDER_ID: &str = "timiai";
+const TIMIAI_PROVIDER_NAME: &str = "TimiAI";
+const TIMIAI_API_KEY_ENV: &str = "TIMIAI_API_KEY";
+const TIMIAI_BASE_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy";
+const TIMIAI_CODEX_MODEL: &str = "gpt-5.5";
+const TIMIAI_CLAUDE_MODEL: &str = "claude-opus-4.8";
+const TIMIAI_CATALOG_MODELS: &[&str] = &[
+    "gpt-5.5",
+    "gpt-5.4",
+    "claude-opus-4.8",
+    "claude-opus-4.7",
+    "claude-opus-4.6",
+    "claude-sonnet-4.6",
+    "gemini-3.5-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+];
 const CLAUDE_WOA_PROVIDER_ID: &str = "woa";
+const CODEX_WOA_PROVIDER_ID: &str = "woa";
+const CODEX_WOA_PROVIDER_NAME: &str = "WOA";
+const CODEX_WOA_API_KEY_ENV: &str = "AUTH_TOKEN";
+const CODEX_WOA_LEGACY_API_KEY_ENV: &str = "CODEX_WOA_API_KEY";
+const CODEX_WOA_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+const CODEX_WOA_CODEX_API_KEY_ENV: &str = "CODEX_API_KEY";
+const CODEX_WOA_BASE_URL: &str = "https://copilot.code.woa.com/server/chat/codebuddy-gateway/codex";
+const CODEX_WOA_APP_VERSION: &str = "0.0.9";
+const CODEX_WOA_APP_VERSION_ENV: &str = "CODEX_INTERNAL_APP_VERSION";
+const CODEX_WOA_USER_AGENT_ENV: &str = "CODEX_INTERNAL_USER_AGENT";
+const CODEX_WOA_CONVERSATION_ID_ENV: &str = "CODEX_INTERNAL_CONVERSATION_ID";
+const CODEX_WOA_GIT_REPOS_ENV: &str = "CODEX_INTERNAL_GIT_REPOS";
+const CODEX_WOA_KNOT_API_KEY_ENV: &str = "CODEBUDDY_API_KEY";
+const CODEX_WOA_YOLO_MODE_ENV: &str = "CODEX_INTERNAL_YOLO_MODE";
+const CODEX_WOA_ANYDEV_MODE_ENV: &str = "CODEX_INTERNAL_ANYDEV_MODE";
+const CODEX_WOA_SPECIFY_MODEL_ENV: &str = "CODEX_INTERNAL_SPECIFY_MODEL";
+const CODEX_WOA_MODEL: &str = "gpt-5.4";
+const CODEX_WOA_CATALOG_MODELS: &[&str] = &[
+    CODEX_WOA_MODEL,
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+];
+const DEFAULT_CLAUDE_WOA_AVAILABLE_MODELS: &[&str] =
+    &["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"];
 const VENUS_MODEL_CONTEXT_WINDOW: i64 = 200_000;
 const VENUS_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
 const KIMI_MODEL_CONTEXT_WINDOW: i64 = 262_144;
@@ -66,6 +115,7 @@ const VENUS_CATALOG_MODELS: &[&str] = &[
     "deepseek-v4-pro",
     "deepseek-v4-flash",
 ];
+
 const DEEPSEEK_CATALOG_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-flash"];
 const KIMI_CATALOG_MODELS: &[&str] = &[KIMI_MODEL];
 const MIMO_CATALOG_MODELS: &[&str] = &["MiMo-V2.5-Pro", "MiMo-V2.5"];
@@ -82,6 +132,7 @@ const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
     ("claude-opus-4.6", "claude-opus-4-6"),
     ("claude-sonnet-4.6", "claude-sonnet-4-6"),
     ("claude-opus-4.7", "claude-opus-4-7"),
+    ("claude-opus-4.8", "claude-opus-4-8"),
     ("deepseek-v4-pro", "deepseek-v4-pro-external"),
     ("deepseek-v4-flash", "deepseek-v4-flash-external"),
     ("MiMo-V2.5-Pro", "mimo-v2.5-pro"),
@@ -90,6 +141,11 @@ const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
 
 const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     (VENUS_MODEL, VENUS_MODEL_CONTEXT_WINDOW),
+    (CODEX_WOA_MODEL, 1_050_000),
+    ("gpt-5.3-codex", 200_000),
+    ("gpt-5.2-codex", 200_000),
+    ("gpt-5.1-codex-max", 1_000_000),
+    ("gpt-5.1-codex-mini", 128_000),
     ("gpt-5.2", 400_000),
     ("gpt-5.3", 128_000),
     ("gpt-5.4", 1_050_000),
@@ -99,6 +155,8 @@ const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("claude-opus-4.6", 1_000_000),
     ("claude-sonnet-4.6", 1_000_000),
     ("claude-opus-4.7", 1_000_000),
+    ("claude-opus-4.8", 1_000_000),
+    ("gemini-3.5-flash", 1_000_000),
     ("deepseek-v4-pro", 1_000_000),
     ("deepseek-v4-flash", 1_000_000),
     (KIMI_MODEL, KIMI_MODEL_CONTEXT_WINDOW),
@@ -108,6 +166,11 @@ const VENUS_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
 
 const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
     (VENUS_MODEL, VENUS_MODEL_MAX_OUTPUT_TOKENS),
+    (CODEX_WOA_MODEL, 128_000),
+    ("gpt-5.3-codex", 128_000),
+    ("gpt-5.2-codex", 128_000),
+    ("gpt-5.1-codex-max", 128_000),
+    ("gpt-5.1-codex-mini", 64_000),
     ("gpt-5.2", 128_000),
     ("gpt-5.3", 16_384),
     ("gpt-5.4", 128_000),
@@ -117,6 +180,8 @@ const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
     ("claude-opus-4.6", 128_000),
     ("claude-sonnet-4.6", 64_000),
     ("claude-opus-4.7", 128_000),
+    ("claude-opus-4.8", 128_000),
+    ("gemini-3.5-flash", 128_000),
     ("deepseek-v4-pro", 384_000),
     ("deepseek-v4-flash", 384_000),
     (KIMI_MODEL, KIMI_MODEL_MAX_OUTPUT_TOKENS),
@@ -169,6 +234,30 @@ const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
         credential_label: Some("Venus API key"),
         requires_credential: true,
         help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 Venus chat completions。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: CODEX_WOA_PROVIDER_ID,
+        label: CODEX_WOA_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::Responses,
+        base_url: Some(CODEX_WOA_BASE_URL),
+        default_model: Some(CODEX_WOA_MODEL),
+        models: CODEX_WOA_CATALOG_MODELS,
+        credential_label: None,
+        requires_credential: false,
+        help_text: "复用 WOA 登录 token，直连 CodeBuddy Codex gateway 的 Responses API。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: TIMIAI_PROVIDER_ID,
+        label: TIMIAI_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::Responses,
+        base_url: Some(TIMIAI_BASE_URL),
+        default_model: Some(TIMIAI_CODEX_MODEL),
+        models: TIMIAI_CATALOG_MODELS,
+        credential_label: Some("TimiAI key"),
+        requires_credential: true,
+        help_text: "通过本机 Codex API Proxy 转发到 TimiAI Responses API，Codex / Claude 共用同一个 key。",
     },
     ProviderProfileDefinition {
         family: AgentProviderFamily::Codex,
@@ -247,6 +336,18 @@ const CLAUDE_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
     },
     ProviderProfileDefinition {
         family: AgentProviderFamily::Claude,
+        id: TIMIAI_PROVIDER_ID,
+        label: TIMIAI_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::ClaudeNative,
+        base_url: Some(TIMIAI_BASE_URL),
+        default_model: Some(TIMIAI_CLAUDE_MODEL),
+        models: TIMIAI_CATALOG_MODELS,
+        credential_label: Some("TimiAI key"),
+        requires_credential: true,
+        help_text: "通过本机 proxy 转发到 TimiAI Anthropic Messages API，Codex / Claude 共用同一个 key。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
         id: BYOK_PROVIDER_ID,
         label: BYOK_PROVIDER_NAME,
         proxy_kind: AgentProviderProxyKind::ClaudeNative,
@@ -306,6 +407,13 @@ fn default_settings() -> AppSettings {
         selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
         claude_woa: ClaudeWoaSettings::default(),
     }
+}
+
+fn default_claude_woa_available_models() -> Vec<String> {
+    DEFAULT_CLAUDE_WOA_AVAILABLE_MODELS
+        .iter()
+        .map(|model| (*model).to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -476,6 +584,12 @@ fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
         settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
         changed = true;
     }
+    if selected_claude_provider_profile_id(settings) == CLAUDE_WOA_PROVIDER_ID
+        && settings.claude_woa.available_models.is_empty()
+    {
+        settings.claude_woa.available_models = default_claude_woa_available_models();
+        changed = true;
+    }
 
     changed
 }
@@ -501,6 +615,244 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
         codex_acp: codex_acp_settings_status(paths),
         claude_woa: claude_woa_settings_status(paths),
     }
+}
+
+pub async fn detect_ioa_environment() -> IoaEnvironmentStatus {
+    let started = Instant::now();
+    crate::startup_perf::mark("settings/ioa_env_detect/start", IOA_ENV_DETECT_URL);
+    let client = match reqwest::Client::builder()
+        .timeout(IOA_ENV_DETECT_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            crate::startup_perf::mark(
+                "settings/ioa_env_detect/client_error",
+                format!(
+                    "duration_ms={} error={error}",
+                    started.elapsed().as_millis()
+                ),
+            );
+            return external_ioa_environment_status(Some(format!(
+                "Failed to create IOA environment detector: {error}"
+            )));
+        }
+    };
+
+    detect_ioa_environment_with_client(
+        &client,
+        IOA_ENV_DETECT_URL,
+        started,
+        IOA_ENV_DETECT_MAX_ATTEMPTS,
+        IOA_ENV_DETECT_RETRY_DELAY,
+    )
+    .await
+}
+
+async fn detect_ioa_environment_with_client(
+    client: &reqwest::Client,
+    url: &str,
+    started: Instant,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> IoaEnvironmentStatus {
+    let attempts = max_attempts.max(1);
+    let mut last_retryable_error = None;
+
+    for attempt in 1..=attempts {
+        match detect_ioa_environment_once(client, url, started, attempt).await {
+            IoaDetectAttempt::Detected(status) => return status,
+            IoaDetectAttempt::RetryableFailure(message) => {
+                if attempt >= attempts {
+                    return external_ioa_environment_status(Some(format!(
+                        "{message} after {attempts} attempts"
+                    )));
+                }
+                last_retryable_error = Some(message);
+                crate::startup_perf::mark(
+                    "settings/ioa_env_detect/retry",
+                    format!(
+                        "attempt={} next_attempt={} delay_ms={} duration_ms={}",
+                        attempt,
+                        attempt + 1,
+                        retry_delay.as_millis(),
+                        started.elapsed().as_millis()
+                    ),
+                );
+                if !retry_delay.is_zero() {
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    external_ioa_environment_status(last_retryable_error)
+}
+
+enum IoaDetectAttempt {
+    Detected(IoaEnvironmentStatus),
+    RetryableFailure(String),
+}
+
+async fn detect_ioa_environment_once(
+    client: &reqwest::Client,
+    url: &str,
+    started: Instant,
+    attempt: usize,
+) -> IoaDetectAttempt {
+    match client.get(url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            match response.text().await {
+                Ok(body) => {
+                    if !status.is_success() {
+                        crate::startup_perf::mark(
+                            "settings/ioa_env_detect/http_error",
+                            format!(
+                                "attempt={} http_status={} duration_ms={} body_prefix={}",
+                                attempt,
+                                status.as_u16(),
+                                started.elapsed().as_millis(),
+                                compact_log_prefix(&body),
+                            ),
+                        );
+                        return IoaDetectAttempt::RetryableFailure(format!(
+                            "IOA environment detector returned HTTP {}",
+                            status.as_u16()
+                        ));
+                    }
+                    match serde_json::from_str::<serde_json::Value>(&body) {
+                        Ok(payload) => {
+                            let detected_status = ioa_environment_status_from_value(&payload, true);
+                            crate::startup_perf::mark(
+                                "settings/ioa_env_detect/end",
+                                format!(
+                                    "attempt={} http_status={} duration_ms={} detected={} company_environment={} is_company_export_ip={} is_internal={} recommended_setup={:?}",
+                                    attempt,
+                                    status.as_u16(),
+                                    started.elapsed().as_millis(),
+                                    detected_status.detected,
+                                    detected_status.company_environment,
+                                    detected_status.is_company_export_ip,
+                                    detected_status.is_internal,
+                                    detected_status.recommended_setup,
+                                ),
+                            );
+                            IoaDetectAttempt::Detected(detected_status)
+                        }
+                        Err(error) => {
+                            crate::startup_perf::mark(
+                                "settings/ioa_env_detect/parse_error",
+                                format!(
+                                    "attempt={} http_status={} duration_ms={} error={} body_prefix={}",
+                                    attempt,
+                                    status.as_u16(),
+                                    started.elapsed().as_millis(),
+                                    error,
+                                    compact_log_prefix(&body),
+                                ),
+                            );
+                            IoaDetectAttempt::RetryableFailure(format!(
+                                "Failed to parse IOA environment response: {error}"
+                            ))
+                        }
+                    }
+                }
+                Err(error) => {
+                    crate::startup_perf::mark(
+                        "settings/ioa_env_detect/body_error",
+                        format!(
+                            "attempt={} http_status={} duration_ms={} error={error}",
+                            attempt,
+                            status.as_u16(),
+                            started.elapsed().as_millis(),
+                        ),
+                    );
+                    IoaDetectAttempt::RetryableFailure(format!(
+                        "Failed to read IOA environment response: {error}"
+                    ))
+                }
+            }
+        }
+        Err(error) => {
+            crate::startup_perf::mark(
+                "settings/ioa_env_detect/request_error",
+                format!(
+                    "attempt={} duration_ms={} error={error}",
+                    attempt,
+                    started.elapsed().as_millis()
+                ),
+            );
+            IoaDetectAttempt::RetryableFailure(format!("Failed to detect IOA environment: {error}"))
+        }
+    }
+}
+
+fn ioa_environment_status_from_value(
+    payload: &serde_json::Value,
+    detected: bool,
+) -> IoaEnvironmentStatus {
+    let data = payload.get("data").unwrap_or(payload);
+    let is_company_export_ip = truthy_json_bool(data.get("isCompanyExportIP"));
+    let is_internal = truthy_json_bool(data.get("isInternal"));
+    let login_method_is_ioa = data
+        .get("loginMethod")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|login_method| login_method.eq_ignore_ascii_case("ioa"));
+    let company_environment = is_company_export_ip || is_internal || login_method_is_ioa;
+
+    IoaEnvironmentStatus {
+        is_company_export_ip,
+        is_internal,
+        company_environment,
+        recommended_setup: if company_environment {
+            InitialSetupRecommendation::Woa
+        } else {
+            InitialSetupRecommendation::CodexByok
+        },
+        detected,
+        timestamp_ms: now_ms(),
+        message: None,
+    }
+}
+
+fn external_ioa_environment_status(message: Option<String>) -> IoaEnvironmentStatus {
+    IoaEnvironmentStatus {
+        is_company_export_ip: false,
+        is_internal: false,
+        company_environment: false,
+        recommended_setup: InitialSetupRecommendation::CodexByok,
+        detected: false,
+        timestamp_ms: now_ms(),
+        message,
+    }
+}
+
+fn compact_log_prefix(value: &str) -> String {
+    value
+        .chars()
+        .take(180)
+        .collect::<String>()
+        .replace('\r', " ")
+        .replace('\n', " ")
+}
+
+fn truthy_json_bool(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(value)) => {
+            value.eq_ignore_ascii_case("true") || value == "1"
+        }
+        Some(serde_json::Value::Number(value)) => value.as_i64() == Some(1),
+        _ => false,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettingsSnapshot> {
@@ -584,9 +936,19 @@ pub fn resolve_agent_command_with_settings(paths: &AppPaths) -> String {
         return command;
     }
 
-    let settings = load_app_settings(paths);
-    command_for_agent_with_paths(settings.selected_agent, paths)
+    command_for_agent_with_paths(default_agent_for_new_work(paths), paths)
         .unwrap_or_else(acp_core::platform_default_agent_command)
+}
+
+pub fn default_agent_for_new_work(paths: &AppPaths) -> AgentCliId {
+    let settings = load_app_settings(paths);
+    if settings.selected_agent == AgentCliId::ClaudeAgentAcp
+        && !claude_agent_configured_for_settings(paths, &settings)
+        && detect_agent_with_paths(paths, AgentCliId::Codebuddy).installed
+    {
+        return AgentCliId::Codebuddy;
+    }
+    settings.selected_agent
 }
 
 pub fn command_for_agent(agent: AgentCliId) -> Option<String> {
@@ -716,7 +1078,7 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
         return claude_agent_acp_env(paths);
     }
 
-    if !command.to_ascii_lowercase().contains("codex-acp") {
+    if !is_codex_acp_command(command) {
         return Vec::new();
     }
     if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
@@ -725,6 +1087,9 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
 
     let config_path = codex_config_path(paths);
     let _ = ensure_codex_acp_env_key(&config_path);
+    if codex_active_provider(&config_path) == CODEX_WOA_PROVIDER_ID {
+        return codex_woa_agent_env(paths).unwrap_or_default();
+    }
     let provider_keys = codex_provider_keys(&config_path);
     if provider_keys.is_empty() {
         codex_active_provider_key(&config_path)
@@ -736,10 +1101,17 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
 }
 
 pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result<()> {
+    let settings = load_app_settings(paths);
+    if is_codex_acp_command(command)
+        && settings.codex_connection_mode != CodexConnectionMode::Default
+        && selected_codex_provider_profile_id(paths, &settings) == CODEX_WOA_PROVIDER_ID
+    {
+        ensure_woa_token_for_settings(paths, &settings)?;
+        return Ok(());
+    }
     if !is_claude_agent_acp_command(command) {
         return Ok(());
     }
-    let settings = load_app_settings(paths);
     let selected_profile_id = selected_claude_provider_profile_id(&settings);
     if selected_profile_id != CLAUDE_WOA_PROVIDER_ID {
         if selected_profile_id == BYOK_PROVIDER_ID {
@@ -761,6 +1133,13 @@ pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result
                 .unwrap_or("Claude provider")
         );
     }
+    ensure_woa_token_for_settings(paths, &settings).map(|_| ())
+}
+
+fn ensure_woa_token_for_settings(
+    paths: &AppPaths,
+    settings: &AppSettings,
+) -> Result<crate::claude_woa::WoaToken> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -768,11 +1147,64 @@ pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result
         .block_on(crate::claude_woa::ensure_token_ready(
             &managed_claude_woa_settings(paths, &settings.claude_woa),
         ))
-        .map(|_| ())
+}
+
+fn codex_woa_agent_env(paths: &AppPaths) -> Result<Vec<(String, String)>> {
+    let settings = load_app_settings(paths);
+    let token = ensure_woa_token_for_settings(paths, &settings)?;
+    let access_token = token.access_token;
+    Ok(vec![
+        (CODEX_WOA_API_KEY_ENV.to_string(), access_token.clone()),
+        (
+            CODEX_WOA_LEGACY_API_KEY_ENV.to_string(),
+            access_token.clone(),
+        ),
+        (
+            CODEX_WOA_OPENAI_API_KEY_ENV.to_string(),
+            access_token.clone(),
+        ),
+        (CODEX_WOA_CODEX_API_KEY_ENV.to_string(), access_token),
+        (
+            "openai_base_url".to_string(),
+            CODEX_WOA_BASE_URL.trim_end_matches('/').to_string(),
+        ),
+        (
+            CODEX_WOA_APP_VERSION_ENV.to_string(),
+            CODEX_WOA_APP_VERSION.to_string(),
+        ),
+        (
+            CODEX_WOA_USER_AGENT_ENV.to_string(),
+            format!("Codex-Internal/{CODEX_WOA_APP_VERSION}"),
+        ),
+        (
+            CODEX_WOA_CONVERSATION_ID_ENV.to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ),
+    ])
 }
 
 pub fn is_claude_agent_acp_command(command: &str) -> bool {
     command.to_ascii_lowercase().contains("claude-agent-acp")
+}
+
+fn is_codex_acp_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("codex-acp") || command.contains("kodex-acp")
+}
+
+fn claude_agent_configured_for_settings(paths: &AppPaths, settings: &AppSettings) -> bool {
+    let selected_profile_id = selected_claude_provider_profile_id(settings);
+    if selected_profile_id == BYOK_PROVIDER_ID {
+        return !configured_claude_byok_source_keys(paths).is_empty();
+    }
+    if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
+        let status =
+            crate::claude_woa::status(&managed_claude_woa_settings(paths, &settings.claude_woa));
+        return status.token.exists && !status.token.malformed;
+    }
+    provider_secret(paths, AgentProviderFamily::Claude, &selected_profile_id)
+        .map(|secret| !secret.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn settings_path(paths: &AppPaths) -> PathBuf {
@@ -789,6 +1221,13 @@ fn provider_secret_key(family: AgentProviderFamily, profile_id: &str) -> String 
         AgentProviderFamily::Claude => "claude",
     };
     format!("{family}:{profile_id}")
+}
+
+fn provider_secret_storage_key(family: AgentProviderFamily, profile_id: &str) -> String {
+    if profile_id == TIMIAI_PROVIDER_ID {
+        return format!("shared:{TIMIAI_PROVIDER_ID}");
+    }
+    provider_secret_key(family, profile_id)
 }
 
 fn load_provider_secrets(paths: &AppPaths) -> BTreeMap<String, String> {
@@ -813,8 +1252,23 @@ fn provider_secret(
     family: AgentProviderFamily,
     profile_id: &str,
 ) -> Option<String> {
+    let from_store = provider_secret_from_store(paths, family, profile_id);
+    if profile_id == TIMIAI_PROVIDER_ID {
+        return from_store.or_else(|| {
+            codex_provider_key(&codex_config_path(paths), TIMIAI_PROVIDER_ID)
+                .filter(|secret| !secret.trim().is_empty())
+        });
+    }
+    from_store
+}
+
+fn provider_secret_from_store(
+    paths: &AppPaths,
+    family: AgentProviderFamily,
+    profile_id: &str,
+) -> Option<String> {
     let mut secrets = load_provider_secrets(paths);
-    secrets.remove(&provider_secret_key(family, profile_id))
+    secrets.remove(&provider_secret_storage_key(family, profile_id))
 }
 
 fn save_provider_secret(
@@ -828,7 +1282,10 @@ fn save_provider_secret(
         anyhow::bail!("api_key cannot be empty");
     }
     let mut secrets = load_provider_secrets(paths);
-    secrets.insert(provider_secret_key(family, profile_id), secret.to_string());
+    secrets.insert(
+        provider_secret_storage_key(family, profile_id),
+        secret.to_string(),
+    );
     save_provider_secrets(paths, &secrets)
 }
 
@@ -996,6 +1453,11 @@ fn provider_profile_configured(paths: &AppPaths, definition: &ProviderProfileDef
     if !definition.requires_credential {
         return true;
     }
+    if definition.id == TIMIAI_PROVIDER_ID {
+        return provider_secret(paths, definition.family, definition.id)
+            .map(|secret| !secret.trim().is_empty())
+            .unwrap_or(false);
+    }
     match definition.family {
         AgentProviderFamily::Codex => codex_provider_key(&codex_config_path(paths), definition.id)
             .map(|key| !key.trim().is_empty())
@@ -1051,9 +1513,13 @@ pub fn select_agent_provider_profile(
             if definition.id == BYOK_PROVIDER_ID {
                 write_codex_byok_channel_config(paths)?;
             }
+            if definition.id == CODEX_WOA_PROVIDER_ID {
+                write_codex_woa_channel_config(paths)?;
+            }
             if definition.requires_credential {
-                let Some(api_key) = codex_provider_key(&codex_config_path(paths), definition.id)
-                else {
+                let api_key = codex_provider_key(&codex_config_path(paths), definition.id)
+                    .or_else(|| provider_secret(paths, family, definition.id));
+                let Some(api_key) = api_key else {
                     save_app_settings(paths, &settings)?;
                     return Ok(settings_snapshot(paths));
                 };
@@ -1064,6 +1530,11 @@ pub fn select_agent_provider_profile(
         }
         AgentProviderFamily::Claude => {
             settings.selected_claude_provider_profile_id = Some(definition.id.to_string());
+            if definition.id == CLAUDE_WOA_PROVIDER_ID
+                && settings.claude_woa.available_models.is_empty()
+            {
+                settings.claude_woa.available_models = default_claude_woa_available_models();
+            }
         }
     }
     save_app_settings(paths, &settings)?;
@@ -1083,7 +1554,8 @@ pub fn save_agent_provider_secret(
     }
     match family {
         AgentProviderFamily::Codex => {
-            if definition.id == VENUS_PROVIDER_ID {
+            if definition.id == VENUS_PROVIDER_ID || definition.id == TIMIAI_PROVIDER_ID {
+                save_provider_secret(paths, family, definition.id, secret)?;
                 write_codex_acp_provider_config(paths, definition.id, secret)?;
                 save_codex_managed_mode_with_profile(paths, definition.id)?;
             } else {
@@ -1119,6 +1591,9 @@ pub fn save_codex_acp_provider_key(
     api_key: &str,
 ) -> Result<AgentSettingsSnapshot> {
     let provider = normalize_codex_provider(provider)?;
+    if provider == TIMIAI_PROVIDER_ID {
+        save_provider_secret(paths, AgentProviderFamily::Codex, provider, api_key)?;
+    }
     write_codex_acp_provider_config(paths, provider, api_key)?;
     save_codex_managed_mode_with_profile(paths, provider)?;
     Ok(settings_snapshot(paths))
@@ -1130,7 +1605,9 @@ pub fn select_codex_acp_provider(
 ) -> Result<AgentSettingsSnapshot> {
     let provider = normalize_codex_provider(provider)?;
     let config_path = codex_config_path(paths);
-    let Some(api_key) = codex_provider_key(&config_path, provider) else {
+    let Some(api_key) = codex_provider_key(&config_path, provider)
+        .or_else(|| provider_secret(paths, AgentProviderFamily::Codex, provider))
+    else {
         anyhow::bail!("请先填写并保存 {} API key", provider_label(provider));
     };
     if api_key.trim().is_empty() {
@@ -1191,6 +1668,38 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)
 }
 
+fn write_codex_woa_channel_config(paths: &AppPaths) -> Result<()> {
+    paths.ensure_root()?;
+    let path = codex_config_path(paths);
+    let mut doc = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+        content
+            .parse::<DocumentMut>()
+            .with_context(|| format!("failed to parse Codex config {}", path.display()))?
+    } else {
+        DocumentMut::new()
+    };
+
+    let default_model = default_model_for_provider(CODEX_WOA_PROVIDER_ID);
+    doc["model"] = value(default_model);
+    doc["model_provider"] = value(CODEX_WOA_PROVIDER_ID);
+    doc["chatgpt_base_url"] = value(CODEX_WOA_BASE_URL);
+    doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
+    doc["model_context_window"] = value(model_context_window(default_model));
+    doc["model_max_output_tokens"] = value(model_max_output_tokens(default_model));
+    doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+    doc["model_catalog_json"] = value(
+        codex_model_catalog_path(paths)
+            .to_string_lossy()
+            .to_string(),
+    );
+    write_codex_woa_provider_table(&mut doc);
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+    write_codex_acp_model_catalog(paths, CODEX_WOA_PROVIDER_ID)
+}
+
 pub fn write_codex_acp_provider_config(
     paths: &AppPaths,
     provider: &str,
@@ -1239,7 +1748,10 @@ pub fn write_codex_acp_provider_config(
 
 fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str) -> Result<()> {
     let provider = normalize_codex_provider(provider)?;
-    if provider == VENUS_PROVIDER_ID || provider == BYOK_PROVIDER_ID {
+    if provider == VENUS_PROVIDER_ID
+        || provider == BYOK_PROVIDER_ID
+        || provider == TIMIAI_PROVIDER_ID
+    {
         anyhow::bail!("{} is not a BYOK model source", provider_label(provider));
     }
     let key = api_key.trim();
@@ -1305,10 +1817,11 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
 }
 
 fn codex_channel_provider_for_source(provider: &str) -> &'static str {
-    if provider == VENUS_PROVIDER_ID {
-        VENUS_PROVIDER_ID
-    } else {
-        BYOK_PROVIDER_ID
+    match provider {
+        VENUS_PROVIDER_ID => VENUS_PROVIDER_ID,
+        CODEX_WOA_PROVIDER_ID => CODEX_WOA_PROVIDER_ID,
+        TIMIAI_PROVIDER_ID => TIMIAI_PROVIDER_ID,
+        _ => BYOK_PROVIDER_ID,
     }
 }
 
@@ -1386,6 +1899,7 @@ fn codex_provider_keys(path: &Path) -> Vec<(String, String)> {
     }
     providers.extend([
         VENUS_PROVIDER_ID,
+        TIMIAI_PROVIDER_ID,
         DEEPSEEK_PROVIDER_ID,
         KIMI_PROVIDER_ID,
         MIMO_PROVIDER_ID,
@@ -1435,6 +1949,48 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         .and_then(|item| item.as_str())
         .and_then(|provider| normalize_codex_provider(provider).ok())
         .unwrap_or(VENUS_PROVIDER_ID);
+    if provider == CODEX_WOA_PROVIDER_ID {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let paths = AppPaths::from_root(parent);
+        let settings = load_app_settings(&paths);
+        ensure_woa_token_for_settings(&paths, &settings)?;
+        let before = doc.to_string();
+        let active_model = doc
+            .get("model")
+            .and_then(|item| item.as_str())
+            .unwrap_or_else(|| default_model_for_provider(provider))
+            .to_string();
+        write_codex_woa_provider_table(&mut doc);
+        doc["chatgpt_base_url"] = value(CODEX_WOA_BASE_URL);
+        if doc.get("preferred_auth_method").is_none() {
+            doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
+        }
+        if doc.get("model_context_window").is_none() {
+            doc["model_context_window"] = value(model_context_window(&active_model));
+        }
+        if doc.get("model_max_output_tokens").is_none() {
+            doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model));
+        }
+        if doc.get("model_reasoning_effort").is_none() {
+            doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+        }
+        let catalog_path_string = codex_model_catalog_path(&paths)
+            .to_string_lossy()
+            .to_string();
+        if doc.get("model_catalog_json").and_then(|item| item.as_str())
+            != Some(catalog_path_string.as_str())
+        {
+            doc["model_catalog_json"] = value(catalog_path_string);
+        }
+        let _ = write_codex_acp_model_catalog(&paths, provider);
+        if doc.to_string() != before {
+            std::fs::write(path, doc.to_string())
+                .with_context(|| format!("failed to write Codex config {}", path.display()))?;
+        }
+        return Ok(());
+    }
     if provider == BYOK_PROVIDER_ID || codex_is_byok_source(provider) {
         let mut changed = false;
         if provider != BYOK_PROVIDER_ID {
@@ -1556,6 +2112,10 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
 }
 
 fn write_codex_provider_table(doc: &mut DocumentMut, provider: &str, api_key: &str) {
+    if provider == CODEX_WOA_PROVIDER_ID {
+        write_codex_woa_provider_table(doc);
+        return;
+    }
     if doc
         .get("model_providers")
         .and_then(|item| item.as_table())
@@ -1576,6 +2136,54 @@ fn write_codex_provider_table(doc: &mut DocumentMut, provider: &str, api_key: &s
     provider_table.insert("wire_api", value(wire_api_for_provider(provider)));
     provider_table.insert("env_key", value(env_key_for_provider(provider)));
     provider_table.insert("api_key", value(api_key));
+}
+
+fn write_codex_woa_provider_table(doc: &mut DocumentMut) {
+    if doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .is_none()
+    {
+        doc.insert("model_providers", Item::Table(Table::new()));
+    }
+    let providers = doc["model_providers"]
+        .as_table_mut()
+        .expect("model_providers should be a table");
+    providers.insert(CODEX_WOA_PROVIDER_ID, Item::Table(Table::new()));
+    let provider_table = providers
+        .get_mut(CODEX_WOA_PROVIDER_ID)
+        .and_then(|item| item.as_table_mut())
+        .expect("WOA provider should be a table");
+    provider_table.insert("name", value(CODEX_WOA_PROVIDER_NAME));
+    provider_table.insert("base_url", value(CODEX_WOA_BASE_URL));
+    provider_table.insert("chatgpt_base_url", value(CODEX_WOA_BASE_URL));
+    provider_table.insert("wire_api", value(VENUS_WIRE_API));
+    provider_table.insert("requires_openai_auth", value(false));
+
+    provider_table.insert("http_headers", Item::Table(Table::new()));
+    let headers = provider_table
+        .get_mut("http_headers")
+        .and_then(|item| item.as_table_mut())
+        .expect("http_headers should be a table");
+    headers.insert("x-app-name", value("codex-internal"));
+    headers.insert("x-request-platform", value("codex-internal"));
+    headers.insert("x-scene-name", value("common_chat"));
+    headers.insert("x-channel", value("codex-internal"));
+
+    provider_table.insert("env_http_headers", Item::Table(Table::new()));
+    let env_headers = provider_table
+        .get_mut("env_http_headers")
+        .and_then(|item| item.as_table_mut())
+        .expect("env_http_headers should be a table");
+    env_headers.insert("x-api-key", value(CODEX_WOA_API_KEY_ENV));
+    env_headers.insert("x-knot-api-key", value(CODEX_WOA_KNOT_API_KEY_ENV));
+    env_headers.insert("x-conversation-id", value(CODEX_WOA_CONVERSATION_ID_ENV));
+    env_headers.insert("x-app-version", value(CODEX_WOA_APP_VERSION_ENV));
+    env_headers.insert("x-git-repos", value(CODEX_WOA_GIT_REPOS_ENV));
+    env_headers.insert("x-yolo-mode", value(CODEX_WOA_YOLO_MODE_ENV));
+    env_headers.insert("x-anydev-mode", value(CODEX_WOA_ANYDEV_MODE_ENV));
+    env_headers.insert("x-specify-model", value(CODEX_WOA_SPECIFY_MODEL_ENV));
+    env_headers.insert("user-agent", value(CODEX_WOA_USER_AGENT_ENV));
 }
 
 fn write_codex_byok_provider_table(doc: &mut DocumentMut) {
@@ -1608,6 +2216,8 @@ fn venus_base_url() -> String {
 fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         BYOK_PROVIDER_ID => Ok(BYOK_PROVIDER_ID),
+        CODEX_WOA_PROVIDER_ID => Ok(CODEX_WOA_PROVIDER_ID),
+        TIMIAI_PROVIDER_ID | "timi" | "timi-ai" | "timi_ai" => Ok(TIMIAI_PROVIDER_ID),
         VENUS_PROVIDER_ID => Ok(VENUS_PROVIDER_ID),
         DEEPSEEK_PROVIDER_ID => Ok(DEEPSEEK_PROVIDER_ID),
         KIMI_PROVIDER_ID | "kimi" | "kimi-code" => Ok(KIMI_PROVIDER_ID),
@@ -1619,6 +2229,8 @@ fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
 fn default_model_for_provider(provider: &str) -> &'static str {
     match provider {
         BYOK_PROVIDER_ID => model_slug(VENUS_MODEL),
+        CODEX_WOA_PROVIDER_ID => model_slug(CODEX_WOA_MODEL),
+        TIMIAI_PROVIDER_ID => model_slug(TIMIAI_CODEX_MODEL),
         DEEPSEEK_PROVIDER_ID => model_slug(DEEPSEEK_MODEL),
         KIMI_PROVIDER_ID => model_slug(KIMI_MODEL),
         MIMO_PROVIDER_ID => model_slug(MIMO_MODEL),
@@ -1629,6 +2241,8 @@ fn default_model_for_provider(provider: &str) -> &'static str {
 fn provider_name(provider: &str) -> &'static str {
     match provider {
         BYOK_PROVIDER_ID => BYOK_PROVIDER_NAME,
+        CODEX_WOA_PROVIDER_ID => CODEX_WOA_PROVIDER_NAME,
+        TIMIAI_PROVIDER_ID => TIMIAI_PROVIDER_NAME,
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_PROVIDER_NAME,
         KIMI_PROVIDER_ID => KIMI_PROVIDER_NAME,
         MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
@@ -1639,6 +2253,8 @@ fn provider_name(provider: &str) -> &'static str {
 fn provider_label(provider: &str) -> &'static str {
     match provider {
         BYOK_PROVIDER_ID => "BYOK",
+        CODEX_WOA_PROVIDER_ID => "WOA",
+        TIMIAI_PROVIDER_ID => TIMIAI_PROVIDER_NAME,
         DEEPSEEK_PROVIDER_ID => "DeepSeek",
         KIMI_PROVIDER_ID => "Kimi Code",
         MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
@@ -1653,6 +2269,8 @@ fn wire_api_for_provider(_provider: &str) -> &'static str {
 fn env_key_for_provider(provider: &str) -> &'static str {
     match provider {
         BYOK_PROVIDER_ID => BYOK_API_KEY_ENV,
+        CODEX_WOA_PROVIDER_ID => CODEX_WOA_API_KEY_ENV,
+        TIMIAI_PROVIDER_ID => TIMIAI_API_KEY_ENV,
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_API_KEY_ENV,
         KIMI_PROVIDER_ID => KIMI_API_KEY_ENV,
         MIMO_PROVIDER_ID => MIMO_API_KEY_ENV,
@@ -1662,7 +2280,9 @@ fn env_key_for_provider(provider: &str) -> &'static str {
 
 fn base_url_for_provider(provider: &str) -> String {
     match provider {
+        CODEX_WOA_PROVIDER_ID => CODEX_WOA_BASE_URL.to_string(),
         BYOK_PROVIDER_ID => venus_base_url(),
+        TIMIAI_PROVIDER_ID => venus_base_url(),
         DEEPSEEK_PROVIDER_ID => venus_base_url(),
         _ => venus_base_url(),
     }
@@ -1694,7 +2314,7 @@ fn catalog_models_for_provider_with_paths(paths: &AppPaths, provider: &str) -> V
     }
     let config_path = codex_config_path(paths);
     let mut models = Vec::new();
-    for provider in [DEEPSEEK_PROVIDER_ID, KIMI_PROVIDER_ID, MIMO_PROVIDER_ID] {
+    for provider in BYOK_SOURCE_PROVIDER_IDS {
         if codex_provider_key(&config_path, provider)
             .filter(|key| !key.trim().is_empty())
             .is_some()
@@ -1710,6 +2330,8 @@ fn catalog_models_for_provider_with_paths(paths: &AppPaths, provider: &str) -> V
 
 fn catalog_models_for_provider(provider: &str) -> &'static [&'static str] {
     match provider {
+        CODEX_WOA_PROVIDER_ID => CODEX_WOA_CATALOG_MODELS,
+        TIMIAI_PROVIDER_ID => TIMIAI_CATALOG_MODELS,
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_CATALOG_MODELS,
         KIMI_PROVIDER_ID => KIMI_CATALOG_MODELS,
         MIMO_PROVIDER_ID => MIMO_CATALOG_MODELS,
@@ -1722,10 +2344,11 @@ fn codex_acp_model_catalog_entry(
     provider: &str,
     priority: usize,
 ) -> serde_json::Value {
-    let slug = model_slug(model);
+    let slug = model_slug_for_provider(model, provider);
     let context_window = model_context_window(model);
     let max_output_tokens = model_max_output_tokens(model);
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
+    let apply_patch_tool_type = apply_patch_tool_type_for_provider(provider);
     json!({
         "slug": slug,
         "display_name": model,
@@ -1755,7 +2378,7 @@ fn codex_acp_model_catalog_entry(
         "default_reasoning_summary": "none",
         "support_verbosity": true,
         "default_verbosity": "low",
-        "apply_patch_tool_type": "freeform",
+        "apply_patch_tool_type": apply_patch_tool_type,
         "web_search_tool_type": "text_and_image",
         "truncation_policy": {
             "mode": "tokens",
@@ -1773,12 +2396,28 @@ fn codex_acp_model_catalog_entry(
     })
 }
 
+fn apply_patch_tool_type_for_provider(provider: &str) -> &'static str {
+    if provider == CODEX_WOA_PROVIDER_ID {
+        "function"
+    } else {
+        "freeform"
+    }
+}
+
 /// Resolve a display model name to the actual slug sent to the server.
 fn model_slug(display_name: &str) -> &str {
     VENUS_MODEL_SLUG_MAP
         .iter()
         .find_map(|(name, slug)| (*name == display_name).then_some(*slug))
         .unwrap_or(display_name)
+}
+
+fn model_slug_for_provider<'a>(display_name: &'a str, provider: &str) -> &'a str {
+    if provider == TIMIAI_PROVIDER_ID {
+        display_name
+    } else {
+        model_slug(display_name)
+    }
 }
 
 fn model_context_window(model: &str) -> i64 {
@@ -1869,8 +2508,15 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     };
     let mut env = Vec::new();
     if available_models.is_empty() {
-    } else if let Ok(value) = serde_json::to_string(&claude_model_config(&available_models)) {
-        env.push(("CLAUDE_MODEL_CONFIG".to_string(), value));
+    } else {
+        let model_config = if selected_profile_id == TIMIAI_PROVIDER_ID {
+            claude_model_config_for_provider(&available_models, TIMIAI_PROVIDER_ID)
+        } else {
+            claude_model_config(&available_models)
+        };
+        if let Ok(value) = serde_json::to_string(&model_config) {
+            env.push(("CLAUDE_MODEL_CONFIG".to_string(), value));
+        }
     }
 
     if selected_profile_id == CLAUDE_WOA_PROVIDER_ID {
@@ -1902,6 +2548,32 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     let Some(profile) = selected_profile else {
         return env;
     };
+    if profile.id == TIMIAI_PROVIDER_ID {
+        if let Some(secret) = provider_secret(paths, AgentProviderFamily::Claude, profile.id) {
+            acp_core::ensure_codex_api_proxy(TIMIAI_PROVIDER_ID, &secret);
+            env.push((
+                "ANTHROPIC_API_KEY".to_string(),
+                TIMIAI_PROVIDER_ID.to_string(),
+            ));
+            env.push((
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                TIMIAI_PROVIDER_ID.to_string(),
+            ));
+            env.push(("AUTH_TOKEN".to_string(), TIMIAI_PROVIDER_ID.to_string()));
+        }
+        env.push((
+            "ANTHROPIC_BASE_URL".to_string(),
+            claude_provider_proxy_base_url(),
+        ));
+        if let Some(model) = profile.default_model {
+            env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
+        }
+        env.push((
+            "CLAUDE_PROVIDER_PROXY_KIND".to_string(),
+            claude_proxy_kind_env(profile.proxy_kind).to_string(),
+        ));
+        return env;
+    }
     if let Some(secret) = provider_secret(paths, AgentProviderFamily::Claude, profile.id) {
         env.push(("ANTHROPIC_API_KEY".to_string(), secret.clone()));
         env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), secret.clone()));
@@ -1925,6 +2597,7 @@ fn configured_claude_byok_models(paths: &AppPaths) -> Vec<String> {
     for profile in CLAUDE_PROVIDER_PROFILES.iter().filter(|profile| {
         profile.id != CLAUDE_WOA_PROVIDER_ID
             && profile.id != VENUS_PROVIDER_ID
+            && profile.id != TIMIAI_PROVIDER_ID
             && profile.id != BYOK_PROVIDER_ID
             && profile.requires_credential
     }) {
@@ -1952,10 +2625,17 @@ fn configured_claude_byok_source_keys(paths: &AppPaths) -> Vec<(&'static str, St
 }
 
 fn claude_model_config(available_models: &[String]) -> serde_json::Value {
+    claude_model_config_for_provider(available_models, BYOK_PROVIDER_ID)
+}
+
+fn claude_model_config_for_provider(
+    available_models: &[String],
+    provider: &str,
+) -> serde_json::Value {
     let model_overrides = available_models
         .iter()
         .filter_map(|model| {
-            let slug = model_slug(model);
+            let slug = model_slug_for_provider(model, provider);
             (slug != model).then(|| (model.clone(), serde_json::Value::String(slug.to_string())))
         })
         .collect::<serde_json::Map<_, _>>();
@@ -2147,10 +2827,165 @@ fn shell_quote_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::Mutex;
     use tempfile::tempdir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(value: OsString) -> Self {
+            let original = std::env::var_os("PATH");
+            unsafe {
+                std::env::set_var("PATH", value);
+            }
+            Self {
+                key: "PATH",
+                original,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn ioa_environment_detects_company_export_ip() {
+        let status = ioa_environment_status_from_value(
+            &serde_json::json!({
+                "data": {
+                    "isCompanyExportIP": true,
+                    "isInternal": false
+                }
+            }),
+            true,
+        );
+
+        assert!(status.company_environment);
+        assert_eq!(status.recommended_setup, InitialSetupRecommendation::Woa);
+        assert!(status.detected);
+    }
+
+    #[test]
+    fn ioa_environment_detects_login_method_ioa() {
+        let status = ioa_environment_status_from_value(
+            &serde_json::json!({
+                "data": {
+                    "isCompanyExportIP": "false",
+                    "isInternal": false,
+                    "loginMethod": "ioa"
+                }
+            }),
+            true,
+        );
+
+        assert!(status.company_environment);
+        assert_eq!(status.recommended_setup, InitialSetupRecommendation::Woa);
+        assert!(status.detected);
+    }
+
+    #[test]
+    fn ioa_environment_falls_back_to_codex_byok_for_external_network() {
+        let status = ioa_environment_status_from_value(
+            &serde_json::json!({
+                "data": {
+                    "isCompanyExportIP": false,
+                    "isInternal": false
+                }
+            }),
+            true,
+        );
+
+        assert!(!status.company_environment);
+        assert_eq!(
+            status.recommended_setup,
+            InitialSetupRecommendation::CodexByok
+        );
+        assert!(status.detected);
+    }
+
+    #[test]
+    fn ioa_environment_detection_failure_falls_back_to_codex_byok() {
+        let status = external_ioa_environment_status(Some("request timed out".to_string()));
+
+        assert!(!status.company_environment);
+        assert!(!status.detected);
+        assert_eq!(
+            status.recommended_setup,
+            InitialSetupRecommendation::CodexByok
+        );
+        assert_eq!(status.message.as_deref(), Some("request timed out"));
+    }
+
+    #[tokio::test]
+    async fn ioa_environment_retries_untrusted_detector_responses() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = Arc::clone(&request_count);
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request);
+                server_request_count.fetch_add(1, Ordering::SeqCst);
+                let (status, body) = match index {
+                    0 => ("502 Bad Gateway", "blocked by endpoint protection"),
+                    1 => ("200 OK", "<html>blocked</html>"),
+                    _ => (
+                        "200 OK",
+                        r#"{"data":{"isCompanyExportIP":true,"isInternal":false}}"#,
+                    ),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+
+        let status =
+            detect_ioa_environment_with_client(&client, &url, Instant::now(), 3, Duration::ZERO)
+                .await;
+
+        assert!(
+            status.detected,
+            "status={status:?} count={}",
+            request_count.load(Ordering::SeqCst)
+        );
+        assert!(status.company_environment);
+        assert_eq!(status.recommended_setup, InitialSetupRecommendation::Woa);
+        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        server.join().unwrap();
+    }
 
     #[test]
     fn missing_settings_default_to_claude_byok() {
@@ -2185,7 +3020,10 @@ mod tests {
             codex_connection_mode: CodexConnectionMode::Managed,
             selected_codex_provider_profile_id: Some(VENUS_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(CLAUDE_WOA_PROVIDER_ID.to_string()),
-            claude_woa: ClaudeWoaSettings::default(),
+            claude_woa: ClaudeWoaSettings {
+                available_models: default_claude_woa_available_models(),
+                ..ClaudeWoaSettings::default()
+            },
         };
 
         save_app_settings(&paths, &settings).unwrap();
@@ -2248,8 +3086,26 @@ mod tests {
                 .unwrap_or(false)
         );
         assert_eq!(snapshot.claude_woa.selected_profile_id, BYOK_PROVIDER_ID);
-        assert_eq!(snapshot.codex_acp.profiles.len(), 6);
-        assert_eq!(snapshot.claude_woa.profiles.len(), 6);
+        assert_eq!(snapshot.codex_acp.profiles.len(), 8);
+        assert_eq!(snapshot.claude_woa.profiles.len(), 7);
+        assert!(snapshot.codex_acp.profiles.iter().any(|profile| {
+            profile.id == TIMIAI_PROVIDER_ID
+                && profile.label == TIMIAI_PROVIDER_NAME
+                && profile.proxy_kind == AgentProviderProxyKind::Responses
+                && profile.base_url.as_deref() == Some(TIMIAI_BASE_URL)
+        }));
+        assert!(snapshot.claude_woa.profiles.iter().any(|profile| {
+            profile.id == TIMIAI_PROVIDER_ID
+                && profile.label == TIMIAI_PROVIDER_NAME
+                && profile.proxy_kind == AgentProviderProxyKind::ClaudeNative
+                && profile.base_url.as_deref() == Some(TIMIAI_BASE_URL)
+        }));
+        assert!(snapshot.codex_acp.profiles.iter().any(|profile| {
+            profile.id == CODEX_WOA_PROVIDER_ID
+                && profile.label == CODEX_WOA_PROVIDER_NAME
+                && profile.proxy_kind == AgentProviderProxyKind::Responses
+                && profile.base_url.as_deref() == Some(CODEX_WOA_BASE_URL)
+        }));
         assert!(snapshot.codex_acp.profiles.iter().any(|profile| {
             profile.id == KIMI_PROVIDER_ID
                 && profile.proxy_kind == AgentProviderProxyKind::CompletionToResponses
@@ -2334,6 +3190,49 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_for_new_work_uses_codebuddy_when_claude_byok_is_unconfigured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join(binary_name("codebuddy")), "fake").unwrap();
+        let _path_guard =
+            EnvVarGuard::set_path(std::env::join_paths([bin_dir.as_os_str()]).unwrap());
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        assert_eq!(default_agent_for_new_work(&paths), AgentCliId::Codebuddy);
+        assert!(
+            resolve_agent_command_with_settings(&paths)
+                .to_lowercase()
+                .contains("codebuddy")
+        );
+    }
+
+    #[test]
+    fn default_agent_for_new_work_keeps_configured_claude_byok() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join(binary_name("codebuddy")), "fake").unwrap();
+        let _path_guard =
+            EnvVarGuard::set_path(std::env::join_paths([bin_dir.as_os_str()]).unwrap());
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            MIMO_PROVIDER_ID,
+            "mimo-secret",
+        )
+        .unwrap();
+
+        assert_eq!(
+            default_agent_for_new_work(&paths),
+            AgentCliId::ClaudeAgentAcp
+        );
+    }
+
+    #[test]
     fn claude_woa_config_persists_channel_and_uses_managed_token_path() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -2368,6 +3267,24 @@ mod tests {
             claude_woa_token_path(&paths)
         );
         assert_ne!(snapshot.claude_woa.token_path, token_path);
+    }
+
+    #[test]
+    fn selecting_claude_woa_fills_default_models() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let snapshot = select_agent_provider_profile(
+            &paths,
+            AgentProviderFamily::Claude,
+            CLAUDE_WOA_PROVIDER_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.settings.claude_woa.available_models,
+            vec!["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"]
+        );
     }
 
     #[test]
@@ -2642,6 +3559,157 @@ mod tests {
     }
 
     #[test]
+    fn selecting_codex_woa_creates_direct_gateway_config() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let snapshot = select_agent_provider_profile(
+            &paths,
+            AgentProviderFamily::Codex,
+            CODEX_WOA_PROVIDER_ID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.codex_acp.selected_profile_id,
+            CODEX_WOA_PROVIDER_ID
+        );
+        assert!(snapshot.codex_acp.profiles.iter().any(|profile| profile.id
+            == CODEX_WOA_PROVIDER_ID
+            && profile.label == CODEX_WOA_PROVIDER_NAME
+            && profile.selected
+            && profile.configured));
+
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        assert!(content.contains("[model_providers.woa]"));
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(CODEX_WOA_MODEL));
+        assert_eq!(doc["model_provider"].as_str(), Some(CODEX_WOA_PROVIDER_ID));
+        assert_eq!(
+            doc["preferred_auth_method"].as_str(),
+            Some(CODEX_AUTH_METHOD_API_KEY)
+        );
+        assert_eq!(
+            doc["model_context_window"].as_integer(),
+            Some(model_context_window(CODEX_WOA_MODEL))
+        );
+        assert_eq!(
+            doc["model_max_output_tokens"].as_integer(),
+            Some(model_max_output_tokens(CODEX_WOA_MODEL))
+        );
+        assert_eq!(doc["chatgpt_base_url"].as_str(), Some(CODEX_WOA_BASE_URL));
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["base_url"].as_str(),
+            Some(CODEX_WOA_BASE_URL)
+        );
+        assert!(
+            !doc["model_providers"][CODEX_WOA_PROVIDER_ID]["base_url"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("127.0.0.1")
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["chatgpt_base_url"].as_str(),
+            Some(CODEX_WOA_BASE_URL)
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["wire_api"].as_str(),
+            Some(VENUS_WIRE_API)
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["requires_openai_auth"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["http_headers"]["x-request-platform"]
+                .as_str(),
+            Some("codex-internal")
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["env_http_headers"]["x-api-key"].as_str(),
+            Some(CODEX_WOA_API_KEY_ENV)
+        );
+        assert!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["env_http_headers"]
+                .get("oauth-token")
+                .is_none()
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["env_http_headers"]["x-knot-api-key"]
+                .as_str(),
+            Some(CODEX_WOA_KNOT_API_KEY_ENV)
+        );
+        assert_eq!(
+            doc["model_providers"][CODEX_WOA_PROVIDER_ID]["env_http_headers"]["x-git-repos"]
+                .as_str(),
+            Some(CODEX_WOA_GIT_REPOS_ENV)
+        );
+        let woa_provider_table = doc["model_providers"][CODEX_WOA_PROVIDER_ID]
+            .as_table()
+            .unwrap();
+        assert!(woa_provider_table.get("api_key").is_none());
+        assert!(woa_provider_table.get("env_key").is_none());
+
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let slugs = models
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slugs,
+            CODEX_WOA_CATALOG_MODELS
+                .iter()
+                .map(|model| model_slug(model))
+                .collect::<Vec<_>>()
+        );
+        assert!(slugs.contains(&"gpt-5.4"));
+        assert!(!slugs.contains(&"gpt-5.5-codex-max"));
+        assert!(!slugs.contains(&"gpt-5.5-codex-mini"));
+        assert!(!slugs.contains(&"gpt-5.5"));
+        assert!(models.iter().all(|model| {
+            model["input_modalities"].as_array().unwrap()
+                == &vec![
+                    serde_json::Value::String("text".to_string()),
+                    serde_json::Value::String("image".to_string()),
+                ]
+        }));
+        assert!(
+            models
+                .iter()
+                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("function") })
+        );
+
+        crate::claude_woa::save_token(
+            &claude_woa_token_path(&paths),
+            &crate::claude_woa::WoaToken {
+                access_token: "access-secret".into(),
+                refresh_token: Some("refresh-secret".into()),
+                expires_at: crate::claude_woa::now_ms() + 600_000,
+            },
+        )
+        .unwrap();
+        let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+        assert!(env.contains(&(
+            CODEX_WOA_API_KEY_ENV.to_string(),
+            "access-secret".to_string()
+        )));
+        assert!(env.contains(&(
+            CODEX_WOA_APP_VERSION_ENV.to_string(),
+            CODEX_WOA_APP_VERSION.to_string()
+        )));
+        assert!(env.contains(&(
+            CODEX_WOA_USER_AGENT_ENV.to_string(),
+            format!("Codex-Internal/{CODEX_WOA_APP_VERSION}")
+        )));
+        assert!(env.iter().any(|(name, value)| {
+            name == CODEX_WOA_CONVERSATION_ID_ENV && uuid::Uuid::parse_str(value).is_ok()
+        }));
+    }
+
+    #[test]
     fn codex_acp_deepseek_config_creates_provider_config() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -2817,6 +3885,131 @@ mod tests {
     }
 
     #[test]
+    fn timiai_key_is_shared_between_codex_and_claude_channels() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        let snapshot = save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            TIMIAI_PROVIDER_ID,
+            "timiai-secret",
+        )
+        .unwrap();
+
+        assert!(
+            snapshot
+                .codex_acp
+                .profiles
+                .iter()
+                .any(|profile| profile.id == TIMIAI_PROVIDER_ID && profile.configured)
+        );
+        assert!(
+            snapshot
+                .claude_woa
+                .profiles
+                .iter()
+                .any(|profile| profile.id == TIMIAI_PROVIDER_ID && profile.configured)
+        );
+
+        let snapshot =
+            select_agent_provider_profile(&paths, AgentProviderFamily::Codex, TIMIAI_PROVIDER_ID)
+                .unwrap();
+        assert_eq!(snapshot.codex_acp.selected_profile_id, TIMIAI_PROVIDER_ID);
+
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(TIMIAI_CODEX_MODEL));
+        assert_eq!(doc["model_provider"].as_str(), Some(TIMIAI_PROVIDER_ID));
+        assert_eq!(
+            doc["model_providers"][TIMIAI_PROVIDER_ID]["env_key"].as_str(),
+            Some(TIMIAI_API_KEY_ENV)
+        );
+        assert_eq!(
+            doc["model_providers"][TIMIAI_PROVIDER_ID]["api_key"].as_str(),
+            Some("timiai-secret")
+        );
+        assert!(
+            doc["model_providers"][TIMIAI_PROVIDER_ID]["base_url"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("http://127.0.0.1:")
+        );
+
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&TIMIAI_CODEX_MODEL));
+        assert!(slugs.contains(&TIMIAI_CLAUDE_MODEL));
+        assert!(slugs.contains(&DEEPSEEK_MODEL));
+        assert!(!slugs.contains(&model_slug(DEEPSEEK_MODEL)));
+
+        let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+        assert!(env.contains(&(TIMIAI_API_KEY_ENV.to_string(), "timiai-secret".to_string())));
+    }
+
+    #[test]
+    fn claude_timiai_channel_uses_shared_key_and_local_proxy() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Codex,
+            TIMIAI_PROVIDER_ID,
+            "timiai-secret",
+        )
+        .unwrap();
+        let snapshot =
+            select_agent_provider_profile(&paths, AgentProviderFamily::Claude, TIMIAI_PROVIDER_ID)
+                .unwrap();
+
+        assert_eq!(snapshot.claude_woa.selected_profile_id, TIMIAI_PROVIDER_ID);
+        assert!(snapshot.claude_woa.profiles.iter().any(|profile| {
+            profile.id == TIMIAI_PROVIDER_ID
+                && profile.configured
+                && profile.models.contains(&TIMIAI_CODEX_MODEL.to_string())
+                && profile.models.contains(&TIMIAI_CLAUDE_MODEL.to_string())
+        }));
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        assert!(!command.contains("--woa"));
+        ensure_agent_ready_for_command(&command, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+
+        assert!(env.contains(&(
+            "ANTHROPIC_API_KEY".to_string(),
+            TIMIAI_PROVIDER_ID.to_string()
+        )));
+        assert!(env.iter().any(|(name, value)| {
+            name == "ANTHROPIC_BASE_URL" && value.starts_with("http://127.0.0.1:")
+        }));
+        assert!(env.contains(&(
+            "ANTHROPIC_MODEL".to_string(),
+            TIMIAI_CLAUDE_MODEL.to_string()
+        )));
+        let (_, model_config) = env
+            .iter()
+            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+            .unwrap();
+        let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
+        let available_models = model_config["availableModels"].as_array().unwrap();
+        assert!(
+            available_models.contains(&serde_json::Value::String(TIMIAI_CODEX_MODEL.to_string()))
+        );
+        assert!(
+            available_models.contains(&serde_json::Value::String(TIMIAI_CLAUDE_MODEL.to_string()))
+        );
+        assert!(model_config.get("modelOverrides").is_none());
+    }
+
+    #[test]
     fn saving_codex_byok_source_key_preserves_selected_byok_channel() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -2918,7 +4111,9 @@ api_key = "mimo-secret"
 "#,
                 kimi_model = KIMI_MODEL,
                 kimi_provider = KIMI_PROVIDER_ID,
-                catalog_path = codex_model_catalog_path(&paths).to_string_lossy(),
+                catalog_path = codex_model_catalog_path(&paths)
+                    .to_string_lossy()
+                    .replace('\\', "\\\\"),
                 deepseek_provider = DEEPSEEK_PROVIDER_ID,
                 mimo_provider = MIMO_PROVIDER_ID,
             ),
@@ -2993,6 +4188,10 @@ api_key = "mimo-secret"
         assert_eq!(model_max_output_tokens("claude-sonnet-4.6"), 64_000);
         assert_eq!(model_context_window("claude-opus-4.7"), 1_000_000);
         assert_eq!(model_max_output_tokens("claude-opus-4.7"), 128_000);
+        assert_eq!(model_context_window("claude-opus-4.8"), 1_000_000);
+        assert_eq!(model_max_output_tokens("claude-opus-4.8"), 128_000);
+        assert_eq!(model_context_window("gemini-3.5-flash"), 1_000_000);
+        assert_eq!(model_max_output_tokens("gemini-3.5-flash"), 128_000);
         assert_eq!(model_context_window("deepseek-v4-pro"), 1_000_000);
         assert_eq!(model_max_output_tokens("deepseek-v4-pro"), 384_000);
         assert_eq!(model_context_window("deepseek-v4-flash"), 1_000_000);
@@ -3174,7 +4373,16 @@ name = "Other"
             !env.iter()
                 .any(|(name, _)| name == "CLAUDE_PROVIDER_PROXY_KIND")
         );
-        assert!(!env.iter().any(|(name, _)| name == "CLAUDE_MODEL_CONFIG"));
+        let model_config = env
+            .iter()
+            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+            .map(|(_, value)| value)
+            .expect("WOA should use its default model list");
+        assert!(model_config.contains("claude-opus-4-7[1m]"));
+        assert!(model_config.contains("claude-opus-4-6[1m]"));
+        assert!(!model_config.contains(DEEPSEEK_MODEL));
+        assert!(!model_config.contains(KIMI_MODEL));
+        assert!(!model_config.contains(MIMO_MODEL));
     }
 
     #[test]

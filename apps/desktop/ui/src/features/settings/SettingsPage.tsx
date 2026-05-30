@@ -11,6 +11,7 @@ import type {
   LspServerConfigInput,
 } from "../../types";
 import {
+  openExternalUrl,
   settingsDetectAgents,
   settingsGetAgentSnapshot,
   settingsGetLspSnapshot,
@@ -31,12 +32,20 @@ import {
 import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
+export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
+
+export interface SettingsStartupNotice {
+  kind: "woa" | "codex_byok";
+  message?: string | null;
+}
+
 interface Props {
   onBack: () => void;
   onThemeChange?: (theme: AppTheme) => void;
+  startupNotice?: SettingsStartupNotice | null;
+  initialAgentTab?: AgentSettingsTab;
+  onStartupNoticeDismissed?: () => void;
 }
-
-type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
 
 const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "claude-agent-acp", label: "Claude" },
@@ -44,9 +53,16 @@ const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "codebuddy", label: "CodeBuddy" },
 ];
 
-export function SettingsPage({ onBack, onThemeChange }: Props) {
+export function SettingsPage({
+  initialAgentTab,
+  startupNotice,
+  onBack,
+  onStartupNoticeDismissed,
+  onThemeChange,
+}: Props) {
   const [activePane, setActivePane] = useState<"general" | "lsp">("general");
-  const [activeAgentTab, setActiveAgentTab] = useState<AgentSettingsTab>("claude-agent-acp");
+  const [activeAgentTab, setActiveAgentTab] = useState<AgentSettingsTab>(initialAgentTab ?? "claude-agent-acp");
+  const [visibleStartupNotice, setVisibleStartupNotice] = useState<SettingsStartupNotice | null>(startupNotice ?? null);
   const [snapshot, setSnapshot] = useState<AgentSettingsSnapshot | null>(null);
   const [lspSnapshot, setLspSnapshot] = useState<LspSettingsSnapshot | null>(null);
   const [lspDrafts, setLspDrafts] = useState<Record<string, LspServerConfigInput>>({});
@@ -64,7 +80,9 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
   const [byokProfileInitialized, setByokProfileInitialized] = useState(false);
   const [codexVenusApiKey, setCodexVenusApiKey] = useState("");
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
+  const [timiAiApiKey, setTimiAiApiKey] = useState("");
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
+  const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok">("channel");
   const [claudeProfileId, setClaudeProfileId] = useState("byok");
   const [claudeVenusApiKey, setClaudeVenusApiKey] = useState("");
   const [claudeWoaChannel, setClaudeWoaChannel] = useState<ClaudeWoaChannel>("default");
@@ -110,11 +128,23 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
   }, [load]);
 
   useEffect(() => {
+    if (initialAgentTab) {
+      setActivePane("general");
+      setActiveAgentTab(initialAgentTab);
+    }
+  }, [initialAgentTab]);
+
+  useEffect(() => {
+    setVisibleStartupNotice(startupNotice ?? null);
+  }, [startupNotice?.kind]);
+
+  useEffect(() => {
+    if (initialAgentTab) return;
     const selectedAgent = snapshot?.settings.selected_agent;
     if (selectedAgent === "codebuddy" || selectedAgent === "codex-acp" || selectedAgent === "claude-agent-acp") {
       setActiveAgentTab(selectedAgent);
     }
-  }, [snapshot?.settings.selected_agent]);
+  }, [initialAgentTab, snapshot?.settings.selected_agent]);
 
   useEffect(() => {
     if (snapshot?.codex_acp.selected_profile_id) {
@@ -125,10 +155,10 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
   useEffect(() => {
     if (!snapshot || byokProfileInitialized) return;
     const byokProfiles = snapshot.codex_acp.profiles.filter((profile) =>
-      profile.requires_credential && profile.id !== "venus",
+      profile.requires_credential && profile.id !== "venus" && profile.id !== "timiai",
     );
     const selected = snapshot.codex_acp.selected_profile_id;
-    if (selected !== "default" && selected !== "venus" && selected !== "byok") {
+    if (selected !== "default" && selected !== "venus" && selected !== "timiai" && selected !== "byok") {
       setByokProfileId(selected);
     } else if (selected === "byok") {
       setByokProfileId(byokProfiles.find((profile) => profile.configured)?.id ?? byokProfiles[0]?.id ?? "deepseek");
@@ -166,13 +196,23 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
     return () => window.clearInterval(timer);
   }, [claudeWoaLogin]);
 
+  const dismissStartupNotice = useCallback(() => {
+    setVisibleStartupNotice(null);
+    onStartupNoticeDismissed?.();
+  }, [onStartupNoticeDismissed]);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onBack();
+      if (event.key !== "Escape") return;
+      if (visibleStartupNotice) {
+        dismissStartupNotice();
+        return;
+      }
+      onBack();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onBack]);
+  }, [dismissStartupNotice, onBack, visibleStartupNotice]);
 
   const handleDetect = useCallback(async () => {
     setError(null);
@@ -228,6 +268,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
     const key = codexAcpApiKey.trim();
     setError(null);
     setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("byok");
     if (!byokProfileId) {
       setError("请选择 BYOK 模型来源");
       return;
@@ -250,6 +291,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
         },
       });
       setCodexAcpApiKey("");
+      setCodexAcpMessageTarget("byok");
       setCodexAcpMessage(`${providerLabel(codexSnapshot.codex_acp.profiles, byokProfileId)} API key 已更新，后续新建会话生效`);
     } catch (e) {
       setError(String(e));
@@ -258,12 +300,12 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
     }
   }, [byokProfileId, codexAcpApiKey]);
 
-  const handleSelectCodexChannel = useCallback(async (channel: "default" | "venus" | "byok") => {
+  const handleSelectCodexChannel = useCallback(async (channel: "default" | "venus" | "woa" | "timiai" | "byok") => {
     const byokProfiles = snapshot?.codex_acp.profiles.filter((profile) =>
-      profile.requires_credential && profile.id !== "venus",
+      profile.requires_credential && profile.id !== "venus" && profile.id !== "timiai",
     ) ?? [];
     const selectedByokProfileId = byokProfiles.find((profile) => profile.id === byokProfileId)?.id
-      ?? (codexProfileId !== "default" && codexProfileId !== "venus" && codexProfileId !== "byok" ? codexProfileId : undefined)
+      ?? (codexProfileId !== "default" && codexProfileId !== "venus" && codexProfileId !== "woa" && codexProfileId !== "timiai" && codexProfileId !== "byok" ? codexProfileId : undefined)
       ?? byokProfiles.find((profile) => profile.configured)?.id
       ?? byokProfiles[0]?.id;
     const nextProfileId =
@@ -271,11 +313,16 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
         ? "default"
         : channel === "venus"
           ? "venus"
-          : "byok";
+          : channel === "woa"
+            ? "woa"
+            : channel === "timiai"
+              ? "timiai"
+              : "byok";
     if (!nextProfileId || snapshot?.codex_acp.selected_profile_id === nextProfileId) return;
     setBusyCodexAcp(true);
     setError(null);
     setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("channel");
     try {
       const nextSnapshot = await settingsSelectAgentProviderProfile("codex", nextProfileId);
       setSnapshot(nextSnapshot);
@@ -285,7 +332,9 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       }
       setCodexAcpApiKey("");
       setCodexVenusApiKey("");
-      setCodexAcpMessage(`Codex 通道已切换到 ${channel === "default" ? "默认" : channel === "venus" ? "Venus" : "BYOK"}`);
+      setTimiAiApiKey("");
+      setCodexAcpMessageTarget("channel");
+      setCodexAcpMessage(`Codex 通道已切换到 ${channel === "default" ? "默认" : channel === "venus" ? "Venus" : channel === "woa" ? "WOA" : channel === "timiai" ? "TimiAI" : "BYOK"}`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -297,6 +346,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
     const key = codexVenusApiKey.trim();
     setError(null);
     setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("channel");
     if (!key) {
       setError("API key 不能为空");
       return;
@@ -307,6 +357,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setSnapshot(nextSnapshot);
       setCodexProfileId("venus");
       setCodexVenusApiKey("");
+      setCodexAcpMessageTarget("channel");
       setCodexAcpMessage("Venus API key 已保存，Codex 通道已切换到 Venus");
     } catch (e) {
       setError(String(e));
@@ -315,18 +366,60 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
     }
   }, [codexVenusApiKey]);
 
-  const handleSelectClaudeChannel = useCallback(async (channel: "woa" | "venus" | "byok") => {
+  const handleSaveTimiAiKey = useCallback(async (family: "codex" | "claude") => {
+    const key = timiAiApiKey.trim();
+    setError(null);
+    setCodexAcpMessage(null);
+    if (family === "codex") {
+      setCodexAcpMessageTarget("channel");
+    }
+    setClaudeWoaMessage(null);
+    if (!key) {
+      setError("API key 不能为空");
+      return;
+    }
+    if (family === "codex") {
+      setBusyCodexAcp(true);
+    } else {
+      setBusyClaudeWoa(true);
+    }
+    try {
+      const nextSnapshot = await settingsSaveAgentProviderSecret(family, "timiai", key);
+      setSnapshot(nextSnapshot);
+      setTimiAiApiKey("");
+      if (family === "codex") {
+        setCodexProfileId("timiai");
+        setCodexAcpMessageTarget("channel");
+        setCodexAcpMessage("TimiAI key 已保存，Codex / Claude 可共用");
+      } else {
+        setClaudeProfileId("timiai");
+        setClaudeWoaMessage("TimiAI key 已保存，Codex / Claude 可共用");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      if (family === "codex") {
+        setBusyCodexAcp(false);
+      } else {
+        setBusyClaudeWoa(false);
+      }
+    }
+  }, [timiAiApiKey]);
+
+  const handleSelectClaudeChannel = useCallback(async (channel: "woa" | "venus" | "timiai" | "byok") => {
     const byokProfiles = snapshot?.claude_woa.profiles.filter((profile) =>
-      profile.requires_credential && profile.id !== "venus",
+      profile.requires_credential && profile.id !== "venus" && profile.id !== "timiai",
     ) ?? [];
     const nextProfileId =
       channel === "woa"
         ? "woa"
         : channel === "venus"
           ? "venus"
-          : claudeProfileId !== "woa" && claudeProfileId !== "venus"
-            ? claudeProfileId
-            : byokProfiles.find((profile) => profile.configured)?.id ?? byokProfiles[0]?.id;
+          : channel === "timiai"
+            ? "timiai"
+            : claudeProfileId !== "woa" && claudeProfileId !== "venus" && claudeProfileId !== "timiai"
+              ? claudeProfileId
+              : byokProfiles.find((profile) => profile.configured)?.id ?? byokProfiles[0]?.id;
     const normalizedNextProfileId = channel === "byok" ? "byok" : nextProfileId;
     if (!normalizedNextProfileId || snapshot?.claude_woa.selected_profile_id === normalizedNextProfileId) return;
     setBusyClaudeWoa(true);
@@ -337,7 +430,8 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setSnapshot(nextSnapshot);
       setClaudeProfileId(normalizedNextProfileId);
       setClaudeVenusApiKey("");
-      setClaudeWoaMessage(`Claude 通道已切换到 ${channel === "woa" ? "WOA" : channel === "venus" ? "Venus" : "BYOK"}`);
+      setTimiAiApiKey("");
+      setClaudeWoaMessage(`Claude 通道已切换到 ${channel === "woa" ? "WOA" : channel === "venus" ? "Venus" : channel === "timiai" ? "TimiAI" : "BYOK"}`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -435,6 +529,15 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       setBusyClaudeWoa(false);
     }
   }, []);
+
+  const handleOpenClaudeWoaLoginUrl = useCallback(async () => {
+    if (!claudeWoaLogin) return;
+    try {
+      await openExternalUrl(claudeWoaLogin.verification_uri_complete ?? claudeWoaLogin.verification_uri);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [claudeWoaLogin]);
 
   const updateLspDraft = useCallback((
     languageId: string,
@@ -545,7 +648,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
   const renderByokPool = () => {
     if (!snapshot) return null;
     const byokProfiles = snapshot.codex_acp.profiles.filter((profile) =>
-      profile.requires_credential && profile.id !== "venus",
+      profile.requires_credential && profile.id !== "venus" && profile.id !== "timiai",
     );
     const profile = byokProfiles.find((item) => item.id === byokProfileId) ?? byokProfiles[0];
     if (!profile) return null;
@@ -571,6 +674,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
               setByokProfileId(event.currentTarget.value);
               setCodexAcpApiKey("");
               setCodexAcpMessage(null);
+              setCodexAcpMessageTarget("byok");
             }}
           >
             {byokProfiles.map((item) => (
@@ -600,7 +704,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
           />
         </label>
         <div className="settings-provider-config-actions">
-          {codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}
+          {codexAcpMessageTarget === "byok" && codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}
           <button
             type="button"
             className="settings-btn"
@@ -613,6 +717,110 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
       </section>
     );
   };
+
+  const renderTimiAiConfig = (family: "codex" | "claude") => {
+    if (!snapshot) return null;
+    const profile = (family === "codex" ? snapshot.codex_acp.profiles : snapshot.claude_woa.profiles)
+      .find((item) => item.id === "timiai");
+    const busy = family === "codex" ? busyCodexAcp : busyClaudeWoa;
+    const message = family === "codex" ? codexAcpMessage : claudeWoaMessage;
+    const showMessage = family === "claude" || codexAcpMessageTarget === "channel";
+    const endpoint = family === "codex"
+      ? "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses"
+      : "http://api.timiai.woa.com/ai_api_manage/llmproxy/v1/messages";
+    return (
+      <>
+        <div className="settings-provider-config-path">
+          <span>Endpoint：<code>{endpoint}</code>；Codex / Claude 共用同一个 TimiAI key。</span>
+        </div>
+        <div className="settings-provider-detail">
+          <span className={`settings-row-badge ${profile?.configured ? "is-installed" : "is-missing"}`}>
+            {profile?.configured ? "已配置" : "未配置"}
+          </span>
+          {profile?.models.length ? <span>模型：{profile.models.join("、")}</span> : null}
+          {family === "codex" && <span>远程压缩：<code>https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact</code></span>}
+          <p>{profile?.help_text ?? "通过 TimiAI 网关对接 Codex / Claude。"}</p>
+        </div>
+        <label className="settings-field settings-provider-key-field">
+          <span>TimiAI key</span>
+          <input
+            aria-label={`${family}_timiai_api_key`}
+            type="password"
+            autoComplete="off"
+            placeholder={profile?.configured ? "输入新的 TimiAI key 以替换" : "输入 TimiAI key"}
+            value={timiAiApiKey}
+            onChange={(event) => setTimiAiApiKey(event.currentTarget.value)}
+          />
+        </label>
+        <div className="settings-provider-config-actions">
+          {showMessage && message && <span className="settings-provider-config-message">{message}</span>}
+          <button
+            type="button"
+            className="settings-btn"
+            disabled={busy || !timiAiApiKey.trim()}
+            onClick={() => handleSaveTimiAiKey(family)}
+          >
+            {busy ? "保存中..." : `保存 ${family === "codex" ? "Codex" : "Claude"} TimiAI key`}
+          </button>
+        </div>
+      </>
+    );
+  };
+
+  const renderWoaTokenControls = (messagePrefix: "Codex" | "Claude") => {
+    if (!snapshot) return null;
+    return (
+      <>
+        <div className="settings-provider-config-message">
+          {snapshot.claude_woa.token.malformed
+            ? snapshot.claude_woa.token.message
+            : snapshot.claude_woa.token.exists
+              ? `accessToken ${snapshot.claude_woa.token.access_token ?? ""} · refresh ${snapshot.claude_woa.token.refresh_needed ? "需要刷新" : "正常"}`
+              : snapshot.claude_woa.token.message}
+        </div>
+        {claudeWoaLogin && (
+          <div className="settings-warning">
+            <span>
+              打开{" "}
+              <button type="button" className="settings-inline-link" onClick={handleOpenClaudeWoaLoginUrl}>
+                {claudeWoaLogin.verification_uri_complete ?? claudeWoaLogin.verification_uri}
+              </button>
+              ，输入 <code>{claudeWoaLogin.user_code}</code>
+            </span>
+          </div>
+        )}
+        <div className="settings-provider-config-actions">
+          {claudeWoaMessage && <span className="settings-provider-config-message">{claudeWoaMessage}</span>}
+          {claudeWoaLogin ? (
+            <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleCancelClaudeWoaLogin}>
+              取消登录
+            </button>
+          ) : (
+            <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleStartClaudeWoaLogin}>
+              {busyClaudeWoa ? "处理中..." : "WOA 登录"}
+            </button>
+          )}
+          <button
+            type="button"
+            className="settings-btn"
+            disabled={busyClaudeWoa || !snapshot.claude_woa.token.exists || snapshot.claude_woa.token.malformed}
+            onClick={handleRefreshClaudeWoaToken}
+          >
+            刷新 token
+          </button>
+          {messagePrefix === "Claude" && (
+            <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={() => handleSaveClaudeWoaConfig()}>
+              保存模型列表
+            </button>
+          )}
+        </div>
+      </>
+    );
+  };
+
+  const startupNoticeCopy = visibleStartupNotice
+    ? startupNoticeCopyFor(visibleStartupNotice)
+    : null;
 
   return (
     <div className="settings-page">
@@ -747,20 +955,24 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                       <div className="settings-provider-config-head">
                         <div>
                           <span>Codex 通道</span>
-                          <p>Codex 可以使用系统默认官方配置、内部 Venus，或 BYOK 模型池；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
+                          <p>Codex 可以使用系统默认官方配置、WOA、TimiAI、内部 Venus，或 BYOK 模型池；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
                         </div>
                         <span className="settings-provider-active">
-                          当前：{snapshot.codex_acp.selected_profile_id === "default" ? "默认" : snapshot.codex_acp.selected_profile_id === "venus" ? "Venus" : "BYOK"}
+                          当前：{snapshot.codex_acp.selected_profile_id === "default" ? "默认" : snapshot.codex_acp.selected_profile_id === "venus" ? "Venus" : snapshot.codex_acp.selected_profile_id === "woa" ? "WOA" : snapshot.codex_acp.selected_profile_id === "timiai" ? "TimiAI" : "BYOK"}
                         </span>
                       </div>
                       {renderAgentRuntime("codex-acp")}
                       <div className="settings-provider-options" role="radiogroup" aria-label="Codex channel">
-                        {(["default", "venus", "byok"] as const).map((channel) => {
+                        {(["default", "woa", "timiai", "venus", "byok"] as const).map((channel) => {
                           const selected = channel === "default"
                             ? snapshot.codex_acp.selected_profile_id === "default"
+                            : channel === "woa"
+                              ? snapshot.codex_acp.selected_profile_id === "woa"
+                            : channel === "timiai"
+                              ? snapshot.codex_acp.selected_profile_id === "timiai"
                             : channel === "venus"
                               ? snapshot.codex_acp.selected_profile_id === "venus"
-                              : snapshot.codex_acp.selected_profile_id !== "default" && snapshot.codex_acp.selected_profile_id !== "venus";
+                              : snapshot.codex_acp.selected_profile_id !== "default" && snapshot.codex_acp.selected_profile_id !== "woa" && snapshot.codex_acp.selected_profile_id !== "timiai" && snapshot.codex_acp.selected_profile_id !== "venus";
                           return (
                             <button
                               key={channel}
@@ -771,10 +983,14 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                               aria-pressed={selected}
                             >
                               <span className="settings-provider-option-main">
-                                <span>{channel === "default" ? "默认" : channel === "venus" ? "Venus" : "BYOK"}</span>
+                                <span>{channel === "default" ? "默认" : channel === "woa" ? "WOA" : channel === "timiai" ? "TimiAI" : channel === "venus" ? "Venus" : "BYOK"}</span>
                                 <span>
                                   {channel === "default"
                                     ? "系统安装的 Codex 官方配置"
+                                    : channel === "woa"
+                                      ? "Tencent WOA 登录的 CodeBuddy Codex gateway"
+                                    : channel === "timiai"
+                                      ? "TimiAI Responses API，共用 key"
                                     : channel === "venus"
                                       ? "内部 Venus LLM 网关"
                                       : "用户自带 Key 的模型来源"}
@@ -792,6 +1008,15 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                           <span>使用系统安装的 Codex 官方配置，不写入 Kodex 托管 provider。</span>
                         </div>
                       )}
+                      {snapshot.codex_acp.selected_profile_id === "woa" && (
+                        <>
+                          <div className="settings-provider-config-path">
+                            <span>写入 <code>{snapshot.codex_acp.config_path}</code>；复用 WOA Token <code>{snapshot.claude_woa.token_path}</code>，直连 CodeBuddy Codex gateway Responses API。</span>
+                          </div>
+                          {renderWoaTokenControls("Codex")}
+                        </>
+                      )}
+                      {snapshot.codex_acp.selected_profile_id === "timiai" && renderTimiAiConfig("codex")}
                       {snapshot.codex_acp.selected_profile_id === "venus" && (
                         <>
                           <div className="settings-provider-config-path">
@@ -820,10 +1045,13 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                           </div>
                         </>
                       )}
-                      {snapshot.codex_acp.selected_profile_id !== "default" && snapshot.codex_acp.selected_profile_id !== "venus" && (
+                      {snapshot.codex_acp.selected_profile_id !== "default" && snapshot.codex_acp.selected_profile_id !== "woa" && snapshot.codex_acp.selected_profile_id !== "timiai" && snapshot.codex_acp.selected_profile_id !== "venus" && (
                         <div className="settings-provider-config-path">
                           <span>写入 <code>{snapshot.codex_acp.config_path}</code>；BYOK 通过本机 proxy 按模型路由。</span>
                         </div>
+                      )}
+                      {codexAcpMessageTarget === "channel" && snapshot.codex_acp.selected_profile_id !== "timiai" && codexAcpMessage && (
+                        <div className="settings-provider-config-message">{codexAcpMessage}</div>
                       )}
                     </div>
                     {renderByokPool()}
@@ -836,20 +1064,22 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                       <div className="settings-provider-config-head">
                         <div>
                           <span>Claude 通道</span>
-                          <p>Claude 可以走 WOA、Venus 或 BYOK；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
+                          <p>Claude 可以走 WOA、TimiAI、Venus 或 BYOK；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
                         </div>
                         <span className="settings-provider-active">
-                          当前：{claudeProfileId === "woa" ? "WOA" : claudeProfileId === "venus" ? "Venus" : "BYOK"}
+                          当前：{claudeProfileId === "woa" ? "WOA" : claudeProfileId === "timiai" ? "TimiAI" : claudeProfileId === "venus" ? "Venus" : "BYOK"}
                         </span>
                       </div>
                       {renderAgentRuntime("claude-agent-acp")}
                       <div className="settings-provider-options" role="radiogroup" aria-label="Claude channel">
-                        {(["woa", "venus", "byok"] as const).map((channel) => {
+                        {(["woa", "timiai", "venus", "byok"] as const).map((channel) => {
                           const selected = channel === "woa"
                             ? claudeProfileId === "woa"
+                            : channel === "timiai"
+                              ? claudeProfileId === "timiai"
                             : channel === "venus"
                               ? claudeProfileId === "venus"
-                              : claudeProfileId !== "woa" && claudeProfileId !== "venus";
+                              : claudeProfileId !== "woa" && claudeProfileId !== "timiai" && claudeProfileId !== "venus";
                           return (
                             <button
                               key={channel}
@@ -860,10 +1090,12 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                               aria-pressed={selected}
                             >
                               <span className="settings-provider-option-main">
-                                <span>{channel === "woa" ? "WOA" : channel === "venus" ? "Venus" : "BYOK"}</span>
+                                <span>{channel === "woa" ? "WOA" : channel === "timiai" ? "TimiAI" : channel === "venus" ? "Venus" : "BYOK"}</span>
                                 <span>
                                   {channel === "woa"
                                     ? "Tencent WOA 登录"
+                                    : channel === "timiai"
+                                      ? "TimiAI Messages API，共用 key"
                                     : channel === "venus"
                                       ? "内部 Venus LLM 网关"
                                       : "用户自带 Key 的模型来源"}
@@ -904,53 +1136,20 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                               </button>
                             ))}
                           </div>
-                          <div className="settings-provider-config-message">
-                            {snapshot.claude_woa.token.malformed
-                              ? snapshot.claude_woa.token.message
-                              : snapshot.claude_woa.token.exists
-                                ? `accessToken ${snapshot.claude_woa.token.access_token ?? ""} · refresh ${snapshot.claude_woa.token.refresh_needed ? "需要刷新" : "正常"}`
-                                : snapshot.claude_woa.token.message}
-                          </div>
                           <label className="settings-field settings-provider-models-field">
                             <span>模型列表</span>
                             <textarea
                               aria-label="claude_woa_models"
                               value={claudeWoaModelsText}
                               onChange={(event) => setClaudeWoaModelsText(event.currentTarget.value)}
-                              placeholder={"claude-sonnet-4-6[1m]\nclaude-opus-4-7[1m]"}
+                              placeholder={"claude-opus-4-7[1m]\nclaude-opus-4-6[1m]"}
                               spellCheck={false}
                             />
                           </label>
-                          {claudeWoaLogin && (
-                            <div className="settings-warning">
-                              <span>打开 <code>{claudeWoaLogin.verification_uri_complete ?? claudeWoaLogin.verification_uri}</code>，输入 <code>{claudeWoaLogin.user_code}</code></span>
-                            </div>
-                          )}
-                          <div className="settings-provider-config-actions">
-                            {claudeWoaMessage && <span className="settings-provider-config-message">{claudeWoaMessage}</span>}
-                            {claudeWoaLogin ? (
-                              <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleCancelClaudeWoaLogin}>
-                                取消登录
-                              </button>
-                            ) : (
-                              <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={handleStartClaudeWoaLogin}>
-                                {busyClaudeWoa ? "处理中..." : "WOA 登录"}
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              className="settings-btn"
-                              disabled={busyClaudeWoa || !snapshot.claude_woa.token.exists || snapshot.claude_woa.token.malformed}
-                              onClick={handleRefreshClaudeWoaToken}
-                            >
-                              刷新 token
-                            </button>
-                            <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={() => handleSaveClaudeWoaConfig()}>
-                              保存模型列表
-                            </button>
-                          </div>
+                          {renderWoaTokenControls("Claude")}
                         </>
                       )}
+                      {claudeProfileId === "timiai" && renderTimiAiConfig("claude")}
                       {claudeProfileId === "venus" && (
                         <>
                           <label className="settings-field settings-provider-key-field">
@@ -981,7 +1180,7 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
                           </div>
                         </>
                       )}
-                      {claudeProfileId !== "woa" && claudeProfileId !== "venus" && claudeWoaMessage && (
+                      {claudeProfileId !== "woa" && claudeProfileId !== "timiai" && claudeProfileId !== "venus" && claudeWoaMessage && (
                         <div className="settings-provider-config-message">{claudeWoaMessage}</div>
                       )}
                     </div>
@@ -1100,8 +1299,48 @@ export function SettingsPage({ onBack, onThemeChange }: Props) {
         </section>
         )}
       </main>
+
+      {startupNoticeCopy && (
+        <div className="settings-startup-backdrop" role="presentation">
+          <div
+            className="settings-startup-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="settings-startup-title"
+            aria-describedby="settings-startup-message"
+          >
+            <div className="settings-startup-kicker">初始化未完成</div>
+            <h2 id="settings-startup-title">{startupNoticeCopy.title}</h2>
+            <p id="settings-startup-message">{startupNoticeCopy.message}</p>
+            <div className="settings-startup-actions">
+              <button type="button" className="settings-btn is-install" autoFocus onClick={dismissStartupNotice}>
+                {startupNoticeCopy.action}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function startupNoticeCopyFor(notice: SettingsStartupNotice) {
+  const detail = notice.message ? ` 检测错误：${notice.message}` : "";
+  const kind = notice.kind;
+  if (kind === "woa") {
+    return {
+      title: "内网通道还没设置好",
+      message: "检测到当前在公司内网，但 WOA、TimiAI 或 Venus 还没有任意一个配置完成。未完成前新建会话不能正常使用，请先在这里完成其中一个内网通道。",
+      action: "去设置",
+    };
+  }
+  return {
+    title: "Codex BYOK 还没设置好",
+    message: notice.message
+      ? `没有确认当前在公司内网，已按外网路径兜底。Codex BYOK 还没有配置，未完成前新建会话不能正常使用，请先在这里保存一个 BYOK API key。${detail}`
+      : "检测到当前不在公司内网，Codex BYOK 还没有配置。未完成前新建会话不能正常使用，请先在这里保存一个 BYOK API key。",
+    action: "去设置",
+  };
 }
 
 function splitArgs(value: string): string[] {

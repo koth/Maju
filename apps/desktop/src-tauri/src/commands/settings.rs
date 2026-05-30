@@ -10,7 +10,8 @@ use tokio::sync::watch;
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
     ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginState, ClaudeWoaLoginStatus,
-    LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
+    IoaEnvironmentStatus, LspProbeResult, LspServerConfigInput, LspServerSettingsEntry,
+    LspSettingsSnapshot,
 };
 
 #[cfg(windows)]
@@ -30,6 +31,11 @@ pub fn settings_get_agent_snapshot() -> Result<AgentSettingsSnapshot, String> {
 #[tauri::command]
 pub fn settings_detect_agents() -> Result<AgentSettingsSnapshot, String> {
     settings_get_agent_snapshot()
+}
+
+#[tauri::command]
+pub async fn settings_detect_ioa_environment() -> Result<IoaEnvironmentStatus, String> {
+    Ok(app_core::settings::detect_ioa_environment().await)
 }
 
 #[tauri::command]

@@ -16,9 +16,8 @@ impl Application {
             .as_deref()
             .map(is_codex_agent_label)
             .unwrap_or_else(|| {
-                self.agent_command
-                    .to_ascii_lowercase()
-                    .contains("codex-acp")
+                let command = self.agent_command.to_ascii_lowercase();
+                command.contains("codex-acp") || command.contains("kodex-acp")
             })
     }
 
@@ -128,6 +127,7 @@ impl Application {
         self.agent_title_received = false;
         self.provisional_prompt_title = None;
         self.pending_model_restore = Some(self.ui.session.model.clone());
+        self.authoritative_model_selection = None;
         self.bump_revision();
         Ok(())
     }
@@ -190,6 +190,7 @@ impl Application {
         self.agent_title_received = false;
         self.provisional_prompt_title = None;
         self.pending_model_restore = None;
+        self.authoritative_model_selection = None;
         self.persist_session_model_mode();
         let _ = self.store.update_session_agent_cli(
             &self.ui.session.id.to_string(),
@@ -281,6 +282,7 @@ impl Application {
         self.provisional_prompt_title = None;
         self.skip_replay = has_resume_id;
         self.pending_model_restore = Some(self.ui.session.model.clone());
+        self.authoritative_model_selection = None;
         self.bump_revision();
         Ok(())
     }

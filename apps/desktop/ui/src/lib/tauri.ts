@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus } from "../types";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus, IoaEnvironmentStatus } from "../types";
+
+export async function openExternalUrl(url: string): Promise<void> {
+  await shellOpen(url);
+}
 
 export async function startupPerfMark(stage: string, detail?: string): Promise<void> {
   try {
@@ -191,6 +196,10 @@ export async function fsRename(path: string, newName: string): Promise<FileEntry
   return invoke<FileEntry>("fs_rename", { path, newName });
 }
 
+export async function fsDeleteFile(path: string): Promise<void> {
+  return invoke("fs_delete_file", { path });
+}
+
 export async function fsReveal(path: string, select = false): Promise<void> {
   return invoke("fs_reveal", { path, select });
 }
@@ -209,6 +218,10 @@ export async function settingsGetAgentSnapshot(): Promise<AgentSettingsSnapshot>
 
 export async function settingsDetectAgents(): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_detect_agents");
+}
+
+export async function settingsDetectIoaEnvironment(): Promise<IoaEnvironmentStatus> {
+  return invoke<IoaEnvironmentStatus>("settings_detect_ioa_environment");
 }
 
 export async function settingsSelectAgent(agent: AgentCliId): Promise<AgentSettingsSnapshot> {

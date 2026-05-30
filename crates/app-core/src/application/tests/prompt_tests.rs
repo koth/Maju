@@ -37,6 +37,7 @@ fn inline_think_filter_preserves_literal_partial_tag_text_on_flush() {
 fn placeholder_session_titles_are_not_meaningful_agent_titles() {
     assert!(is_placeholder_session_title("新会话"));
     assert!(is_placeholder_session_title("New Session"));
+    assert!(is_placeholder_session_title("Untitled Session"));
     assert!(!is_placeholder_session_title("修复登录流程"));
 }
 
@@ -101,7 +102,7 @@ fn non_codex_first_prompt_sets_provisional_title_for_placeholder() {
 }
 
 #[test]
-fn codex_first_prompt_waits_for_protocol_title() {
+fn codex_first_prompt_sets_fallback_until_protocol_title() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
 
@@ -112,8 +113,8 @@ fn codex_first_prompt_waits_for_protocol_title() {
 
     app.send_prompt_background("修复登录").unwrap();
 
-    assert_eq!(app.ui.session.title, "新 ACP 会话");
-    assert!(app.provisional_prompt_title.is_none());
+    assert_eq!(app.ui.session.title, "修复登录");
+    assert_eq!(app.provisional_prompt_title.as_deref(), Some("修复登录"));
     app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
         title: "修复登录流程".into(),
     });
@@ -124,7 +125,72 @@ fn codex_first_prompt_waits_for_protocol_title() {
 }
 
 #[test]
-fn claude_first_prompt_waits_for_protocol_title() {
+fn placeholder_agent_title_does_not_clear_codex_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.needs_title = true;
+    app.agent_title_received = false;
+    app.ui.session.title = "新 ACP 会话".into();
+    app.ui.session.agent_cli = Some("Codex".into());
+    app.provisional_prompt_title = None;
+
+    app.send_prompt_background("修复 WOA 标题生成").unwrap();
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "New Session".into(),
+    });
+
+    assert_eq!(app.ui.session.title, "修复 WOA 标题生成");
+    assert!(!app.agent_title_received);
+    assert!(app.needs_title);
+    assert_eq!(
+        app.provisional_prompt_title.as_deref(),
+        Some("修复 WOA 标题生成")
+    );
+    let persisted = app
+        .store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == app.ui.session.id.to_string())
+        .unwrap();
+    assert_eq!(persisted.title, "修复 WOA 标题生成");
+    app.session.shutdown();
+}
+
+#[test]
+fn protocol_title_agents_refine_local_fallback_when_title_metadata_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.needs_title = true;
+    app.agent_title_received = false;
+    app.ui.session.title = "新 ACP 会话".into();
+    app.ui.session.agent_cli = Some("Codex".into());
+    app.provisional_prompt_title = None;
+
+    app.send_prompt_background("修复 WOA 标题生成").unwrap();
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "好的，我来稳定 WOA 会话标题生成".into(),
+    });
+
+    assert!(app.refine_session_title_after_turn_if_needed());
+    assert_eq!(app.ui.session.title, "稳定 WOA 会话标题生成");
+    assert!(!app.needs_title);
+    assert!(!app.agent_title_received);
+    assert!(app.provisional_prompt_title.is_none());
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "WOA 标题自动生成".into(),
+    });
+    assert_eq!(app.ui.session.title, "WOA 标题自动生成");
+    assert!(app.agent_title_received);
+    app.session.shutdown();
+}
+
+#[test]
+fn claude_first_prompt_sets_fallback_until_protocol_title() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
 
@@ -136,8 +202,11 @@ fn claude_first_prompt_waits_for_protocol_title() {
     app.send_prompt_background("帮我修复登录 token 刷新失败的问题")
         .unwrap();
 
-    assert_eq!(app.ui.session.title, "新 ACP 会话");
-    assert!(app.provisional_prompt_title.is_none());
+    assert_eq!(app.ui.session.title, "帮我修复登录 token 刷新失败的问题");
+    assert_eq!(
+        app.provisional_prompt_title.as_deref(),
+        Some("帮我修复登录 token 刷新失败的问题")
+    );
     app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
         title: "修复登录 token 刷新".into(),
     });
@@ -168,10 +237,13 @@ fn claude_session_title_matching_user_prompt_is_ignored() {
         title: "你看下rembg现在用的什么模型".into(),
     });
 
-    assert_eq!(app.ui.session.title, "新 ACP 会话");
+    assert_eq!(app.ui.session.title, "你看下rembg现在用的什么模型");
     assert!(!app.agent_title_received);
     assert!(app.needs_title);
-    assert!(app.provisional_prompt_title.is_none());
+    assert_eq!(
+        app.provisional_prompt_title.as_deref(),
+        Some("你看下rembg现在用的什么模型")
+    );
     let persisted = app
         .store
         .list_sessions()
@@ -179,7 +251,7 @@ fn claude_session_title_matching_user_prompt_is_ignored() {
         .into_iter()
         .find(|session| session.id == app.ui.session.id.to_string())
         .unwrap();
-    assert_eq!(persisted.title, "新 ACP 会话");
+    assert_eq!(persisted.title, "你看下rembg现在用的什么模型");
 
     app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
         title: "检查 rembg 模型配置".into(),

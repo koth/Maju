@@ -23,7 +23,7 @@
   gap: 12px;
   max-width: 720px;
   width: 100%;
-  padding: 0 24px;
+  padding: 24px;
   margin: 0 auto;
 }
 
@@ -58,11 +58,34 @@
   cursor: pointer;
 }
 
+.welcome-secondary-btn {
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(215, 225, 223, 0.04);
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .welcome-open-btn:hover:not(:disabled) {
   opacity: 0.9;
 }
 
+.welcome-secondary-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
 .welcome-open-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.welcome-secondary-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -71,6 +94,93 @@
   color: var(--danger);
   font-size: 13px;
   margin: 0;
+}
+
+.welcome-woa {
+  display: flex;
+  width: min(100%, 560px);
+  flex-direction: column;
+  gap: 12px;
+  margin: 4px 0 8px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg) 70%, var(--app-bg));
+  text-align: left;
+}
+
+.welcome-woa.is-required {
+  border-color: var(--interactive-selected-border);
+}
+
+.welcome-woa-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.welcome-woa-kicker {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.welcome-woa h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.welcome-woa p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.welcome-woa-status,
+.welcome-woa-message,
+.welcome-woa-code {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.welcome-woa-code {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.welcome-woa code {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+}
+
+.welcome-link-btn {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.welcome-link-btn:hover {
+  color: var(--text-strong);
+}
+
+.welcome-woa-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .welcome-recents {

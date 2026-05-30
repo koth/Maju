@@ -21,11 +21,15 @@ interface Props {
 interface Attachment {
   id: string;
   name: string;
+  displayName: string;
   mimeType: string;
   data: string | null;
   text: string | null;
   uri: string | null;
-  kind: "image" | "file";
+  kind: "image" | "file" | "workspace_file";
+  path: string | null;
+  startLine: number | null;
+  endLine: number | null;
   previewUrl: string | null;
   thumbnailData: string | null;
   thumbnailMimeType: string | null;
@@ -45,6 +49,7 @@ export function Composer({
   const [openControlId, setOpenControlId] = useState<string | null>(null);
   const [optimisticTurnActive, setOptimisticTurnActive] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [activeImagePreviewId, setActiveImagePreviewId] = useState<string | null>(null);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -81,6 +86,10 @@ export function Composer({
     (input.trim().length > 0 || attachments.length > 0) &&
     snapshot.session.status === "Idle" &&
     !optimisticTurnActive;
+  const activeImagePreview = useMemo(
+    () => attachments.find((attachment) => attachment.id === activeImagePreviewId && attachment.previewUrl) ?? null,
+    [activeImagePreviewId, attachments],
+  );
 
   const availableCommands = snapshot.available_commands ?? [];
   const filteredCommands = useMemo(() => {
@@ -149,14 +158,40 @@ export function Composer({
     snapshot.workspace.root,
   ]);
 
+  useEffect(() => {
+    if (!activeImagePreview) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setActiveImagePreviewId(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeImagePreview]);
+
+  const removeAttachment = useCallback((attachmentId: string) => {
+    setAttachments((current) => current.filter((item) => item.id !== attachmentId));
+    setActiveImagePreviewId((current) => (current === attachmentId ? null : current));
+  }, []);
+
   const handleSend = useCallback(async () => {
     if (!canSend) return;
     const prompt: UserPromptContent[] = [];
     const text = input.trim();
+    for (const attachment of attachments) {
+      if (attachment.kind !== "workspace_file" || !attachment.path) continue;
+      prompt.push({
+        type: "workspace_file",
+        path: attachment.path,
+        start_line: attachment.startLine,
+        end_line: attachment.endLine,
+      });
+    }
     if (text.length > 0) {
       prompt.push({ type: "text", text });
     }
     for (const attachment of attachments) {
+      if (attachment.kind === "workspace_file") continue;
       if (attachment.kind === "image") {
         if (!attachment.data) continue;
         prompt.push({
@@ -180,6 +215,7 @@ export function Composer({
     }
     setInput("");
     setAttachments([]);
+    setActiveImagePreviewId(null);
     setSlashMenuOpen(false);
     setOptimisticTurnActive(true);
     try {
@@ -356,9 +392,60 @@ export function Composer({
               ))}
             </div>
           )}
+          {attachments.length > 0 && (
+            <div className="composer-attachment-strip" aria-label="已附加的文件">
+              {attachments.map((attachment) =>
+                attachment.previewUrl ? (
+                  <div className="composer-image-attachment" key={attachment.id}>
+                    <button
+                      type="button"
+                      className="composer-image-preview-btn"
+                      onClick={() => setActiveImagePreviewId(attachment.id)}
+                      aria-label={`预览 ${attachment.name}`}
+                      title="预览图片"
+                    >
+                      <img src={attachment.previewUrl} alt={attachment.name} />
+                    </button>
+                    <button
+                      className="composer-attachment-remove composer-image-remove"
+                      type="button"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`移除 ${attachment.name}`}
+                    >
+                      x
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    className={`composer-attachment-chip ${attachment.uri ? "composer-reference-chip" : ""}`}
+                    key={attachment.id}
+                  >
+                    {attachment.uri ? (
+                      <span className="composer-reference-mention" title={attachment.displayName}>
+                        @{attachment.displayName}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="composer-file-glyph">FILE</span>
+                        <span title={attachment.name}>{attachment.name}</span>
+                      </>
+                    )}
+                    <button
+                      className="composer-attachment-remove"
+                      type="button"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`移除 ${attachment.name}`}
+                    >
+                      x
+                    </button>
+                  </div>
+                ),
+              )}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
-            className="composer-textarea"
+            className={`composer-textarea ${attachments.length > 0 ? "has-attachments" : ""}`}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -376,27 +463,6 @@ export function Composer({
             {turnActive ? <span className="composer-stop-icon" /> : "↑"}
           </button>
         </div>
-        {attachments.length > 0 && (
-          <div className="composer-attachment-strip" aria-label="已附加的文件">
-            {attachments.map((attachment) => (
-              <div className="composer-attachment-chip" key={attachment.id}>
-                {attachment.previewUrl ? (
-                  <img src={attachment.previewUrl} alt={attachment.name} />
-                ) : (
-                  <span className="composer-file-glyph">{attachment.uri ? "REF" : "FILE"}</span>
-                )}
-                <span title={attachment.uri ?? attachment.name}>{attachment.name}</span>
-                <button
-                  type="button"
-                  onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
-                  aria-label={`移除 ${attachment.name}`}
-                >
-                  x
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
         <div className="composer-control-rail">
           <input
             ref={attachmentInputRef}
@@ -455,6 +521,30 @@ export function Composer({
           <div className="composer-error">{controlError}</div>
         )}
       </div>
+      {activeImagePreview?.previewUrl && (
+        <div
+          className="composer-image-preview-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label="图片预览"
+          onClick={() => setActiveImagePreviewId(null)}
+        >
+          <button
+            type="button"
+            className="composer-image-preview-close"
+            onClick={() => setActiveImagePreviewId(null)}
+            aria-label="关闭图片预览"
+          >
+            x
+          </button>
+          <img
+            className="composer-image-preview-original"
+            src={activeImagePreview.previewUrl}
+            alt={activeImagePreview.name}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -475,11 +565,15 @@ function readAttachment(file: File): Promise<Attachment> {
         resolve({
           id: `${file.name}-${file.lastModified}-${file.size}`,
           name: file.name,
+          displayName: file.name,
           mimeType: file.type || "application/octet-stream",
           data,
           text: null,
           uri: null,
           kind: isImage ? "image" : "file",
+          path: null,
+          startLine: null,
+          endLine: null,
           previewUrl: isImage ? result : null,
           thumbnailData: thumbnail?.data ?? null,
           thumbnailMimeType: thumbnail?.mimeType ?? null,
@@ -501,48 +595,55 @@ async function attachmentFromReference(
   const range = referenceRange(request);
   const uri = workspaceFileUri(workspaceRoot, request.path, range);
   const name = referenceDisplayName(request.path, range);
+  const displayName = referenceMentionDisplayName(request.path, range);
 
-  if (request.text != null) {
-    return {
-      id: `ref:${uri}`,
-      name,
-      mimeType: mimeTypeForPath(request.path),
-      data: null,
-      text: request.text,
-      uri,
-      kind: "file",
-      previewUrl: null,
-      thumbnailData: null,
-      thumbnailMimeType: null,
-    };
-  }
-
-  const file = await editorGetContent(request.path);
-  if ((file.kind ?? "text") === "image") {
+  if (!range && imageInputEnabled && isLikelyImagePath(request.path)) {
+    const file = await editorGetContent(request.path);
+    if ((file.kind ?? "text") !== "image") {
+      return workspaceReferenceAttachment(request.path, range, uri, name, displayName);
+    }
     const { data, mimeType } = parseDataUrl(file.content, file.mime_type ?? "application/octet-stream");
     const thumbnail = imageInputEnabled ? await createImageThumbnail(file.content).catch(() => null) : null;
     return {
       id: `ref:${uri}`,
       name,
+      displayName,
       mimeType,
       data,
       text: null,
       uri,
       kind: imageInputEnabled ? "image" : "file",
+      path: null,
+      startLine: null,
+      endLine: null,
       previewUrl: imageInputEnabled ? file.content : null,
       thumbnailData: thumbnail?.data ?? null,
       thumbnailMimeType: thumbnail?.mimeType ?? null,
     };
   }
 
+  return workspaceReferenceAttachment(request.path, range, uri, name, displayName);
+}
+
+function workspaceReferenceAttachment(
+  path: string,
+  range: { startLine: number; endLine: number } | null,
+  uri: string,
+  name: string,
+  displayName: string,
+): Attachment {
   return {
     id: `ref:${uri}`,
     name,
-    mimeType: file.mime_type ?? mimeTypeForPath(request.path),
+    displayName,
+    mimeType: mimeTypeForPath(path),
     data: null,
-    text: file.content,
+    text: null,
     uri,
-    kind: "file",
+    kind: "workspace_file",
+    path,
+    startLine: range?.startLine ?? null,
+    endLine: range?.endLine ?? null,
     previewUrl: null,
     thumbnailData: null,
     thumbnailMimeType: null,
@@ -566,8 +667,19 @@ function referenceDisplayName(
   const filename = path.replace(/\\/g, "/").split("/").pop() || path;
   if (!range) return filename;
   return range.startLine === range.endLine
-    ? `${filename}:L${range.startLine}`
-    : `${filename}:L${range.startLine}-L${range.endLine}`;
+    ? `${filename}#L${range.startLine}`
+    : `${filename}#L${range.startLine}-L${range.endLine}`;
+}
+
+function referenceMentionDisplayName(
+  path: string,
+  range: { startLine: number; endLine: number } | null,
+) {
+  const normalizedPath = path.replace(/\\/g, "/").replace(/^[\\/]+/, "");
+  if (!range) return normalizedPath;
+  return range.startLine === range.endLine
+    ? `${normalizedPath}#L${range.startLine}`
+    : `${normalizedPath}#L${range.startLine}-L${range.endLine}`;
 }
 
 function workspaceFileUri(
@@ -597,6 +709,10 @@ function pathToFileUri(path: string) {
     .split("/")
     .map((segment, index) => (index === 0 ? "" : encodeURIComponent(segment)))
     .join("/")}`;
+}
+
+function isLikelyImagePath(path: string) {
+  return /\.(apng|avif|bmp|gif|jpe?g|png|webp)$/i.test(path);
 }
 
 function mimeTypeForPath(path: string) {

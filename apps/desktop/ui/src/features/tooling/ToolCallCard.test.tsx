@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fireEvent, render } from "@testing-library/react";
-import { ToolCallCard } from "./ToolCallCard";
+import { ToolCallCard, previewToCompactPatch } from "./ToolCallCard";
 import type { ToolInvocation, ToolStatus } from "../../types/index";
 
 function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
@@ -148,6 +148,32 @@ describe("ToolCallCard animation states", () => {
 });
 
 describe("ToolCallCard tracker-confirmed diffs", () => {
+  it("preserves original hunk line numbers in compact previews", () => {
+    const patch = previewToCompactPatch({
+      path: "openspec/changes/accelerate-pipeline-execution/tasks.md",
+      hunks: [
+        {
+          heading: "@@ -40,1 +40,1 @@",
+          lines: [
+            {
+              kind: "Removed",
+              content:
+                "- [x] 6.1 修改 `backend/app/config.py` 将 `cpu_worker_concurrency: int = 1` 改为 `cpu_worker_concurrency: int = 2`",
+            },
+            {
+              kind: "Added",
+              content:
+                "- [x] 6.1 修改 `backend/app/config.py` 将 `cpu_worker_concurrency: int = 1` 改为 `cpu_worker_concurrency: int = 4`",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(patch).toContain("@@ -40 +40 @@");
+    expect(patch).not.toContain("@@ -1 +1 @@");
+  });
+
   it("does not classify read tool with diff_previews as editing", () => {
     const tool = makeTool({
       status: "Succeeded",
@@ -324,6 +350,72 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
 
     expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("docs/windows-guide.md");
+  });
+
+  it("renders shell-wrapped apply_patch commands as editing diffs", () => {
+    const command = [
+      "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "-Command",
+      "@'\n*** Begin Patch\n*** Update File: frontend/src/pages/WorkbenchPage.tsx\n@@\n-const oldValue = 1\n+const oldValue = 2\n*** End Patch\n'@ | apply_patch",
+    ];
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "Done" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "frontend/src/pages/WorkbenchPage.tsx",
+    );
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+1");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-1");
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
+  });
+
+  it("renders CodeBuddy raw_output changes unified_diff as editing diffs", () => {
+    const rawOutput = JSON.stringify({
+      call_id: "call_123",
+      changes: {
+        "D:\\work\\ArashiIconAIGenTool\\frontend\\src\\features\\workbench\\workbenchUtils.ts": {
+          move_path: null,
+          type: "update",
+          unified_diff:
+            "@@ -1,2 +1,2 @@\n-import type { AssetRecord } from '@/types'\n+import type { AssetRecord, PipelineStage } from '@/types'\n \n@@ -56,2 +56,5 @@\n export function getAssetStage(asset: AssetRecord) {\n+  const metadataValue = asset.metadata?.stage_completion_order\n+  if (!metadataValue) return null\n   return asset.stage\n",
+        },
+      },
+    });
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      raw_output: rawOutput,
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "D:/work/ArashiIconAIGenTool/frontend/src/features/workbench/workbenchUtils.ts",
+    );
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+3");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-1");
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+    expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
+    expect(container.textContent).not.toContain('"unified_diff"');
   });
 
   it("classifies Get-Content and Test-Path commands as exploration", () => {

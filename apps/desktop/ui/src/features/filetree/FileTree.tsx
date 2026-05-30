@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import type { FileEntry } from "../../types";
-import { fsListDir, fsRename, fsReveal } from "../../lib/tauri";
+import { fsDeleteFile, fsListDir, fsRename, fsReveal } from "../../lib/tauri";
 import { getFileIcon } from "./file-icons";
 import "./FileTree.css";
 
@@ -273,7 +274,7 @@ export function FileTree({
 
   const handleContextMenu = useCallback((entry: FileEntry, x: number, y: number) => {
     const width = 190;
-    const height = entry.kind === "File" ? 118 : 82;
+    const height = entry.kind === "File" ? 148 : 82;
     setContextMenu({
       entry,
       x: Math.min(x, window.innerWidth - width - 8),
@@ -337,6 +338,21 @@ export function FileTree({
       committingRenameRef.current = false;
     }
   }, [cancelRename, expandedDirs, refreshDirectory, renameState]);
+
+  const handleDeleteFile = useCallback(async (entry: FileEntry) => {
+    if (entry.kind !== "File") return;
+    setContextMenu(null);
+    const accepted = await confirm(`确定删除文件 ${entry.path}？`);
+    if (!accepted) return;
+
+    try {
+      await fsDeleteFile(entry.path);
+      setSelectedEntry((current) => (current?.path === entry.path ? null : current));
+      await refreshDirectory(parentDirectory(entry.path));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [refreshDirectory]);
 
   const handleReveal = useCallback(async (entry: FileEntry) => {
     setContextMenu(null);
@@ -402,6 +418,16 @@ export function FileTree({
               onClick={() => handleAddReference(contextMenu.entry)}
             >
               添加到 Composer 引用
+            </button>
+          )}
+          {contextMenu.entry.kind === "File" && (
+            <button
+              type="button"
+              role="menuitem"
+              className="filetree-menu-danger"
+              onClick={() => handleDeleteFile(contextMenu.entry)}
+            >
+              删除文件
             </button>
           )}
         </div>

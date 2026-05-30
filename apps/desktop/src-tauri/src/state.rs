@@ -326,11 +326,11 @@ impl AppState {
     ) -> Result<Option<UiSnapshotUpdate>, String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+        poll_connected_workspaces(&mut guard);
         let app = match guard.workspaces.get_mut(&active_key) {
             Some(WorkspaceEntry::Connected(app)) => app,
             _ => return Err("No connected workspace open".into()),
         };
-        app.poll_prompt_progress();
         Ok(app.lightweight_ui_update(cursor))
     }
 
@@ -513,6 +513,14 @@ fn open_workspace_items(guard: &WorkspaceRegistry) -> Vec<OpenWorkspaceItem> {
         |item| item.is_active,
     );
     items
+}
+
+fn poll_connected_workspaces(guard: &mut WorkspaceRegistry) {
+    for entry in guard.workspaces.values_mut() {
+        if let WorkspaceEntry::Connected(app) = entry {
+            app.poll_prompt_progress();
+        }
+    }
 }
 
 fn active_session_id(sessions: &[SessionListItem]) -> uuid::Uuid {

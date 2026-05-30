@@ -22,6 +22,7 @@ use workspace_model::{
 
 const PLAN_MODE_ID: &str = "plan";
 const BUILD_MODE_ID: &str = "build";
+const KODEX_CONTEXT_COMPACTED_META_KEY: &str = "kodex.ai/contextCompacted";
 const NOTIFICATION_LOG_CHANNEL_SIZE: usize = 1024;
 
 struct NotificationLogRecord {
@@ -39,6 +40,9 @@ pub(crate) fn emit_notification(
 ) -> anyhow::Result<()> {
     let raw_notification =
         serde_json::to_value(&notification).map_err(|err| anyhow!(err.to_string()))?;
+    if emit_kodex_notification(tx, &raw_notification)? {
+        return Ok(());
+    }
     if emit_codebuddy_notification(tx, workspace_root, &raw_notification)? {
         return Ok(());
     }
@@ -551,6 +555,7 @@ fn emit_tool_call(tx: &mpsc::Sender<ClientEvent>, tool: ToolCall) -> anyhow::Res
     for content in tool.content {
         emit_tool_content(tx, &tool_id, content)?;
     }
+    emit_tool_diff_previews_from_raw_output(tx, &tool_id, tool.raw_output.as_ref())?;
 
     if tool.status == ToolCallStatus::Completed {
         tx.send(ClientEvent::ToolCompleted {
@@ -603,6 +608,36 @@ fn emit_codebuddy_notification(
     }
 }
 
+fn emit_kodex_notification(
+    tx: &mpsc::Sender<ClientEvent>,
+    payload: &Value,
+) -> anyhow::Result<bool> {
+    let Some(context_compacted) = payload
+        .get("_meta")
+        .and_then(|meta| meta.get(KODEX_CONTEXT_COMPACTED_META_KEY))
+        .or_else(|| {
+            payload
+                .get("update")
+                .and_then(|update| update.get("_meta"))
+                .and_then(|meta| meta.get(KODEX_CONTEXT_COMPACTED_META_KEY))
+        })
+    else {
+        return Ok(false);
+    };
+
+    let message = context_compacted
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| context_compacted.as_str())
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or("上下文已压缩")
+        .to_string();
+
+    tx.send(ClientEvent::ContextCompacted { message })
+        .map_err(|_| anyhow!("failed to emit context compaction notice"))?;
+    Ok(true)
+}
+
 fn emit_codebuddy_tool_call(
     tx: &mpsc::Sender<ClientEvent>,
     workspace_root: &str,
@@ -634,6 +669,7 @@ fn emit_codebuddy_tool_call(
 
     emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
     emit_codebuddy_text_content(tx, &id, update)?;
+    emit_tool_diff_previews_from_raw_output(tx, &id, update.get("rawOutput"))?;
 
     if status.as_deref() == Some("completed") {
         let terminal_output = update.get("rawOutput").and_then(parse_terminal_output);
@@ -701,6 +737,7 @@ fn emit_codebuddy_tool_call_update(
     if !is_partial {
         emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
         emit_codebuddy_text_content(tx, &id, update)?;
+        emit_tool_diff_previews_from_raw_output(tx, &id, raw_output)?;
     }
 
     tx.send(ClientEvent::ToolUpdated {
@@ -791,6 +828,109 @@ fn emit_codebuddy_diff_content(
     }
 
     Ok(())
+}
+
+fn emit_tool_diff_previews_from_raw_output(
+    tx: &mpsc::Sender<ClientEvent>,
+    id: &str,
+    raw_output: Option<&Value>,
+) -> anyhow::Result<()> {
+    let Some(changes) = raw_output
+        .and_then(|value| value.get("changes"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+
+    for (path, change) in changes {
+        let Some(unified_diff) = change
+            .get("unified_diff")
+            .or_else(|| change.get("unifiedDiff"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let hunks = hunks_from_unified_diff(unified_diff);
+        if hunks.is_empty() {
+            continue;
+        }
+        let display_path = change
+            .get("move_path")
+            .or_else(|| change.get("movePath"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(path);
+
+        tx.send(ClientEvent::ToolDiffPreview {
+            id: id.to_string(),
+            path: display_path.to_string(),
+            hunks,
+        })
+        .map_err(|_| anyhow!("failed to emit raw output diff preview"))?;
+    }
+
+    Ok(())
+}
+
+fn hunks_from_unified_diff(unified_diff: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::<DiffHunk>::new();
+    let mut current: Option<DiffHunk> = None;
+
+    for line in unified_diff.lines() {
+        if line.starts_with("@@") {
+            if let Some(hunk) = current.take()
+                && hunk.lines.iter().any(is_changed_diff_line)
+            {
+                hunks.push(hunk);
+            }
+            current = Some(DiffHunk {
+                heading: line.to_string(),
+                lines: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
+        if line == r"\ No newline at end of file" {
+            continue;
+        }
+
+        if let Some(content) = line.strip_prefix('+') {
+            hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Added,
+                content: content.to_string(),
+            });
+        } else if let Some(content) = line.strip_prefix('-') {
+            hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Removed,
+                content: content.to_string(),
+            });
+        } else if let Some(content) = line.strip_prefix(' ') {
+            hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                content: content.to_string(),
+            });
+        } else if line.is_empty() {
+            hunk.lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                content: String::new(),
+            });
+        }
+    }
+
+    if let Some(hunk) = current
+        && hunk.lines.iter().any(is_changed_diff_line)
+    {
+        hunks.push(hunk);
+    }
+
+    hunks
+}
+
+fn is_changed_diff_line(line: &DiffLine) -> bool {
+    matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed)
 }
 
 fn codebuddy_content_path(item: &Value) -> Option<&str> {
@@ -963,7 +1103,7 @@ fn emit_codebuddy_agent_chunk(
     update: &Value,
 ) -> anyhow::Result<()> {
     let text = extract_text(update.get("content"));
-    if text.trim().is_empty() {
+    if text.is_empty() {
         return Ok(());
     }
 
@@ -1376,6 +1516,7 @@ fn emit_tool_update(tx: &mpsc::Sender<ClientEvent>, update: ToolCallUpdate) -> a
             emit_tool_content(tx, &id, item)?;
         }
     }
+    emit_tool_diff_previews_from_raw_output(tx, &id, update.fields.raw_output.as_ref())?;
 
     if let Some(status) = update.fields.status {
         match status {
@@ -1706,6 +1847,31 @@ mod tests {
     }
 
     #[test]
+    fn kodex_context_compacted_meta_emits_structured_event() {
+        let (tx, rx) = mpsc::channel();
+        let notification = SessionNotification::new(
+            "session-1",
+            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new()),
+        )
+        .meta(serde_json::Map::from_iter([(
+            KODEX_CONTEXT_COMPACTED_META_KEY.to_string(),
+            serde_json::json!({
+                "message": "上下文已压缩"
+            }),
+        )]));
+
+        emit_notification(&tx, "", notification).unwrap();
+
+        match rx.try_recv().unwrap() {
+            ClientEvent::ContextCompacted { message } => {
+                assert_eq!(message, "上下文已压缩");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn codebuddy_diff_content_preserves_old_text_for_tool_card_stats() {
         let (tx, rx) = mpsc::channel();
         let old_text = "# Kodex\n\n## Project Structure\n\nbody\n";
@@ -1836,6 +2002,66 @@ mod tests {
         );
         assert_eq!(diffs[1].2, None);
         assert_eq!(diffs[1].3, "## Tasks\n\n- [ ] Add parser\n");
+    }
+
+    #[test]
+    fn codebuddy_raw_output_changes_emit_tool_diff_preview() {
+        let (tx, rx) = mpsc::channel();
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-raw-diff",
+                    "status": "completed",
+                    "title": "Edit D:\\work\\App\\src\\main.rs",
+                    "rawOutput": {
+                        "changes": {
+                            "D:\\work\\App\\src\\main.rs": {
+                                "move_path": null,
+                                "type": "update",
+                                "unified_diff": "@@ -1,3 +1,4 @@\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n+    println!(\"done\");\n }\n"
+                            }
+                        },
+                        "success": true
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let previews = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                ClientEvent::ToolDiffPreview { id, path, hunks } => Some((id, path, hunks)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].0, "call-raw-diff");
+        assert_eq!(previews[0].1, "D:\\work\\App\\src\\main.rs");
+        assert_eq!(previews[0].2.len(), 1);
+        assert_eq!(previews[0].2[0].heading, "@@ -1,3 +1,4 @@");
+        let added = previews[0].2[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        let removed = previews[0].2[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            added,
+            vec!["    println!(\"new\");", "    println!(\"done\");"]
+        );
+        assert_eq!(removed, vec!["    println!(\"old\");"]);
     }
 
     #[test]
@@ -2425,7 +2651,7 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_whitespace_agent_chunks_are_ignored() {
+    fn codebuddy_whitespace_agent_chunks_are_preserved() {
         let (tx, rx) = mpsc::channel();
 
         let handled = emit_codebuddy_notification(
@@ -2434,22 +2660,23 @@ mod tests {
             &serde_json::json!({
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "\n\n"
-                        },
-                        {
-                            "type": "text",
-                            "text": " \t"
-                        }
-                    ]
+                    "content": {
+                        "type": "text",
+                        "text": "\n\n"
+                    }
                 }
             }),
         )
         .unwrap();
 
         assert!(handled);
+        match rx.try_recv().expect("whitespace chunk should be emitted") {
+            ClientEvent::MessageChunk { role, content } => {
+                assert_eq!(role, MessageRole::Assistant);
+                assert_eq!(content, "\n\n");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
         assert!(rx.try_recv().is_err());
     }
 }

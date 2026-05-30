@@ -194,10 +194,27 @@ fn stage_codex_acp_binary() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("target").join("release").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root
+            .join("codex-acp")
+            .join("target")
+            .join("release")
+            .display()
+    );
     if let Ok(target) = env::var("TARGET") {
         println!(
             "cargo:rerun-if-changed={}",
             workspace_root
+                .join("target")
+                .join(&target)
+                .join("release")
+                .display()
+        );
+        println!(
+            "cargo:rerun-if-changed={}",
+            workspace_root
+                .join("codex-acp")
                 .join("target")
                 .join(target)
                 .join("release")
@@ -217,7 +234,7 @@ fn stage_codex_acp_binary() {
 
     let Some(source) = find_codex_acp_binary(workspace_root) else {
         println!(
-            "cargo:warning=No codex-acp binary found under target/release; Kodex will fall back to npm install."
+            "cargo:warning=No codex-acp binary found under codex-acp/target/release or target/release; run `npm --prefix apps/desktop/ui run codex:binary` before desktop:build, or set KODEX_CODEX_ACP_BINARY."
         );
         return;
     };
@@ -250,12 +267,28 @@ fn find_codex_acp_binary(workspace_root: &Path) -> Option<PathBuf> {
     if let Ok(target) = env::var("TARGET") {
         candidates.push(
             workspace_root
+                .join("codex-acp")
                 .join("target")
-                .join(target)
+                .join(&target)
+                .join("release")
+                .join(binary_name),
+        );
+        candidates.push(
+            workspace_root
+                .join("target")
+                .join(&target)
                 .join("release")
                 .join(binary_name),
         );
     }
+
+    candidates.push(
+        workspace_root
+            .join("codex-acp")
+            .join("target")
+            .join("release")
+            .join(binary_name),
+    );
 
     candidates.push(
         workspace_root

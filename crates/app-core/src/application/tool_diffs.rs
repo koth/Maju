@@ -1,7 +1,8 @@
 use super::diff_utils::{
     ExactEditText, canonical_text_diff, edit_input_after_text, edit_input_before_text,
-    is_file_write_tool_identity, looks_like_fragment_to_full_file_text,
-    looks_like_whole_file_addition_hunks, normalize_diff_text_for_session_change,
+    edit_input_unified_diff_for_path, is_file_write_tool_identity,
+    looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
+    normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
     tool_command_write_hint_paths, tool_diff_hunks_for_detected_write,
     tool_hunks_for_tracker_update,
 };
@@ -50,15 +51,19 @@ impl Application {
             let exact_edit = self.exact_edit_text_for_tool(call_id, &normalized);
             let exact_edit_hunks = exact_edit.as_ref().map(|edit| edit.hunks.clone());
             let existing_tool_hunks = self.existing_tool_diff_hunks(call_id, &normalized);
-            let tool_hunks = tool_hunks_for_tracker_update(
-                change.skipped_diff,
-                exact_edit_hunks,
-                existing_tool_hunks,
-                previous_session_new_text.as_deref(),
-                change.old_text.as_deref(),
-                &change.new_text,
-                &canonical.hunks,
-            );
+            let landed_tool_hunks =
+                compatible_landed_tool_hunks(existing_tool_hunks.clone(), &change.new_text);
+            let tool_hunks = landed_tool_hunks.clone().unwrap_or_else(|| {
+                tool_hunks_for_tracker_update(
+                    change.skipped_diff,
+                    exact_edit_hunks,
+                    existing_tool_hunks,
+                    previous_session_new_text.as_deref(),
+                    change.old_text.as_deref(),
+                    &change.new_text,
+                    &canonical.hunks,
+                )
+            });
 
             if canonical.quality == DiffQuality::Exact {
                 if canonical.added_lines == 0 && canonical.removed_lines == 0 {
@@ -66,16 +71,29 @@ impl Application {
                         self.ui.session_changes.remove(index);
                         changed = true;
                     }
-                    self.upsert_review_file_change_for_tool(
-                        &change.path,
-                        change.change_type.clone(),
-                        exact_edit.as_ref(),
-                        change
-                            .old_text
-                            .clone()
-                            .or(previous_session_new_text.clone()),
-                        change.new_text.clone(),
-                    );
+                    if landed_tool_hunks
+                        .as_ref()
+                        .and_then(|hunks| {
+                            self.upsert_review_file_change_from_landed_tool_hunks(
+                                &change.path,
+                                change.change_type.clone(),
+                                &change.new_text,
+                                hunks,
+                            )
+                        })
+                        .is_none()
+                    {
+                        self.upsert_review_file_change_for_tool(
+                            &change.path,
+                            change.change_type.clone(),
+                            exact_edit.as_ref(),
+                            change
+                                .old_text
+                                .clone()
+                                .or(previous_session_new_text.clone()),
+                            change.new_text.clone(),
+                        );
+                    }
                     self.attach_tool_diff_preview(call_id, &change.path, &normalized, tool_hunks);
                     continue;
                 }
@@ -108,17 +126,30 @@ impl Application {
                         timestamp: current_timestamp(),
                     });
                 }
-                self.upsert_review_file_change_for_tool(
-                    &change.path,
-                    change.change_type.clone(),
-                    exact_edit.as_ref(),
-                    change
-                        .old_text
-                        .clone()
-                        .or(previous_session_new_text.clone())
-                        .or(effective_old_text),
-                    change.new_text.clone(),
-                );
+                if landed_tool_hunks
+                    .as_ref()
+                    .and_then(|hunks| {
+                        self.upsert_review_file_change_from_landed_tool_hunks(
+                            &change.path,
+                            change.change_type.clone(),
+                            &change.new_text,
+                            hunks,
+                        )
+                    })
+                    .is_none()
+                {
+                    self.upsert_review_file_change_for_tool(
+                        &change.path,
+                        change.change_type.clone(),
+                        exact_edit.as_ref(),
+                        change
+                            .old_text
+                            .clone()
+                            .or(previous_session_new_text.clone())
+                            .or(effective_old_text),
+                        change.new_text.clone(),
+                    );
+                }
                 changed = true;
             }
 
@@ -136,6 +167,14 @@ impl Application {
         let tool = self.ui.tools.iter().find(|tool| tool.call_id == call_id)?;
         let input = tool.raw_input.as_deref()?;
         let json = serde_json::from_str::<serde_json::Value>(input).ok()?;
+        if let Some(unified_diff) =
+            edit_input_unified_diff_for_path(&json, normalized_path, &self.ui.workspace.root)
+            && let Some(exact_edit) =
+                self.exact_edit_text_from_unified_diff(normalized_path, unified_diff)
+        {
+            return Some(exact_edit);
+        }
+
         let before = edit_input_before_text(&json)?;
         let after = edit_input_after_text(&json)?;
         let input_path = json
@@ -168,6 +207,26 @@ impl Application {
         (!hunks.is_empty()).then_some(ExactEditText {
             old_text: before,
             new_text: after,
+            hunks,
+        })
+    }
+
+    pub(super) fn exact_edit_text_from_unified_diff(
+        &self,
+        normalized_path: &str,
+        unified_diff: &str,
+    ) -> Option<ExactEditText> {
+        let full_new = std::fs::read_to_string(self.ui.workspace.root.join(normalized_path))
+            .ok()
+            .map(|text| normalize_diff_text_for_session_change(&text))?;
+        let full_old = reverse_apply_unified_diff(&full_new, unified_diff)?;
+        if full_old == full_new {
+            return None;
+        }
+        let hunks = diff_to_hunks(Some(&full_old), &full_new);
+        (!hunks.is_empty()).then_some(ExactEditText {
+            old_text: full_old,
+            new_text: full_new,
             hunks,
         })
     }
@@ -266,6 +325,109 @@ impl Application {
                 hunks,
             });
         }
+    }
+
+    pub(super) fn apply_tool_diff_preview_to_review(
+        &mut self,
+        path: &str,
+        normalized_path: &str,
+        hunks: &[DiffHunk],
+    ) -> bool {
+        if hunks.is_empty() {
+            return false;
+        }
+
+        let abs_path = self.ui.workspace.root.join(normalized_path);
+        let Ok(new_text) = std::fs::read_to_string(abs_path) else {
+            return false;
+        };
+        let new_text = normalize_diff_text_for_session_change(&new_text);
+        let Some(old_text) = reverse_apply_diff_hunks(&new_text, hunks) else {
+            return false;
+        };
+        if old_text == new_text {
+            return false;
+        }
+
+        self.upsert_review_file_change(path, FileChangeType::Modified, Some(old_text), new_text);
+        true
+    }
+
+    pub(super) fn upsert_review_file_change_from_landed_tool_hunks(
+        &mut self,
+        path: &str,
+        change_type: FileChangeType,
+        new_text: &str,
+        hunks: &[DiffHunk],
+    ) -> Option<bool> {
+        if hunks.is_empty() {
+            return None;
+        }
+
+        let normalized_new_text = normalize_diff_text_for_session_change(new_text);
+        let old_text = reverse_apply_diff_hunks(&normalized_new_text, hunks)?;
+        if old_text == normalized_new_text {
+            return None;
+        }
+
+        let canonical = canonical_text_diff(
+            &change_type,
+            Some(&old_text),
+            Some(&normalized_new_text),
+            None,
+        );
+        if canonical.quality != DiffQuality::Exact {
+            return None;
+        }
+        let incoming_total = canonical.added_lines + canonical.removed_lines;
+        if incoming_total == 0 {
+            return None;
+        }
+
+        self.begin_review_changes_if_needed();
+        let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let existing_index = self
+            .ui
+            .review_changes
+            .iter()
+            .position(|change| normalize_tracked_path(&change.path) == normalized_path);
+        if let Some(index) = existing_index {
+            let existing = &self.ui.review_changes[index];
+            let existing_canonical = canonical_text_diff(
+                &existing.change_type,
+                existing.old_text.as_deref(),
+                Some(&existing.new_text),
+                None,
+            );
+            let existing_total = existing_canonical.added_lines + existing_canonical.removed_lines;
+            if existing_total >= incoming_total {
+                return Some(false);
+            }
+        }
+
+        let timestamp = current_timestamp();
+        if let Some(index) = existing_index {
+            let existing = &mut self.ui.review_changes[index];
+            existing.old_text = canonical.old_text;
+            existing.new_text = canonical.new_text.unwrap_or(normalized_new_text);
+            existing.change_type = change_type;
+            existing.added_lines = canonical.added_lines;
+            existing.removed_lines = canonical.removed_lines;
+            existing.timestamp = timestamp;
+        } else {
+            self.ui.review_changes.push(SessionFileChange {
+                path: normalized_path,
+                change_type,
+                old_text: canonical.old_text,
+                new_text: canonical.new_text.unwrap_or(normalized_new_text),
+                added_lines: canonical.added_lines,
+                removed_lines: canonical.removed_lines,
+                timestamp,
+            });
+        }
+        self.persist_review_file_changes();
+        self.persist_current_agent_turn_change_set(None, ChangeSetStatus::Pending);
+        Some(true)
     }
 
     pub(in crate::application) fn discard_failed_tool_speculative_diffs(
@@ -429,27 +591,46 @@ impl Application {
                     .position(|c| normalize_path(&c.path) == normalized)
             {
                 let exact_edit = self.exact_edit_text_for_tool(&call_id, &normalized);
+                let landed_tool_hunks = compatible_landed_tool_hunks(
+                    self.existing_tool_diff_hunks(&call_id, &normalized),
+                    &new_text,
+                );
                 let old_text = self.ui.session_changes[index].old_text.clone();
                 let previous_session_new_text = self.ui.session_changes[index].new_text.clone();
-                let tool_hunks = exact_edit
-                    .as_ref()
-                    .map(|edit| edit.hunks.clone())
-                    .unwrap_or_else(|| {
-                        tool_diff_hunks_for_detected_write(
-                            Some(&previous_session_new_text),
-                            None,
-                            &new_text,
-                        )
-                    });
+                let tool_hunks = landed_tool_hunks.clone().unwrap_or_else(|| {
+                    exact_edit
+                        .as_ref()
+                        .map(|edit| edit.hunks.clone())
+                        .unwrap_or_else(|| {
+                            tool_diff_hunks_for_detected_write(
+                                Some(&previous_session_new_text),
+                                None,
+                                &new_text,
+                            )
+                        })
+                });
                 if old_text.as_deref().unwrap_or_default() == new_text {
                     self.ui.session_changes.remove(index);
-                    self.upsert_review_file_change_for_tool(
-                        &normalized,
-                        FileChangeType::Modified,
-                        exact_edit.as_ref(),
-                        Some(previous_session_new_text.clone()),
-                        new_text.clone(),
-                    );
+                    if landed_tool_hunks
+                        .as_ref()
+                        .and_then(|hunks| {
+                            self.upsert_review_file_change_from_landed_tool_hunks(
+                                &normalized,
+                                FileChangeType::Modified,
+                                &new_text,
+                                hunks,
+                            )
+                        })
+                        .is_none()
+                    {
+                        self.upsert_review_file_change_for_tool(
+                            &normalized,
+                            FileChangeType::Modified,
+                            exact_edit.as_ref(),
+                            Some(previous_session_new_text.clone()),
+                            new_text.clone(),
+                        );
+                    }
                     changed = true;
                     self.attach_tool_diff_preview(&call_id, &normalized, &normalized, tool_hunks);
                     continue;
@@ -478,13 +659,26 @@ impl Application {
                     existing.timestamp = current_timestamp();
                     existing.change_type.clone()
                 };
-                self.upsert_review_file_change_for_tool(
-                    &normalized,
-                    review_change_type,
-                    exact_edit.as_ref(),
-                    Some(previous_session_new_text),
-                    new_text,
-                );
+                if landed_tool_hunks
+                    .as_ref()
+                    .and_then(|hunks| {
+                        self.upsert_review_file_change_from_landed_tool_hunks(
+                            &normalized,
+                            review_change_type.clone(),
+                            &new_text,
+                            hunks,
+                        )
+                    })
+                    .is_none()
+                {
+                    self.upsert_review_file_change_for_tool(
+                        &normalized,
+                        review_change_type,
+                        exact_edit.as_ref(),
+                        Some(previous_session_new_text),
+                        new_text,
+                    );
+                }
                 changed = true;
 
                 self.attach_tool_diff_preview(&call_id, &normalized, &normalized, tool_hunks);
@@ -517,4 +711,17 @@ impl Application {
             quality: record.quality,
         })
     }
+}
+
+fn compatible_landed_tool_hunks(
+    hunks: Option<Vec<DiffHunk>>,
+    new_text: &str,
+) -> Option<Vec<DiffHunk>> {
+    let hunks = hunks?;
+    if hunks.is_empty() || looks_like_whole_file_addition_hunks(&hunks) {
+        return None;
+    }
+    let normalized_new_text = normalize_diff_text_for_session_change(new_text);
+    let old_text = reverse_apply_diff_hunks(&normalized_new_text, &hunks)?;
+    (old_text != normalized_new_text).then_some(hunks)
 }

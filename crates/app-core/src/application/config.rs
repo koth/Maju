@@ -68,10 +68,18 @@ impl Application {
             return Err(format!("{} 的值未知：{value_id}", control.label));
         }
 
-        let events = match control.source {
+        let is_model_control = control.category == workspace_model::SessionConfigCategory::Model;
+        let selected_control_id = control.id.clone();
+        let selected_label = control
+            .choices
+            .iter()
+            .find(|choice| choice.id == value_id)
+            .map(|choice| choice.label.clone());
+
+        let events = match control.source.clone() {
             SessionConfigSource::ConfigOption => self
                 .session
-                .set_config_option(control.id, value_id.to_string())
+                .set_config_option(control.id.clone(), value_id.to_string())
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LegacyMode => self
                 .session
@@ -86,7 +94,7 @@ impl Application {
                     .set_permission_mode(value_id)
                     .map_err(|error| error.to_string())?;
                 vec![ClientEvent::SessionConfigValueChanged {
-                    control_id: control.id,
+                    control_id: control.id.clone(),
                     value_id: value_id.to_string(),
                     value_label: control
                         .choices
@@ -99,6 +107,15 @@ impl Application {
 
         for event in events {
             self.apply_event_with_dirty_tracking(&event);
+        }
+        if is_model_control {
+            self.pending_model_restore = None;
+            self.authoritative_model_selection = Some(value_id.to_string());
+            self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
+                control_id: selected_control_id,
+                value_id: value_id.to_string(),
+                value_label: selected_label,
+            });
         }
         self.persist_session_model_mode();
         self.bump_revision();
@@ -164,6 +181,7 @@ impl Application {
             .controls
             .iter()
             .find(|control| control.category == workspace_model::SessionConfigCategory::Model)
+            .cloned()
         else {
             return;
         };
@@ -185,12 +203,30 @@ impl Application {
             return;
         };
 
-        self.pending_model_restore = None;
-        let Ok(events) = self.session.set_model(choice.id) else {
+        let control_id = model_control.id.clone();
+        let value_id = choice.id.clone();
+        let value_label = choice.label.clone();
+        let result = match model_control.source {
+            SessionConfigSource::ConfigOption => self
+                .session
+                .set_config_option(control_id.clone(), value_id.clone()),
+            SessionConfigSource::SessionModel => self.session.set_model(value_id.clone()),
+            SessionConfigSource::LegacyMode | SessionConfigSource::LocalMode => {
+                self.session.set_model(value_id.clone())
+            }
+        };
+        let Ok(events) = result else {
             return;
         };
+        self.pending_model_restore = None;
         for event in events {
             self.apply_event_with_dirty_tracking(&event);
         }
+        self.authoritative_model_selection = Some(value_id.clone());
+        self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
+            control_id,
+            value_id,
+            value_label: Some(value_label),
+        });
     }
 }

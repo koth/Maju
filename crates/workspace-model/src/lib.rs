@@ -133,6 +133,13 @@ pub enum UserPromptContent {
         #[serde(default)]
         uri: Option<String>,
     },
+    WorkspaceFile {
+        path: String,
+        #[serde(default)]
+        start_line: Option<u32>,
+        #[serde(default)]
+        end_line: Option<u32>,
+    },
 }
 
 impl UserPromptContent {
@@ -196,6 +203,18 @@ impl UserPromptContent {
             mime_type,
             name: name.into(),
             uri: Some(uri.into()),
+        }
+    }
+
+    pub fn workspace_file(
+        path: impl Into<String>,
+        start_line: Option<u32>,
+        end_line: Option<u32>,
+    ) -> Self {
+        Self::WorkspaceFile {
+            path: path.into(),
+            start_line,
+            end_line,
         }
     }
 }
@@ -923,6 +942,24 @@ pub struct AgentSettingsSnapshot {
     pub env_override: Option<String>,
     pub codex_acp: CodexAcpSettingsStatus,
     pub claude_woa: ClaudeWoaSettingsStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InitialSetupRecommendation {
+    Woa,
+    CodexByok,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IoaEnvironmentStatus {
+    pub is_company_export_ip: bool,
+    pub is_internal: bool,
+    pub company_environment: bool,
+    pub recommended_setup: InitialSetupRecommendation,
+    pub detected: bool,
+    pub timestamp_ms: u64,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

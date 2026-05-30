@@ -235,6 +235,7 @@ impl Application {
             provisional_prompt_title: None,
             skip_replay,
             pending_model_restore,
+            authoritative_model_selection: None,
             file_tracker,
             dirty_tool_call_ids: HashSet::new(),
             review_changes_started: false,

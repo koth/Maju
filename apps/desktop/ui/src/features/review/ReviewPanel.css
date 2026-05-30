@@ -33,7 +33,7 @@
   min-height: 30px;
   padding: 0 8px;
   border-radius: 6px;
-  border: 1px solid transparent;
+  border: 0;
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-chat);
@@ -67,8 +67,12 @@
 
 .review-tab-active {
   color: var(--text-strong);
-  background: var(--interactive-selected);
-  border-color: transparent;
+  background: transparent;
+  font-weight: 560;
+}
+
+.review-tab-active:hover {
+  background: transparent;
 }
 
 .review-tabs-spacer {

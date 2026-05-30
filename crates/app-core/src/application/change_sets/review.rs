@@ -145,6 +145,19 @@ impl Application {
                 Some(&exact_edit.new_text),
                 None,
             );
+            if exact_edit.new_text == fallback_new_text
+                && exact_canonical.quality == DiffQuality::Exact
+                && exact_canonical.added_lines + exact_canonical.removed_lines > 0
+            {
+                self.upsert_review_file_change(
+                    path,
+                    change_type,
+                    Some(exact_edit.old_text.clone()),
+                    exact_edit.new_text.clone(),
+                );
+                return;
+            }
+
             if should_prefer_exact_tool_review_diff(&exact_canonical, &fallback_canonical) {
                 self.upsert_review_file_change(
                     path,
@@ -166,6 +179,32 @@ impl Application {
                 exact_edit.new_text.clone(),
             );
         }
+    }
+
+    pub(in crate::application) fn should_apply_tool_diff_to_review(
+        &self,
+        path: &str,
+        old_text: Option<&str>,
+        new_text: &str,
+    ) -> bool {
+        let new_text = normalize_diff_text_for_session_change(new_text);
+        let old_text = old_text.map(normalize_diff_text_for_session_change);
+        let old_lines = old_text.as_deref().map(str::lines).map(Iterator::count);
+        let new_lines = new_text.lines().count();
+
+        if old_lines.unwrap_or(0) > 20 || new_lines > 20 {
+            return true;
+        }
+
+        let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let current_text = std::fs::read_to_string(self.ui.workspace.root.join(normalized_path))
+            .ok()
+            .map(|text| normalize_diff_text_for_session_change(&text));
+        if current_text.as_deref() == Some(new_text.as_str()) {
+            return true;
+        }
+
+        false
     }
 
     pub(in crate::application) fn tool_diff_baseline_text(

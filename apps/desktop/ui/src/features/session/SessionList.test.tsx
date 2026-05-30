@@ -52,7 +52,11 @@ function providerProfile(
   };
 }
 
-function agentSnapshot(selectedClaudeProfile = "xiaomi_mimo", xiaomiConfigured = true): AgentSettingsSnapshot {
+function agentSnapshot(
+  selectedClaudeProfile = "xiaomi_mimo",
+  xiaomiConfigured = true,
+  codebuddyInstalled = true,
+): AgentSettingsSnapshot {
   return {
     settings: {
       selected_agent: "claude-agent-acp",
@@ -73,8 +77,8 @@ function agentSnapshot(selectedClaudeProfile = "xiaomi_mimo", xiaomiConfigured =
         id: "codebuddy",
         label: "CodeBuddy",
         binary: "codebuddy",
-        installed: true,
-        detected_path: "/opt/homebrew/bin/codebuddy",
+        installed: codebuddyInstalled,
+        detected_path: codebuddyInstalled ? "/opt/homebrew/bin/codebuddy" : null,
         selected: false,
       },
       {
@@ -173,7 +177,7 @@ describe("SessionList agent picker", () => {
   });
 
   it("still blocks WOA sessions when the WOA token is missing", async () => {
-    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot("woa"));
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot("woa", true, false));
 
     render(
       <SessionList
@@ -191,5 +195,30 @@ describe("SessionList agent picker", () => {
 
     expect(await screen.findByText("Claude Agent ACP 需要先在设置中完成 WOA 登录。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "创建会话" })).toBeDisabled();
+  });
+
+  it("defaults to CodeBuddy when the default Claude profile is not configured", async () => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot("xiaomi_mimo", false));
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.queryByText(/需要先在设置中保存/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codebuddy"));
   });
 });

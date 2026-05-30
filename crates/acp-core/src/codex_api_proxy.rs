@@ -18,6 +18,13 @@ type ProxyBody = BoxBody<Bytes, Infallible>;
 
 const VENUS_CHAT_COMPLETIONS_URL: &str =
     "https://v2.open.venus.woa.com/llmproxy/v1/chat/completions";
+const CODEX_WOA_RESPONSES_URL: &str =
+    "https://copilot.code.woa.com/server/chat/codebuddy-gateway/codex/responses";
+const CODEX_WOA_APP_VERSION: &str = "0.0.9";
+const TIMIAI_RESPONSES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses";
+const TIMIAI_RESPONSES_COMPACT_URL: &str =
+    "https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact";
+const TIMIAI_MESSAGES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/v1/messages";
 const DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 const KIMI_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.kimi.com/coding/v1/chat/completions";
 const KIMI_UPSTREAM_MESSAGES_URL: &str = "https://api.kimi.com/coding/v1/messages";
@@ -33,6 +40,7 @@ struct CodexApiProxyConfig {
     provider: String,
     api_key: String,
     api_keys: BTreeMap<String, String>,
+    session_ids: BTreeMap<String, String>,
 }
 
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
@@ -63,6 +71,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 provider: "venus".to_string(),
                 api_key: String::new(),
                 api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
             }))
         })
         .clone();
@@ -73,6 +82,10 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
         current
             .api_keys
             .insert(provider.to_string(), api_key.to_string());
+        current
+            .session_ids
+            .entry(provider.to_string())
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string());
     }
 
     let running = CODEX_API_PROXY_RUNNING
@@ -206,6 +219,9 @@ async fn proxy_codex_api_request(
     if path.ends_with("/messages") {
         return proxy_anthropic_messages_request(request, config).await;
     }
+    if path.ends_with("/responses/compact") {
+        return proxy_native_codex_responses_compact_request(request, config).await;
+    }
     if !path.ends_with("/responses") {
         return Ok(response_with_status(
             StatusCode::NOT_FOUND,
@@ -222,6 +238,7 @@ async fn proxy_codex_api_request(
             provider: "venus".to_string(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
+            session_ids: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
@@ -234,7 +251,22 @@ async fn proxy_codex_api_request(
         .unwrap_or_default()
         .to_string();
     let provider = proxy_provider_for_model(&requested_model, &config.provider);
+    let payload = prepare_responses_payload_for_provider(payload, provider);
     log_responses_payload_summary("responses_request", &payload, provider);
+    let api_key = api_key_for_proxy_provider(&config, provider);
+    if api_key.trim().is_empty() {
+        return Ok(response_with_status(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": format!("API key is not configured for {provider}") } })
+                .to_string(),
+            "application/json",
+        ));
+    }
+    if matches!(normalize_proxy_provider(provider), "woa" | "timiai") {
+        let session_id = session_id_for_proxy_provider(&config, provider);
+        return proxy_native_codex_responses_request(payload, &api_key, provider, &session_id)
+            .await;
+    }
     let chat_payload = match responses_payload_to_chat_payload(payload, provider) {
         Ok(payload) => payload,
         Err(error) => {
@@ -246,15 +278,6 @@ async fn proxy_codex_api_request(
             ));
         }
     };
-    let api_key = api_key_for_proxy_provider(&config, provider);
-    if api_key.trim().is_empty() {
-        return Ok(response_with_status(
-            StatusCode::UNAUTHORIZED,
-            json!({ "error": { "message": format!("API key is not configured for {provider}") } })
-                .to_string(),
-            "application/json",
-        ));
-    }
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
     match normalize_proxy_provider(provider) {
         "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
@@ -267,10 +290,15 @@ async fn proxy_codex_api_request(
     let upstream_url = upstream_chat_completions_url(provider);
 
     let client = reqwest::Client::new();
-    let upstream = client
+    let request = client
         .post(upstream_url)
-        .bearer_auth(api_key)
-        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_TYPE, "application/json");
+    let request = if normalize_proxy_provider(provider) == "woa" {
+        with_woa_gateway_headers(request, &api_key)
+    } else {
+        request.bearer_auth(api_key)
+    };
+    let upstream = request
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
         .await?;
@@ -320,6 +348,172 @@ async fn proxy_codex_api_request(
     Ok(response)
 }
 
+async fn proxy_native_codex_responses_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    session_id: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let normalized_provider = normalize_proxy_provider(provider);
+    let payload = if normalized_provider == "timiai" {
+        sanitize_timiai_responses_payload(payload)
+    } else {
+        payload
+    };
+    let (auth_header_name, auth_log_state, x_api_key_log_state, session_log_state) =
+        if normalized_provider == "timiai" {
+            (
+                "Authorization",
+                timiai_authorization_log_state(api_key),
+                if api_key.trim().is_empty() {
+                    "empty"
+                } else {
+                    "present"
+                },
+                "present",
+            )
+        } else {
+            (
+                "x-api-key",
+                if api_key.trim().is_empty() {
+                    "empty"
+                } else {
+                    "present"
+                },
+                if api_key.trim().is_empty() {
+                    "empty"
+                } else {
+                    "present"
+                },
+                "not_sent",
+            )
+        };
+    append_codex_api_proxy_log(&format!(
+        "native_responses_upstream_request provider={} method=POST url={} model={} stream={} input_present={} tools={} auth_header={}:{} x_api_key={} x_session_id={}",
+        normalized_provider,
+        upstream_responses_url(provider),
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload.get("input").is_some(),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        auth_header_name,
+        auth_log_state,
+        x_api_key_log_state,
+        session_log_state,
+    ));
+    let client = reqwest::Client::new();
+    let request = client
+        .post(upstream_responses_url(provider))
+        .header(CONTENT_TYPE, "application/json");
+    let upstream = with_native_responses_headers(request, api_key, provider, session_id)
+        .body(serde_json::to_vec(&payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if is_event_stream(&content_type) {
+        if normalized_provider == "timiai" {
+            return Ok(streaming_timiai_responses_response(
+                upstream,
+                status,
+                &content_type,
+            ));
+        }
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
+    }
+
+    let body = upstream.bytes().await?;
+    let body = if normalized_provider == "timiai" && status.is_success() {
+        sanitize_timiai_responses_response_body(body.as_ref()).unwrap_or_else(|| body.to_vec())
+    } else {
+        body.to_vec()
+    };
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
+async fn proxy_native_codex_responses_compact_request(
+    request: Request<Incoming>,
+    config: Arc<RwLock<CodexApiProxyConfig>>,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let body = request.into_body().collect().await?.to_bytes();
+    let config = config
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| CodexApiProxyConfig {
+            provider: "venus".to_string(),
+            api_key: String::new(),
+            api_keys: BTreeMap::new(),
+            session_ids: BTreeMap::new(),
+        });
+    let provider = normalize_proxy_provider(&config.provider);
+    if provider != "timiai" {
+        return Ok(response_with_status(
+            StatusCode::NOT_FOUND,
+            "not found".to_string(),
+            "text/plain; charset=utf-8",
+        ));
+    }
+    let api_key = api_key_for_proxy_provider(&config, provider);
+    if api_key.trim().is_empty() {
+        return Ok(response_with_status(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": "API key is not configured for timiai" } }).to_string(),
+            "application/json",
+        ));
+    }
+
+    let session_id = session_id_for_proxy_provider(&config, provider);
+    let client = reqwest::Client::new();
+    let upstream = with_timiai_headers(
+        client
+            .post(TIMIAI_RESPONSES_COMPACT_URL)
+            .header(CONTENT_TYPE, "application/json"),
+        &api_key,
+        &session_id,
+    )
+    .body(body)
+    .send()
+    .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = upstream.bytes().await?;
+    let mut response = Response::new(full_body(body));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
 async fn proxy_anthropic_messages_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
@@ -332,6 +526,7 @@ async fn proxy_anthropic_messages_request(
             provider: "venus".to_string(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
+            session_ids: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_model = payload
@@ -340,7 +535,10 @@ async fn proxy_anthropic_messages_request(
         .unwrap_or_default()
         .to_string();
     let provider = proxy_provider_for_model(&requested_model, &config.provider);
-    log_anthropic_payload_summary("anthropic_messages_request", &payload);
+    log_anthropic_payload_summary(
+        &format!("anthropic_messages_request provider={provider}"),
+        &payload,
+    );
     let api_key = api_key_for_proxy_provider(&config, provider);
     if api_key.trim().is_empty() {
         return Ok(response_with_status(
@@ -351,9 +549,18 @@ async fn proxy_anthropic_messages_request(
         ));
     }
 
+    let session_id = session_id_for_proxy_provider(&config, provider);
+    if normalize_proxy_provider(provider) == "timiai" && !is_claude_family_model(&requested_model) {
+        return proxy_timiai_responses_to_anthropic_messages_request(
+            payload,
+            &api_key,
+            &session_id,
+        )
+        .await;
+    }
     match normalize_proxy_provider(provider) {
-        "kimi_code" | "xiaomi_mimo" => {
-            proxy_native_anthropic_messages_request(payload, &api_key, provider).await
+        "kimi_code" | "xiaomi_mimo" | "timiai" => {
+            proxy_native_anthropic_messages_request(payload, &api_key, provider, &session_id).await
         }
         _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, provider).await,
     }
@@ -363,18 +570,77 @@ async fn proxy_native_anthropic_messages_request(
     payload: Value,
     api_key: &str,
     provider: &str,
+    session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let upstream_url = upstream_messages_url(provider);
-    let payload = normalize_native_anthropic_payload(payload, provider);
+    let requested_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let client = reqwest::Client::new();
-    let upstream = client
+    let normalized_provider = normalize_proxy_provider(provider);
+    let payload = if normalized_provider == "timiai" {
+        sanitize_timiai_anthropic_messages_payload(normalize_native_anthropic_payload(
+            payload, provider,
+        ))
+    } else {
+        normalize_native_anthropic_payload(payload, provider)
+    };
+    let (auth_header_name, auth_log_state, session_log_state) = if normalized_provider == "timiai" {
+        (
+            "Authorization",
+            timiai_authorization_log_state(api_key),
+            "present",
+        )
+    } else {
+        (
+            "x-api-key",
+            if api_key.trim().is_empty() {
+                "empty"
+            } else {
+                "present"
+            },
+            "not_sent",
+        )
+    };
+    let x_api_key_log_state = if api_key.trim().is_empty() {
+        "empty"
+    } else {
+        "present"
+    };
+    append_codex_api_proxy_log(&format!(
+        "native_anthropic_upstream_request provider={} method=POST url={} model={} downstream_stream={} upstream_stream={} tools={} auth_header={}:{} x_api_key={} x_session_id={}",
+        normalized_provider,
+        upstream_url,
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        requested_stream,
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        auth_header_name,
+        auth_log_state,
+        x_api_key_log_state,
+        session_log_state
+    ));
+    let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json")
-        .header("User-Agent", "claude-code/0.2.0")
-        .header("x-api-key", api_key)
-        .body(serde_json::to_vec(&payload)?)
-        .send()
-        .await?;
+        .header("User-Agent", "claude-code/0.2.0");
+    let request = if normalize_proxy_provider(provider) == "timiai" {
+        with_timiai_headers(request, api_key, session_id)
+    } else {
+        request.header("x-api-key", api_key)
+    };
+    let upstream = request.body(serde_json::to_vec(&payload)?).send().await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -392,11 +658,108 @@ async fn proxy_native_anthropic_messages_request(
     let body = upstream.bytes().await?;
     let status = normalize_upstream_error_status(status, body.as_ref());
     if !status.is_success() {
+        append_codex_api_proxy_log(&format!(
+            "native_anthropic_upstream_error provider={} url={} model={} status={}",
+            normalize_proxy_provider(provider),
+            upstream_url,
+            payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            status.as_u16()
+        ));
         log_suspicious_venus_response(status, &content_type, body.as_ref());
     }
     let mut response = Response::new(full_body(body));
     *response.status_mut() = status;
     if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
+async fn proxy_timiai_responses_to_anthropic_messages_request(
+    payload: Value,
+    api_key: &str,
+    session_id: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let requested_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut responses_payload = anthropic_payload_to_responses_payload(payload);
+    if let Some(object) = responses_payload.as_object_mut() {
+        object.remove("stream");
+    }
+    responses_payload = sanitize_timiai_responses_payload(responses_payload);
+    append_codex_api_proxy_log(&format!(
+        "timiai_responses_anthropic_bridge_request method=POST url={} model={} downstream_stream={} upstream_stream=false tools={} auth_header=Authorization:{} x_api_key=present x_session_id=present",
+        TIMIAI_RESPONSES_URL,
+        responses_payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        requested_stream,
+        responses_payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        timiai_authorization_log_state(api_key)
+    ));
+    let client = reqwest::Client::new();
+    let upstream = with_timiai_headers(
+        client
+            .post(TIMIAI_RESPONSES_URL)
+            .header(CONTENT_TYPE, "application/json"),
+        api_key,
+        session_id,
+    )
+    .body(serde_json::to_vec(&responses_payload)?)
+    .send()
+    .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if is_event_stream(&content_type) {
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
+    }
+    let body = upstream.bytes().await?;
+    let status = normalize_upstream_error_status(status, body.as_ref());
+    if !status.is_success() {
+        append_codex_api_proxy_log(&format!(
+            "timiai_responses_anthropic_bridge_error url={} model={} status={}",
+            TIMIAI_RESPONSES_URL,
+            responses_payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            status.as_u16()
+        ));
+        log_suspicious_venus_response(status, &content_type, body.as_ref());
+    }
+    let mut response_content_type = content_type.clone();
+    let body = if requested_stream && status.is_success() {
+        let response: Value = serde_json::from_slice(body.as_ref())?;
+        response_content_type = "text/event-stream".to_string();
+        anthropic_response_to_sse(&responses_response_to_anthropic_response(response))
+    } else if status.is_success() {
+        let response: Value = serde_json::from_slice(body.as_ref())?;
+        serde_json::to_vec(&responses_response_to_anthropic_response(response))?
+    } else {
+        body.to_vec()
+    };
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = response_content_type.parse() {
         response.headers_mut().insert(CONTENT_TYPE, value);
     }
     Ok(response)
@@ -417,10 +780,15 @@ async fn proxy_completion_to_anthropic_messages_request(
         log_chat_payload_summary("deepseek_anthropic_request", &chat_payload);
     }
     let client = reqwest::Client::new();
-    let upstream = client
+    let request = client
         .post(upstream_chat_completions_url(provider))
-        .bearer_auth(api_key)
-        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_TYPE, "application/json");
+    let request = if normalize_proxy_provider(provider) == "woa" {
+        with_woa_gateway_headers(request, api_key)
+    } else {
+        request.bearer_auth(api_key)
+    };
+    let upstream = request
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
         .await?;
@@ -466,6 +834,8 @@ async fn proxy_completion_to_anthropic_messages_request(
 
 fn normalize_proxy_provider(provider: &str) -> &'static str {
     match provider.trim().to_ascii_lowercase().as_str() {
+        "woa" | "codebuddy" | "codebuddy_gateway" | "codebuddy-gateway" => "woa",
+        "timiai" | "timi" | "timi-ai" | "timi_ai" => "timiai",
         "deepseek" => "deepseek",
         "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
         "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
@@ -474,6 +844,9 @@ fn normalize_proxy_provider(provider: &str) -> &'static str {
 }
 
 fn proxy_provider_for_model<'a>(model: &str, fallback_provider: &'a str) -> &'a str {
+    if normalize_proxy_provider(fallback_provider) == "timiai" {
+        return "timiai";
+    }
     let normalized = model.trim().to_ascii_lowercase();
     if normalized.contains("kimi-for-coding") {
         return "kimi_code";
@@ -495,6 +868,14 @@ fn api_key_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -> S
     })
 }
 
+fn session_id_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -> String {
+    config
+        .session_ids
+        .get(provider)
+        .cloned()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 fn upstream_chat_completions_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
@@ -504,8 +885,78 @@ fn upstream_chat_completions_url(provider: &str) -> &'static str {
     }
 }
 
+fn upstream_responses_url(provider: &str) -> &'static str {
+    match normalize_proxy_provider(provider) {
+        "woa" => CODEX_WOA_RESPONSES_URL,
+        "timiai" => TIMIAI_RESPONSES_URL,
+        _ => CODEX_WOA_RESPONSES_URL,
+    }
+}
+
+fn with_native_responses_headers(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+    provider: &str,
+    session_id: &str,
+) -> reqwest::RequestBuilder {
+    if normalize_proxy_provider(provider) == "timiai" {
+        with_timiai_headers(request, api_key, session_id)
+    } else {
+        with_woa_gateway_headers(request, api_key)
+    }
+}
+
+fn with_woa_gateway_headers(
+    request: reqwest::RequestBuilder,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
+    request
+        .header("x-app-name", "codex-internal")
+        .header("x-request-platform", "codex-internal")
+        .header("x-scene-name", "common_chat")
+        .header("x-channel", "codex-internal")
+        .header("x-app-version", CODEX_WOA_APP_VERSION)
+        .header(
+            "User-Agent",
+            format!("Codex-Internal/{CODEX_WOA_APP_VERSION}"),
+        )
+        .header("x-conversation-id", uuid::Uuid::new_v4().to_string())
+        .header("x-api-key", access_token)
+}
+
+fn with_timiai_headers(
+    request: reqwest::RequestBuilder,
+    api_key: &str,
+    session_id: &str,
+) -> reqwest::RequestBuilder {
+    let key = timiai_authorization_header_value(api_key);
+    request
+        .header("Authorization", key.clone())
+        .header("x-api-key", key)
+        .header("X-Session-Id", session_id)
+}
+
+fn timiai_authorization_header_value(api_key: &str) -> String {
+    api_key.trim().to_string()
+}
+
+fn timiai_authorization_log_state(api_key: &str) -> &'static str {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        "empty"
+    } else if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+    {
+        "bearer_value"
+    } else {
+        "raw_value"
+    }
+}
+
 fn upstream_messages_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
+        "timiai" => TIMIAI_MESSAGES_URL,
         "kimi_code" => KIMI_UPSTREAM_MESSAGES_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_MESSAGES_URL,
         _ => KIMI_UPSTREAM_MESSAGES_URL,
@@ -538,6 +989,96 @@ fn upstream_native_anthropic_model<'a>(provider: &str, model: &'a str) -> &'a st
         ("xiaomi_mimo", "MiMo-V2.5") => "mimo-v2.5",
         _ => model,
     }
+}
+
+fn is_claude_family_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude-")
+}
+
+fn prepare_responses_payload_for_provider(payload: Value, provider: &str) -> Value {
+    if normalize_proxy_provider(provider) == "timiai" {
+        sanitize_timiai_responses_payload(payload)
+    } else {
+        payload
+    }
+}
+
+fn sanitize_timiai_responses_payload(mut payload: Value) -> Value {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    let mut removed = Vec::<String>::new();
+    for key in ["context_management", "reasoning"] {
+        if object.remove(key).is_some() {
+            removed.push(key.to_string());
+        }
+    }
+    if let Some(input) = object.get_mut("input") {
+        removed.extend(sanitize_timiai_responses_input(input));
+    }
+    if !removed.is_empty() {
+        append_codex_api_proxy_log(&format!(
+            "timiai_responses_payload_sanitized removed={}",
+            removed.join(",")
+        ));
+    }
+    payload
+}
+
+fn sanitize_timiai_responses_input(input: &mut Value) -> Vec<String> {
+    let Some(items) = input.as_array_mut() else {
+        return Vec::new();
+    };
+
+    let mut removed_reasoning = 0usize;
+    let mut removed_commentary = 0usize;
+    let mut retained = Vec::with_capacity(items.len());
+    for item in std::mem::take(items) {
+        if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+            removed_reasoning += 1;
+            continue;
+        }
+        if item_is_timiai_unsupported_commentary_message(&item) {
+            removed_commentary += 1;
+            continue;
+        }
+        retained.push(item);
+    }
+    *items = retained;
+
+    let mut removed = Vec::new();
+    if removed_reasoning > 0 {
+        removed.push(format!("input.reasoning:{removed_reasoning}"));
+    }
+    if removed_commentary > 0 {
+        removed.push(format!("input.commentary:{removed_commentary}"));
+    }
+    removed
+}
+
+fn item_is_timiai_unsupported_commentary_message(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("message")
+        && item.get("role").and_then(Value::as_str) == Some("assistant")
+        && item.get("phase").and_then(Value::as_str) == Some("commentary")
+}
+
+fn sanitize_timiai_anthropic_messages_payload(mut payload: Value) -> Value {
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    let mut removed = Vec::new();
+    for key in ["context_management"] {
+        if object.remove(key).is_some() {
+            removed.push(key);
+        }
+    }
+    if !removed.is_empty() {
+        append_codex_api_proxy_log(&format!(
+            "timiai_anthropic_payload_sanitized removed={}",
+            removed.join(",")
+        ));
+    }
+    payload
 }
 
 fn normalize_upstream_error_status(status: StatusCode, body: &[u8]) -> StatusCode {
@@ -624,8 +1165,11 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
         Some(Value::Array(items)) => {
             let mut pending_tool_calls = Vec::new();
             for item in items {
-                if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                    pending_tool_calls.push(responses_function_call_to_chat_tool_call(item)?);
+                if matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("function_call" | "custom_tool_call")
+                ) {
+                    pending_tool_calls.push(responses_tool_call_to_chat_tool_call(item)?);
                     continue;
                 }
                 flush_pending_tool_calls(&mut messages, &mut pending_tool_calls);
@@ -762,8 +1306,8 @@ fn responses_input_item_to_chat_message(
             }
             Ok(Some(message))
         }
-        "function_call" => Ok(None),
-        "function_call_output" => {
+        "function_call" | "custom_tool_call" => Ok(None),
+        "function_call_output" | "custom_tool_call_output" => {
             let call_id = item
                 .get("call_id")
                 .and_then(Value::as_str)
@@ -786,7 +1330,7 @@ fn responses_input_item_to_chat_message(
     }
 }
 
-fn responses_function_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> {
+fn responses_tool_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> {
     let call_id = item
         .get("call_id")
         .or_else(|| item.get("id"))
@@ -796,10 +1340,15 @@ fn responses_function_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Val
         .get("name")
         .and_then(Value::as_str)
         .context("function_call input item is missing name")?;
-    let arguments = item
-        .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
+    let arguments = if item.get("type").and_then(Value::as_str) == Some("custom_tool_call") {
+        let input = item.get("input").and_then(Value::as_str).unwrap_or("");
+        serde_json::to_string(&json!({ "patch": input })).unwrap_or_else(|_| "{}".to_string())
+    } else {
+        item.get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("{}")
+            .to_string()
+    };
     Ok(json!({
         "id": call_id,
         "type": "function",
@@ -957,6 +1506,187 @@ fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
         }
     }
     payload
+}
+
+fn anthropic_payload_to_responses_payload(anthropic: Value) -> Value {
+    let mut input = Vec::new();
+    if let Some(messages) = anthropic.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            append_anthropic_message_to_responses_input(message, &mut input);
+        }
+    }
+    if input.is_empty() {
+        input.push(json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "" }]
+        }));
+    }
+
+    let mut payload = json!({
+        "model": anthropic
+            .get("model")
+            .cloned()
+            .unwrap_or_else(|| Value::String("gpt-5.5".to_string())),
+        "input": input,
+    });
+    if let Some(system) = anthropic.get("system") {
+        let instructions = response_content_to_text(system);
+        if !instructions.trim().is_empty() {
+            payload["instructions"] = Value::String(instructions);
+        }
+    }
+    if let Some(max_tokens) = anthropic.get("max_tokens") {
+        payload["max_output_tokens"] = max_tokens.clone();
+    }
+    if let Some(stream) = anthropic.get("stream") {
+        payload["stream"] = stream.clone();
+    }
+    if let Some(temperature) = anthropic.get("temperature") {
+        payload["temperature"] = temperature.clone();
+    }
+    if let Some(tools) = anthropic_tools_to_responses_tools(anthropic.get("tools")) {
+        payload["tools"] = tools;
+    }
+    if let Some(tool_choice) =
+        anthropic_tool_choice_to_responses_tool_choice(anthropic.get("tool_choice"))
+    {
+        payload["tool_choice"] = tool_choice;
+    }
+    payload
+}
+
+fn append_anthropic_message_to_responses_input(message: &Value, input: &mut Vec<Value>) {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    if !content.is_array() {
+        push_responses_text_message(input, role, &response_content_to_text(content));
+        return;
+    }
+    let Some(blocks) = content.as_array() else {
+        return;
+    };
+    let mut pending_text = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        pending_text.push(text.to_string());
+                    }
+                }
+            }
+            "tool_result" => {
+                flush_responses_text_message(input, role, &mut pending_text);
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_proxy"),
+                    "output": block
+                        .get("content")
+                        .map(response_content_to_text)
+                        .unwrap_or_default()
+                }));
+            }
+            "tool_use" => {
+                flush_responses_text_message(input, role, &mut pending_text);
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_proxy"),
+                    "name": block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                    "arguments": block
+                        .get("input")
+                        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()))
+                        .unwrap_or_else(|| "{}".to_string())
+                }));
+            }
+            _ => {}
+        }
+    }
+    flush_responses_text_message(input, role, &mut pending_text);
+}
+
+fn flush_responses_text_message(
+    input: &mut Vec<Value>,
+    role: &str,
+    pending_text: &mut Vec<String>,
+) {
+    if pending_text.is_empty() {
+        return;
+    }
+    let text = pending_text.join("\n");
+    pending_text.clear();
+    push_responses_text_message(input, role, &text);
+}
+
+fn push_responses_text_message(input: &mut Vec<Value>, role: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let role = if role == "assistant" {
+        "assistant"
+    } else {
+        "user"
+    };
+    let content_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    input.push(json!({
+        "type": "message",
+        "role": role,
+        "content": [{ "type": content_type, "text": text }]
+    }));
+}
+
+fn anthropic_tools_to_responses_tools(value: Option<&Value>) -> Option<Value> {
+    let tools = value?.as_array()?;
+    let converted = tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name").and_then(Value::as_str)?;
+            Some(json!({
+                "type": "function",
+                "name": name,
+                "description": tool
+                    .get("description")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(String::new())),
+                "parameters": tool
+                    .get("input_schema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+            }))
+        })
+        .collect::<Vec<_>>();
+    (!converted.is_empty()).then(|| Value::Array(converted))
+}
+
+fn anthropic_tool_choice_to_responses_tool_choice(value: Option<&Value>) -> Option<Value> {
+    let value = value?;
+    match value.get("type").and_then(Value::as_str) {
+        Some("auto") => Some(Value::String("auto".to_string())),
+        Some("any") => Some(Value::String("required".to_string())),
+        Some("tool") => value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| json!({ "type": "function", "name": name })),
+        _ => None,
+    }
 }
 
 fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
@@ -1212,20 +1942,10 @@ fn anthropic_response_to_sse(response: &Value) -> Vec<u8> {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or(VENUS_MODEL_FALLBACK);
-    let text = response
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|content| {
-            content
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default();
     let mut output = String::new();
-    output.push_str(&format!(
-        "event: message_start\ndata: {}\n\n",
+    push_sse(
+        &mut output,
+        "message_start",
         json!({
             "type": "message_start",
             "message": {
@@ -1238,24 +1958,31 @@ fn anthropic_response_to_sse(response: &Value) -> Vec<u8> {
                 "stop_sequence": Value::Null,
                 "usage": { "input_tokens": 0, "output_tokens": 0 }
             }
-        })
-    ));
-    output.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
-    if !text.is_empty() {
-        output.push_str(&format!(
-            "event: content_block_delta\ndata: {}\n\n",
-            json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": { "type": "text_delta", "text": text }
-            })
-        ));
-    }
-    output.push_str(
-        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        }),
     );
-    output.push_str(&format!(
-        "event: message_delta\ndata: {}\n\n",
+    let content = response
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if content.is_empty() {
+        emit_anthropic_response_text_sse_block(&mut output, 0, "");
+    } else {
+        for (index, item) in content.iter().enumerate() {
+            match item.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    emit_anthropic_response_tool_use_sse_block(&mut output, index, item);
+                }
+                _ => {
+                    let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+                    emit_anthropic_response_text_sse_block(&mut output, index, text);
+                }
+            }
+        }
+    }
+    push_sse(
+        &mut output,
+        "message_delta",
         json!({
             "type": "message_delta",
             "delta": {
@@ -1263,10 +1990,85 @@ fn anthropic_response_to_sse(response: &Value) -> Vec<u8> {
                 "stop_sequence": Value::Null
             },
             "usage": response.get("usage").cloned().unwrap_or_else(|| json!({ "output_tokens": 0 }))
-        })
-    ));
-    output.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        }),
+    );
+    push_sse(
+        &mut output,
+        "message_stop",
+        json!({ "type": "message_stop" }),
+    );
     output.into_bytes()
+}
+
+fn emit_anthropic_response_text_sse_block(output: &mut String, index: usize, text: &str) {
+    push_sse(
+        output,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": "text", "text": "" }
+        }),
+    );
+    if !text.is_empty() {
+        push_sse(
+            output,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "text_delta", "text": text }
+            }),
+        );
+    }
+    push_sse(
+        output,
+        "content_block_stop",
+        json!({ "type": "content_block_stop", "index": index }),
+    );
+}
+
+fn emit_anthropic_response_tool_use_sse_block(output: &mut String, index: usize, item: &Value) {
+    let id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("tool_proxy");
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let input = item.get("input").cloned().unwrap_or_else(|| json!({}));
+    let input_json = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+    push_sse(
+        output,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": {
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": {}
+            }
+        }),
+    );
+    if !input_json.is_empty() {
+        push_sse(
+            output,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "input_json_delta", "partial_json": input_json }
+            }),
+        );
+    }
+    push_sse(
+        output,
+        "content_block_stop",
+        json!({ "type": "content_block_stop", "index": index }),
+    );
 }
 
 fn parse_tool_arguments(value: Option<&Value>) -> Value {
@@ -1284,18 +2086,40 @@ fn responses_tools_to_chat_tools(value: Option<&Value>) -> Option<Value> {
     let converted = tools
         .iter()
         .filter_map(|tool| {
-            if tool.get("type").and_then(Value::as_str) != Some("function") {
-                return None;
-            }
-            let name = tool.get("name").and_then(Value::as_str)?;
-            Some(json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": tool.get("description").cloned().unwrap_or(Value::String(String::new())),
-                    "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+            match tool.get("type").and_then(Value::as_str) {
+                Some("function") => {
+                    let name = tool.get("name").and_then(Value::as_str)?;
+                    Some(json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": tool.get("description").cloned().unwrap_or(Value::String(String::new())),
+                            "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                        }
+                    }))
                 }
-            }))
+                Some("custom") if tool.get("name").and_then(Value::as_str) == Some("apply_patch") => {
+                    Some(json!({
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "description": "Edit files by applying a patch. Put the complete raw patch text in the `patch` string. Do not wrap the patch in shell commands, here-strings, or JSON inside the string.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "patch": {
+                                        "type": "string",
+                                        "description": "The complete patch text, starting with *** Begin Patch and ending with *** End Patch."
+                                    }
+                                },
+                                "required": ["patch"],
+                                "additionalProperties": false
+                            }
+                        }
+                    }))
+                }
+                _ => None,
+            }
         })
         .collect::<Vec<_>>();
     (!converted.is_empty()).then_some(Value::Array(converted))
@@ -1381,13 +2205,126 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("call_venus");
     let function = tool_call.get("function").unwrap_or(&Value::Null);
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+    if name == "apply_patch" {
+        return json!({
+            "id": id,
+            "type": "custom_tool_call",
+            "call_id": id,
+            "name": name,
+            "input": apply_patch_input_from_function_arguments(arguments),
+            "status": "completed"
+        });
+    }
     json!({
         "id": id,
         "type": "function_call",
         "call_id": id,
-        "name": function.get("name").and_then(Value::as_str).unwrap_or("unknown"),
-        "arguments": function.get("arguments").and_then(Value::as_str).unwrap_or("{}"),
+        "name": name,
+        "arguments": arguments,
         "status": "completed"
+    })
+}
+
+fn apply_patch_input_from_function_arguments(arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    let parsed = serde_json::from_str::<Value>(trimmed);
+    if let Ok(value) = parsed {
+        if let Some(patch) = value
+            .get("patch")
+            .or_else(|| value.get("input"))
+            .or_else(|| value.get("content"))
+            .and_then(Value::as_str)
+        {
+            return patch.to_string();
+        }
+        if let Some(text) = value.as_str() {
+            return text.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn responses_response_to_anthropic_response(response: Value) -> Value {
+    let mut content = Vec::new();
+    let mut stop_reason = "end_turn";
+    if let Some(output) = response.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                "message" => {
+                    content.extend(responses_message_item_to_anthropic_content(item));
+                }
+                "function_call" | "custom_tool_call" => {
+                    stop_reason = "tool_use";
+                    content.push(responses_tool_call_item_to_anthropic_content(item));
+                }
+                _ => {}
+            }
+        }
+    }
+    json!({
+        "id": response
+            .get("id")
+            .cloned()
+            .unwrap_or_else(|| Value::String("msg_timiai".to_string())),
+        "type": "message",
+        "role": "assistant",
+        "model": response
+            .get("model")
+            .cloned()
+            .unwrap_or_else(|| Value::String("gpt-5.5".to_string())),
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": Value::Null,
+        "usage": normalized_chat_usage(response.get("usage")),
+    })
+}
+
+fn responses_message_item_to_anthropic_content(item: &Value) -> Vec<Value> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|part| {
+                    let text = part
+                        .get("text")
+                        .or_else(|| part.get("output_text"))
+                        .and_then(Value::as_str)?;
+                    (!text.is_empty()).then(|| json!({ "type": "text", "text": text }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn responses_tool_call_item_to_anthropic_content(item: &Value) -> Value {
+    let id = item
+        .get("call_id")
+        .or_else(|| item.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("call_timiai");
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let input = item
+        .get("arguments")
+        .or_else(|| item.get("input"))
+        .map(|value| parse_tool_arguments(Some(value)))
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input
     })
 }
 
@@ -1411,14 +2348,33 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
                         .get("id")
                         .and_then(Value::as_str)
                         .unwrap_or("call_kimi");
-                    output.push(json!({
-                        "id": id,
-                        "type": "function_call",
-                        "call_id": id,
-                        "name": block.get("name").and_then(Value::as_str).unwrap_or("unknown"),
-                        "arguments": block.get("input").map(|input| input.to_string()).unwrap_or_else(|| "{}".to_string()),
-                        "status": "completed"
-                    }));
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let arguments = block
+                        .get("input")
+                        .map(|input| input.to_string())
+                        .unwrap_or_else(|| "{}".to_string());
+                    if name == "apply_patch" {
+                        output.push(json!({
+                            "id": id,
+                            "type": "custom_tool_call",
+                            "call_id": id,
+                            "name": name,
+                            "input": apply_patch_input_from_function_arguments(&arguments),
+                            "status": "completed"
+                        }));
+                    } else {
+                        output.push(json!({
+                            "id": id,
+                            "type": "function_call",
+                            "call_id": id,
+                            "name": name,
+                            "arguments": arguments,
+                            "status": "completed"
+                        }));
+                    }
                 }
                 _ => {}
             }
@@ -1615,35 +2571,56 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     };
     if !call.added && !call.name.is_empty() {
         call.added = true;
-        push_sse(
-            output,
-            "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "output_index": output_index,
-                "item": {
-                    "id": call.id,
-                    "type": "function_call",
-                    "call_id": call.id,
-                    "name": call.name,
-                    "arguments": "",
-                    "status": "in_progress"
-                }
-            }),
-        );
+        if call.name == "apply_patch" {
+            push_sse(
+                output,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": call.id,
+                        "type": "custom_tool_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "input": "",
+                        "status": "in_progress"
+                    }
+                }),
+            );
+        } else {
+            push_sse(
+                output,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": call.id,
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": "",
+                        "status": "in_progress"
+                    }
+                }),
+            );
+        }
     }
     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
         call.arguments.push_str(arguments);
-        push_sse(
-            output,
-            "response.function_call_arguments.delta",
-            json!({
-                "type": "response.function_call_arguments.delta",
-                "output_index": output_index,
-                "item_id": call.id,
-                "delta": arguments
-            }),
-        );
+        if call.name != "apply_patch" {
+            push_sse(
+                output,
+                "response.function_call_arguments.delta",
+                json!({
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": output_index,
+                    "item_id": call.id,
+                    "delta": arguments
+                }),
+            );
+        }
     }
 }
 
@@ -1693,7 +2670,7 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
         } else {
             index
         };
-        if !call.arguments.is_empty() {
+        if !call.arguments.is_empty() && call.name != "apply_patch" {
             push_sse(
                 output,
                 "response.function_call_arguments.done",
@@ -1705,14 +2682,25 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
                 }),
             );
         }
-        let item = json!({
-            "id": call.id,
-            "type": "function_call",
-            "call_id": call.id,
-            "name": if call.name.is_empty() { "unknown" } else { &call.name },
-            "arguments": call.arguments,
-            "status": "completed"
-        });
+        let item = if call.name == "apply_patch" {
+            json!({
+                "id": call.id,
+                "type": "custom_tool_call",
+                "call_id": call.id,
+                "name": &call.name,
+                "input": apply_patch_input_from_function_arguments(&call.arguments),
+                "status": "completed"
+            })
+        } else {
+            json!({
+                "id": call.id,
+                "type": "function_call",
+                "call_id": call.id,
+                "name": if call.name.is_empty() { "unknown" } else { &call.name },
+                "arguments": call.arguments,
+                "status": "completed"
+            })
+        };
         push_sse(
             output,
             "response.output_item.done",
@@ -1881,6 +2869,185 @@ fn streaming_passthrough_response(
         response.headers_mut().insert(CONTENT_TYPE, value);
     }
     response
+}
+
+fn streaming_timiai_responses_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+    content_type: &str,
+) -> Response<ProxyBody> {
+    let upstream_stream = upstream.bytes_stream();
+    let stream = futures::stream::unfold(
+        (
+            upstream_stream,
+            TimiaiResponsesSseSanitizer::default(),
+            false,
+        ),
+        |(mut upstream_stream, mut sanitizer, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match upstream_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        let bytes = sanitizer.push_chunk(&chunk);
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, sanitizer, false),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        append_codex_api_proxy_log(&format!(
+                            "timiai_responses_sse_read_error error={error}"
+                        ));
+                        let bytes = sanitizer.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, sanitizer, true),
+                        ));
+                    }
+                    None => {
+                        let bytes = sanitizer.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, sanitizer, true),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}
+
+#[derive(Debug, Default)]
+struct TimiaiResponsesSseSanitizer {
+    buffer: String,
+    removed_reasoning_events: usize,
+}
+
+impl TimiaiResponsesSseSanitizer {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        let mut output = String::new();
+        while let Some((event, consumed)) = next_sse_event(&self.buffer) {
+            self.buffer.drain(..consumed);
+            if let Some(event) = sanitize_timiai_responses_sse_event(&event) {
+                output.push_str(&event);
+                output.push_str("\n\n");
+            } else {
+                self.removed_reasoning_events += 1;
+            }
+        }
+        output.into_bytes()
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        let trailing = std::mem::take(&mut self.buffer);
+        let mut output = String::new();
+        if !trailing.trim().is_empty() {
+            if let Some(event) = sanitize_timiai_responses_sse_event(&trailing) {
+                output.push_str(&event);
+                output.push_str("\n\n");
+            } else {
+                self.removed_reasoning_events += 1;
+            }
+        }
+        if self.removed_reasoning_events > 0 {
+            append_codex_api_proxy_log(&format!(
+                "timiai_responses_sse_sanitized removed_reasoning_events={}",
+                self.removed_reasoning_events
+            ));
+        }
+        output.into_bytes()
+    }
+}
+
+fn sanitize_timiai_responses_sse_event(event: &str) -> Option<String> {
+    let event_name = sse_event_name(event);
+    let data = sse_data_line(event);
+
+    if event_name.is_some_and(|name| name.contains("reasoning")) {
+        return None;
+    }
+    if data.is_some_and(|value| value.trim() == "[DONE]") {
+        return Some(event.to_string());
+    }
+    let Some(event_name) = event_name else {
+        return Some(event.to_string());
+    };
+
+    let Some(data) = data else {
+        return Some(event.to_string());
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(data.trim()) else {
+        return Some(event.to_string());
+    };
+
+    if responses_event_is_reasoning(&value) {
+        return None;
+    }
+    sanitize_responses_value(&mut value);
+
+    let mut output = String::new();
+    push_sse(&mut output, event_name, value);
+    Some(output.trim_end().to_string())
+}
+
+fn sse_event_name(event: &str) -> Option<&str> {
+    event
+        .lines()
+        .find_map(|line| line.strip_prefix("event:").map(str::trim))
+}
+
+fn responses_event_is_reasoning(value: &Value) -> bool {
+    if value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| event_type.contains("reasoning"))
+    {
+        return true;
+    }
+
+    value
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        == Some("reasoning")
+}
+
+fn sanitize_timiai_responses_response_body(body: &[u8]) -> Option<Vec<u8>> {
+    let mut value = serde_json::from_slice::<Value>(body).ok()?;
+    sanitize_responses_value(&mut value);
+    serde_json::to_vec(&value).ok()
+}
+
+fn sanitize_responses_value(value: &mut Value) {
+    remove_reasoning_output_items(value);
+    if let Some(response) = value.get_mut("response") {
+        remove_reasoning_output_items(response);
+    }
+}
+
+fn remove_reasoning_output_items(value: &mut Value) {
+    let Some(output) = value.get_mut("output").and_then(Value::as_array_mut) else {
+        return;
+    };
+    output.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
 }
 
 #[derive(Debug)]
@@ -2304,7 +3471,7 @@ fn responses_response_to_sse(response: &Value) -> Vec<u8> {
                     );
                     final_output.push(item.clone());
                 }
-                "function_call" => {
+                "function_call" | "custom_tool_call" => {
                     push_sse(
                         &mut output,
                         "response.output_item.added",
@@ -2680,6 +3847,7 @@ fn full_body(bytes: Bytes) -> ProxyBody {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 
+#[cfg(not(test))]
 fn append_codex_api_proxy_log(line: &str) {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return;
@@ -2700,6 +3868,9 @@ fn append_codex_api_proxy_log(line: &str) {
         let _ = writeln!(file, "{line}");
     }
 }
+
+#[cfg(test)]
+fn append_codex_api_proxy_log(_line: &str) {}
 
 #[cfg(test)]
 mod tests {
@@ -2771,6 +3942,52 @@ mod tests {
     }
 
     #[test]
+    fn converts_apply_patch_custom_tool_to_chat_function_tool() {
+        let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
+        let payload = json!({
+            "model": "glm-5.1",
+            "input": [
+                { "role": "user", "content": "edit" },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": patch
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": "Done"
+                }
+            ],
+            "tools": [{
+                "type": "custom",
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "format": { "type": "grammar", "syntax": "lark", "definition": "start: begin_patch" }
+            }]
+        });
+
+        let chat = responses_payload_to_chat_payload(payload, "venus").unwrap();
+
+        assert_eq!(
+            chat["tools"][0]["function"]["parameters"]["properties"]["patch"]["type"],
+            "string"
+        );
+        assert_eq!(
+            chat["messages"][1]["tool_calls"][0]["function"]["name"],
+            "apply_patch"
+        );
+        let arguments = chat["messages"][1]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let arguments: Value = serde_json::from_str(arguments).unwrap();
+        assert_eq!(arguments["patch"], patch);
+        assert_eq!(chat["messages"][2]["role"], "tool");
+        assert_eq!(chat["messages"][2]["tool_call_id"], "call_patch");
+    }
+
+    #[test]
     fn deepseek_requests_preserve_upstream_streaming() {
         let payload = json!({
             "model": "deepseek-v4-pro",
@@ -2781,6 +3998,308 @@ mod tests {
         let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
 
         assert_eq!(chat["stream"], true);
+    }
+
+    #[test]
+    fn woa_provider_uses_native_codex_gateway_responses() {
+        assert_eq!(normalize_proxy_provider("woa"), "woa");
+        assert_eq!(normalize_proxy_provider("codebuddy-gateway"), "woa");
+        assert_eq!(upstream_responses_url("woa"), CODEX_WOA_RESPONSES_URL);
+        assert!(upstream_responses_url("woa").ends_with("/codex/responses"));
+    }
+
+    #[test]
+    fn timiai_provider_uses_native_responses_and_messages() {
+        assert_eq!(normalize_proxy_provider("timi-ai"), "timiai");
+        assert_eq!(upstream_responses_url("timiai"), TIMIAI_RESPONSES_URL);
+        assert_eq!(upstream_messages_url("timiai"), TIMIAI_MESSAGES_URL);
+        assert!(is_claude_family_model("claude-sonnet-4.6"));
+        assert!(!is_claude_family_model("gpt-5.5"));
+        assert_eq!(
+            proxy_provider_for_model("deepseek-v4-pro", "timiai"),
+            "timiai"
+        );
+    }
+
+    #[test]
+    fn converts_non_claude_anthropic_request_to_timiai_responses_payload() {
+        let anthropic = json!({
+            "model": "gpt-5.5",
+            "max_tokens": 1024,
+            "stream": true,
+            "system": [{
+                "type": "text",
+                "text": "You are helpful",
+                "cache_control": { "type": "ephemeral" }
+            }],
+            "messages": [
+                { "role": "user", "content": "hello" },
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "read_file",
+                        "input": { "path": "README.md" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "file body"
+                    }]
+                }
+            ],
+            "tools": [{
+                "name": "read_file",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                }
+            }],
+            "tool_choice": { "type": "auto" }
+        });
+
+        let responses = anthropic_payload_to_responses_payload(anthropic);
+
+        assert_eq!(responses["model"], "gpt-5.5");
+        assert_eq!(responses["max_output_tokens"], 1024);
+        assert_eq!(responses["stream"], true);
+        assert_eq!(responses["instructions"], "You are helpful");
+        assert_eq!(responses["input"][0]["role"], "user");
+        assert_eq!(responses["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(responses["input"][1]["type"], "function_call");
+        assert_eq!(responses["input"][1]["name"], "read_file");
+        assert_eq!(responses["input"][2]["type"], "function_call_output");
+        assert_eq!(responses["tools"][0]["type"], "function");
+        assert_eq!(responses["tools"][0]["name"], "read_file");
+        assert_eq!(responses["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn converts_timiai_responses_response_to_anthropic_message() {
+        let responses = json!({
+            "id": "resp_1",
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{ "type": "output_text", "text": "checking" }]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"README.md\"}"
+                }
+            ],
+            "usage": { "input_tokens": 12, "output_tokens": 4 }
+        });
+
+        let anthropic = responses_response_to_anthropic_response(responses);
+
+        assert_eq!(anthropic["id"], "resp_1");
+        assert_eq!(anthropic["model"], "gpt-5.5");
+        assert_eq!(anthropic["content"][0]["type"], "text");
+        assert_eq!(anthropic["content"][0]["text"], "checking");
+        assert_eq!(anthropic["content"][1]["type"], "tool_use");
+        assert_eq!(anthropic["content"][1]["id"], "call_1");
+        assert_eq!(anthropic["content"][1]["input"]["path"], "README.md");
+        assert_eq!(anthropic["stop_reason"], "tool_use");
+    }
+
+    #[test]
+    fn sanitizes_timiai_responses_payload_extensions() {
+        let payload = json!({
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": null
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "hello"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{ "type": "output_text", "text": "interim note" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{ "type": "output_text", "text": "final" }]
+                }
+            ],
+            "context_management": { "strategy": "auto" },
+            "reasoning": { "effort": "medium" },
+            "stream": true
+        });
+
+        let sanitized = sanitize_timiai_responses_payload(payload);
+
+        assert!(sanitized.get("context_management").is_none());
+        assert!(sanitized.get("reasoning").is_none());
+        assert_eq!(sanitized["model"], "gpt-5.5");
+        assert_eq!(sanitized["input"].as_array().unwrap().len(), 2);
+        assert_eq!(sanitized["input"][0]["type"], "message");
+        assert_eq!(sanitized["input"][0]["content"], "hello");
+        assert_eq!(sanitized["input"][1]["phase"], "final_answer");
+        assert_eq!(sanitized["stream"], true);
+    }
+
+    #[test]
+    fn timiai_responses_payload_is_prepared_before_upstream_logging() {
+        let payload = json!({
+            "model": "gpt-5.5",
+            "input": [
+                { "type": "reasoning", "summary": [] },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{ "type": "output_text", "text": "planning" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{ "type": "output_text", "text": "done" }]
+                }
+            ],
+            "reasoning": { "effort": "medium" }
+        });
+
+        let prepared = prepare_responses_payload_for_provider(payload, "timiai");
+
+        assert!(prepared.get("reasoning").is_none());
+        assert_eq!(prepared["input"].as_array().unwrap().len(), 1);
+        assert_eq!(prepared["input"][0]["phase"], "final_answer");
+        assert_eq!(prepared["input"][0]["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn sanitizes_timiai_responses_sse_reasoning_items() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"content\":[]}}\n\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"hidden\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"visible\"}]}]}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let mut sanitizer = TimiaiResponsesSseSanitizer::default();
+        let mut sanitized = sanitizer.push_chunk(body.as_bytes());
+        sanitized.extend(sanitizer.finish());
+        let text = String::from_utf8(sanitized).unwrap();
+
+        assert!(!text.contains("response.reasoning_text.delta"));
+        assert!(!text.contains("\"type\":\"reasoning\""));
+        assert!(text.contains("response.output_text.delta"));
+        assert!(text.contains("visible"));
+        assert!(text.contains("[DONE]"));
+    }
+
+    #[test]
+    fn sanitizes_timiai_anthropic_messages_payload_extensions() {
+        let payload = json!({
+            "model": "claude-opus-4.8",
+            "context_management": { "strategy": "auto" },
+            "messages": [{ "role": "user", "content": "hello" }],
+            "tools": [{ "name": "read_file" }]
+        });
+
+        let sanitized = sanitize_timiai_anthropic_messages_payload(payload);
+
+        assert!(sanitized.get("context_management").is_none());
+        assert_eq!(sanitized["model"], "claude-opus-4.8");
+        assert_eq!(sanitized["messages"][0]["role"], "user");
+        assert_eq!(sanitized["tools"][0]["name"], "read_file");
+    }
+
+    #[test]
+    fn timiai_session_id_is_reused_from_proxy_config() {
+        let mut session_ids = BTreeMap::new();
+        session_ids.insert("timiai".to_string(), "session-1".to_string());
+        let config = CodexApiProxyConfig {
+            provider: "timiai".to_string(),
+            api_key: "secret".to_string(),
+            api_keys: BTreeMap::new(),
+            session_ids,
+        };
+
+        assert_eq!(
+            session_id_for_proxy_provider(&config, "timiai"),
+            "session-1"
+        );
+    }
+
+    #[test]
+    fn timiai_authorization_header_uses_saved_key_without_bearer_injection() {
+        assert_eq!(
+            timiai_authorization_header_value("timiai-secret"),
+            "timiai-secret"
+        );
+        assert_eq!(
+            timiai_authorization_header_value("  timiai-secret  "),
+            "timiai-secret"
+        );
+        assert_eq!(
+            timiai_authorization_header_value("Bearer timiai-secret"),
+            "Bearer timiai-secret"
+        );
+        assert_eq!(timiai_authorization_log_state("timiai-secret"), "raw_value");
+        assert_eq!(
+            timiai_authorization_log_state("Bearer timiai-secret"),
+            "bearer_value"
+        );
+    }
+
+    #[test]
+    fn timiai_upstream_headers_include_x_api_key() {
+        let request = with_timiai_headers(
+            reqwest::Client::new().post("http://example.com"),
+            " timiai-secret ",
+            "session-1",
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("Authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("timiai-secret")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("timiai-secret")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Session-Id")
+                .and_then(|value| value.to_str().ok()),
+            Some("session-1")
+        );
     }
 
     #[test]
@@ -2830,6 +4349,36 @@ mod tests {
         assert_eq!(response["usage"]["input_tokens"], 12);
         assert_eq!(response["usage"]["output_tokens"], 3);
         assert_eq!(response["usage"]["total_tokens"], 15);
+    }
+
+    #[test]
+    fn converts_apply_patch_chat_function_call_to_custom_tool_call() {
+        let patch = "*** Begin Patch\n*** Add File: probe.txt\n+ok\n*** End Patch";
+        let chat = json!({
+            "id": "chatcmpl_1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {
+                            "name": "apply_patch",
+                            "arguments": serde_json::to_string(&json!({ "patch": patch })).unwrap()
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let response = chat_response_to_responses_response(chat).unwrap();
+
+        assert_eq!(response["output"][0]["type"], "custom_tool_call");
+        assert_eq!(response["output"][0]["call_id"], "call_patch");
+        assert_eq!(response["output"][0]["name"], "apply_patch");
+        assert_eq!(response["output"][0]["input"], patch);
     }
 
     #[test]

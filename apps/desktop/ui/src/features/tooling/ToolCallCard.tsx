@@ -46,12 +46,25 @@ function ToolCallCardImpl({
   }
 
   const presentation = deriveToolPresentation(tool);
+  const commandApplyPatchPreviews =
+    presentation.presentationKind === "command"
+      ? diffPreviewsFromApplyPatchCommand(presentation.command)
+      : [];
   const commandEditPaths =
     presentation.presentationKind === "command"
-      ? getCommandMutationDiffPaths(tool, presentation.command)
+      ? uniqueStrings([
+          ...getCommandMutationDiffPaths(tool, presentation.command),
+          ...commandApplyPatchPreviews.map((preview) => preview.path),
+        ])
       : [];
   const trackedDiffPaths = getTrackedDiffPaths(tool, commandEditPaths);
-  const diffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
+  const trackedDiffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
+  const diffPreviews =
+    trackedDiffPreviews.length > 0
+      ? trackedDiffPreviews
+      : commandApplyPatchPreviews.filter((preview) =>
+          commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
+        );
   const category: ToolCategory =
     rawInputHasEditPayload(tool) || commandEditPaths.length > 0
       ? "editing"
@@ -526,11 +539,13 @@ interface PatchLine {
   content: string;
   oldStart: number;
   newStart: number;
+  hunkIndex: number;
 }
 
 interface PatchRange {
   start: number;
   end: number;
+  hunkIndex: number;
 }
 
 function getDiffStats(previews: ToolDiffPreview[]) {
@@ -548,7 +563,7 @@ function getDiffStats(previews: ToolDiffPreview[]) {
   );
 }
 
-function previewToCompactPatch(preview: ToolDiffPreview): string {
+export function previewToCompactPatch(preview: ToolDiffPreview): string {
   const path = normalizePatchPath(preview.path);
   const lines = toPatchLines(preview.hunks);
   const ranges = compactPatchRanges(lines);
@@ -565,45 +580,66 @@ function previewToCompactPatch(preview: ToolDiffPreview): string {
 }
 
 function toPatchLines(hunks: DiffHunk[]): PatchLine[] {
-  let oldLine = 1;
-  let newLine = 1;
+  let fallbackOldLine = 1;
+  let fallbackNewLine = 1;
 
-  return hunks.flatMap((hunk) =>
-    hunk.lines.map((line) => {
+  return hunks.flatMap((hunk, hunkIndex) => {
+    const range = parseHunkRange(hunk.heading);
+    let oldLine = range ? lineCursorStart(range.oldStart, range.oldCount) : fallbackOldLine;
+    let newLine = range ? lineCursorStart(range.newStart, range.newCount) : fallbackNewLine;
+    const patchLines = hunk.lines.map((line) => {
       const patchLine = {
         kind: line.kind,
         content: line.content,
         oldStart: oldLine,
         newStart: newLine,
+        hunkIndex,
       };
 
       if (line.kind !== "Added") oldLine += 1;
       if (line.kind !== "Removed") newLine += 1;
 
       return patchLine;
-    })
-  );
+    });
+    fallbackOldLine = oldLine;
+    fallbackNewLine = newLine;
+    return patchLines;
+  });
 }
 
 function compactPatchRanges(lines: PatchLine[]): PatchRange[] {
+  const hunkBounds = patchLineHunkBounds(lines);
   const changedIndexes = lines
     .map((line, index) => (line.kind === "Context" ? -1 : index))
     .filter((index) => index >= 0);
 
   if (changedIndexes.length === 0) {
-    return lines.length > 0 ? [{ start: 0, end: Math.min(lines.length, 12) }] : [];
+    const first = lines[0];
+    if (!first) return [];
+    const bounds = hunkBounds.get(first.hunkIndex);
+    return bounds
+      ? [
+          {
+            start: bounds.start,
+            end: Math.min(bounds.end, bounds.start + 12),
+            hunkIndex: first.hunkIndex,
+          },
+        ]
+      : [];
   }
 
   const ranges: PatchRange[] = [];
   for (const index of changedIndexes) {
-    const start = Math.max(0, index - DIFF_CONTEXT_LINES);
-    const end = Math.min(lines.length, index + DIFF_CONTEXT_LINES + 1);
+    const line = lines[index];
+    const bounds = hunkBounds.get(line.hunkIndex) ?? { start: 0, end: lines.length };
+    const start = Math.max(bounds.start, index - DIFF_CONTEXT_LINES);
+    const end = Math.min(bounds.end, index + DIFF_CONTEXT_LINES + 1);
     const last = ranges[ranges.length - 1];
 
-    if (last && start <= last.end) {
+    if (last && last.hunkIndex === line.hunkIndex && start <= last.end) {
       last.end = Math.max(last.end, end);
     } else {
-      ranges.push({ start, end });
+      ranges.push({ start, end, hunkIndex: line.hunkIndex });
     }
   }
 
@@ -634,6 +670,48 @@ function patchLineToText(line: PatchLine): string {
 function formatPatchRange(start: number, lineCount: number): string {
   if (lineCount === 0) return `${Math.max(0, start - 1)},0`;
   return lineCount === 1 ? `${start}` : `${start},${lineCount}`;
+}
+
+interface ParsedHunkRange {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+}
+
+function parseHunkRange(heading: string): ParsedHunkRange | null {
+  const match = heading.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+  if (!match) return null;
+  const oldStart = Number(match[1]);
+  const oldCount = match[2] == null ? 1 : Number(match[2]);
+  const newStart = Number(match[3]);
+  const newCount = match[4] == null ? 1 : Number(match[4]);
+  if (
+    !Number.isFinite(oldStart) ||
+    !Number.isFinite(oldCount) ||
+    !Number.isFinite(newStart) ||
+    !Number.isFinite(newCount)
+  ) {
+    return null;
+  }
+  return { oldStart, oldCount, newStart, newCount };
+}
+
+function lineCursorStart(start: number, count: number): number {
+  return count === 0 ? start + 1 : start;
+}
+
+function patchLineHunkBounds(lines: PatchLine[]): Map<number, { start: number; end: number }> {
+  const bounds = new Map<number, { start: number; end: number }>();
+  lines.forEach((line, index) => {
+    const existing = bounds.get(line.hunkIndex);
+    if (existing) {
+      existing.end = index + 1;
+    } else {
+      bounds.set(line.hunkIndex, { start: index, end: index + 1 });
+    }
+  });
+  return bounds;
 }
 
 function normalizePatchPath(path: string): string {
@@ -1277,6 +1355,7 @@ function getTrackedDiffPaths(tool: ToolInvocation, commandEditPaths: string[] = 
   return uniqueStrings([
     ...commandEditPaths,
     ...tool.diff_paths,
+    ...diffPreviewsFromRawOutput(tool.raw_output).map((preview) => preview.path),
     ...(rawInputFilePath(tool) ? [rawInputFilePath(tool)!] : []),
     ...(pathFromToolLogs(tool) ? [pathFromToolLogs(tool)!] : []),
   ]);
@@ -1297,11 +1376,17 @@ function getTrackedDiffPreviews(tool: ToolInvocation, commandEditPaths: string[]
   }
   if (previews.length > 0) return previews;
   const inputPreview = diffPreviewFromRawInput(tool);
-  return inputPreview ? [inputPreview] : [];
+  if (inputPreview) return [inputPreview];
+  return diffPreviewsFromRawOutput(tool.raw_output);
 }
 
 function getCommandMutationDiffPaths(tool: ToolInvocation, command: string | null): string[] {
   if (!command) return [];
+  const applyPatchPaths = pathsFromApplyPatchCommand(command);
+  if (applyPatchPaths.length > 0) {
+    return applyPatchPaths;
+  }
+
   const writePaths = commandWritePaths(command);
   if (writePaths.length > 0) {
     return writePaths.map(displayPath);
@@ -1319,6 +1404,147 @@ function getCommandMutationDiffPaths(tool: ToolInvocation, command: string | nul
   return changedPaths.filter((changedPath) =>
     pathspecs.some((pathspec) => sameOrNestedPath(pathspec, changedPath)),
   );
+}
+
+function pathsFromApplyPatchCommand(command: string): string[] {
+  return diffPreviewsFromApplyPatchCommand(command).map((preview) => displayPath(preview.path));
+}
+
+function diffPreviewsFromApplyPatchCommand(command: string | null): ToolDiffPreview[] {
+  const patch = extractApplyPatchText(command);
+  if (!patch) return [];
+  return diffPreviewsFromApplyPatchText(patch);
+}
+
+function extractApplyPatchText(command: string | null): string | null {
+  if (!command || !command.includes("apply_patch")) return null;
+  const start = command.indexOf("*** Begin Patch");
+  if (start < 0) return null;
+  const endMarker = "*** End Patch";
+  const end = command.indexOf(endMarker, start);
+  if (end < 0) return null;
+  return command.slice(start, end + endMarker.length);
+}
+
+function diffPreviewsFromApplyPatchText(patch: string): ToolDiffPreview[] {
+  const lines = patch.replace(/\r\n/g, "\n").split("\n");
+  const previews: ToolDiffPreview[] = [];
+  let current: ToolDiffPreview | null = null;
+  let currentHunk: DiffHunk | null = null;
+  let addedFileLines: DiffHunk["lines"] | null = null;
+
+  const flushAddedFile = () => {
+    if (!current || !addedFileLines) return;
+    current.hunks.push({
+      heading: `@@ -0,0 +1,${Math.max(addedFileLines.length, 1)} @@`,
+      lines: addedFileLines,
+    });
+    addedFileLines = null;
+  };
+  const startFile = (path: string) => {
+    flushAddedFile();
+    const preview: ToolDiffPreview = { path: displayPath(path), hunks: [] };
+    current = preview;
+    previews.push(preview);
+    currentHunk = null;
+    return preview;
+  };
+
+  for (const line of lines) {
+    const fileMatch = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+    if (fileMatch) {
+      const activePreview = startFile(fileMatch[1]);
+      addedFileLines = line.includes("*** Add File:") ? [] : null;
+      if (line.includes("*** Delete File:")) {
+        activePreview.hunks.push({
+          heading: "@@ -1 +0,0 @@",
+          lines: [{ kind: "Removed", content: "[file deleted]" }],
+        });
+      }
+      continue;
+    }
+
+    if (!current || line.startsWith("*** Begin Patch") || line.startsWith("*** End Patch")) {
+      continue;
+    }
+    const activePreview = current as ToolDiffPreview;
+
+    if (addedFileLines) {
+      if (line.startsWith("+")) {
+        addedFileLines.push({ kind: "Added", content: line.slice(1) });
+      }
+      continue;
+    }
+
+    if (line.startsWith("@@")) {
+      currentHunk = { heading: line, lines: [] };
+      activePreview.hunks.push(currentHunk);
+      continue;
+    }
+
+    if (!currentHunk) {
+      currentHunk = { heading: "@@", lines: [] };
+      activePreview.hunks.push(currentHunk);
+    }
+
+    if (line.startsWith("+")) {
+      currentHunk.lines.push({ kind: "Added", content: line.slice(1) });
+    } else if (line.startsWith("-")) {
+      currentHunk.lines.push({ kind: "Removed", content: line.slice(1) });
+    } else if (line.startsWith(" ")) {
+      currentHunk.lines.push({ kind: "Context", content: line.slice(1) });
+    }
+  }
+
+  flushAddedFile();
+  return previews.filter((preview) => preview.hunks.some((hunk) => hunk.lines.length > 0));
+}
+
+function diffPreviewsFromRawOutput(rawOutput: string | null | undefined): ToolDiffPreview[] {
+  if (!rawOutput) return [];
+  const parsed = parseJsonValue(rawOutput);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+  const changes = (parsed as Record<string, unknown>).changes;
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) return [];
+
+  return Object.entries(changes as Record<string, unknown>)
+    .map(([path, change]) => {
+      if (!change || typeof change !== "object" || Array.isArray(change)) return null;
+      const unifiedDiff = stringField(change, "unified_diff", "unifiedDiff", "diff");
+      if (!unifiedDiff) return null;
+      const preview = diffPreviewFromUnifiedDiff(path, unifiedDiff);
+      return preview.hunks.length > 0 ? preview : null;
+    })
+    .filter((preview): preview is ToolDiffPreview => preview != null);
+}
+
+function diffPreviewFromUnifiedDiff(path: string, unifiedDiff: string): ToolDiffPreview {
+  const preview: ToolDiffPreview = { path: displayPath(path), hunks: [] };
+  let currentHunk: DiffHunk | null = null;
+
+  for (const line of unifiedDiff.replace(/\r\n/g, "\n").split("\n")) {
+    if (line.startsWith("diff --git ")) continue;
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) continue;
+    if (line.startsWith("\\ No newline")) continue;
+
+    if (line.startsWith("@@")) {
+      currentHunk = { heading: line, lines: [] };
+      preview.hunks.push(currentHunk);
+      continue;
+    }
+    if (!currentHunk) continue;
+
+    if (line.startsWith("+")) {
+      currentHunk.lines.push({ kind: "Added", content: line.slice(1) });
+    } else if (line.startsWith("-")) {
+      currentHunk.lines.push({ kind: "Removed", content: line.slice(1) });
+    } else if (line.startsWith(" ")) {
+      currentHunk.lines.push({ kind: "Context", content: line.slice(1) });
+    }
+  }
+
+  preview.hunks = preview.hunks.filter((hunk) => hunk.lines.length > 0);
+  return preview;
 }
 
 function commandWritePaths(command: string): string[] {
@@ -1881,6 +2107,7 @@ function getRawOutputLines(tool: ToolInvocation): {
 
   // Skip vague/unhelpful outputs
   if (isVagueError(raw)) return { lines: [], omitted: 0 };
+  if (diffPreviewsFromRawOutput(raw).length > 0) return { lines: [], omitted: 0 };
   // Skip outputs that just repeat the summary
   if (raw === tool.summary) return { lines: [], omitted: 0 };
   // Skip very short outputs that add no value (like "Completed", "OK")
