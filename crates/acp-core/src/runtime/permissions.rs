@@ -180,6 +180,9 @@ fn decide_build_permission(
 ) -> PermissionDecision {
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::SwitchMode => PermissionDecision::Ask,
+        ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
+            select_permission_option(request, false)
+        }
         ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
             let paths = permission_paths(request);
             if paths_are_inside_workspace(workspace_root, &paths) {
@@ -262,6 +265,158 @@ fn is_markdown_path(path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
+fn request_has_direct_shell_file_mutation(request: &RequestPermissionRequest) -> bool {
+    let mut commands = Vec::new();
+    if let Some(raw_input) = &request.tool_call.fields.raw_input {
+        collect_shell_commands(raw_input, &mut commands);
+    }
+    if let Some(title) = &request.tool_call.fields.title {
+        let title = title.trim();
+        if !title.is_empty() {
+            commands.push(title.to_string());
+        }
+    }
+    commands
+        .iter()
+        .any(|command| shell_command_directly_mutates_files(command))
+}
+
+fn collect_shell_commands(value: &serde_json::Value, commands: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(command) => {
+            if !command.trim().is_empty() {
+                commands.push(command.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                commands.push(parts.join(" "));
+            }
+            for item in items {
+                collect_shell_commands(item, commands);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["command", "cmd", "shell_command", "command_line", "args"] {
+                if let Some(value) = object.get(key) {
+                    collect_shell_commands(value, commands);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shell_command_directly_mutates_files(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    if contains_command_token(&lower, "apply_patch") {
+        return false;
+    }
+    shell_redirection_writes_file(command)
+        || contains_command_token(&lower, "tee")
+        || contains_command_token(&lower, "truncate")
+        || contains_command_token(&lower, "touch")
+        || contains_command_token(&lower, "rm")
+        || contains_command_token(&lower, "mv")
+        || contains_command_token(&lower, "cp")
+        || contains_command_token(&lower, "set-content")
+        || contains_command_token(&lower, "add-content")
+        || contains_command_token(&lower, "out-file")
+        || contains_command_token(&lower, "remove-item")
+        || contains_command_token(&lower, "move-item")
+        || contains_command_token(&lower, "copy-item")
+        || (contains_command_token(&lower, "new-item")
+            && lower.contains("-itemtype")
+            && lower.contains("file"))
+        || (contains_command_token(&lower, "sed") && lower.contains(" -i"))
+        || (contains_command_token(&lower, "perl") && lower.contains(" -pi"))
+}
+
+fn contains_command_token(text: &str, token: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = text[offset..].find(token) {
+        let index = offset + index;
+        let before = text[..index].chars().next_back();
+        let after = text[index + token.len()..].chars().next();
+        if !before.is_some_and(is_command_word_char) && !after.is_some_and(is_command_word_char) {
+            return true;
+        }
+        offset = index + token.len();
+    }
+    false
+}
+
+fn is_command_word_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, '_' | '-')
+}
+
+fn shell_redirection_writes_file(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'>' {
+            index += 1;
+            continue;
+        }
+        if index > 0 && bytes[index - 1].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let mut target_start = index + 1;
+        if target_start < bytes.len() && bytes[target_start] == b'>' {
+            target_start += 1;
+        }
+        if let Some(target) = shell_redirection_target(command, target_start)
+            && !is_null_redirection_target(&target)
+            && !target.starts_with('&')
+        {
+            return true;
+        }
+        index = target_start;
+    }
+    false
+}
+
+fn shell_redirection_target(command: &str, start: usize) -> Option<String> {
+    let mut index = start;
+    let chars = command.as_bytes();
+    while index < chars.len() && chars[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+
+    let quote = chars[index];
+    if quote == b'\'' || quote == b'"' {
+        let mut end = index + 1;
+        while end < chars.len() && chars[end] != quote {
+            end += 1;
+        }
+        return Some(command[index + 1..end].trim().to_string());
+    }
+
+    let mut end = index;
+    while end < chars.len()
+        && !chars[end].is_ascii_whitespace()
+        && !matches!(chars[end], b';' | b'|')
+    {
+        end += 1;
+    }
+    Some(command[index..end].trim().to_string()).filter(|target| !target.is_empty())
+}
+
+fn is_null_redirection_target(target: &str) -> bool {
+    matches!(
+        target.trim().to_ascii_lowercase().as_str(),
+        "/dev/null" | "$null" | "nul" | "null"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +424,7 @@ mod tests {
         PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId,
         ToolCallUpdate, ToolCallUpdateFields,
     };
+    use serde_json::json;
 
     fn switch_mode_request() -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -286,6 +442,23 @@ mod tests {
         )
     }
 
+    fn execute_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "shell",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .title("Shell".to_string())
+                    .raw_input(raw_input),
+            ),
+            vec![
+                PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+            ],
+        )
+    }
+
     #[test]
     fn switch_mode_permission_is_always_interactive() {
         let request = switch_mode_request();
@@ -297,6 +470,51 @@ mod tests {
         assert_eq!(
             decide_permission(PermissionPolicyMode::Plan, "D:/work/repo", &request),
             PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn build_permission_rejects_shell_redirection_file_writes() {
+        let request = execute_request(json!({
+            "command": "cat > AGENTS.md << 'ENDOFFILE'\n# Guidelines\nENDOFFILE"
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Select("reject".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_permission_rejects_powershell_file_writes() {
+        let request = execute_request(json!({
+            "command": [
+                "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "-Command",
+                "Set-Content -Path AGENTS.md -Value '# Guidelines'"
+            ]
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Select("reject".to_string()),
+        );
+    }
+
+    #[test]
+    fn build_permission_allows_shell_reads_and_apply_patch_wrappers() {
+        let read_request = execute_request(json!({ "command": "rg -n \"TODO\" src 2>/dev/null" }));
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &read_request),
+            PermissionDecision::Select("allow".to_string()),
+        );
+
+        let patch_request = execute_request(json!({
+            "command": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\nPATCH"
+        }));
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &patch_request),
+            PermissionDecision::Select("allow".to_string()),
         );
     }
 }

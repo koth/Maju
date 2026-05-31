@@ -7,6 +7,7 @@ const CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "resources/claude-agent-acp";
 
 fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=tauri.release.conf.json");
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/icon.icns");
     println!("cargo:rerun-if-changed=icons/32x32.png");

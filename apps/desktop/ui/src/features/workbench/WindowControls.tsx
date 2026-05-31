@@ -1,7 +1,10 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isMacOS } from "../../lib/platform";
 import "./WindowControls.css";
 
 export function WindowControls() {
+  if (isMacOS()) return null;
+
   const appWindow = getCurrentWindow();
 
   return (

@@ -1,7 +1,9 @@
 .diff-tab {
   display: flex;
+  flex: 1;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
 }
 
 .dt-header {
@@ -15,10 +17,23 @@
   flex-shrink: 0;
 }
 
+.diff-tab.is-breadcrumb-toolbar .dt-header {
+  min-height: 44px;
+  height: 44px;
+  gap: 12px;
+  padding: 0 10px 0 14px;
+  background: var(--app-bg);
+  border-bottom-color: var(--border-subtle);
+  color: var(--text-muted);
+  font-family: var(--font-chat);
+}
+
 .dt-header-left {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 .dt-file-name {
@@ -53,9 +68,88 @@
 }
 
 .dt-header-right {
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.dt-breadcrumbs {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.dt-breadcrumb-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.dt-breadcrumb-item:not(.is-current) {
+  color: var(--text-muted);
+}
+
+.dt-breadcrumb-item.is-current {
+  min-width: 0;
+  flex-shrink: 1;
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.dt-breadcrumb-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dt-breadcrumb-separator {
+  color: var(--text-soft);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.dt-icon-btn {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.dt-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.dt-icon-btn:hover,
+.dt-icon-btn.is-active {
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 .dt-mode-btn {
@@ -103,8 +197,14 @@
 }
 
 .dt-editor {
+  position: relative;
   flex: 1;
   overflow: hidden;
+}
+
+.dt-editor .monaco-editor .scroll-decoration,
+.dt-editor .monaco-diff-editor .scroll-decoration {
+  box-shadow: none !important;
 }
 
 .dt-editor .monaco-diff-editor .line-insert,

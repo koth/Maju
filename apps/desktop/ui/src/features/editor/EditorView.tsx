@@ -38,6 +38,9 @@ interface Props {
   searchQuery?: string;
   navToken?: number;
   appTheme: AppTheme;
+  toolbarMode?: "default" | "breadcrumbs";
+  workspaceName?: string;
+  fileTreeVisible?: boolean;
   onDirtyChange?: (path: string, dirty: boolean) => void;
   onSaved?: () => void;
   onAddComposerReference?: (request: {
@@ -45,6 +48,7 @@ interface Props {
     startLine: number;
     endLine: number;
   }) => void;
+  onToggleFileTree?: () => void;
 }
 
 export function EditorView({
@@ -53,9 +57,13 @@ export function EditorView({
   searchQuery,
   navToken,
   appTheme,
+  toolbarMode = "default",
+  workspaceName,
+  fileTreeVisible = false,
   onDirtyChange,
   onSaved,
   onAddComposerReference,
+  onToggleFileTree,
 }: Props) {
   const [snapshot, setSnapshot] = useState<EditorFileSnapshot | null>(null);
   const [content, setContent] = useState<string>("");
@@ -66,15 +74,10 @@ export function EditorView({
   const [lspStatus, setLspStatus] = useState<LspServerStatus | null>(null);
   const [sourceMode, setSourceMode] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [selectionReference, setSelectionReference] = useState<{
-    startLine: number;
-    endLine: number;
-  } | null>(null);
   const editorRef = useRef<monacoEditor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const prevPathRef = useRef<string | null>(null);
   const decorationsRef = useRef<monacoEditor.IEditorDecorationsCollection | null>(null);
-  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const composerReferenceActionRef = useRef<{ dispose: () => void } | null>(null);
   const lspChangeTimerRef = useRef<number | null>(null);
   const editorDisposedRef = useRef(false);
@@ -109,6 +112,7 @@ export function EditorView({
   const isImageFile = fileKind === "image";
   const isRenderableDocument = isTextFile && (language === "markdown" || language === "html");
   const isSourceMode = isTextFile && (!isRenderableDocument || sourceMode);
+  const useBreadcrumbToolbar = toolbarMode === "breadcrumbs";
 
   const addCurrentSelectionToComposer = useCallback(() => {
     const editor = editorRef.current;
@@ -220,10 +224,6 @@ export function EditorView({
   }, [activeSnapshot, isSourceMode, language, path]);
 
   useEffect(() => {
-    setSelectionReference(null);
-  }, [path, isSourceMode]);
-
-  useEffect(() => {
     if (!lspStatus?.running) return;
     const updateMarkers = async () => {
       const diagnostics = await editorLspGetDiagnostics(path, language).catch(() => []);
@@ -293,23 +293,10 @@ export function EditorView({
         if (editorRef.current === editor) {
           editorRef.current = null;
         }
-        selectionDisposableRef.current?.dispose();
-        selectionDisposableRef.current = null;
         composerReferenceActionRef.current?.dispose();
         composerReferenceActionRef.current = null;
         editorDisposedRef.current = true;
       });
-      selectionDisposableRef.current?.dispose();
-      const updateSelectionReference = () => {
-        const selection = editor.getSelection();
-        const range = selection ? selectionLineRange(selection) : null;
-        if (!range) {
-          setSelectionReference(null);
-          return;
-        }
-        setSelectionReference(range);
-      };
-      selectionDisposableRef.current = editor.onDidChangeCursorSelection(updateSelectionReference);
       composerReferenceActionRef.current?.dispose();
       composerReferenceActionRef.current = null;
       if (onAddComposerReferenceRef.current) {
@@ -327,7 +314,6 @@ export function EditorView({
       const model = getOrCreateModel(monacoInstance, path, content);
       updateModelBaseVersion(path, activeSnapshot?.version);
       safeSetEditorModel(model);
-      updateSelectionReference();
 
       // Only restore previous view state if we don't have a specific line to jump to
       if (!lineNumber) {
@@ -520,9 +506,13 @@ export function EditorView({
   }, [fullscreen]);
 
   useEffect(() => {
+    if (useBreadcrumbToolbar) {
+      setFullscreen(false);
+    }
+  }, [useBreadcrumbToolbar]);
+
+  useEffect(() => {
     return () => {
-      selectionDisposableRef.current?.dispose();
-      selectionDisposableRef.current = null;
       composerReferenceActionRef.current?.dispose();
       composerReferenceActionRef.current = null;
     };
@@ -537,14 +527,18 @@ export function EditorView({
   }
 
   return (
-    <div className={`editor-view ${fullscreen ? "is-fullscreen" : ""}`}>
+    <div className={`editor-view ${fullscreen ? "is-fullscreen" : ""} ${useBreadcrumbToolbar ? "is-breadcrumb-toolbar" : ""}`}>
       <div className="editor-toolbar">
         <div className="editor-toolbar-main">
           {fullscreen && <span className="editor-fullscreen-mode">全屏编辑</span>}
-          <span className="editor-toolbar-path" title={activeSnapshot.path}>{activeSnapshot.path}</span>
+          {useBreadcrumbToolbar ? (
+            <EditorBreadcrumbs path={activeSnapshot.path} workspaceName={workspaceName} />
+          ) : (
+            <span className="editor-toolbar-path" title={activeSnapshot.path}>{activeSnapshot.path}</span>
+          )}
           {saving && <span className="editor-muted-pill">保存中...</span>}
-          {isSourceMode && lspStatus?.running && <span className="editor-muted-pill">LSP 已连接</span>}
-          {isSourceMode && !lspStatus?.running && lspStatus?.configured && lspStatus?.enabled && lspStatus?.message && (
+          {!useBreadcrumbToolbar && isSourceMode && lspStatus?.running && <span className="editor-muted-pill">LSP 已连接</span>}
+          {!useBreadcrumbToolbar && isSourceMode && !lspStatus?.running && lspStatus?.configured && lspStatus?.enabled && lspStatus?.message && (
             <button
               type="button"
               className="editor-muted-pill editor-lsp-settings-btn"
@@ -566,51 +560,57 @@ export function EditorView({
               预览
             </button>
           )}
-          {isSourceMode && onAddComposerReference && (
-            <button
-              type="button"
-              className="editor-action-btn editor-reference-btn"
-              disabled={!selectionReference}
-              title={
-                selectionReference
-                  ? `引用第 ${selectionReference.startLine}-${selectionReference.endLine} 行`
-                  : "选中代码行后添加到 Composer 引用"
-              }
-              onClick={() => {
-                if (!selectionReference) return;
-                addCurrentSelectionToComposer();
-              }}
-            >
-              引用选区
-            </button>
-          )}
           {isSourceMode && (
             <>
               {conflict && <span className="editor-conflict-text">磁盘内容已变化</span>}
             </>
           )}
-          <button
-            type="button"
-            className={
-              fullscreen
-                ? "editor-action-btn editor-exit-fullscreen-btn"
-                : "editor-action-btn editor-icon-btn editor-fullscreen-btn"
-            }
-            title={fullscreen ? "退出全屏 (Esc)" : "全屏编辑"}
-            aria-label={fullscreen ? "退出全屏" : "全屏编辑"}
-            aria-keyshortcuts={fullscreen ? "Escape" : undefined}
-            onClick={() => setFullscreen((value) => !value)}
-          >
-            {fullscreen ? (
-              <>
-                <span aria-hidden="true" className="editor-fullscreen-symbol">⤡</span>
-                <span>退出全屏</span>
-                <span className="editor-fullscreen-shortcut">Esc</span>
-              </>
-            ) : (
-              <span aria-hidden="true">⛶</span>
-            )}
-          </button>
+          {useBreadcrumbToolbar && (
+            <button
+              type="button"
+              className="editor-action-btn editor-icon-btn editor-more-btn"
+              title="更多操作"
+              aria-label="更多操作"
+            >
+              <span aria-hidden="true">...</span>
+            </button>
+          )}
+          {onToggleFileTree && (
+            <button
+              type="button"
+              className={`editor-action-btn editor-icon-btn editor-filetree-toggle ${fileTreeVisible ? "is-active" : ""}`}
+              title={fileTreeVisible ? "隐藏文件树" : "显示文件树"}
+              aria-label={fileTreeVisible ? "隐藏文件树" : "显示文件树"}
+              aria-pressed={fileTreeVisible}
+              onClick={onToggleFileTree}
+            >
+              <FolderPanelIcon />
+            </button>
+          )}
+          {!useBreadcrumbToolbar && (
+            <button
+              type="button"
+              className={
+                fullscreen
+                  ? "editor-action-btn editor-exit-fullscreen-btn"
+                  : "editor-action-btn editor-icon-btn editor-fullscreen-btn"
+              }
+              title={fullscreen ? "退出全屏 (Esc)" : "全屏编辑"}
+              aria-label={fullscreen ? "退出全屏" : "全屏编辑"}
+              aria-keyshortcuts={fullscreen ? "Escape" : undefined}
+              onClick={() => setFullscreen((value) => !value)}
+            >
+              {fullscreen ? (
+                <>
+                  <span aria-hidden="true" className="editor-fullscreen-symbol">⤡</span>
+                  <span>退出全屏</span>
+                  <span className="editor-fullscreen-shortcut">Esc</span>
+                </>
+              ) : (
+                <span aria-hidden="true">⛶</span>
+              )}
+            </button>
+          )}
         </div>
       </div>
       {conflict && <div className="editor-conflict-banner">{conflict}</div>}
@@ -651,13 +651,52 @@ export function EditorView({
               bracketPairColorization: { enabled: false },
               smoothScrolling: true,
               cursorBlinking: "smooth",
-              padding: { top: 12, bottom: 12 },
+              padding: { top: useBreadcrumbToolbar ? 18 : 12, bottom: 12 },
               automaticLayout: true,
             }}
           />
         </Suspense>
       )}
     </div>
+  );
+}
+
+function EditorBreadcrumbs({
+  path,
+  workspaceName,
+}: {
+  path: string;
+  workspaceName?: string;
+}) {
+  const segments = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  const rootLabel = workspaceName?.trim() || "workspace";
+  const items = [rootLabel, ...segments];
+
+  return (
+    <nav className="editor-breadcrumbs" aria-label="文件路径" title={path}>
+      {items.map((item, index) => {
+        const isLast = index === items.length - 1;
+        return (
+          <span
+            key={`${item}-${index}`}
+            className={`editor-breadcrumb-item ${isLast ? "is-current" : ""}`}
+          >
+            <span className="editor-breadcrumb-label">{item}</span>
+            {!isLast && <span className="editor-breadcrumb-separator" aria-hidden="true">›</span>}
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
+
+function FolderPanelIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.8 5.8c0-.9.7-1.6 1.6-1.6h3.4l1.4 1.5h6.4c.9 0 1.6.7 1.6 1.6v7c0 .9-.7 1.6-1.6 1.6H4.4c-.9 0-1.6-.7-1.6-1.6V5.8Z" />
+      <path d="M2.8 7.6h14.4" />
+      <path d="M13.2 9.4v4.7" />
+    </svg>
   );
 }
 

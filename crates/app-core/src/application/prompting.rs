@@ -29,7 +29,7 @@ impl Application {
 
     pub fn send_prompt_content_background(
         &mut self,
-        prompt: Vec<UserPromptContent>,
+        mut prompt: Vec<UserPromptContent>,
     ) -> anyhow::Result<()> {
         if self.in_flight_prompt.is_some() {
             let error = anyhow::anyhow!("提示请求已在运行中");
@@ -37,13 +37,6 @@ impl Application {
             return Err(error);
         }
 
-        let display_body = prompt_display_body(&prompt);
-        let title_source = prompt_text(&prompt).unwrap_or_else(|| "图片提示".into());
-        if display_body.is_empty() {
-            let error = anyhow::anyhow!("提示内容不能为空");
-            self.push_system_message(error.to_string());
-            return Err(error);
-        }
         if prompt_has_image(&prompt) && !self.ui.prompt_capabilities.image {
             let error = anyhow::anyhow!("当前智能体不支持图片提示");
             self.push_system_message(error.to_string());
@@ -51,6 +44,20 @@ impl Application {
         }
         if prompt_has_file(&prompt) && !self.ui.prompt_capabilities.embedded_context {
             let error = anyhow::anyhow!("当前智能体不支持文件附件");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+
+        if prompt_has_image(&prompt) {
+            let _ = crate::attachment_cache::cache_prompt_images(
+                &mut prompt,
+                &self.app_paths.attachments_dir(),
+            );
+        }
+        let display_body = prompt_display_body(&prompt);
+        let title_source = prompt_text(&prompt).unwrap_or_else(|| "图片提示".into());
+        if display_body.is_empty() {
+            let error = anyhow::anyhow!("提示内容不能为空");
             self.push_system_message(error.to_string());
             return Err(error);
         }
@@ -122,6 +129,12 @@ impl Application {
     }
 
     pub fn poll_prompt_progress(&mut self) {
+        self.poll_current_runtime_progress();
+        self.poll_background_runtimes();
+        self.retire_idle_background_runtimes();
+    }
+
+    pub(super) fn poll_current_runtime_progress(&mut self) {
         // Detect subprocess crash even when no prompt is in flight
         if self.in_flight_prompt.is_none()
             && !self.session.is_alive()
@@ -400,6 +413,77 @@ impl Application {
 
         if ui_changed || had_file_changes {
             self.bump_revision();
+        }
+    }
+
+    fn poll_background_runtimes(&mut self) {
+        let runtime_ids = self
+            .runtime_registry
+            .entries
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for runtime_id in runtime_ids {
+            let Some(mut runtime) = self.runtime_registry.remove(&runtime_id) else {
+                continue;
+            };
+            let was_in_flight = runtime.is_in_flight();
+            let previous_attention = runtime.attention_state.clone();
+            let previous_idle_since = runtime.idle_since;
+            let last_viewed = runtime.last_viewed;
+
+            self.swap_visible_state_with_runtime(&mut runtime);
+            self.poll_current_runtime_progress();
+            let still_in_flight = self.in_flight_prompt.is_some();
+            let needs_attention = self.runtime_needs_attention();
+            self.swap_visible_state_with_runtime(&mut runtime);
+
+            runtime.last_viewed = last_viewed;
+            if still_in_flight {
+                runtime.runtime_status = SessionRuntimeStatus::BackgroundRunning;
+                runtime.idle_since = None;
+            } else {
+                runtime.runtime_status = SessionRuntimeStatus::BackgroundIdle;
+                runtime.idle_since = previous_idle_since.or_else(|| Some(self.runtime_now()));
+            }
+
+            runtime.attention_state = if needs_attention {
+                SessionAttentionState::NeedsAttention
+            } else if was_in_flight
+                && !still_in_flight
+                && matches!(previous_attention, SessionAttentionState::None)
+            {
+                SessionAttentionState::CompletedUnviewed
+            } else {
+                previous_attention
+            };
+            self.runtime_registry.insert(runtime);
+        }
+    }
+
+    fn retire_idle_background_runtimes(&mut self) {
+        let now = self.runtime_now();
+        let retire_ids = self
+            .runtime_registry
+            .entries
+            .iter()
+            .filter_map(|(id, runtime)| {
+                let idle_for = runtime
+                    .idle_since
+                    .and_then(|idle_since| now.checked_duration_since(idle_since))?;
+                (!runtime.is_in_flight() && idle_for >= BACKGROUND_RUNTIME_IDLE_GRACE)
+                    .then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for runtime_id in retire_ids {
+            if let Some(mut runtime) = self.runtime_registry.remove(&runtime_id) {
+                let attention = runtime.attention_state.clone();
+                runtime.session.shutdown();
+                self.runtime_registry
+                    .retain_attention_after_retirement(runtime_id, attention);
+            }
         }
     }
 

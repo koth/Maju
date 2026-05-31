@@ -1,9 +1,10 @@
 use agent_client_protocol::schema::{
-    AgentCapabilities, ContentChunk, Diff, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, LoadSessionResponse, ModelInfo, NewSessionRequest, NewSessionResponse,
-    Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptCapabilities, PromptRequest,
-    PromptResponse, SessionModelState, SetSessionModelRequest, SetSessionModelResponse, StopReason,
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, ContentChunk, Diff,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
+    NewSessionRequest, NewSessionResponse, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    PromptCapabilities, PromptRequest, PromptResponse, SessionModelState, SetSessionModelRequest,
+    SetSessionModelResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Result};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_: NewSessionRequest, responder, _connection| {
+            async move |_: NewSessionRequest, responder, connection: ConnectionTo<Client>| {
                 responder.respond(NewSessionResponse::new("mock-session").models(
                     SessionModelState::new(
                         "mock-fast",
@@ -58,7 +59,19 @@ async fn main() -> Result<()> {
                             ModelInfo::new("mock-smart", "Mock Smart"),
                         ],
                     ),
-                ))
+                ))?;
+
+                connection.send_notification(
+                    agent_client_protocol::schema::SessionNotification::new(
+                        "mock-session",
+                        agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(
+                            AvailableCommandsUpdate::new(vec![AvailableCommand::new(
+                                "mock",
+                                "Mock startup slash command",
+                            )]),
+                        ),
+                    ),
+                )
             },
             agent_client_protocol::on_receive_request!(),
         )

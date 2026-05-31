@@ -9,6 +9,7 @@ import {
   shouldShowAgentPlanNearComposer,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
+import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
 import { WelcomeLauncher } from "./WelcomeLauncher";
@@ -24,6 +25,7 @@ import { useWorkbenchSnapshot } from "./useWorkbenchSnapshot";
 import { useWorkbenchGit } from "./useWorkbenchGit";
 import { useTimelineChangeSets } from "./useTimelineChangeSets";
 import { useWorkbenchTabs } from "./useWorkbenchTabs";
+import { useLeftSidebarState } from "./useLeftSidebarState";
 import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
 import {
@@ -31,6 +33,11 @@ import {
   reviewableTurnChangeSetSignature,
 } from "./autoReview";
 import "./Workbench.css";
+
+const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
+  kind: "base",
+  tab: "Review",
+};
 
 export function Workbench() {
   const {
@@ -97,6 +104,12 @@ export function Workbench() {
   const reviewFocusSeqRef = useRef(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
+    leftSidebarWidth,
+    leftSidebarStyle,
+    clampStoredLeftSidebarWidth,
+    handleLeftSidebarResizeStart,
+  } = useLeftSidebarState();
+  const {
     rightPanelCollapsed,
     setRightPanelCollapsed,
     rightPanelWidth,
@@ -104,6 +117,12 @@ export function Workbench() {
     clampStoredRightPanelWidth,
     handleRightPanelResizeStart,
   } = useRightPanelState();
+  const [reviewPanelExpanded, setReviewPanelExpanded] = useState(false);
+  const [expandedReviewSideTreeVisible, setExpandedReviewSideTreeVisible] = useState(false);
+  const [reviewPanelActiveTab, setReviewPanelActiveTab] = useState<ReviewPanelActiveTab>(
+    INITIAL_REVIEW_PANEL_ACTIVE_TAB,
+  );
+  const [reviewPanelOpenTabs, setReviewPanelOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
   const {
     terminalDockVisible,
     terminalDockMounted,
@@ -132,6 +151,12 @@ export function Workbench() {
     setSettingsInitialAgentTab(null);
   }, []);
 
+  const resetReviewPanelTabs = useCallback(() => {
+    setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
+    setReviewPanelOpenTabs([]);
+    setExpandedReviewSideTreeVisible(false);
+  }, []);
+
   useEffect(() => {
     settingsGetAgentSnapshot()
       .then((snapshot) => setAppTheme(applyAppTheme(snapshot.settings.theme)))
@@ -139,9 +164,13 @@ export function Workbench() {
   }, []);
 
   useEffect(() => {
-    window.addEventListener("resize", clampStoredRightPanelWidth);
-    return () => window.removeEventListener("resize", clampStoredRightPanelWidth);
-  }, [clampStoredRightPanelWidth]);
+    const handleResize = () => {
+      clampStoredLeftSidebarWidth();
+      clampStoredRightPanelWidth();
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [clampStoredLeftSidebarWidth, clampStoredRightPanelWidth]);
 
   useEffect(() => {
     const handleOpenSettingsEvent = () => handleOpenSettings();
@@ -156,8 +185,10 @@ export function Workbench() {
     setComposerReferenceRequests([]);
     resetGitHydration();
     resetTabs();
+    resetReviewPanelTabs();
     setRightPanelCollapsed(false);
-  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetTabs]);
+    setReviewPanelExpanded(false);
+  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handleWorkspaceChanged = useCallback((nextSnapshot: UiSnapshot) => {
     acceptSnapshot(nextSnapshot);
@@ -165,9 +196,11 @@ export function Workbench() {
     setComposerReferenceRequests([]);
     resetGitHydration();
     resetTabs();
+    resetReviewPanelTabs();
     setSidebarCollapsed(false);
     setRightPanelCollapsed(false);
-  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetTabs]);
+    setReviewPanelExpanded(false);
+  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null) => {
     await sessionResolvePermission(requestId, optionId);
@@ -180,12 +213,31 @@ export function Workbench() {
     setComposerReferenceRequests([]);
     resetGitHydration();
     resetTabs();
+    resetReviewPanelTabs();
+    setReviewPanelExpanded(false);
     pollState();
-  }, [clearChangeSets, clearSnapshot, pollState, resetGitHydration, resetTabs]);
+  }, [clearChangeSets, clearSnapshot, pollState, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handleToggleThreads = useCallback(() => {
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
+
+  const handleToggleRightPanel = useCallback(() => {
+    setRightPanelCollapsed((collapsed) => {
+      if (!collapsed) {
+        setReviewPanelExpanded(false);
+      }
+      return !collapsed;
+    });
+  }, [setRightPanelCollapsed]);
+
+  const handleReviewPanelExpandedChange = useCallback((expanded: boolean) => {
+    setRightPanelCollapsed(false);
+    setReviewPanelExpanded(expanded);
+    if (!expanded) {
+      setExpandedReviewSideTreeVisible(false);
+    }
+  }, [setRightPanelCollapsed]);
 
   const handleReviewChangeSetSelect = useCallback((changeSetId: string) => {
     setRightPanelCollapsed(false);
@@ -233,6 +285,22 @@ export function Workbench() {
   const handleComposerReferenceConsumed = useCallback((id: string) => {
     setComposerReferenceRequests((current) => current.filter((request) => request.id !== id));
   }, []);
+
+  const renderReviewFileTab = useCallback((
+    path: string,
+    context?: { fileTreeVisible: boolean; onToggleFileTree?: () => void },
+  ) => (
+    <EditorView
+      path={path}
+      appTheme={appTheme}
+      toolbarMode="breadcrumbs"
+      workspaceName={snapshot?.workspace.name}
+      fileTreeVisible={context?.fileTreeVisible ?? false}
+      onToggleFileTree={context?.onToggleFileTree}
+      onDirtyChange={handleEditorDirtyChange}
+      onSaved={handleEditorSaved}
+    />
+  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, snapshot?.workspace.name]);
 
   const pendingPlanApproval = useMemo(
     () => (snapshot ? findPendingPlanApproval(snapshot.tools) : null),
@@ -282,6 +350,35 @@ export function Workbench() {
 
   const agentLabel = snapshot.session.agent_cli || "智能体";
   const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
+  const workbenchBodyClassName = [
+    "workbench-body",
+    terminalDockVisible ? "has-terminal-dock" : "",
+    reviewPanelExpanded ? "is-review-expanded" : "",
+    reviewPanelExpanded && expandedReviewSideTreeVisible ? "has-expanded-review-side-tree" : "",
+  ].filter(Boolean).join(" ");
+  const reviewPanel = (
+    <ReviewPanel
+      snapshot={snapshot}
+      refreshing={gitRefreshing}
+      hydrated={gitHydrated}
+      appTheme={appTheme}
+      panelExpanded={reviewPanelExpanded}
+      onRefresh={handleRefreshGit}
+      onFileSelect={(path, changeSetId) =>
+        handleOpenDiffTab(path, "git", undefined, changeSetId)
+      }
+      onFileOpen={handleOpenEditorTab}
+      onAddComposerReference={(path) => enqueueComposerReference({ path })}
+      onPanelExpandedChange={handleReviewPanelExpandedChange}
+      onEditorFileTreeVisibleChange={setExpandedReviewSideTreeVisible}
+      renderFileTab={renderReviewFileTab}
+      activeTab={reviewPanelActiveTab}
+      openTabs={reviewPanelOpenTabs}
+      onActiveTabChange={setReviewPanelActiveTab}
+      onOpenTabsChange={setReviewPanelOpenTabs}
+      focusRequest={reviewFocusRequest}
+    />
+  );
 
   return (
     <div className="workbench">
@@ -294,11 +391,11 @@ export function Workbench() {
         onToggleSidebar={handleToggleThreads}
         onToggleTerminal={handleToggleTerminalDock}
         onRefreshGit={handleRefreshGit}
-        onToggleRightPanel={() => setRightPanelCollapsed((collapsed) => !collapsed)}
+        onToggleRightPanel={handleToggleRightPanel}
         onFileOpen={handleSearchResultOpen}
       />
 
-      <div className="workbench-content">
+      <div className="workbench-content" style={leftSidebarStyle}>
         <ThreadSidebarShell collapsed={sidebarCollapsed}>
           <SessionList
             activeSessionId={snapshot.session.id}
@@ -310,14 +407,30 @@ export function Workbench() {
             onWorkspaceChanged={handleWorkspaceChanged}
           />
         </ThreadSidebarShell>
+        {!sidebarCollapsed && (
+          <div className="sidebar-resizer">
+            <button
+              type="button"
+              className="sidebar-resizer-hit"
+              aria-label="调整项目栏宽度"
+              title="拖拽调整项目栏宽度"
+              onPointerDown={handleLeftSidebarResizeStart}
+            />
+          </div>
+        )}
 
         <div className="workbench-main-shell">
 
         <div
-          className={`workbench-body ${terminalDockVisible ? "has-terminal-dock" : ""}`}
+          className={workbenchBodyClassName}
           style={rightPanelStyle}
         >
           <main className="center-panel">
+            {reviewPanelExpanded && (
+              <section className="expanded-review-panel-shell" aria-label="展开审查面板">
+                {reviewPanel}
+              </section>
+            )}
             <ThreadHeader
               session={snapshot.session}
               workspace={snapshot.workspace}
@@ -337,57 +450,82 @@ export function Workbench() {
               </div>
             )}
 
-            <div className={`conversation-container ${activeTab.type === "conversation" ? "" : "is-workspace-tab"}`}>
-              {activeTab.type === "conversation" ? (
-                <>
-                  <ConversationTimeline
-                    snapshot={snapshot}
-                    onPermissionSelect={handlePermissionSelect}
-                    turnChangeSetsByMessageId={timelineTurnChangeSets}
-                    onReviewFileSelect={(path, changeSetId) =>
-                      handleOpenDiffTab(path, "change-set", undefined, changeSetId)
-                    }
-                    onReviewChangeSetSelect={handleReviewChangeSetSelect}
-                    hiddenPermissionRequestIds={hiddenPermissionRequestIds}
-                  />
-                </>
-              ) : (
-                <section className="workspace-tab-content" aria-label="打开的文件">
-                  {activeTab.type === "diff" && resolvedDiffChange && (
-                    <DiffTab change={resolvedDiffChange} appTheme={appTheme} />
-                  )}
-                  {activeTab.type === "diff" && !resolvedDiffChange && (
-                    <div className="workbench-loading">正在加载差异...</div>
-                  )}
-                  {activeTab.type === "editor" && activeTab.filePath && (
-                    <EditorView
-                      path={activeTab.filePath}
-                      lineNumber={activeTab.lineNumber}
-                      searchQuery={activeTab.searchQuery}
-                      navToken={activeTab.navToken}
-                      appTheme={appTheme}
-                      onDirtyChange={handleEditorDirtyChange}
-                      onSaved={handleEditorSaved}
-                      onAddComposerReference={enqueueComposerReference}
+            {reviewPanelExpanded ? (
+              <div
+                className={`expanded-review-composer-layer ${
+                  expandedReviewSideTreeVisible ? "has-review-side-tree" : ""
+                }`}
+              >
+                {showComposerPlan && (
+                  <div className="composer-plan-slot">
+                    <AgentPlanPanel entries={snapshot.agent_plan} />
+                  </div>
+                )}
+                <Composer
+                  snapshot={snapshot}
+                  onStateChange={pollState}
+                  referenceRequests={composerReferenceRequests}
+                  onReferenceRequestConsumed={handleComposerReferenceConsumed}
+                  compact
+                />
+              </div>
+            ) : (
+              <div
+                className={`conversation-container ${
+                  activeTab.type === "conversation" ? "" : "is-workspace-tab"
+                }`}
+              >
+                {activeTab.type === "conversation" ? (
+                  <>
+                    <ConversationTimeline
+                      snapshot={snapshot}
+                      onPermissionSelect={handlePermissionSelect}
+                      turnChangeSetsByMessageId={timelineTurnChangeSets}
+                      onReviewFileSelect={(path, changeSetId) =>
+                        handleOpenDiffTab(path, "change-set", undefined, changeSetId)
+                      }
+                      onReviewChangeSetSelect={handleReviewChangeSetSelect}
+                      hiddenPermissionRequestIds={hiddenPermissionRequestIds}
                     />
-                  )}
-                </section>
-              )}
-              {showComposerPlan && (
-                <div className="composer-plan-slot">
-                  <AgentPlanPanel entries={snapshot.agent_plan} />
-                </div>
-              )}
-              <Composer
-                snapshot={snapshot}
-                onStateChange={pollState}
-                referenceRequests={composerReferenceRequests}
-                onReferenceRequestConsumed={handleComposerReferenceConsumed}
-              />
-            </div>
+                  </>
+                ) : (
+                  <section className="workspace-tab-content" aria-label="打开的文件">
+                    {activeTab.type === "diff" && resolvedDiffChange && (
+                      <DiffTab change={resolvedDiffChange} appTheme={appTheme} />
+                    )}
+                    {activeTab.type === "diff" && !resolvedDiffChange && (
+                      <div className="workbench-loading">正在加载差异...</div>
+                    )}
+                    {activeTab.type === "editor" && activeTab.filePath && (
+                      <EditorView
+                        path={activeTab.filePath}
+                        lineNumber={activeTab.lineNumber}
+                        searchQuery={activeTab.searchQuery}
+                        navToken={activeTab.navToken}
+                        appTheme={appTheme}
+                        onDirtyChange={handleEditorDirtyChange}
+                        onSaved={handleEditorSaved}
+                        onAddComposerReference={enqueueComposerReference}
+                      />
+                    )}
+                  </section>
+                )}
+                {showComposerPlan && (
+                  <div className="composer-plan-slot">
+                    <AgentPlanPanel entries={snapshot.agent_plan} />
+                  </div>
+                )}
+                <Composer
+                  snapshot={snapshot}
+                  onStateChange={pollState}
+                  referenceRequests={composerReferenceRequests}
+                  onReferenceRequestConsumed={handleComposerReferenceConsumed}
+                />
+              </div>
+            )}
           </main>
 
-          {!rightPanelCollapsed && (
+          {!rightPanelCollapsed && !reviewPanelExpanded && (
             <div className="panel-resizer">
               <button
                 type="button"
@@ -399,21 +537,13 @@ export function Workbench() {
             </div>
           )}
 
-          <aside className={`right-panel ${rightPanelCollapsed ? "is-collapsed" : ""}`}>
-            <ReviewPanel
-              snapshot={snapshot}
-              refreshing={gitRefreshing}
-              hydrated={gitHydrated}
-              appTheme={appTheme}
-              onRefresh={handleRefreshGit}
-              onFileSelect={(path, changeSetId) =>
-                handleOpenDiffTab(path, "git", undefined, changeSetId)
-              }
-              onFileOpen={handleOpenEditorTab}
-              onAddComposerReference={(path) => enqueueComposerReference({ path })}
-              focusRequest={reviewFocusRequest}
-            />
-          </aside>
+          {reviewPanelExpanded ? (
+            <aside className="right-panel is-expanded-spacer" aria-hidden="true" />
+          ) : (
+            <aside className={`right-panel ${rightPanelCollapsed ? "is-collapsed" : ""}`}>
+              {reviewPanel}
+            </aside>
+          )}
         </div>
         {terminalDockMounted && (
           <TerminalDock
@@ -422,7 +552,7 @@ export function Workbench() {
             appTheme={appTheme}
             visible={terminalDockVisible}
             height={terminalDockHeight}
-            layoutSignal={`${rightPanelWidth}:${rightPanelCollapsed}`}
+            layoutSignal={`${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`}
             onHeightChange={handleTerminalDockHeightChange}
             onHide={handleHideTerminalDock}
           />

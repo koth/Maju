@@ -29,10 +29,18 @@ import {
   settingsSelectAgent,
   settingsSelectTheme,
 } from "../../lib/tauri";
+import {
+  checkForAppUpdate,
+  getCurrentAppVersion,
+  installPendingAppUpdate,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+} from "../../lib/updater";
 import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
 export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
+type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "installing" | "installed" | "error";
 
 export interface SettingsStartupNotice {
   kind: "woa" | "codex_byok";
@@ -52,6 +60,20 @@ const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "codex-acp", label: "Codex" },
   { id: "codebuddy", label: "CodeBuddy" },
 ];
+
+function modelListLabel(models: string[]): string {
+  return `模型：${models.join("、")}`;
+}
+
+function renderModelChip(models?: string[] | null) {
+  if (!models?.length) return null;
+  const label = modelListLabel(models);
+  return (
+    <span className="settings-model-chip" title={label} aria-label={label} tabIndex={0}>
+      模型
+    </span>
+  );
+}
 
 export function SettingsPage({
   initialAgentTab,
@@ -90,6 +112,11 @@ export function SettingsPage({
   const [claudeWoaLogin, setClaudeWoaLogin] = useState<ClaudeWoaLoginStart | null>(null);
   const [claudeWoaMessage, setClaudeWoaMessage] = useState<string | null>(null);
   const [busyClaudeWoa, setBusyClaudeWoa] = useState(false);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
 
   const applyLspSnapshot = useCallback((nextSnapshot: LspSettingsSnapshot) => {
     setLspSnapshot(nextSnapshot);
@@ -126,6 +153,24 @@ export function SettingsPage({
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentAppVersion()
+      .then((version) => {
+        if (!cancelled) {
+          setAppVersion(version);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAppVersion(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (initialAgentTab) {
@@ -248,6 +293,46 @@ export function SettingsPage({
       setBusyTheme(null);
     }
   }, [onThemeChange]);
+
+  const handleCheckForUpdate = useCallback(async () => {
+    setUpdateStatus("checking");
+    setUpdateInfo(null);
+    setUpdateProgress(null);
+    setUpdateMessage(null);
+    try {
+      const nextUpdate = await checkForAppUpdate();
+      if (!nextUpdate) {
+        setUpdateStatus("up-to-date");
+        setUpdateMessage("当前已是最新版本");
+        return;
+      }
+      setAppVersion(nextUpdate.currentVersion);
+      setUpdateInfo(nextUpdate);
+      setUpdateStatus("available");
+      setUpdateMessage(`发现新版本 ${nextUpdate.version}`);
+    } catch (e) {
+      setUpdateStatus("error");
+      setUpdateMessage(String(e));
+    }
+  }, []);
+
+  const handleInstallUpdate = useCallback(async () => {
+    if (!updateInfo) return;
+    setUpdateStatus("installing");
+    setUpdateProgress(null);
+    setUpdateMessage(`正在安装 ${updateInfo.version}`);
+    try {
+      await installPendingAppUpdate((progress) => {
+        setUpdateProgress(progress);
+        setUpdateMessage(formatUpdateProgress(progress));
+      });
+      setUpdateStatus("installed");
+      setUpdateMessage("更新已安装，正在重启");
+    } catch (e) {
+      setUpdateStatus("error");
+      setUpdateMessage(String(e));
+    }
+  }, [updateInfo]);
 
   const handleInstall = useCallback(async (agent: AgentCliId) => {
     setBusyAgent(agent);
@@ -612,14 +697,6 @@ export function SettingsPage({
         <span className={`settings-row-badge ${agent.installed ? "is-installed" : "is-missing"}`}>
           {agent.installed ? "已安装" : "未安装"}
         </span>
-        <span>
-          命令：<code>{agent.binary}</code>
-        </span>
-        {agent.detected_path && (
-          <span>
-            路径：<code>{agent.detected_path}</code>
-          </span>
-        )}
         <div className="settings-row-actions">
           {agent.installed ? (
             <button
@@ -657,7 +734,7 @@ export function SettingsPage({
         <div className="settings-provider-config-head">
           <div>
             <span>BYOK 模型池</span>
-            <p>保存自己的 API key。已配置的模型会进入 Codex / Claude 的模型选择，而不是作为通道 Provider 切换。</p>
+            <p>保存自己的 API key。</p>
           </div>
           <span className="settings-provider-active">
             {byokProfiles.filter((item) => item.configured).length}/{byokProfiles.length} 已配置
@@ -688,9 +765,7 @@ export function SettingsPage({
           <span className={`settings-row-badge ${profile.configured ? "is-installed" : "is-missing"}`}>
             {profile.configured ? "已配置" : "未配置"}
           </span>
-          {profile.models.length > 0 && <span>模型：{profile.models.join("、")}</span>}
-          {profile.base_url && <span>Endpoint：<code>{profile.base_url}</code></span>}
-          <p>{profile.help_text}</p>
+          {renderModelChip(profile.models)}
         </div>
         <label className="settings-field settings-provider-key-field">
           <span>{profile.credential_label ?? `${profile.label} API key`}</span>
@@ -725,21 +800,13 @@ export function SettingsPage({
     const busy = family === "codex" ? busyCodexAcp : busyClaudeWoa;
     const message = family === "codex" ? codexAcpMessage : claudeWoaMessage;
     const showMessage = family === "claude" || codexAcpMessageTarget === "channel";
-    const endpoint = family === "codex"
-      ? "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses"
-      : "http://api.timiai.woa.com/ai_api_manage/llmproxy/v1/messages";
     return (
       <>
-        <div className="settings-provider-config-path">
-          <span>Endpoint：<code>{endpoint}</code>；Codex / Claude 共用同一个 TimiAI key。</span>
-        </div>
         <div className="settings-provider-detail">
           <span className={`settings-row-badge ${profile?.configured ? "is-installed" : "is-missing"}`}>
             {profile?.configured ? "已配置" : "未配置"}
           </span>
-          {profile?.models.length ? <span>模型：{profile.models.join("、")}</span> : null}
-          {family === "codex" && <span>远程压缩：<code>https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact</code></span>}
-          <p>{profile?.help_text ?? "通过 TimiAI 网关对接 Codex / Claude。"}</p>
+          {renderModelChip(profile?.models)}
         </div>
         <label className="settings-field settings-provider-key-field">
           <span>TimiAI key</span>
@@ -773,10 +840,10 @@ export function SettingsPage({
       <>
         <div className="settings-provider-config-message">
           {snapshot.claude_woa.token.malformed
-            ? snapshot.claude_woa.token.message
+            ? "WOA 登录状态异常，请重新登录"
             : snapshot.claude_woa.token.exists
-              ? `accessToken ${snapshot.claude_woa.token.access_token ?? ""} · refresh ${snapshot.claude_woa.token.refresh_needed ? "需要刷新" : "正常"}`
-              : snapshot.claude_woa.token.message}
+              ? `WOA 已登录${snapshot.claude_woa.token.refresh_needed ? "，需要刷新" : ""}`
+              : "尚未登录 WOA"}
         </div>
         {claudeWoaLogin && (
           <div className="settings-warning">
@@ -806,7 +873,7 @@ export function SettingsPage({
             disabled={busyClaudeWoa || !snapshot.claude_woa.token.exists || snapshot.claude_woa.token.malformed}
             onClick={handleRefreshClaudeWoaToken}
           >
-            刷新 token
+            刷新登录
           </button>
           {messagePrefix === "Claude" && (
             <button type="button" className="settings-btn" disabled={busyClaudeWoa} onClick={() => handleSaveClaudeWoaConfig()}>
@@ -891,8 +958,52 @@ export function SettingsPage({
         </section>
 
         <section className="settings-section">
+          <h2 className="settings-section-title">应用更新</h2>
+          <p className="settings-section-desc">检查 GitHub Release 上的 Kodex 桌面更新。</p>
+          <div className="settings-update-panel">
+            <div className="settings-update-copy">
+              <div className="settings-row-title">Kodex{appVersion ? ` ${appVersion}` : ""}</div>
+              <div className="settings-row-meta">
+                {updateInfo ? `可更新到 ${updateInfo.version}` : "通过 Tauri updater 校验签名后安装"}
+              </div>
+            </div>
+            <div className="settings-row-actions">
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={updateStatus === "checking" || updateStatus === "installing"}
+                onClick={handleCheckForUpdate}
+              >
+                {updateStatus === "checking" ? "检查中..." : "检查更新"}
+              </button>
+              {updateStatus === "available" && (
+                <button type="button" className="settings-btn is-install" onClick={handleInstallUpdate}>
+                  安装并重启
+                </button>
+              )}
+            </div>
+          </div>
+          {updateMessage && (
+            <div className={updateStatus === "error" ? "settings-error" : updateStatus === "available" ? "settings-warning" : "settings-status"}>
+              {updateMessage}
+            </div>
+          )}
+          {updateInfo?.body && updateStatus === "available" && (
+            <div className="settings-update-notes">{updateInfo.body}</div>
+          )}
+          {updateStatus === "installing" && updateProgress?.contentLength && (
+            <progress
+              className="settings-update-progress"
+              max={updateProgress.contentLength}
+              value={Math.min(updateProgress.downloadedBytes, updateProgress.contentLength)}
+              aria-label="更新下载进度"
+            />
+          )}
+        </section>
+
+        <section className="settings-section">
           <h2 className="settings-section-title">智能体</h2>
-          <p className="settings-section-desc">选择默认 ACP 智能体，并配置各自的通道、网关和模型来源。</p>
+          <p className="settings-section-desc">选择默认智能体和可用模型来源。</p>
 
           {loading && <div className="settings-status">加载中...</div>}
           {error && (
@@ -937,14 +1048,12 @@ export function SettingsPage({
                       <div className="settings-provider-config-head">
                         <div>
                           <span>CodeBuddy</span>
-                          <p>使用系统检测到的 CodeBuddy ACP CLI。</p>
                         </div>
                         <span className="settings-provider-active">
                           {snapshot.settings.selected_agent === "codebuddy" ? "当前默认" : "可选"}
                         </span>
                       </div>
                       {renderAgentRuntime("codebuddy")}
-                      <p className="settings-provider-config-message">CodeBuddy 当前不需要额外的模型或网关设置。</p>
                     </div>
                   );
                 })()}
@@ -955,7 +1064,7 @@ export function SettingsPage({
                       <div className="settings-provider-config-head">
                         <div>
                           <span>Codex 通道</span>
-                          <p>Codex 可以使用系统默认官方配置、WOA、TimiAI、内部 Venus，或 BYOK 模型池；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
+                          <p>选择 Codex 的默认通道。</p>
                         </div>
                         <span className="settings-provider-active">
                           当前：{snapshot.codex_acp.selected_profile_id === "default" ? "默认" : snapshot.codex_acp.selected_profile_id === "venus" ? "Venus" : snapshot.codex_acp.selected_profile_id === "woa" ? "WOA" : snapshot.codex_acp.selected_profile_id === "timiai" ? "TimiAI" : "BYOK"}
@@ -986,14 +1095,14 @@ export function SettingsPage({
                                 <span>{channel === "default" ? "默认" : channel === "woa" ? "WOA" : channel === "timiai" ? "TimiAI" : channel === "venus" ? "Venus" : "BYOK"}</span>
                                 <span>
                                   {channel === "default"
-                                    ? "系统安装的 Codex 官方配置"
+                                    ? "本机默认配置"
                                     : channel === "woa"
-                                      ? "Tencent WOA 登录的 CodeBuddy Codex gateway"
+                                      ? "WOA 登录"
                                     : channel === "timiai"
-                                      ? "TimiAI Responses API，共用 key"
+                                      ? "TimiAI"
                                     : channel === "venus"
-                                      ? "内部 Venus LLM 网关"
-                                      : "用户自带 Key 的模型来源"}
+                                      ? "Venus"
+                                      : "自带 API key"}
                                 </span>
                               </span>
                               <span className={`settings-row-badge ${selected ? "is-installed" : "is-missing"}`}>
@@ -1003,25 +1112,14 @@ export function SettingsPage({
                           );
                         })}
                       </div>
-                      {snapshot.codex_acp.selected_profile_id === "default" && (
-                        <div className="settings-provider-config-path">
-                          <span>使用系统安装的 Codex 官方配置，不写入 Kodex 托管 provider。</span>
-                        </div>
-                      )}
                       {snapshot.codex_acp.selected_profile_id === "woa" && (
                         <>
-                          <div className="settings-provider-config-path">
-                            <span>写入 <code>{snapshot.codex_acp.config_path}</code>；复用 WOA Token <code>{snapshot.claude_woa.token_path}</code>，直连 CodeBuddy Codex gateway Responses API。</span>
-                          </div>
                           {renderWoaTokenControls("Codex")}
                         </>
                       )}
                       {snapshot.codex_acp.selected_profile_id === "timiai" && renderTimiAiConfig("codex")}
                       {snapshot.codex_acp.selected_profile_id === "venus" && (
                         <>
-                          <div className="settings-provider-config-path">
-                            <span>写入 <code>{snapshot.codex_acp.config_path}</code>，使用内部 Venus LLM 网关。</span>
-                          </div>
                           <label className="settings-field settings-provider-key-field">
                             <span>Venus API key</span>
                             <input
@@ -1045,11 +1143,6 @@ export function SettingsPage({
                           </div>
                         </>
                       )}
-                      {snapshot.codex_acp.selected_profile_id !== "default" && snapshot.codex_acp.selected_profile_id !== "woa" && snapshot.codex_acp.selected_profile_id !== "timiai" && snapshot.codex_acp.selected_profile_id !== "venus" && (
-                        <div className="settings-provider-config-path">
-                          <span>写入 <code>{snapshot.codex_acp.config_path}</code>；BYOK 通过本机 proxy 按模型路由。</span>
-                        </div>
-                      )}
                       {codexAcpMessageTarget === "channel" && snapshot.codex_acp.selected_profile_id !== "timiai" && codexAcpMessage && (
                         <div className="settings-provider-config-message">{codexAcpMessage}</div>
                       )}
@@ -1064,7 +1157,7 @@ export function SettingsPage({
                       <div className="settings-provider-config-head">
                         <div>
                           <span>Claude 通道</span>
-                          <p>Claude 可以走 WOA、TimiAI、Venus 或 BYOK；DeepSeek / Kimi Code / Xiaomi MiMo 属于 BYOK。</p>
+                          <p>选择 Claude 的默认通道。</p>
                         </div>
                         <span className="settings-provider-active">
                           当前：{claudeProfileId === "woa" ? "WOA" : claudeProfileId === "timiai" ? "TimiAI" : claudeProfileId === "venus" ? "Venus" : "BYOK"}
@@ -1095,10 +1188,10 @@ export function SettingsPage({
                                   {channel === "woa"
                                     ? "Tencent WOA 登录"
                                     : channel === "timiai"
-                                      ? "TimiAI Messages API，共用 key"
+                                      ? "TimiAI"
                                     : channel === "venus"
-                                      ? "内部 Venus LLM 网关"
-                                      : "用户自带 Key 的模型来源"}
+                                      ? "Venus"
+                                      : "自带 API key"}
                                 </span>
                               </span>
                               <span className={`settings-row-badge ${selected ? "is-installed" : "is-missing"}`}>
@@ -1110,9 +1203,6 @@ export function SettingsPage({
                       </div>
                       {claudeProfileId === "woa" && (
                         <>
-                          <div className="settings-provider-config-path">
-                            <span>Token <code>{snapshot.claude_woa.token_path}</code></span>
-                          </div>
                           <div className="settings-provider-options" role="radiogroup" aria-label="Claude WOA channel">
                             {(["default", "offline"] as ClaudeWoaChannel[]).map((channel) => (
                               <button
@@ -1127,8 +1217,8 @@ export function SettingsPage({
                                 aria-pressed={claudeWoaChannel === channel}
                               >
                                 <span className="settings-provider-option-main">
-                                  <span>{channel === "default" ? "Default" : "Offline"}</span>
-                                  <span>{channel === "default" ? "codebuddy-gateway" : "codebuddy-gateway-offline"}</span>
+                                  <span>{channel === "default" ? "在线" : "离线"}</span>
+                                  <span>{channel === "default" ? "推荐" : "备用"}</span>
                                 </span>
                                 <span className={`settings-row-badge ${claudeWoaChannel === channel ? "is-installed" : "is-missing"}`}>
                                   {claudeWoaChannel === channel ? "当前" : "可选"}
@@ -1359,6 +1449,27 @@ function parseClaudeWoaModels(value: string): string[] {
     }
   }
   return models;
+}
+
+function formatUpdateProgress(progress: AppUpdateProgress): string {
+  if (progress.phase === "finished") {
+    return "更新包下载完成，正在安装";
+  }
+  if (progress.contentLength && progress.contentLength > 0) {
+    return `正在下载更新包 ${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.contentLength)}`;
+  }
+  return `正在下载更新包 ${formatBytes(progress.downloadedBytes)}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const kib = bytes / 1024;
+  if (kib < 1024) {
+    return `${kib.toFixed(1)} KiB`;
+  }
+  return `${(kib / 1024).toFixed(1)} MiB`;
 }
 
 function providerLabel(profiles: AgentProviderProfile[], profileId: string): string {

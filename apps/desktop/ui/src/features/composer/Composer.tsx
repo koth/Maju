@@ -16,6 +16,7 @@ interface Props {
   onStateChange: () => void;
   referenceRequests?: ComposerReferenceRequest[];
   onReferenceRequestConsumed?: (id: string) => void;
+  compact?: boolean;
 }
 
 interface Attachment {
@@ -40,6 +41,7 @@ export function Composer({
   onStateChange,
   referenceRequests = [],
   onReferenceRequestConsumed,
+  compact = false,
 }: Props) {
   const [input, setInput] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
@@ -369,8 +371,14 @@ export function Composer({
     );
   }
 
+  const composerClassName = [
+    "composer",
+    compact ? "is-compact" : "",
+    attachments.length > 0 ? "has-attachments" : "",
+  ].filter(Boolean).join(" ");
+
   return (
-    <div className="composer">
+    <div className={composerClassName}>
       <div className={`composer-inner ${turnActive ? "is-turn-active" : ""}`}>
         <div className="composer-input-wrap">
           {slashMenuOpen && filteredCommands.length > 0 && (
@@ -451,7 +459,7 @@ export function Composer({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={turnActive ? "智能体正在工作...添加指引或停止本轮" : "委托任务，附加上下文，然后按 Ctrl+Enter 发送"}
-            rows={2}
+            rows={compact ? 1 : 2}
           />
           <button
             className={`composer-send-btn ${canSend ? "composer-send-btn-active" : ""} ${turnActive ? "composer-stop-btn" : ""}`}

@@ -12,8 +12,9 @@ pub struct SessionConfig {
     pub agent_command: String,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub agent_env: Vec<(String, String)>,
-    /// ACP session ID from a previous session to resume via `--resume <id>`.
-    /// When set, the agent command will have `--resume <id>` appended.
+    /// ACP session ID from a previous agent-side session.
+    /// When set and the agent advertises load-session support, the runtime
+    /// sends ACP `session/load`; otherwise it starts a fresh `session/new`.
     pub resume_session_id: Option<String>,
     /// Unique identifier for this session's log file (timestamp-based).
     pub log_id: String,

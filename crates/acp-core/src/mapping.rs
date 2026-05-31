@@ -89,6 +89,15 @@ pub(crate) fn emit_notification(
     }
 }
 
+pub(crate) fn is_session_state_update(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::AvailableCommandsUpdate(_)
+            | SessionUpdate::ConfigOptionUpdate(_)
+            | SessionUpdate::CurrentModeUpdate(_)
+    )
+}
+
 fn emit_plan_update(tx: &mpsc::Sender<ClientEvent>, plan: Plan) -> anyhow::Result<()> {
     let entries = plan
         .entries

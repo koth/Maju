@@ -9,7 +9,7 @@ import {
   workspaceSetActive,
   settingsGetAgentSnapshot,
 } from "../../lib/tauri";
-import type { AgentProviderProfile, AgentSettingsSnapshot, WorkspaceSessionList } from "../../types";
+import type { AgentProviderProfile, AgentSettingsSnapshot, SessionListItem, WorkspaceSessionList } from "../../types";
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
@@ -136,6 +136,32 @@ const workspaceSessions: WorkspaceSessionList[] = [
   },
 ];
 
+function sessionItem(overrides: Partial<SessionListItem>): SessionListItem {
+  return {
+    id: "session-1",
+    title: "Feature work",
+    status: "Idle",
+    created_at: "2026-05-30T00:00:00Z",
+    updated_at: "2026-05-30T00:00:00Z",
+    message_count: 1,
+    acp_session_id: "acp-1",
+    agent_cli: "Codex",
+    runtime_status: "none",
+    attention_state: "none",
+    ...overrides,
+  };
+}
+
+function workspaceWithSessions(sessions: SessionListItem[]): WorkspaceSessionList[] {
+  return [
+    {
+      ...workspaceSessions[0],
+      sessions,
+      active_session_id: sessions[0]?.id ?? "",
+    },
+  ];
+}
+
 describe("SessionList agent picker", () => {
   beforeEach(() => {
     vi.mocked(sessionList).mockResolvedValue(workspaceSessions);
@@ -220,5 +246,85 @@ describe("SessionList agent picker", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
 
     await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codebuddy"));
+  });
+
+  it("shows a spinner for a background session that is still running", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active" }),
+        sessionItem({
+          id: "background-session",
+          title: "Background run",
+          runtime_status: "background_running",
+        }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("后台会话仍在运行");
+    expect(indicator).toHaveClass("is-progress");
+  });
+
+  it("shows and clears the completed-unviewed dot from refreshed session data", async () => {
+    vi.mocked(sessionList)
+      .mockResolvedValueOnce(
+        workspaceWithSessions([
+          sessionItem({ id: "active-session", title: "Active" }),
+          sessionItem({
+            id: "background-session",
+            title: "Done in background",
+            attention_state: "completed_unviewed",
+          }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        workspaceWithSessions([
+          sessionItem({ id: "active-session", title: "Active" }),
+          sessionItem({
+            id: "background-session",
+            title: "Done in background",
+            attention_state: "none",
+          }),
+        ]),
+      );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("后台会话已完成，尚未查看");
+    expect(indicator).toHaveClass("is-complete");
+
+    const rowTitle = screen.getByTitle("Done in background · Codex");
+    const rowButton = rowTitle.closest("button");
+    expect(rowButton).not.toBeNull();
+    fireEvent.click(rowButton!);
+
+    await waitFor(() => {
+      expect(sessionSwitch).toHaveBeenCalledWith(
+        "background-session",
+        "/Users/kothchen/code/Kodex",
+      );
+      expect(screen.queryByLabelText("后台会话已完成，尚未查看")).not.toBeInTheDocument();
+    });
   });
 });

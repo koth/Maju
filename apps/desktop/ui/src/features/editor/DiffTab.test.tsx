@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { DiffTab } from "./DiffTab";
 import type { DiffQuality, FileChangeRecord } from "../../types";
 
@@ -17,6 +17,10 @@ function makeChange(quality: DiffQuality): FileChangeRecord {
   };
 }
 
+afterEach(() => {
+  cleanup();
+});
+
 describe("DiffTab unavailable quality states", () => {
   it.each([
     ["LargeFileSkipped", "文件太大，已跳过内联差异预览。"],
@@ -28,5 +32,23 @@ describe("DiffTab unavailable quality states", () => {
     render(<DiffTab change={makeChange(quality)} appTheme="graphite" />);
 
     expect(screen.getByText(message)).toBeTruthy();
+  });
+
+  it("renders workspace breadcrumbs in breadcrumb toolbar mode", () => {
+    render(
+      <DiffTab
+        change={makeChange("MissingBaseline")}
+        appTheme="graphite"
+        toolbarMode="breadcrumbs"
+        workspaceName="Kodex"
+      />,
+    );
+
+    const breadcrumbs = screen.getByLabelText("差异文件路径");
+    expect(breadcrumbs).toBeTruthy();
+    expect(within(breadcrumbs).getByText("Kodex")).toBeTruthy();
+    expect(within(breadcrumbs).getByText("src")).toBeTruthy();
+    expect(within(breadcrumbs).getByText("file.ts")).toBeTruthy();
+    expect(screen.queryByText("src/file.ts")).toBeNull();
   });
 });

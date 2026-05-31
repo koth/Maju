@@ -75,12 +75,101 @@
   background: transparent;
 }
 
+.review-open-file-tab {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  align-items: center;
+  height: 30px;
+  padding: 0 8px 0 5px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-chat);
+  font-size: 12px;
+}
+
+.review-open-file-tab:hover {
+  color: var(--text-strong);
+  background: var(--interactive-hover);
+}
+
+.review-open-file-tab.review-tab-active {
+  color: var(--text-strong);
+  background: transparent;
+  font-weight: 560;
+}
+
+.review-file-tab-close {
+  position: relative;
+  display: grid;
+  flex: 0 0 18px;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.review-file-tab-icon {
+  width: 14px;
+  height: 14px;
+  transition: opacity var(--transition-fast);
+}
+
+.review-file-tab-x {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transition: opacity var(--transition-fast);
+}
+
+.review-open-file-tab:hover .review-file-tab-close,
+.review-file-tab-close:focus-visible {
+  background: var(--interactive-selected);
+}
+
+.review-open-file-tab:hover .review-file-tab-icon,
+.review-file-tab-close:focus-visible .review-file-tab-icon {
+  opacity: 0;
+}
+
+.review-open-file-tab:hover .review-file-tab-x,
+.review-file-tab-close:focus-visible .review-file-tab-x {
+  opacity: 1;
+}
+
+.review-file-tab-label-btn {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .review-tabs-spacer {
   flex: 1 1 0;
   min-width: 0;
 }
 
-.review-refresh-btn {
+.review-refresh-btn,
+.review-panel-toggle-btn {
   display: grid;
   flex: 0 0 28px;
   place-items: center;
@@ -95,7 +184,8 @@
   font-size: 14px;
 }
 
-.review-refresh-btn svg {
+.review-refresh-btn svg,
+.review-panel-toggle-btn svg {
   width: 15px;
   height: 15px;
   fill: none;
@@ -105,7 +195,9 @@
   stroke-linejoin: round;
 }
 
-.review-refresh-btn:hover {
+.review-refresh-btn:hover,
+.review-panel-toggle-btn:hover,
+.review-panel-toggle-btn.is-active {
   color: var(--text-strong);
   background: var(--interactive-hover);
 }
@@ -135,6 +227,71 @@
 
 .review-tab-panel-files {
   overflow: hidden;
+}
+
+.review-tab-panel-editor {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+}
+
+.review-tab-panel-file-editor {
+  position: relative;
+  isolation: isolate;
+  box-sizing: border-box;
+  background: var(--app-bg);
+}
+
+.review-tab-panel-file-editor .editor-view.is-breadcrumb-toolbar {
+  background: transparent;
+}
+
+.review-tab-panel-diff-editor {
+  position: relative;
+  isolation: isolate;
+  box-sizing: border-box;
+  background: var(--app-bg);
+}
+
+.review-tab-panel-diff-editor .diff-tab {
+  background: transparent;
+}
+
+.review-tab-panel-diff-editor .dt-header {
+  z-index: 4;
+}
+
+.review-tab-panel-diff-editor .diff-tab.is-breadcrumb-toolbar .dt-header {
+  padding-right: 10px;
+}
+
+.review-editor-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.review-editor-filetree {
+  display: flex;
+  width: clamp(230px, 24%, 300px);
+  min-width: 220px;
+  max-width: 300px;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--app-bg);
+}
+
+.review-editor-filetree > .filetree,
+.review-editor-filetree > .review-git-filetree {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+}
+
+.review-git-editor-filetree {
+  width: clamp(230px, 24%, 300px);
 }
 
 .review-meta {
@@ -528,6 +685,10 @@
   padding: 0 2px;
 }
 
+.review-group-compact {
+  padding: 0;
+}
+
 .review-group-header {
   display: flex;
   align-items: center;
@@ -535,6 +696,10 @@
   padding: 7px 0;
   cursor: pointer;
   user-select: none;
+}
+
+.review-group-compact .review-group-header {
+  padding: 5px 0;
 }
 
 .review-group-arrow {
@@ -618,8 +783,20 @@
   font-size: 12px;
 }
 
+.review-group-compact .review-untracked-row {
+  min-height: 27px;
+  gap: 5px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
 .review-untracked-row:hover {
   background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.review-untracked-row.is-active {
+  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
   color: var(--text-strong);
 }
 
@@ -636,6 +813,11 @@
   width: 17px;
   height: 17px;
   flex-shrink: 0;
+}
+
+.review-group-compact .review-tree-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .review-folder-icon {
@@ -683,6 +865,13 @@
   font-size: 12px;
 }
 
+.review-group-compact .review-diff-row {
+  min-height: 27px;
+  gap: 5px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
 .review-diff-dir {
   color: var(--text-muted);
 }
@@ -701,6 +890,10 @@
   box-shadow: none;
 }
 
+.review-diff-file.is-active {
+  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
+}
+
 .review-diff-name {
   flex: 1;
   min-width: 0;
@@ -708,6 +901,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+.review-group-compact .review-diff-name {
+  font-weight: 500;
 }
 
 .review-diff-stats {
@@ -719,4 +916,64 @@
 .review-diff-children {
   display: flex;
   flex-direction: column;
+}
+
+.review-git-filetree {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding: 10px 10px 12px 12px;
+  color: var(--text-muted);
+}
+
+.review-git-filetree-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
+  color: var(--text-soft);
+}
+
+.review-git-filetree-search:focus-within {
+  border-color: color-mix(in srgb, var(--border-strong) 78%, transparent);
+  background: color-mix(in srgb, var(--surface-bg) 52%, transparent);
+}
+
+.review-git-filetree-search-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
+}
+
+.review-git-filetree-search-input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+}
+
+.review-git-filetree-search-input::placeholder {
+  color: var(--text-soft);
+}
+
+.review-git-filetree-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 6px;
 }

@@ -1,0 +1,88 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "app-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc --config tauri.release.conf.json
+          - name: macOS Intel
+            platform: macos-15-intel
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --config tauri.release.conf.json
+          - name: macOS Apple Silicon
+            platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --config tauri.release.conf.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/ui/package-lock.json
+            kodex-claude/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            codex-acp -> codex-acp/target
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix apps/desktop/ui
+          npm ci --prefix kodex-claude
+
+      - name: Build bundled agents
+        run: |
+          npm --prefix apps/desktop/ui run claude:binary
+          npm --prefix apps/desktop/ui run codex:binary
+
+      - name: Build and upload Tauri release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop/src-tauri
+          tauriScript: npm --prefix ../ui exec tauri
+          tagName: app-v__VERSION__
+          releaseName: Kodex v__VERSION__
+          releaseBody: See assets to download and install Kodex.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true

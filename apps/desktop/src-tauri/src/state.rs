@@ -582,6 +582,8 @@ mod tests {
             message_count: 0,
             acp_session_id: None,
             agent_cli: None,
+            runtime_status: Default::default(),
+            attention_state: Default::default(),
         };
         let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
             workspace,

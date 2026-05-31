@@ -1680,7 +1680,7 @@ function collectShellRedirectionPaths(command: string, paths: string[]) {
     if (i > 0 && /\d/.test(command[i - 1])) continue;
     if (command[i + 1] === ">") i += 1;
     const value = parseCommandValueAt(command, i + 1);
-    if (value && looksLikePath(value)) paths.push(value);
+    if (value) paths.push(value);
   }
 }
 

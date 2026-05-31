@@ -5,11 +5,13 @@ use super::session_titles::{
     sync_session_title_from_list,
 };
 use crate::events::{ClientEvent, SessionConfig};
-use crate::mapping::{append_runtime_event_log, emit_notification, session_config_from_parts};
+use crate::mapping::{
+    append_runtime_event_log, emit_notification, is_session_state_update, session_config_from_parts,
+};
 use agent_client_protocol::schema::{
     ClientCapabilities, FileSystemCapabilities, Implementation, InitializeRequest,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, ProtocolVersion, SessionId,
-    SessionNotification, SessionUpdate,
+    SessionNotification,
 };
 use agent_client_protocol::{ActiveSession, Agent, ConnectionTo, Dispatch};
 use anyhow::anyhow;
@@ -65,8 +67,6 @@ pub(super) async fn start_session(
             "supportsSessionList": supports_session_list,
         }),
     )?;
-    let has_resume_id = config.resume_session_id.is_some();
-
     let (mut session, initial_session_config) =
         if supports_load_session && config.resume_session_id.is_some() {
             let session_id_str = config.resume_session_id.as_ref().unwrap();
@@ -108,9 +108,7 @@ pub(super) async fn start_session(
             (session, initial_session_config)
         };
 
-    if supports_load_session && has_resume_id {
-        drain_loaded_session_replay(&mut session, tx_events, config).await;
-    }
+    drain_initial_session_updates(&mut session, tx_events, config).await;
 
     let _ = tx_events.send(ClientEvent::SessionStarted {
         session_id: session.session_id().0.to_string(),
@@ -145,11 +143,14 @@ pub(super) async fn start_session(
     })
 }
 
-async fn drain_loaded_session_replay(
+async fn drain_initial_session_updates(
     session: &mut ActiveSession<'static, Agent>,
     tx_events: &mpsc::Sender<ClientEvent>,
     config: &SessionConfig,
 ) {
+    // Some agents publish startup-only state, including slash commands, before
+    // the first user prompt. The command loop is idle until a command arrives,
+    // so drain a short initialization window and forward only state-like updates.
     loop {
         match tokio::time::timeout(std::time::Duration::from_millis(100), session.read_update())
             .await
@@ -158,17 +159,12 @@ async fn drain_loaded_session_replay(
                 if let agent_client_protocol::SessionMessage::SessionMessage(dispatch) = update {
                     let _ = agent_client_protocol::util::MatchDispatch::new(dispatch)
                         .if_notification(async |notification: SessionNotification| {
-                            match &notification.update {
-                                SessionUpdate::AvailableCommandsUpdate(_)
-                                | SessionUpdate::ConfigOptionUpdate(_)
-                                | SessionUpdate::CurrentModeUpdate(_) => {
-                                    let _ = emit_notification(
-                                        tx_events,
-                                        &config.workspace_root,
-                                        notification,
-                                    );
-                                }
-                                _ => {}
+                            if is_session_state_update(&notification.update) {
+                                let _ = emit_notification(
+                                    tx_events,
+                                    &config.workspace_root,
+                                    notification,
+                                );
                             }
                             Ok(())
                         })

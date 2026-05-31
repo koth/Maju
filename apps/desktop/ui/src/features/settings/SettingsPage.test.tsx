@@ -15,6 +15,11 @@ import {
   settingsRefreshClaudeWoaToken,
   settingsGetClaudeWoaLogin,
 } from "../../lib/tauri";
+import {
+  checkForAppUpdate,
+  getCurrentAppVersion,
+  installPendingAppUpdate,
+} from "../../lib/updater";
 import type { AgentProviderProfile, AgentSettingsSnapshot, LspSettingsSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", async () => {
@@ -44,6 +49,12 @@ vi.mock("../../lib/tauri", async () => {
     settingsResetLspServer: vi.fn(),
   };
 });
+
+vi.mock("../../lib/updater", () => ({
+  checkForAppUpdate: vi.fn(),
+  getCurrentAppVersion: vi.fn(),
+  installPendingAppUpdate: vi.fn(),
+}));
 
 function providerProfile(
   family: "codex" | "claude",
@@ -212,6 +223,9 @@ async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
 
 describe("SettingsPage LSP settings", () => {
   beforeEach(() => {
+    vi.mocked(getCurrentAppVersion).mockResolvedValue("0.1.0");
+    vi.mocked(checkForAppUpdate).mockResolvedValue(null);
+    vi.mocked(installPendingAppUpdate).mockResolvedValue(undefined);
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot);
     vi.mocked(settingsGetLspSnapshot).mockResolvedValue(lspSnapshot());
     vi.mocked(settingsProbeLspServer).mockResolvedValue({
@@ -331,6 +345,40 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.getByText("Codex 通道")).toBeInTheDocument();
   });
 
+  it("checks for updates and reports the current version as up to date", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+    await waitFor(() => expect(checkForAppUpdate).toHaveBeenCalled());
+    expect(await screen.findByText("当前已是最新版本")).toBeInTheDocument();
+  });
+
+  it("installs an available update from settings", async () => {
+    vi.mocked(checkForAppUpdate).mockResolvedValueOnce({
+      currentVersion: "0.1.0",
+      version: "0.1.1",
+      date: null,
+      body: "Release notes",
+    });
+    vi.mocked(installPendingAppUpdate).mockImplementationOnce(async (onProgress) => {
+      onProgress?.({ phase: "started", downloadedBytes: 0, contentLength: 2048 });
+      onProgress?.({ phase: "progress", downloadedBytes: 1024, contentLength: 2048 });
+      onProgress?.({ phase: "finished", downloadedBytes: 2048, contentLength: 2048 });
+    });
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
+
+    expect(await screen.findByText("发现新版本 0.1.1")).toBeInTheDocument();
+    expect(screen.getByText("Release notes")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "安装并重启" }));
+
+    await waitFor(() => expect(installPendingAppUpdate).toHaveBeenCalled());
+    expect(await screen.findByText("更新已安装，正在重启")).toBeInTheDocument();
+  });
+
   it("loads, probes, saves, disables, and resets a language server", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
@@ -376,7 +424,7 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.queryByText("goose")).not.toBeInTheDocument();
     expect(screen.getByLabelText("byok_provider_profile")).toBeInTheDocument();
     expect(screen.getAllByText("未配置").length).toBeGreaterThan(0);
-    expect(screen.getByText("C:\\Users\\yvonchen\\.kodex\\config.toml")).toBeInTheDocument();
+    expect(screen.queryByText("C:\\Users\\yvonchen\\.kodex\\config.toml")).not.toBeInTheDocument();
 
     const saveButton = screen.getByRole("button", { name: "保存 Codex Venus key" });
     expect(saveButton).toBeDisabled();
@@ -400,9 +448,9 @@ describe("SettingsPage LSP settings", () => {
 
     await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "woa"));
     await screen.findByText("Codex 通道已切换到 WOA");
-    expect(screen.getAllByText(/CodeBuddy Codex gateway/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/CodeBuddy Codex gateway/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "WOA 登录" })).toBeInTheDocument();
-    expect(screen.getByText("Run WOA login to create a token.")).toBeInTheDocument();
+    expect(screen.getByText("尚未登录 WOA")).toBeInTheDocument();
   });
 
   it("saves a shared TimiAI key from the Codex channel", async () => {
@@ -414,7 +462,9 @@ describe("SettingsPage LSP settings", () => {
 
     await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "timiai"));
     await screen.findByText("Codex 通道已切换到 TimiAI");
-    expect(screen.getAllByText(/llmproxy\/responses/).length).toBeGreaterThan(0);
+    const timiaiModels = "模型：gpt-5.5、gpt-5.4、claude-opus-4.8、deepseek-v4-pro";
+    expect(screen.queryByText(/llmproxy\/responses/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(timiaiModels)).toHaveAttribute("title", timiaiModels);
 
     const saveButton = screen.getByRole("button", { name: "保存 Codex TimiAI key" });
     expect(saveButton).toBeDisabled();
@@ -484,8 +534,9 @@ describe("SettingsPage LSP settings", () => {
 
     fireEvent.change(sourceSelect, { target: { value: "xiaomi_mimo" } });
     expect(sourceSelect).toHaveValue("xiaomi_mimo");
-    expect(screen.getByText("模型：MiMo-V2.5-Pro、MiMo-V2.5")).toBeInTheDocument();
-    expect(screen.getByText("https://token-plan-cn.xiaomimimo.com/v1")).toBeInTheDocument();
+    const xiaomiModels = "模型：MiMo-V2.5-Pro、MiMo-V2.5";
+    expect(screen.getByLabelText(xiaomiModels)).toHaveAttribute("title", xiaomiModels);
+    expect(screen.queryByText("https://token-plan-cn.xiaomimimo.com/v1")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "mimo-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 Xiaomi Token Plan key" }));
@@ -570,7 +621,9 @@ describe("SettingsPage LSP settings", () => {
 
     await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("claude", "timiai"));
     await screen.findByText("Claude 通道已切换到 TimiAI");
-    expect(screen.getByText(/llmproxy\/v1\/messages/)).toBeInTheDocument();
+    const timiaiModels = "模型：gpt-5.5、gpt-5.4、claude-opus-4.8、deepseek-v4-pro";
+    expect(screen.queryByText(/llmproxy\/v1\/messages/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(timiaiModels)).toHaveAttribute("title", timiaiModels);
 
     fireEvent.change(screen.getByLabelText("claude_timiai_api_key"), { target: { value: "timiai-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 Claude TimiAI key" }));

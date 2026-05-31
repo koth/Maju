@@ -127,9 +127,9 @@
 .thread-sidebar-shell {
   position: relative;
   z-index: 1;
-  width: var(--shell-sidebar-width);
-  min-width: 248px;
-  max-width: 320px;
+  width: var(--left-sidebar-width, var(--shell-sidebar-width));
+  min-width: 172px;
+  max-width: 420px;
   flex-shrink: 0;
   overflow: hidden;
   background: var(--shell-sidebar-bg);
@@ -138,10 +138,52 @@
 }
 
 .workbench-content {
+  --left-sidebar-width: var(--shell-sidebar-width);
+
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+
+.sidebar-resizer {
+  position: relative;
+  z-index: 8;
+  width: 0;
+  flex: 0 0 0;
+}
+
+.sidebar-resizer-hit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -8px;
+  z-index: 8;
+  width: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.sidebar-resizer-hit::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 7px;
+  width: 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  opacity: 0.36;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), opacity var(--transition-fast);
+}
+
+.sidebar-resizer-hit:hover::after,
+body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
+  background: rgba(137, 205, 255, 0.32);
+  box-shadow: 0 0 0 1px rgba(137, 205, 255, 0.08);
+  opacity: 1;
 }
 
 .workbench-main-shell {
@@ -167,6 +209,10 @@
   background: var(--shell-titlebar-bg);
   border-bottom: 1px solid var(--border-subtle);
   -webkit-app-region: drag;
+}
+
+.global-chrome.is-macos {
+  padding-left: 78px;
 }
 
 .global-chrome-identity,
@@ -363,11 +409,17 @@ body.is-resizing-right-panel {
   user-select: none;
 }
 
+body.is-resizing-left-sidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .center-panel {
   --center-panel-gutter: clamp(8px, 1.5vw, 21px);
   --conversation-column-width: 83.333%;
   --conversation-column-min: min(100%, 720px);
   --conversation-column-max: 1180px;
+  --expanded-review-side-tree-width: clamp(230px, 24vw, 300px);
 
   display: flex;
   flex: 1 1 auto;
@@ -380,6 +432,13 @@ body.is-resizing-right-panel {
   border-right: 0;
   border-radius: 16px 0 0 0;
   box-shadow: none;
+}
+
+.workbench-body.is-review-expanded .center-panel {
+  position: relative;
+  z-index: 2;
+  overflow: visible;
+  border-right: 1px solid var(--border-subtle);
 }
 
 .right-panel {
@@ -399,6 +458,11 @@ body.is-resizing-right-panel {
 
 .right-panel.is-collapsed {
   display: none;
+}
+
+.right-panel.is-expanded-spacer {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .thread-header {
@@ -515,6 +579,68 @@ body.is-resizing-right-panel {
 
 .conversation-container.is-workspace-tab {
   padding-top: 0;
+}
+
+.expanded-review-panel-shell {
+  display: flex;
+  position: absolute;
+  top: 0;
+  right: calc(-1 * var(--right-panel-width));
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: var(--shell-review-bg);
+}
+
+.expanded-review-panel-shell .review-panel {
+  gap: 0;
+  padding: 0;
+  background: var(--shell-review-bg);
+}
+
+.expanded-review-panel-shell .review-tabs {
+  min-height: 44px;
+  padding: 8px 10px;
+  background: var(--shell-review-bg);
+}
+
+.expanded-review-panel-shell .review-tab-panel {
+  box-sizing: border-box;
+  padding: 10px;
+}
+
+.expanded-review-panel-shell .review-tab-panel-editor {
+  padding: 0;
+}
+
+.expanded-review-composer-layer {
+  position: absolute;
+  right: calc(-1 * var(--right-panel-width));
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  padding: 0 var(--center-panel-gutter) 8px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.expanded-review-composer-layer.has-review-side-tree {
+  right: calc(-1 * var(--right-panel-width) + var(--expanded-review-side-tree-width));
+}
+
+.expanded-review-composer-layer > .composer-plan-slot,
+.expanded-review-composer-layer > .composer {
+  width: min(680px, calc(100% - 2 * var(--center-panel-gutter)));
+  min-width: 0;
+  max-width: 680px;
+  pointer-events: auto;
 }
 
 .center-tab-bar-shell {
@@ -710,10 +836,6 @@ body.is-resizing-right-panel {
 }
 
 @media (max-width: 1120px) {
-  .thread-sidebar-shell {
-    width: 248px;
-  }
-
   .thread-header-actions .thread-header-count {
     display: none;
   }
@@ -721,6 +843,7 @@ body.is-resizing-right-panel {
 
 @media (max-width: 920px) {
   .thread-sidebar-shell,
+  .sidebar-resizer,
   .right-panel {
     display: none;
   }

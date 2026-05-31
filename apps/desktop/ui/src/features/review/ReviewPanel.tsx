@@ -1,14 +1,23 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
 import { fsListDir, gitStage, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { DiffTab } from "../editor/DiffTab";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import "./ReviewPanel.css";
 
-type ReviewPanelTab = "Review" | "Diff" | "Files";
+export type ReviewPanelTab = "Review" | "Diff" | "Files";
+export type ReviewPanelActiveTab =
+  | { kind: "base"; tab: ReviewPanelTab }
+  | { kind: "file"; path: string }
+  | { kind: "diff"; path: string; changeSetId: string };
+export type ReviewPanelOpenTab =
+  | { kind: "file"; path: string }
+  | { kind: "diff"; path: string; changeSetId: string };
 type ReviewScope = "last" | "manual";
 
 export interface InlineDiffLine {
@@ -205,10 +214,21 @@ interface Props {
   refreshing: boolean;
   hydrated: boolean;
   appTheme?: AppTheme;
+  panelExpanded?: boolean;
   onRefresh: () => void | Promise<void>;
   onFileSelect: (path: string, changeSetId: string) => void;
   onFileOpen: (path: string) => void;
   onAddComposerReference?: (path: string) => void;
+  onPanelExpandedChange?: (expanded: boolean) => void;
+  onEditorFileTreeVisibleChange?: (visible: boolean) => void;
+  renderFileTab?: (
+    path: string,
+    context: { fileTreeVisible: boolean; onToggleFileTree?: () => void },
+  ) => ReactNode;
+  activeTab?: ReviewPanelActiveTab;
+  openTabs?: ReviewPanelOpenTab[];
+  onActiveTabChange?: Dispatch<SetStateAction<ReviewPanelActiveTab>>;
+  onOpenTabsChange?: Dispatch<SetStateAction<ReviewPanelOpenTab[]>>;
   focusRequest?: { changeSetId: string; token: number } | null;
 }
 
@@ -217,28 +237,103 @@ export function ReviewPanel({
   refreshing,
   hydrated,
   appTheme = "graphite",
+  panelExpanded = false,
   onRefresh,
-  onFileSelect,
   onFileOpen,
   onAddComposerReference,
+  onPanelExpandedChange,
+  onEditorFileTreeVisibleChange,
+  renderFileTab,
+  activeTab: controlledActiveTab,
+  openTabs: controlledOpenTabs,
+  onActiveTabChange,
+  onOpenTabsChange,
   focusRequest,
 }: Props) {
-  const [tab, setTab] = useState<ReviewPanelTab>("Review");
+  const [internalActiveTab, setInternalActiveTab] = useState<ReviewPanelActiveTab>({
+    kind: "base",
+    tab: "Review",
+  });
+  const [internalOpenTabs, setInternalOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
   const [filter, setFilter] = useState("");
   const [fileTreeRefreshSignal, setFileTreeRefreshSignal] = useState(0);
+  const [editorFileTreeVisible, setEditorFileTreeVisible] = useState(false);
   const [changeSetState, setChangeSetState] = useState<{
     summaries: ChangeSetSummary[];
     filesById: Record<string, FileChangeSummary[]>;
   }>({ summaries: [], filesById: {} });
+  const activeTab = controlledActiveTab ?? internalActiveTab;
+  const setActiveTab = onActiveTabChange ?? setInternalActiveTab;
+  const openTabs = controlledOpenTabs ?? internalOpenTabs;
+  const setOpenTabs = onOpenTabsChange ?? setInternalOpenTabs;
+  const resetKeyRef = useRef(`${snapshot.session.id}:${snapshot.workspace.root}`);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const focusRequestKey = focusRequest
+    ? `${focusRequest.changeSetId}:${focusRequest.token}`
+    : null;
+  const handledFocusRequestKeyRef = useRef<string | null>(focusRequestKey);
+  const activeBaseTab = activeTab.kind === "base" ? activeTab.tab : null;
+  const activeFilePath = activeTab.kind === "file" ? activeTab.path : null;
+  const activeDiffTab = activeTab.kind === "diff" ? activeTab : null;
+  const activeSideTreeKeyRef = useRef<string | null>(null);
+  const hasOpenFileTab = openTabs.some((tab) => tab.kind === "file");
+  const hasOpenDiffTab = openTabs.some((tab) => tab.kind === "diff");
+  const activeSideTreeKey = activeFilePath
+    ? `file:${activeFilePath}`
+    : activeDiffTab
+      ? `diff:${activeDiffTab.changeSetId}:${activeDiffTab.path}`
+      : null;
 
   const handleRefresh = useCallback(() => {
-    if (tab === "Diff") {
+    if (activeBaseTab === "Diff") {
       onRefresh();
       return;
     }
 
     setFileTreeRefreshSignal((signal) => signal + 1);
-  }, [onRefresh, tab]);
+  }, [activeBaseTab, onRefresh]);
+
+  const handlePanelExpandedToggle = useCallback(() => {
+    onPanelExpandedChange?.(!panelExpanded);
+  }, [onPanelExpandedChange, panelExpanded]);
+
+  const handleEditorFileTreeToggle = useCallback(() => {
+    setEditorFileTreeVisible((visible) => !visible);
+  }, []);
+
+  const handleOpenReviewTab = useCallback((tab: ReviewPanelOpenTab) => {
+    const tabId = reviewOpenTabId(tab);
+    setOpenTabs((current) =>
+      current.some((openTab) => reviewOpenTabId(openTab) === tabId)
+        ? current
+        : [...current, tab],
+    );
+    setActiveTab(tab);
+  }, [setActiveTab, setOpenTabs]);
+
+  const handleFileTreeOpen = useCallback((path: string) => {
+    if (!renderFileTab) {
+      onFileOpen(path);
+      return;
+    }
+
+    handleOpenReviewTab({ kind: "file", path });
+  }, [handleOpenReviewTab, onFileOpen, renderFileTab]);
+
+  const handleGitFileOpen = useCallback((path: string, changeSetId: string) => {
+    handleOpenReviewTab({ kind: "diff", path, changeSetId });
+  }, [handleOpenReviewTab]);
+
+  const handleOpenTabClose = useCallback((tab: ReviewPanelOpenTab) => {
+    const closingTabId = reviewOpenTabId(tab);
+    const remainingTabs = openTabs.filter((openTab) => reviewOpenTabId(openTab) !== closingTabId);
+    setOpenTabs(remainingTabs);
+    setActiveTab((current) =>
+      reviewActiveTabMatchesOpenTab(current, tab)
+        ? remainingTabs[remainingTabs.length - 1] ?? { kind: "base", tab: tab.kind === "diff" ? "Diff" : "Files" }
+        : current,
+    );
+  }, [openTabs, setActiveTab, setOpenTabs]);
 
   const filteredFiles = useMemo(() => {
     const lowerFilter = filter.toLowerCase();
@@ -263,10 +358,37 @@ export function ReviewPanel({
   );
 
   useEffect(() => {
-    if (focusRequest) {
-      setTab("Review");
+    if (!focusRequestKey) return;
+    if (handledFocusRequestKeyRef.current === focusRequestKey) return;
+
+    handledFocusRequestKeyRef.current = focusRequestKey;
+    setActiveTab({ kind: "base", tab: "Review" });
+  }, [focusRequestKey, setActiveTab]);
+
+  useEffect(() => {
+    const nextResetKey = `${snapshot.session.id}:${snapshot.workspace.root}`;
+    if (resetKeyRef.current === nextResetKey) return;
+
+    resetKeyRef.current = nextResetKey;
+    setOpenTabs([]);
+    setActiveTab({ kind: "base", tab: "Review" });
+    setEditorFileTreeVisible(false);
+  }, [setActiveTab, setOpenTabs, snapshot.session.id, snapshot.workspace.root]);
+
+  useEffect(() => {
+    if (!activeSideTreeKey) {
+      activeSideTreeKeyRef.current = null;
+      setEditorFileTreeVisible(false);
+      return;
     }
-  }, [focusRequest?.token]);
+    if (activeSideTreeKeyRef.current === activeSideTreeKey) return;
+    activeSideTreeKeyRef.current = activeSideTreeKey;
+    setEditorFileTreeVisible(true);
+  }, [activeSideTreeKey]);
+
+  useEffect(() => {
+    onEditorFileTreeVisibleChange?.(Boolean(activeSideTreeKey && editorFileTreeVisible));
+  }, [activeSideTreeKey, editorFileTreeVisible, onEditorFileTreeVisibleChange]);
 
   const grouped = useMemo(() => {
     const groups: Record<ChangeSection, ChangedFile[]> = {
@@ -316,54 +438,102 @@ export function ReviewPanel({
   }, [snapshot.session.id, snapshot.workspace.root, snapshot.revision]);
 
   return (
-    <div className="review-panel">
+    <div ref={panelRef} className="review-panel">
       <div className="review-tabs">
         <button
           type="button"
-          className={`review-tab ${tab === "Review" ? "review-tab-active" : ""}`}
-          onClick={() => setTab("Review")}
+          className={`review-tab ${activeBaseTab === "Review" ? "review-tab-active" : ""}`}
+          onClick={() => setActiveTab({ kind: "base", tab: "Review" })}
           title="审查"
           aria-label="审查"
         >
           <ReviewTabIcon />
           <span className="review-tab-label">审查</span>
         </button>
-        <button
-          type="button"
-          className={`review-tab ${tab === "Diff" ? "review-tab-active" : ""}`}
-          onClick={() => setTab("Diff")}
-          title="Git"
-          aria-label="Git"
-        >
-          <GitTabIcon />
-          <span className="review-tab-label">Git</span>
-        </button>
-        <button
-          type="button"
-          className={`review-tab ${tab === "Files" ? "review-tab-active" : ""}`}
-          onClick={() => setTab("Files")}
-          title="所有文件"
-          aria-label="所有文件"
-        >
-          <FolderTreeIcon className="review-tab-icon" />
-          <span className="review-tab-label">文件</span>
-        </button>
+        {!hasOpenDiffTab && (
+          <button
+            type="button"
+            className={`review-tab ${activeBaseTab === "Diff" ? "review-tab-active" : ""}`}
+            onClick={() => setActiveTab({ kind: "base", tab: "Diff" })}
+            title="Git"
+            aria-label="Git"
+          >
+            <GitTabIcon />
+            <span className="review-tab-label">Git</span>
+          </button>
+        )}
+        {!hasOpenFileTab && (
+          <button
+            type="button"
+            className={`review-tab ${activeBaseTab === "Files" ? "review-tab-active" : ""}`}
+            onClick={() => setActiveTab({ kind: "base", tab: "Files" })}
+            title="所有文件"
+            aria-label="所有文件"
+          >
+            <FolderTreeIcon className="review-tab-icon" />
+            <span className="review-tab-label">文件</span>
+          </button>
+        )}
+        {openTabs.map((tab) => {
+          const tabId = reviewOpenTabId(tab);
+          const fileName = fileNameFromPath(tab.path);
+          const isActive = reviewActiveTabMatchesOpenTab(activeTab, tab);
+          return (
+            <div
+              key={tabId}
+              className={`review-open-file-tab ${isActive ? "review-tab-active" : ""}`}
+              title={tab.kind === "diff" ? `差异：${tab.path}` : tab.path}
+            >
+              <button
+                type="button"
+                className="review-file-tab-close"
+                onClick={() => handleOpenTabClose(tab)}
+                aria-label={`关闭 ${fileName}`}
+                title={`关闭 ${fileName}`}
+              >
+                <img className="review-file-tab-icon" src={getFileIcon(tab.path)} alt="" />
+                <span className="review-file-tab-x" aria-hidden="true">×</span>
+              </button>
+              <button
+                type="button"
+                className="review-file-tab-label-btn"
+                onClick={() => setActiveTab(tab)}
+                aria-label={tab.kind === "diff" ? `打开差异 ${fileName}` : `打开文件 ${fileName}`}
+                title={tab.kind === "diff" ? `差异：${tab.path}` : tab.path}
+              >
+                {fileName}
+              </button>
+            </div>
+          );
+        })}
         <div className="review-tabs-spacer" />
-        {tab !== "Review" && (
+        {activeBaseTab !== null && activeBaseTab !== "Review" && (
           <button
             type="button"
             className="review-refresh-btn"
             onClick={handleRefresh}
-            disabled={tab === "Diff" && refreshing}
-            title={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
-            aria-label={tab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+            disabled={activeBaseTab === "Diff" && refreshing}
+            title={activeBaseTab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
+            aria-label={activeBaseTab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
           >
             <RefreshIcon />
           </button>
         )}
+        {onPanelExpandedChange && (
+          <button
+            type="button"
+            className={`review-panel-toggle-btn ${panelExpanded ? "is-active" : ""}`}
+            onClick={handlePanelExpandedToggle}
+            title={panelExpanded ? "还原审查面板" : "展开审查面板"}
+            aria-label={panelExpanded ? "还原审查面板" : "展开审查面板"}
+            aria-pressed={panelExpanded}
+          >
+            <PanelExpandIcon expanded={panelExpanded} />
+          </button>
+        )}
       </div>
 
-      <div className="review-tab-panel review-tab-panel-review" hidden={tab !== "Review"}>
+      <div className="review-tab-panel review-tab-panel-review" hidden={activeBaseTab !== "Review"}>
         <ReviewChangesView
           changeSetState={changeSetState}
           lastAssistantMessageId={reviewTargetAssistantMessageId}
@@ -374,17 +544,17 @@ export function ReviewPanel({
         />
       </div>
 
-      <div className="review-tab-panel review-tab-panel-files" hidden={tab !== "Files"}>
+      <div className="review-tab-panel review-tab-panel-files" hidden={activeBaseTab !== "Files"}>
         <FileTree
           workspaceRoot={snapshot.workspace.root}
-          onFileOpen={onFileOpen}
+          onFileOpen={handleFileTreeOpen}
           refreshSignal={fileTreeRefreshSignal}
           onAddComposerReference={onAddComposerReference}
           composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
         />
       </div>
 
-      <div className="review-tab-panel review-tab-panel-git" hidden={tab !== "Diff"}>
+      <div className="review-tab-panel review-tab-panel-git" hidden={activeBaseTab !== "Diff"}>
         {!hydrated ? (
           <div className="review-loading-state">
             <span className="review-loading-dot" />
@@ -413,21 +583,194 @@ export function ReviewPanel({
             title="未暂存"
             files={grouped.Unstaged}
             changeSetId="git-worktree:unstaged"
-            onFileSelect={onFileSelect}
+            onFileSelect={handleGitFileOpen}
           />
           <FileGroup
             title="已暂存"
             files={grouped.Staged}
             changeSetId="git-worktree:staged"
-            onFileSelect={onFileSelect}
+            onFileSelect={handleGitFileOpen}
           />
           <UntrackedTree
             files={grouped.Untracked}
-            onFileSelect={onFileSelect}
+            onFileSelect={handleGitFileOpen}
             onRefresh={onRefresh}
           />
         </>
         )}
+      </div>
+      {activeFilePath && renderFileTab && (
+        <div className={`review-tab-panel review-tab-panel-editor review-tab-panel-file-editor ${editorFileTreeVisible ? "has-filetree" : ""}`}>
+          <div className="review-editor-main">
+            {renderFileTab(activeFilePath, {
+              fileTreeVisible: editorFileTreeVisible,
+              onToggleFileTree: handleEditorFileTreeToggle,
+            })}
+          </div>
+          {editorFileTreeVisible && (
+            <aside className="review-editor-filetree" aria-label="文件树">
+              <FileTree
+                workspaceRoot={snapshot.workspace.root}
+                onFileOpen={handleFileTreeOpen}
+                refreshSignal={fileTreeRefreshSignal}
+                activePath={activeFilePath}
+                variant="inline"
+              />
+            </aside>
+          )}
+        </div>
+      )}
+      {activeDiffTab && (
+        <div className={`review-tab-panel review-tab-panel-editor review-tab-panel-diff-editor ${editorFileTreeVisible ? "has-filetree" : ""}`}>
+          <div className="review-editor-main">
+            <ReviewDiffTab
+              path={activeDiffTab.path}
+              changeSetId={activeDiffTab.changeSetId}
+              appTheme={appTheme}
+              workspaceName={snapshot.workspace.name}
+              fileTreeVisible={editorFileTreeVisible}
+              onToggleFileTree={handleEditorFileTreeToggle}
+            />
+          </div>
+          {editorFileTreeVisible && (
+            <aside className="review-editor-filetree review-git-editor-filetree" aria-label="Git 文件树">
+              <GitChangesTree
+                grouped={grouped}
+                filter={filter}
+                onFilterChange={setFilter}
+                activePath={activeDiffTab.path}
+                onFileSelect={handleGitFileOpen}
+                onRefresh={onRefresh}
+              />
+            </aside>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function reviewOpenTabId(tab: ReviewPanelOpenTab | Extract<ReviewPanelActiveTab, { kind: "file" | "diff" }>) {
+  return tab.kind === "diff" ? `diff:${tab.changeSetId}:${tab.path}` : `file:${tab.path}`;
+}
+
+function reviewActiveTabMatchesOpenTab(activeTab: ReviewPanelActiveTab, openTab: ReviewPanelOpenTab) {
+  if (activeTab.kind !== openTab.kind) return false;
+  if (activeTab.path !== openTab.path) return false;
+  if (activeTab.kind !== "diff") return true;
+  return openTab.kind === "diff" && activeTab.changeSetId === openTab.changeSetId;
+}
+
+function fileNameFromPath(path: string) {
+  const segments = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
+function ReviewDiffTab({
+  path,
+  changeSetId,
+  appTheme,
+  workspaceName,
+  fileTreeVisible,
+  onToggleFileTree,
+}: {
+  path: string;
+  changeSetId: string;
+  appTheme: AppTheme;
+  workspaceName?: string;
+  fileTreeVisible: boolean;
+  onToggleFileTree: () => void;
+}) {
+  const [change, setChange] = useState<FileChangeRecord | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setChange(null);
+    setFailed(false);
+    sessionGetChangeSetFileDiff({ change_set_id: changeSetId, path })
+      .then((nextChange) => {
+        if (!cancelled) setChange(nextChange);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [changeSetId, path]);
+
+  return (
+    <div className="review-tab-panel review-tab-panel-editor">
+      {failed ? (
+        <div className="review-loading-state">这个差异暂时无法加载</div>
+      ) : change ? (
+        <DiffTab
+          change={change}
+          appTheme={appTheme}
+          toolbarMode="breadcrumbs"
+          workspaceName={workspaceName}
+          fileTreeVisible={fileTreeVisible}
+          onToggleFileTree={onToggleFileTree}
+        />
+      ) : (
+        <div className="review-loading-state">正在加载差异...</div>
+      )}
+    </div>
+  );
+}
+
+function GitChangesTree({
+  grouped,
+  filter,
+  onFilterChange,
+  activePath,
+  onFileSelect,
+  onRefresh,
+}: {
+  grouped: Record<ChangeSection, ChangedFile[]>;
+  filter: string;
+  onFilterChange: (value: string) => void;
+  activePath: string;
+  onFileSelect: (path: string, changeSetId: string) => void;
+  onRefresh: () => void | Promise<void>;
+}) {
+  return (
+    <div className="review-git-filetree">
+      <label className="review-git-filetree-search">
+        <SearchIcon />
+        <input
+          className="review-git-filetree-search-input"
+          value={filter}
+          placeholder="筛选文件..."
+          onChange={(event) => onFilterChange(event.target.value)}
+        />
+      </label>
+      <div className="review-git-filetree-list">
+        <FileGroup
+          title="未暂存"
+          files={grouped.Unstaged}
+          changeSetId="git-worktree:unstaged"
+          onFileSelect={onFileSelect}
+          activePath={activePath}
+          compact
+        />
+        <FileGroup
+          title="已暂存"
+          files={grouped.Staged}
+          changeSetId="git-worktree:staged"
+          onFileSelect={onFileSelect}
+          activePath={activePath}
+          compact
+        />
+        <UntrackedTree
+          files={grouped.Untracked}
+          onFileSelect={onFileSelect}
+          onRefresh={onRefresh}
+          activePath={activePath}
+          compact
+        />
       </div>
     </div>
   );
@@ -440,6 +783,24 @@ function ReviewTabIcon() {
       <path d="M7.2 7.2h5.6" />
       <path d="M10 10v4" />
       <path d="M8 12h4" />
+    </svg>
+  );
+}
+
+function PanelExpandIcon({ expanded }: { expanded: boolean }) {
+  if (expanded) {
+    return (
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M8 4.5v3.5H4.5" />
+        <path d="M12 15.5v-3.5h3.5" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M12.5 5.5h3v3" />
+      <path d="M7.5 14.5h-3v-3" />
     </svg>
   );
 }
@@ -1212,6 +1573,15 @@ function RefreshIcon() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg className="review-git-filetree-search-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="8.5" cy="8.5" r="5.2" />
+      <path d="m12.4 12.4 4 4" />
+    </svg>
+  );
+}
+
 function GitTabIcon() {
   return (
     <svg className="review-tab-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -1238,11 +1608,15 @@ function FileGroup({
   files,
   changeSetId,
   onFileSelect,
+  activePath,
+  compact = false,
 }: {
   title: string;
   files: ChangedFile[];
   changeSetId: string;
   onFileSelect: (path: string, changeSetId: string) => void;
+  activePath?: string;
+  compact?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
@@ -1276,7 +1650,7 @@ function FileGroup({
   if (files.length === 0) return null;
 
   return (
-    <div className="review-group">
+    <div className={`review-group ${compact ? "review-group-compact" : ""}`}>
       <div
         className="review-group-header"
         onClick={() => setCollapsed(!collapsed)}
@@ -1300,6 +1674,8 @@ function FileGroup({
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
               changeSetId={changeSetId}
+              activePath={activePath}
+              compact={compact}
             />
           ))}
         </div>
@@ -1315,6 +1691,8 @@ function DiffTreeNode({
   onToggleDir,
   onFileSelect,
   changeSetId,
+  activePath,
+  compact,
 }: {
   node: TreeNode;
   depth: number;
@@ -1322,16 +1700,19 @@ function DiffTreeNode({
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
   changeSetId: string;
+  activePath?: string;
+  compact: boolean;
 }) {
   const isDir = node.kind === "directory";
   const isExpanded = expandedDirs.has(node.path);
+  const indent = compact ? `${depth * 12 + 4}px` : `${depth * 14 + 8}px`;
 
   if (isDir) {
     return (
       <div className="review-diff-tree-branch">
         <div
           className="review-diff-row review-diff-dir"
-          style={{ paddingLeft: `${depth * 14 + 8}px` }}
+          style={{ paddingLeft: indent }}
           onClick={() => onToggleDir(node.path)}
         >
           <span className="review-tree-arrow">
@@ -1351,6 +1732,8 @@ function DiffTreeNode({
                 onToggleDir={onToggleDir}
                 onFileSelect={onFileSelect}
                 changeSetId={changeSetId}
+                activePath={activePath}
+                compact={compact}
               />
             ))}
           </div>
@@ -1362,8 +1745,8 @@ function DiffTreeNode({
   return (
     <div className="review-diff-tree-leaf">
       <div
-        className="review-diff-row review-diff-file"
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        className={`review-diff-row review-diff-file ${activePath === node.path ? "is-active" : ""}`}
+        style={{ paddingLeft: indent }}
         onClick={() => onFileSelect(node.path, changeSetId)}
       >
         <span className="review-tree-arrow" />
@@ -1382,10 +1765,14 @@ function UntrackedTree({
   files,
   onFileSelect,
   onRefresh,
+  activePath,
+  compact = false,
 }: {
   files: ChangedFile[];
   onFileSelect: (path: string, changeSetId: string) => void;
   onRefresh: () => void | Promise<void>;
+  activePath?: string;
+  compact?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -1438,7 +1825,7 @@ function UntrackedTree({
   if (files.length === 0) return null;
 
   return (
-    <div className="review-group review-untracked-group">
+    <div className={`review-group review-untracked-group ${compact ? "review-group-compact" : ""}`}>
       <div
         className="review-group-header"
         onClick={() => setCollapsed(!collapsed)}
@@ -1464,6 +1851,8 @@ function UntrackedTree({
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={handleTrackFile}
+              activePath={activePath}
+              compact={compact}
             />
           ))}
         </div>
@@ -1480,6 +1869,8 @@ function UntrackedTreeNode({
   onToggleDir,
   onFileSelect,
   onTrackFile,
+  activePath,
+  compact,
 }: {
   entry: FileEntry;
   depth: number;
@@ -1488,16 +1879,19 @@ function UntrackedTreeNode({
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
   onTrackFile: (path: string) => void;
+  activePath?: string;
+  compact: boolean;
 }) {
   const isDir = entry.kind === "Directory";
   const isExpanded = expandedDirs.has(entry.path);
   const children = childrenCache.get(entry.path);
+  const indent = compact ? `${depth * 12 + 4}px` : `${depth * 14 + 8}px`;
 
   return (
     <>
       <div
-        className={`review-untracked-row ${isDir ? "review-untracked-dir" : "review-untracked-file"}`}
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        className={`review-untracked-row ${isDir ? "review-untracked-dir" : "review-untracked-file"} ${activePath === entry.path ? "is-active" : ""}`}
+        style={{ paddingLeft: indent }}
         onClick={() =>
           isDir
             ? onToggleDir(entry.path)
@@ -1533,6 +1927,8 @@ function UntrackedTreeNode({
               onToggleDir={onToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={onTrackFile}
+              activePath={activePath}
+              compact={compact}
             />
           ))}
         </div>

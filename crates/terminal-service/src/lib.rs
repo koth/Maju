@@ -2,6 +2,7 @@ use anyhow::{Context, anyhow, bail};
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
 use std::env;
+#[cfg(windows)]
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -636,10 +637,18 @@ pub fn default_shell_profile() -> ShellProfile {
 fn shell_startup_args(command: &str) -> Vec<String> {
     let display_name = shell_display_name(command).to_ascii_lowercase();
     if display_name == "pwsh" || display_name == "powershell" {
-        vec!["-NoLogo".into(), "-NoProfile".into()]
+        powershell_startup_args()
     } else {
         Vec::new()
     }
+}
+
+#[cfg(any(windows, test))]
+fn powershell_startup_args() -> Vec<String> {
+    // This is the user-facing interactive terminal, so let PowerShell load the
+    // user's profile. Shell integrations such as `conda init powershell` live
+    // there; non-interactive/background PowerShell calls keep using -NoProfile.
+    vec!["-NoLogo".into()]
 }
 
 fn shell_display_name(command: &str) -> String {
@@ -699,6 +708,17 @@ mod tests {
         let profile = default_shell_profile();
         assert!(!profile.command.trim().is_empty());
         assert!(!profile.display_name.trim().is_empty());
+    }
+
+    #[test]
+    fn powershell_startup_args_load_user_profile() {
+        let args = powershell_startup_args();
+        assert_eq!(args, vec!["-NoLogo"]);
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.eq_ignore_ascii_case("-NoProfile"))
+        );
     }
 
     #[test]

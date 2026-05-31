@@ -120,6 +120,8 @@ pub enum UserPromptContent {
         data: String,
         mime_type: String,
         name: Option<String>,
+        #[serde(default)]
+        display_url: Option<String>,
         thumbnail_data: Option<String>,
         thumbnail_mime_type: Option<String>,
     },
@@ -156,6 +158,7 @@ impl UserPromptContent {
             data: data.into(),
             mime_type: mime_type.into(),
             name,
+            display_url: None,
             thumbnail_data: None,
             thumbnail_mime_type: None,
         }
@@ -172,6 +175,7 @@ impl UserPromptContent {
             data: data.into(),
             mime_type: mime_type.into(),
             name,
+            display_url: None,
             thumbnail_data: Some(thumbnail_data.into()),
             thumbnail_mime_type: Some(thumbnail_mime_type.into()),
         }
@@ -473,6 +477,35 @@ pub struct SidebarSection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeStatus {
+    None,
+    Active,
+    BackgroundRunning,
+    BackgroundIdle,
+}
+
+impl Default for SessionRuntimeStatus {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAttentionState {
+    None,
+    CompletedUnviewed,
+    NeedsAttention,
+}
+
+impl Default for SessionAttentionState {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionListItem {
     pub id: String,
     pub title: String,
@@ -483,6 +516,10 @@ pub struct SessionListItem {
     pub acp_session_id: Option<String>,
     #[serde(default)]
     pub agent_cli: Option<String>,
+    #[serde(default)]
+    pub runtime_status: SessionRuntimeStatus,
+    #[serde(default)]
+    pub attention_state: SessionAttentionState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

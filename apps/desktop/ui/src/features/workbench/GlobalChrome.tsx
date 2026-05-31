@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { WorkspaceDescriptor, SearchResult } from "../../types";
 import { fsSearch } from "../../lib/tauri";
+import { isMacOS } from "../../lib/platform";
 import { SearchResults } from "../search/SearchResults";
 import { WindowControls } from "./WindowControls";
 
@@ -100,9 +101,10 @@ export function GlobalChrome({
   );
 
   const showDropdown = searchOpen && (searchLoading || searchError !== null || searchResult !== null);
+  const chromeClassName = `global-chrome ${isMacOS() ? "is-macos" : ""}`;
 
   return (
-    <header className="global-chrome" data-tauri-drag-region>
+    <header className={chromeClassName} data-tauri-drag-region>
       <div className="global-chrome-left">
         <button
           type="button"

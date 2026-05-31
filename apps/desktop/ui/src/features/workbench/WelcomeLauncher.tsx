@@ -16,6 +16,7 @@ import {
   workspaceRemoveRecent,
   workspaceRestoreOpen,
 } from "../../lib/tauri";
+import { isMacOS } from "../../lib/platform";
 import { open } from "@tauri-apps/plugin-dialog";
 import { WindowControls } from "./WindowControls";
 import "./WelcomeLauncher.css";
@@ -293,10 +294,11 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     : false;
   const woaTokenMessage = agentSettings?.claude_woa.token.message;
   const woaOnboardingKicker = "内网环境 · 开始前需要完成";
+  const titlebarClassName = `welcome-titlebar ${isMacOS() ? "is-macos" : ""}`;
 
   return (
     <div className="welcome">
-      <div className="welcome-titlebar" data-tauri-drag-region>
+      <div className={titlebarClassName} data-tauri-drag-region>
         <WindowControls />
       </div>
       <div className="welcome-content">

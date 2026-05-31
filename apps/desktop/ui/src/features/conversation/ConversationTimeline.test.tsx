@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { clearMocks, mockConvertFileSrc } from "@tauri-apps/api/mocks";
 import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import {
   appendStreamingMessageDelta,
@@ -12,6 +13,11 @@ import type {
   ToolInvocation,
   UiSnapshot,
 } from "../../types/index";
+
+afterEach(() => {
+  clearMocks();
+  vi.unstubAllGlobals();
+});
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
   return {
@@ -548,8 +554,72 @@ describe("ThinkingIndicator", () => {
     const userMessage = container.querySelector(".msg-user");
     expect(userMessage?.querySelectorAll(".msg-user-image")).toHaveLength(2);
     expect(userMessage?.querySelector(".msg-user-image-strip")).toBeTruthy();
+    expect(
+      within(userMessage as HTMLElement).getByRole("button", { name: "预览 图1" }),
+    ).toBeInTheDocument();
+    expect(
+      within(userMessage as HTMLElement).getByRole("button", { name: "预览 图2" }),
+    ).toBeInTheDocument();
     expect(userMessage?.querySelector(".msg-user-bubble")?.textContent).toBe("› 看看这两张图");
     expect(userMessage?.querySelector(".msg-user-bubble .md-image")).toBeNull();
+  });
+
+  it("opens sent image attachments in a preview dialog", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "User",
+          body: "看看\n\n![图1](data:image/png;base64,aaaa)",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+    const currentTimeline = within(container);
+
+    fireEvent.click(currentTimeline.getByRole("button", { name: "预览 图1" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "图片预览：图1" });
+    expect(within(dialog).getByAltText("图1")).toHaveClass("msg-image-preview-original");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
+    expect(within(document.body).queryByRole("dialog", { name: "图片预览：图1" })).not.toBeInTheDocument();
+  });
+
+  it("uses cached original file urls for sent image attachment previews", () => {
+    vi.stubGlobal("isTauri", true);
+    mockConvertFileSrc("macos");
+    const originalUrl = "file:///Users/test/.kodex/attachments/original%20image.png";
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "User",
+          body: `看看\n\n![图1](data:image/png;base64,thumb "${originalUrl}")`,
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+    const currentTimeline = within(container);
+
+    expect(currentTimeline.getByAltText("图1")).toHaveAttribute(
+      "src",
+      "data:image/png;base64,thumb",
+    );
+
+    fireEvent.click(currentTimeline.getByRole("button", { name: "预览 图1" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "图片预览：图1" });
+    expect(within(dialog).getByAltText("图1")).toHaveAttribute(
+      "src",
+      "asset://localhost/%2FUsers%2Ftest%2F.kodex%2Fattachments%2Foriginal%20image.png",
+    );
   });
 
   it("windows long timelines so initial render only mounts the latest entries", () => {

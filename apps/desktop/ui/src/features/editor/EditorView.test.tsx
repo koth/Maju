@@ -318,7 +318,7 @@ describe("EditorView editable state", () => {
       endColumn: 1,
     });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "引用选区" })).not.toBeDisabled());
+    expect(screen.queryByRole("button", { name: "引用选区" })).toBeNull();
     action?.run();
 
     expect(onAddComposerReference).toHaveBeenCalledWith({
@@ -542,5 +542,23 @@ describe("EditorView editable state", () => {
     fireEvent.keyDown(window, { key: "Escape" });
 
     expect(screen.queryByRole("button", { name: "退出全屏" })).not.toBeInTheDocument();
+  });
+
+  it("omits editor fullscreen control in breadcrumb toolbar mode", async () => {
+    render(
+      <EditorView
+        path="src/main.ts"
+        appTheme="kodex_dark"
+        toolbarMode="breadcrumbs"
+        workspaceName="Kodex"
+        onToggleFileTree={vi.fn()}
+      />,
+    );
+
+    await screen.findByLabelText("mock editor");
+
+    expect(screen.getByLabelText("文件路径")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "显示文件树" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "全屏编辑" })).not.toBeInTheDocument();
   });
 });

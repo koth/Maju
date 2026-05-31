@@ -1,4 +1,5 @@
 mod application;
+mod attachment_cache;
 mod bootstrap;
 pub mod claude_woa;
 mod editor_files;
@@ -172,12 +173,39 @@ mod tests {
             message.body.contains("Describe this image")
                 && message
                     .body
-                    .contains("![Image: sample.png](data:image/png;base64,dGh1bWI=)")
+                    .contains("![Image: sample.png](data:image/png;base64,dGh1bWI= \"file://")
                 && message.body.contains("[File: notes.txt]")
         }));
+        assert!(
+            dir.path()
+                .join("home")
+                .join(".kodex")
+                .join("attachments")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_some(),
+            "sent image originals should be cached for timeline previews"
+        );
         assert!(app.ui.messages.iter().any(|message| message.role
             == workspace_model::MessageRole::Assistant
             && message.body.contains("Real ACP session connected")));
+    }
+
+    #[test]
+    fn idle_startup_loads_agent_available_commands() {
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        wait_for_available_commands(&mut app);
+
+        assert!(
+            app.ui
+                .available_commands
+                .iter()
+                .any(|command| command.name == "mock"),
+            "startup slash commands should be visible before the first prompt"
+        );
     }
 
     #[test]
@@ -307,6 +335,7 @@ mod tests {
         assert!(paths.config_dir().is_dir());
         assert!(paths.logs_dir().is_dir());
         assert!(paths.sessions_dir().is_dir());
+        assert!(paths.attachments_dir().is_dir());
         assert!(paths.workspaces_dir().is_dir());
     }
 
@@ -1293,7 +1322,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
     }
 
     #[test]
-    fn switching_back_to_empty_session_starts_new_agent_session_instead_of_resume() {
+    fn switching_back_to_empty_session_reuses_live_runtime_without_resume() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);
 
@@ -1323,14 +1352,31 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         wait_for_control(&mut app, SessionConfigCategory::Model);
 
         app.session_switch(&empty_session_id).unwrap();
+        wait_for_control(&mut app, SessionConfigCategory::Model);
 
         assert_eq!(app.ui.session.id.to_string(), empty_session_id);
         let store =
             SessionStore::open(&dir.path().join("home").join(".kodex"), dir.path()).unwrap();
-        assert_eq!(
-            store.get_acp_session_id(&empty_session_id).unwrap(),
-            None,
-            "empty sessions should clear transient ACP ids instead of resuming them"
+        assert!(
+            store
+                .get_acp_session_id(&empty_session_id)
+                .unwrap()
+                .is_some(),
+            "live empty sessions can keep their transient ACP id because no restore is needed"
+        );
+        let model_control = app
+            .ui
+            .session_config
+            .controls
+            .iter()
+            .find(|control| control.category == SessionConfigCategory::Model)
+            .expect("live empty runtime should retain model state");
+        assert!(
+            model_control
+                .choices
+                .iter()
+                .all(|choice| choice.id != "mock-loaded"),
+            "live empty runtime should be reused without session/load"
         );
     }
 
@@ -1580,6 +1626,16 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         for _ in 0..100 {
             app.poll_prompt_progress();
             if app.ui.prompt_capabilities.image && app.ui.prompt_capabilities.embedded_context {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn wait_for_available_commands(app: &mut Application) {
+        for _ in 0..100 {
+            app.poll_prompt_progress();
+            if !app.ui.available_commands.is_empty() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

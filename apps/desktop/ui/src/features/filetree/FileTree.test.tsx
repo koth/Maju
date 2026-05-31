@@ -66,4 +66,35 @@ describe("FileTree", () => {
 
     expect(screen.queryByRole("menuitem", { name: "删除文件" })).toBeNull();
   });
+
+  it("omits composer reference action when references are unavailable", async () => {
+    render(
+      <FileTree
+        workspaceRoot="/repo"
+        onFileOpen={vi.fn()}
+        onAddComposerReference={vi.fn()}
+        composerReferenceEnabled={false}
+      />,
+    );
+
+    fireEvent.contextMenu(await screen.findByText("notes.md"), {
+      clientX: 12,
+      clientY: 12,
+    });
+
+    expect(screen.queryByRole("menuitem", { name: "添加到 Composer 引用" })).toBeNull();
+  });
+
+  it("uses inline search chrome without the panel header", async () => {
+    render(<FileTree workspaceRoot="/repo" onFileOpen={vi.fn()} variant="inline" />);
+
+    const filter = screen.getByPlaceholderText("筛选文件...");
+    expect(screen.queryByText("所有文件")).toBeNull();
+    expect(await screen.findByText("notes.md")).toBeTruthy();
+
+    fireEvent.change(filter, { target: { value: "src" } });
+
+    expect(screen.getByText("src")).toBeTruthy();
+    expect(screen.queryByText("notes.md")).toBeNull();
+  });
 });

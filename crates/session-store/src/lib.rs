@@ -522,6 +522,8 @@ impl SessionStore {
                 message_count: row.get(5)?,
                 acp_session_id: row.get(6)?,
                 agent_cli: row.get(7)?,
+                runtime_status: Default::default(),
+                attention_state: Default::default(),
             })
         })?;
 
@@ -550,6 +552,8 @@ impl SessionStore {
                 message_count: 0,
                 acp_session_id: row.get(5)?,
                 agent_cli: row.get(6)?,
+                runtime_status: Default::default(),
+                attention_state: Default::default(),
             })
         })?;
 

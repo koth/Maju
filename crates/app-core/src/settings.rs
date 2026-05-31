@@ -135,6 +135,9 @@ const VENUS_MODEL_SLUG_MAP: &[(&str, &str)] = &[
     ("claude-opus-4.8", "claude-opus-4-8"),
     ("deepseek-v4-pro", "deepseek-v4-pro-external"),
     ("deepseek-v4-flash", "deepseek-v4-flash-external"),
+];
+
+const MIMO_MODEL_SLUG_MAP: &[(&str, &str)] = &[
     ("MiMo-V2.5-Pro", "mimo-v2.5-pro"),
     ("MiMo-V2.5", "mimo-v2.5"),
 ];
@@ -1650,8 +1653,8 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     let default_model = configured_codex_byok_models(paths)
         .into_iter()
         .next()
-        .unwrap_or_else(|| model_slug(KIMI_MODEL).to_string());
-    doc["model"] = value(model_slug(&default_model));
+        .unwrap_or_else(|| KIMI_MODEL.to_string());
+    doc["model"] = value(byok_model_slug(&default_model));
     doc["model_provider"] = value(BYOK_PROVIDER_ID);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
     doc["model_context_window"] = value(model_context_window(&default_model));
@@ -1787,6 +1790,10 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
             .and_then(|item| item.as_str())
             .unwrap_or_else(|| default_model_for_provider(provider))
             .to_string();
+        let active_model_slug = byok_model_slug(&active_model);
+        if active_model_slug != active_model {
+            doc["model"] = value(active_model_slug);
+        }
         if doc.get("preferred_auth_method").is_none() {
             doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
         }
@@ -2003,7 +2010,7 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
             .and_then(|item| item.as_str())
             .unwrap_or_else(|| default_model_for_provider(provider))
             .to_string();
-        let active_model_slug = model_slug(&active_model).to_string();
+        let active_model_slug = byok_model_slug(&active_model);
         if active_model_slug != active_model {
             doc["model"] = value(active_model_slug.clone());
             changed = true;
@@ -2228,13 +2235,13 @@ fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
 
 fn default_model_for_provider(provider: &str) -> &'static str {
     match provider {
-        BYOK_PROVIDER_ID => model_slug(VENUS_MODEL),
-        CODEX_WOA_PROVIDER_ID => model_slug(CODEX_WOA_MODEL),
-        TIMIAI_PROVIDER_ID => model_slug(TIMIAI_CODEX_MODEL),
-        DEEPSEEK_PROVIDER_ID => model_slug(DEEPSEEK_MODEL),
-        KIMI_PROVIDER_ID => model_slug(KIMI_MODEL),
-        MIMO_PROVIDER_ID => model_slug(MIMO_MODEL),
-        _ => model_slug(VENUS_MODEL),
+        BYOK_PROVIDER_ID => model_slug_for_provider(VENUS_MODEL, VENUS_PROVIDER_ID),
+        CODEX_WOA_PROVIDER_ID => model_slug_for_provider(CODEX_WOA_MODEL, CODEX_WOA_PROVIDER_ID),
+        TIMIAI_PROVIDER_ID => model_slug_for_provider(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID),
+        DEEPSEEK_PROVIDER_ID => model_slug_for_provider(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID),
+        KIMI_PROVIDER_ID => model_slug_for_provider(KIMI_MODEL, KIMI_PROVIDER_ID),
+        MIMO_PROVIDER_ID => model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID),
+        _ => model_slug_for_provider(VENUS_MODEL, VENUS_PROVIDER_ID),
     }
 }
 
@@ -2344,7 +2351,11 @@ fn codex_acp_model_catalog_entry(
     provider: &str,
     priority: usize,
 ) -> serde_json::Value {
-    let slug = model_slug_for_provider(model, provider);
+    let slug = if provider == BYOK_PROVIDER_ID {
+        byok_model_slug(model)
+    } else {
+        model_slug_for_provider(model, provider).to_string()
+    };
     let context_window = model_context_window(model);
     let max_output_tokens = model_max_output_tokens(model);
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
@@ -2396,27 +2407,59 @@ fn codex_acp_model_catalog_entry(
     })
 }
 
-fn apply_patch_tool_type_for_provider(provider: &str) -> &'static str {
-    if provider == CODEX_WOA_PROVIDER_ID {
-        "function"
-    } else {
-        "freeform"
+fn apply_patch_tool_type_for_provider(_provider: &str) -> &'static str {
+    "function"
+}
+
+/// Resolve a display model name with the Venus slug mapping.
+#[cfg(test)]
+fn model_slug(display_name: &str) -> &str {
+    model_slug_for_provider(display_name, VENUS_PROVIDER_ID)
+}
+
+fn model_slug_for_provider<'a>(display_name: &'a str, provider: &str) -> &'a str {
+    match provider {
+        VENUS_PROVIDER_ID => lookup_model_slug(display_name, VENUS_MODEL_SLUG_MAP),
+        MIMO_PROVIDER_ID => lookup_model_slug(display_name, MIMO_MODEL_SLUG_MAP),
+        _ => display_name,
     }
 }
 
-/// Resolve a display model name to the actual slug sent to the server.
-fn model_slug(display_name: &str) -> &str {
-    VENUS_MODEL_SLUG_MAP
-        .iter()
+fn lookup_model_slug<'a>(
+    display_name: &'a str,
+    map: &'static [(&'static str, &'static str)],
+) -> &'a str {
+    map.iter()
         .find_map(|(name, slug)| (*name == display_name).then_some(*slug))
         .unwrap_or(display_name)
 }
 
-fn model_slug_for_provider<'a>(display_name: &'a str, provider: &str) -> &'a str {
-    if provider == TIMIAI_PROVIDER_ID {
-        display_name
+fn byok_model_slug(model: &str) -> String {
+    if let Some(display_name) = legacy_deepseek_venus_slug_display_name(model) {
+        return display_name.to_string();
+    }
+    let provider = byok_source_provider_for_model(model);
+    model_slug_for_provider(model, provider).to_string()
+}
+
+fn byok_source_provider_for_model(model: &str) -> &'static str {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.contains("deepseek") {
+        DEEPSEEK_PROVIDER_ID
+    } else if normalized.contains("kimi") {
+        KIMI_PROVIDER_ID
+    } else if normalized.contains("mimo") {
+        MIMO_PROVIDER_ID
     } else {
-        model_slug(display_name)
+        VENUS_PROVIDER_ID
+    }
+}
+
+fn legacy_deepseek_venus_slug_display_name(model: &str) -> Option<&'static str> {
+    match model {
+        "deepseek-v4-pro-external" => Some("deepseek-v4-pro"),
+        "deepseek-v4-flash-external" => Some("deepseek-v4-flash"),
+        _ => None,
     }
 }
 
@@ -2440,7 +2483,10 @@ fn model_i64_metadata(model: &str, metadata: &[(&str, i64)], fallback: i64) -> i
     metadata
         .iter()
         .find_map(|(candidate, value)| {
-            (*candidate == model || model_slug(candidate) == model).then_some(*value)
+            (*candidate == model
+                || model_slug_for_provider(candidate, VENUS_PROVIDER_ID) == model
+                || model_slug_for_provider(candidate, MIMO_PROVIDER_ID) == model)
+                .then_some(*value)
         })
         .unwrap_or(fallback)
 }
@@ -2635,8 +2681,12 @@ fn claude_model_config_for_provider(
     let model_overrides = available_models
         .iter()
         .filter_map(|model| {
-            let slug = model_slug_for_provider(model, provider);
-            (slug != model).then(|| (model.clone(), serde_json::Value::String(slug.to_string())))
+            let slug = if provider == BYOK_PROVIDER_ID {
+                byok_model_slug(model)
+            } else {
+                model_slug_for_provider(model, provider).to_string()
+            };
+            (slug != model.as_str()).then(|| (model.clone(), serde_json::Value::String(slug)))
         })
         .collect::<serde_json::Map<_, _>>();
     let mut config = serde_json::Map::new();
@@ -3661,7 +3711,7 @@ mod tests {
             slugs,
             CODEX_WOA_CATALOG_MODELS
                 .iter()
-                .map(|model| model_slug(model))
+                .map(|model| model_slug_for_provider(model, CODEX_WOA_PROVIDER_ID))
                 .collect::<Vec<_>>()
         );
         assert!(slugs.contains(&"gpt-5.4"));
@@ -3719,7 +3769,10 @@ mod tests {
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         assert!(content.contains("[model_providers.deepseek]"));
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(model_slug(DEEPSEEK_MODEL)));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_model_slug(DEEPSEEK_MODEL).as_str())
+        );
         assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
         assert_eq!(
             doc["model_max_output_tokens"].as_integer(),
@@ -3755,9 +3808,13 @@ mod tests {
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(
-            slugs,
-            vec!["deepseek-v4-pro-external", "deepseek-v4-flash-external"]
+        assert_eq!(slugs, vec!["deepseek-v4-pro", "deepseek-v4-flash"]);
+        assert!(
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("function") })
         );
         assert_eq!(
             catalog["models"][0]["input_modalities"].as_array().unwrap(),
@@ -3802,15 +3859,23 @@ mod tests {
             (
                 VENUS_PROVIDER_ID,
                 VENUS_API_KEY_ENV,
-                model_slug(VENUS_MODEL),
+                model_slug_for_provider(VENUS_MODEL, VENUS_PROVIDER_ID),
             ),
             (
                 DEEPSEEK_PROVIDER_ID,
                 DEEPSEEK_API_KEY_ENV,
-                model_slug(DEEPSEEK_MODEL),
+                model_slug_for_provider(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID),
             ),
-            (KIMI_PROVIDER_ID, KIMI_API_KEY_ENV, model_slug(KIMI_MODEL)),
-            (MIMO_PROVIDER_ID, MIMO_API_KEY_ENV, model_slug(MIMO_MODEL)),
+            (
+                KIMI_PROVIDER_ID,
+                KIMI_API_KEY_ENV,
+                model_slug_for_provider(KIMI_MODEL, KIMI_PROVIDER_ID),
+            ),
+            (
+                MIMO_PROVIDER_ID,
+                MIMO_API_KEY_ENV,
+                model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID),
+            ),
         ] {
             let secret = format!("{provider}-secret");
             let snapshot =
@@ -3840,7 +3905,7 @@ mod tests {
             } else {
                 let configured_models = configured_codex_byok_models(&paths)
                     .into_iter()
-                    .map(|model| model_slug(&model).to_string())
+                    .map(|model| byok_model_slug(&model))
                     .collect::<Vec<_>>();
                 assert!(configured_models.contains(&doc["model"].as_str().unwrap().to_string()));
             }
@@ -4042,7 +4107,10 @@ mod tests {
         );
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(model_slug(DEEPSEEK_MODEL)));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_model_slug(DEEPSEEK_MODEL).as_str())
+        );
         assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
         assert_eq!(
             doc["model_providers"][MIMO_PROVIDER_ID]["api_key"].as_str(),
@@ -4057,8 +4125,15 @@ mod tests {
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(slugs.contains(&model_slug(DEEPSEEK_MODEL)));
-        assert!(slugs.contains(&model_slug(MIMO_MODEL)));
+        assert!(slugs.contains(&byok_model_slug(DEEPSEEK_MODEL).as_str()));
+        assert!(slugs.contains(&byok_model_slug(MIMO_MODEL).as_str()));
+        assert!(
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("function") })
+        );
     }
 
     #[test]
@@ -4142,9 +4217,10 @@ api_key = "mimo-secret"
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(slugs.contains(&model_slug(DEEPSEEK_MODEL)));
-        assert!(slugs.contains(&model_slug(KIMI_MODEL)));
-        assert!(slugs.contains(&model_slug(MIMO_MODEL)));
+        assert!(slugs.contains(&byok_model_slug(DEEPSEEK_MODEL).as_str()));
+        assert!(!slugs.contains(&model_slug(DEEPSEEK_MODEL)));
+        assert!(slugs.contains(&byok_model_slug(KIMI_MODEL).as_str()));
+        assert!(slugs.contains(&byok_model_slug(MIMO_MODEL).as_str()));
         assert!(models.iter().any(|model| {
             model["display_name"].as_str() == Some(MIMO_MODEL)
                 && model["slug"].as_str() == Some("mimo-v2.5-pro")
@@ -4161,8 +4237,27 @@ api_key = "mimo-secret"
             model_max_output_tokens(KIMI_MODEL),
             KIMI_MODEL_MAX_OUTPUT_TOKENS
         );
-        assert_eq!(model_slug("MiMo-V2.5-Pro"), "mimo-v2.5-pro");
-        assert_eq!(model_slug("MiMo-V2.5"), "mimo-v2.5");
+        assert_eq!(
+            model_slug_for_provider(DEEPSEEK_MODEL, VENUS_PROVIDER_ID),
+            "deepseek-v4-pro-external"
+        );
+        assert_eq!(
+            model_slug_for_provider(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(byok_model_slug("deepseek-v4-pro-external"), DEEPSEEK_MODEL);
+        assert_eq!(
+            model_slug_for_provider("MiMo-V2.5-Pro", MIMO_PROVIDER_ID),
+            "mimo-v2.5-pro"
+        );
+        assert_eq!(
+            model_slug_for_provider("MiMo-V2.5", MIMO_PROVIDER_ID),
+            "mimo-v2.5"
+        );
+        assert_eq!(
+            model_slug_for_provider("MiMo-V2.5-Pro", VENUS_PROVIDER_ID),
+            "MiMo-V2.5-Pro"
+        );
         assert_eq!(model_context_window("MiMo-V2.5-Pro"), 1_000_000);
         assert_eq!(model_max_output_tokens("MiMo-V2.5-Pro"), 128_000);
         assert_eq!(model_context_window("mimo-v2.5-pro"), 1_000_000);
@@ -4436,7 +4531,7 @@ name = "Other"
         assert!(available_models.contains(&serde_json::Value::String(MIMO_MODEL.to_string())));
         assert_eq!(
             model_config["modelOverrides"][MIMO_MODEL].as_str(),
-            Some(model_slug(MIMO_MODEL))
+            Some(model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID))
         );
         assert_eq!(model_config["preserveDefaultModel"].as_bool(), Some(false));
     }

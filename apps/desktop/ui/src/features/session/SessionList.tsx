@@ -152,12 +152,6 @@ export function SessionList({
   const handleSwitch = useCallback(
     async (id: string, workspaceRoot: string) => {
       if (id === activeSessionId && workspaceRoot === activeWorkspaceRoot) return;
-      const sameWorkspace = workspaceRoot === activeWorkspaceRoot;
-      if (sameWorkspace && currentSessionStatus !== "Idle") {
-        setPendingSwitch({ id, workspaceRoot });
-        setSwitchError(null);
-        return;
-      }
       try {
         await sessionSwitch(id, workspaceRoot);
         onSessionChanged();
@@ -166,7 +160,7 @@ export function SessionList({
         // ignore
       }
     },
-    [activeSessionId, activeWorkspaceRoot, currentSessionStatus, onSessionChanged, refresh],
+    [activeSessionId, activeWorkspaceRoot, onSessionChanged, refresh],
   );
 
   const handleOpenAgentPicker = useCallback(
@@ -555,6 +549,20 @@ function ThreadRow({
   const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
   const agentLabel = formatAgentLabel(session.agent_cli);
   const sessionTooltip = agentLabel ? `${session.title} · ${agentLabel}` : session.title;
+  const runtimeStatus = session.runtime_status ?? "none";
+  const attentionState = session.attention_state ?? "none";
+  const showBackgroundProgress = !active && runtimeStatus === "background_running";
+  const showCompletedDot = !active && attentionState === "completed_unviewed";
+  const showAttentionDot = !active && attentionState === "needs_attention";
+  const indicatorLabel = showBackgroundProgress
+    ? "后台会话仍在运行"
+    : showAttentionDot
+      ? "后台会话需要处理"
+      : showCompletedDot
+        ? "后台会话已完成，尚未查看"
+        : connected
+          ? "Agent 已连接"
+          : undefined;
 
   return (
     <div className={`sl-item ${active ? "sl-active" : ""}`}>
@@ -564,7 +572,17 @@ function ThreadRow({
         onClick={() => onSwitch(session.id)}
         aria-current={active ? "page" : undefined}
       >
-        <span className={`sl-session-online ${connected ? "is-visible" : ""}`} title={connected ? "Agent 已连接" : undefined} aria-label={connected ? "Agent 已连接" : undefined} />
+        <span
+          className={[
+            "sl-session-online",
+            connected ? "is-visible" : "",
+            showBackgroundProgress ? "is-progress" : "",
+            showCompletedDot ? "is-complete" : "",
+            showAttentionDot ? "is-attention" : "",
+          ].filter(Boolean).join(" ")}
+          title={indicatorLabel}
+          aria-label={indicatorLabel}
+        />
         <span className="sl-item-main">
           <span className="sl-item-title" title={sessionTooltip}>{session.title}</span>
         </span>

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { buildLineDiffRows } from "./ReviewPanel";
 import { ReviewPanel } from "./ReviewPanel";
+import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "./ReviewPanel";
 import type { ChangedFile, ChangeSetSummary, FileChangeRecord, FileChangeSummary, UiSnapshot } from "../../types";
 import {
   fsListDir,
@@ -12,6 +14,31 @@ import {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
+}));
+
+vi.mock("../editor/DiffTab", () => ({
+  DiffTab: ({
+    change,
+    fileTreeVisible,
+    onToggleFileTree,
+  }: {
+    change: FileChangeRecord;
+    fileTreeVisible?: boolean;
+    onToggleFileTree?: () => void;
+  }) => (
+    <div>
+      <div>diff tab: {change.path}</div>
+      {onToggleFileTree && (
+        <button
+          type="button"
+          aria-label={fileTreeVisible ? "隐藏 Git 文件树" : "显示 Git 文件树"}
+          onClick={onToggleFileTree}
+        >
+          tree
+        </button>
+      )}
+    </div>
+  ),
 }));
 
 vi.mock("../../lib/tauri", async () => {
@@ -162,6 +189,102 @@ describe("ReviewPanel inline diff", () => {
 });
 
 describe("ReviewPanel scoped change sets", () => {
+  it("toggles the expanded panel control from the tab bar", () => {
+    const onPanelExpandedChange = vi.fn();
+    const baseProps = {
+      snapshot: makeSnapshot(),
+      refreshing: false,
+      hydrated: true,
+      onRefresh: () => {},
+      onFileSelect: () => {},
+      onFileOpen: () => {},
+      onPanelExpandedChange,
+    };
+    const { rerender } = render(<ReviewPanel {...baseProps} panelExpanded={false} />);
+
+    const expandButton = screen.getByRole("button", { name: "展开审查面板" });
+    expect(expandButton).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(expandButton);
+    expect(onPanelExpandedChange).toHaveBeenCalledWith(true);
+
+    rerender(<ReviewPanel {...baseProps} panelExpanded />);
+    const restoreButton = screen.getByRole("button", { name: "还原审查面板" });
+    expect(restoreButton).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(restoreButton);
+    expect(onPanelExpandedChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not force review content to the bottom when the panel is expanded", async () => {
+    const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollHeight",
+    );
+    const clientHeightDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "clientHeight",
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        return this instanceof HTMLElement && this.classList.contains("review-session-list")
+          ? 640
+          : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        return this instanceof HTMLElement && this.classList.contains("review-session-list")
+          ? 180
+          : 0;
+      },
+    });
+
+    try {
+      vi.mocked(sessionListChangeSets).mockResolvedValue([
+        makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
+      ]);
+      vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+        change_set_id: "turn-1",
+        files: [makeSummary("turn-1", "src/turn.ts")],
+      });
+
+      render(
+        <ReviewPanel
+          snapshot={makeSnapshot({
+            messages: [{ id: "turn-1-message", role: "Assistant", body: "done" }],
+            timeline: [{ Message: "turn-1-message" }],
+          })}
+          refreshing={false}
+          hydrated
+          panelExpanded
+          onRefresh={() => {}}
+          onFileSelect={() => {}}
+          onFileOpen={() => {}}
+        />,
+      );
+
+      const list = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(".review-session-list");
+        if (!node) throw new Error("review list not mounted");
+        return node;
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 420));
+      expect(list.scrollTop).toBe(0);
+    } finally {
+      if (scrollHeightDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDescriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
+      }
+      if (clientHeightDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDescriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as { clientHeight?: number }).clientHeight;
+      }
+    }
+  });
+
   it("renders visible review scopes from their own change sets only", async () => {
     vi.mocked(sessionListChangeSets).mockResolvedValue([
       makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
@@ -552,7 +675,7 @@ describe("ReviewPanel scoped change sets", () => {
     expect(screen.queryAllByText("src/stale.ts")).toHaveLength(0);
   });
 
-  it("opens Git rows with live scoped change set ids", async () => {
+  it("opens Git rows as review diff tabs", async () => {
     const onFileSelect = vi.fn();
 
     render(
@@ -580,17 +703,65 @@ describe("ReviewPanel scoped change sets", () => {
 
     await waitFor(() => expect(screen.getByText("unstaged.ts")).toBeTruthy());
     fireEvent.click(screen.getByText("unstaged.ts"));
-    fireEvent.click(screen.getByText("staged.ts"));
-    fireEvent.click(screen.getByText("untracked.ts"));
 
-    expect(onFileSelect).toHaveBeenCalledWith(
-      "src/unstaged.ts",
-      "git-worktree:unstaged",
+    expect(onFileSelect).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
+        change_set_id: "git-worktree:unstaged",
+        path: "src/unstaged.ts",
+      }),
     );
-    expect(onFileSelect).toHaveBeenCalledWith("src/staged.ts", "git-worktree:staged");
-    expect(onFileSelect).toHaveBeenCalledWith(
-      "src/untracked.ts",
-      "git-worktree:untracked",
+    expect(screen.getByRole("button", { name: "打开差异 unstaged.ts" })).toBeTruthy();
+    expect(screen.getByText("diff tab: src/unstaged.ts")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Git$/ })).toBeNull();
+    expect(screen.getByLabelText("Git 文件树")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "隐藏 Git 文件树" })).toBeTruthy();
+    expect(screen.getAllByText("staged.ts").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "隐藏 Git 文件树" }));
+    expect(screen.queryByLabelText("Git 文件树")).toBeNull();
+    expect(screen.getByRole("button", { name: "显示 Git 文件树" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "显示 Git 文件树" }));
+    expect(screen.getByLabelText("Git 文件树")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "隐藏 Git 文件树" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭 unstaged.ts" }));
+    expect(screen.queryByText("diff tab: src/unstaged.ts")).toBeNull();
+    expect(screen.getByRole("button", { name: /^Git$/ })).toHaveClass("review-tab-active");
+  });
+
+  it("opens untracked Git rows as review diff tabs", async () => {
+    const onFileSelect = vi.fn();
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("src/untracked.ts", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={onFileSelect}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    fireEvent.click(await screen.findByText("untracked.ts"));
+
+    expect(onFileSelect).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
+        change_set_id: "git-worktree:untracked",
+        path: "src/untracked.ts",
+      }),
     );
   });
 
@@ -640,5 +811,109 @@ describe("ReviewPanel scoped change sets", () => {
     expect(fsListDir).toHaveBeenCalledTimes(2);
     expect(fsListDir).toHaveBeenNthCalledWith(1, "");
     expect(fsListDir).toHaveBeenNthCalledWith(2, "");
+  });
+
+  it("opens file tree selections as review tabs when a file renderer is provided", async () => {
+    const onFileOpen = vi.fn();
+    vi.mocked(fsListDir).mockResolvedValue([
+      { name: "app.ts", kind: "File", path: "src/app.ts" },
+    ]);
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot()}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={onFileOpen}
+        renderFileTab={(path, context) => (
+          <div>
+            <div>review editor: {path}</div>
+            {context.onToggleFileTree && (
+              <button
+                type="button"
+                aria-label={context.fileTreeVisible ? "隐藏文件树" : "显示文件树"}
+                onClick={context.onToggleFileTree}
+              >
+                tree
+              </button>
+            )}
+          </div>
+        )}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+    fireEvent.click(await screen.findByText("app.ts"));
+
+    expect(onFileOpen).not.toHaveBeenCalled();
+    expect(screen.getByText("review editor: src/app.ts")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开文件 app.ts" })).toBeTruthy();
+    expect(screen.getByLabelText("文件树")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "隐藏文件树" }));
+    expect(screen.queryByLabelText("文件树")).toBeNull();
+    expect(screen.getByRole("button", { name: "显示文件树" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "显示文件树" }));
+    expect(screen.getByLabelText("文件树")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "隐藏文件树" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭 app.ts" }));
+    expect(screen.queryByText("review editor: src/app.ts")).toBeNull();
+  });
+
+  it("preserves open and active review tabs when expanding remounts the panel", async () => {
+    vi.mocked(fsListDir).mockResolvedValue([
+      { name: "app.ts", kind: "File", path: "src/app.ts" },
+    ]);
+
+    function ControlledReviewPanel() {
+      const [expanded, setExpanded] = useState(false);
+      const [activeTab, setActiveTab] = useState<ReviewPanelActiveTab>({
+        kind: "base",
+        tab: "Review",
+      });
+      const [openTabs, setOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
+      const panel = (
+        <ReviewPanel
+          snapshot={makeSnapshot()}
+          refreshing={false}
+          hydrated
+          panelExpanded={expanded}
+          onRefresh={() => {}}
+          onFileSelect={() => {}}
+          onFileOpen={() => {}}
+          onPanelExpandedChange={setExpanded}
+          renderFileTab={(path) => <div>review editor: {path}</div>}
+          activeTab={activeTab}
+          openTabs={openTabs}
+          onActiveTabChange={setActiveTab}
+          onOpenTabsChange={setOpenTabs}
+          focusRequest={{ changeSetId: "turn-1", token: 1 }}
+        />
+      );
+
+      return expanded ? (
+        <section aria-label="expanded placement">{panel}</section>
+      ) : (
+        <aside aria-label="side placement">{panel}</aside>
+      );
+    }
+
+    render(<ControlledReviewPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+    fireEvent.click(await screen.findByText("app.ts"));
+    expect(screen.getByText("review editor: src/app.ts")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开审查面板" }));
+
+    expect(screen.getByText("review editor: src/app.ts")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "还原审查面板" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "打开文件 app.ts" }).closest(".review-open-file-tab"),
+    ).toHaveClass("review-tab-active");
   });
 });

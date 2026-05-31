@@ -8,7 +8,7 @@ use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{
     append_notification_log, append_runtime_event_log, append_typed_notification_log,
-    emit_notification, session_config_from_options,
+    emit_notification, is_session_state_update, session_config_from_options,
 };
 use agent_client_protocol::schema::{
     CancelNotification, PromptRequest, PromptResponse, SessionNotification,
@@ -17,7 +17,7 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{ActiveSession, Agent, Dispatch};
 use anyhow::anyhow;
 use serde_json::json;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use workspace_model::PromptInputCapabilities;
 
 pub(super) async fn run_command_loop(
@@ -31,9 +31,17 @@ pub(super) async fn run_command_loop(
     prompt_capabilities: PromptInputCapabilities,
 ) -> anyhow::Result<()> {
     loop {
-        let command = rx_commands
-            .recv()
-            .map_err(|_| anyhow!("ACP command channel closed"))?;
+        let command = loop {
+            match rx_commands.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(command) => break command,
+                Err(RecvTimeoutError::Timeout) => {
+                    drain_idle_session_state_update(session, config, tx_events).await?;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("ACP command channel closed"));
+                }
+            }
+        };
 
         match command {
             RuntimeCommand::SendPrompt(prompt) => {
@@ -353,6 +361,44 @@ pub(super) async fn run_command_loop(
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+async fn drain_idle_session_state_update(
+    session: &mut ActiveSession<'static, Agent>,
+    config: &SessionConfig,
+    tx_events: &mpsc::Sender<ClientEvent>,
+) -> anyhow::Result<()> {
+    let next_message =
+        tokio::time::timeout(std::time::Duration::from_millis(1), session.read_update()).await;
+
+    let message = match next_message {
+        Ok(Ok(message)) => message,
+        Ok(Err(err)) => return Err(anyhow!(err.to_string())),
+        Err(_) => return Ok(()),
+    };
+
+    if let agent_client_protocol::SessionMessage::SessionMessage(dispatch) = message {
+        agent_client_protocol::util::MatchDispatch::new(dispatch)
+            .if_notification(async |notification: SessionNotification| {
+                if is_session_state_update(&notification.update) {
+                    append_typed_notification_log(config, &notification)?;
+                    emit_notification(tx_events, &config.workspace_root, notification)?;
+                }
+                Ok(())
+            })
+            .await
+            .otherwise(|dispatch: Dispatch| async {
+                if let Dispatch::Notification(untyped) = dispatch {
+                    let (method, payload) = untyped.into_parts();
+                    append_notification_log(config, &method, &payload)?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|err| anyhow!(err.to_string()))?;
     }
 
     Ok(())

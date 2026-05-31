@@ -383,6 +383,25 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
   });
 
+  it("classifies shell heredoc file writes as edits", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command: "cat > AGENTS.md << 'ENDOFFILE'\n# Repository Guidelines\nENDOFFILE",
+      }),
+      terminal_output: { exit_code: 0, output: "" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("AGENTS.md");
+  });
+
   it("renders CodeBuddy raw_output changes unified_diff as editing diffs", () => {
     const rawOutput = JSON.stringify({
       call_id: "call_123",

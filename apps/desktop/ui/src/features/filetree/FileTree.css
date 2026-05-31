@@ -1,9 +1,12 @@
 .filetree {
+  --filetree-indent-base: 8px;
+  --filetree-indent-step: 16px;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
   font-family: var(--font-chat);
+  background: transparent;
 }
 
 .filetree-header {
@@ -22,6 +25,61 @@
   padding: 4px 0;
 }
 
+.filetree-inline {
+  --filetree-indent-base: 4px;
+  --filetree-indent-step: 14px;
+  padding: 10px 10px 12px 12px;
+  color: var(--text-muted);
+}
+
+.filetree-inline .filetree-list {
+  padding: 6px 0 0;
+}
+
+.filetree-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
+  color: var(--text-soft);
+}
+
+.filetree-search:focus-within {
+  border-color: color-mix(in srgb, var(--border-strong) 78%, transparent);
+  background: color-mix(in srgb, var(--surface-bg) 52%, transparent);
+}
+
+.filetree-search-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
+}
+
+.filetree-search-input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+}
+
+.filetree-search-input::placeholder {
+  color: var(--text-soft);
+}
+
 .filetree-node {
   display: flex;
   align-items: center;
@@ -36,12 +94,30 @@
   user-select: none;
 }
 
+.filetree-inline .filetree-node {
+  height: 27px;
+  margin: 1px 0;
+  gap: 5px;
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--text-strong) 88%, transparent);
+  font-size: 12px;
+}
+
 .filetree-node:hover {
   background: var(--interactive-hover);
 }
 
+.filetree-inline .filetree-node:hover {
+  background: color-mix(in srgb, var(--text-strong) 8%, transparent);
+}
+
 .filetree-node.is-selected {
   background: var(--interactive-selected);
+  color: var(--text-strong);
+}
+
+.filetree-inline .filetree-node.is-selected {
+  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
   color: var(--text-strong);
 }
 
@@ -53,11 +129,22 @@
   color: var(--text-muted);
 }
 
+.filetree-inline .filetree-chevron {
+  width: 16px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
 .filetree-icon {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
   object-fit: contain;
+}
+
+.filetree-inline .filetree-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .filetree-folder-icon {
@@ -90,6 +177,11 @@
 .filetree-dir .filetree-name {
   font-weight: 550;
   color: var(--text-strong);
+}
+
+.filetree-inline .filetree-dir .filetree-name,
+.filetree-inline .filetree-file .filetree-name {
+  color: inherit;
 }
 
 .filetree-file .filetree-name {

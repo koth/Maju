@@ -34,6 +34,10 @@ impl AppPaths {
         self.root.join("sessions")
     }
 
+    pub fn attachments_dir(&self) -> PathBuf {
+        self.root.join("attachments")
+    }
+
     pub fn workspaces_dir(&self) -> PathBuf {
         self.root.join("workspaces")
     }
@@ -49,6 +53,7 @@ impl AppPaths {
             self.config_dir(),
             self.logs_dir(),
             self.sessions_dir(),
+            self.attachments_dir(),
             self.workspaces_dir(),
         ] {
             std::fs::create_dir_all(&dir)

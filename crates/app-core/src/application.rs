@@ -7,9 +7,11 @@ use git_service::GitService;
 use session_store::SessionStore;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, MessageRole, SessionConfigSource, SessionListItem, SessionStatus,
-    TimelineItem, ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
+    AgentCliId, ChatMessage, MessageRole, SessionAttentionState, SessionConfigSource,
+    SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem, ToolInvocation,
+    ToolLogEntry, ToolStatus, UserPromptContent,
 };
 
 mod bootstrap;
@@ -43,6 +45,7 @@ pub use ui_snapshot::{UiPatchCursor, UiSnapshotUpdate};
 
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";
 const RESTORED_INCOMPLETE_TOOL_REASON: &str = "上次会话结束前未完成";
+const BACKGROUND_RUNTIME_IDLE_GRACE: Duration = Duration::from_secs(10 * 60);
 
 fn make_log_id() -> String {
     use std::time::SystemTime;
@@ -57,9 +60,120 @@ struct InFlightPrompt {
     task: PromptTask,
 }
 
+struct SessionRuntime {
+    local_session_id: uuid::Uuid,
+    ui: workspace_model::UiSnapshot,
+    session: SessionHandle,
+    agent_command: String,
+    in_flight_prompt: Option<InFlightPrompt>,
+    seq_counter: i64,
+    needs_title: bool,
+    agent_title_received: bool,
+    provisional_prompt_title: Option<String>,
+    skip_replay: bool,
+    pending_model_restore: Option<String>,
+    authoritative_model_selection: Option<String>,
+    file_tracker: FileChangeTracker,
+    dirty_tool_call_ids: HashSet<String>,
+    review_changes_started: bool,
+    current_turn_user_message_id: Option<uuid::Uuid>,
+    inline_think_filter: InlineThinkFilter,
+    last_viewed: Instant,
+    idle_since: Option<Instant>,
+    runtime_status: SessionRuntimeStatus,
+    attention_state: SessionAttentionState,
+}
+
+impl SessionRuntime {
+    fn is_in_flight(&self) -> bool {
+        self.in_flight_prompt.is_some()
+    }
+}
+
+#[derive(Default)]
+struct SessionRuntimeRegistry {
+    entries: HashMap<String, SessionRuntime>,
+    retained_attention: HashMap<String, SessionAttentionState>,
+}
+
+impl SessionRuntimeRegistry {
+    fn insert(&mut self, runtime: SessionRuntime) {
+        self.retained_attention
+            .remove(&runtime.local_session_id.to_string());
+        self.entries
+            .insert(runtime.local_session_id.to_string(), runtime);
+    }
+
+    fn remove(&mut self, session_id: &str) -> Option<SessionRuntime> {
+        self.entries.remove(session_id)
+    }
+
+    fn remove_all_state(&mut self, session_id: &str) -> Option<SessionRuntime> {
+        self.retained_attention.remove(session_id);
+        self.entries.remove(session_id)
+    }
+
+    fn clear_attention(&mut self, session_id: &str) {
+        self.retained_attention.remove(session_id);
+        if let Some(runtime) = self.entries.get_mut(session_id) {
+            runtime.attention_state = SessionAttentionState::None;
+        }
+    }
+
+    fn retain_attention_after_retirement(
+        &mut self,
+        session_id: String,
+        attention: SessionAttentionState,
+    ) {
+        if !matches!(attention, SessionAttentionState::None) {
+            self.retained_attention.insert(session_id, attention);
+        }
+    }
+
+    fn annotate_sessions(&self, sessions: &mut [SessionListItem], visible_session_id: &str) {
+        for item in sessions {
+            if item.id == visible_session_id {
+                item.runtime_status = SessionRuntimeStatus::Active;
+                item.attention_state = SessionAttentionState::None;
+                continue;
+            }
+
+            if let Some(runtime) = self.entries.get(&item.id) {
+                item.runtime_status = runtime.runtime_status.clone();
+                item.attention_state = runtime.attention_state.clone();
+            } else if let Some(attention) = self.retained_attention.get(&item.id) {
+                item.runtime_status = SessionRuntimeStatus::None;
+                item.attention_state = attention.clone();
+            } else {
+                item.runtime_status = SessionRuntimeStatus::None;
+                item.attention_state = SessionAttentionState::None;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeClock {
+    fixed_now: Option<Instant>,
+}
+
+impl RuntimeClock {
+    fn now(&self) -> Instant {
+        self.fixed_now.unwrap_or_else(Instant::now)
+    }
+}
+
+impl Default for RuntimeClock {
+    fn default() -> Self {
+        Self { fixed_now: None }
+    }
+}
+
 pub struct Application {
     pub ui: workspace_model::UiSnapshot,
     session: SessionHandle,
+    runtime_registry: SessionRuntimeRegistry,
+    runtime_clock: RuntimeClock,
     store: SessionStore,
     app_paths: AppPaths,
     pub agent_command: String,
@@ -194,5 +308,107 @@ fn display_codex_provider(provider: &str) -> &str {
 impl Application {
     pub(super) fn bump_revision(&mut self) {
         self.ui.revision = self.ui.revision.saturating_add(1);
+    }
+
+    pub(super) fn runtime_now(&self) -> Instant {
+        self.runtime_clock.now()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_runtime_clock_now(&mut self, now: Instant) {
+        self.runtime_clock.fixed_now = Some(now);
+    }
+
+    #[cfg(test)]
+    pub(super) fn advance_runtime_clock(&mut self, duration: Duration) {
+        let now = self.runtime_now() + duration;
+        self.runtime_clock.fixed_now = Some(now);
+    }
+
+    fn swap_visible_state_with_runtime(&mut self, runtime: &mut SessionRuntime) {
+        std::mem::swap(&mut self.ui, &mut runtime.ui);
+        std::mem::swap(&mut self.session, &mut runtime.session);
+        std::mem::swap(&mut self.agent_command, &mut runtime.agent_command);
+        std::mem::swap(&mut self.in_flight_prompt, &mut runtime.in_flight_prompt);
+        std::mem::swap(&mut self.seq_counter, &mut runtime.seq_counter);
+        std::mem::swap(&mut self.needs_title, &mut runtime.needs_title);
+        std::mem::swap(
+            &mut self.agent_title_received,
+            &mut runtime.agent_title_received,
+        );
+        std::mem::swap(
+            &mut self.provisional_prompt_title,
+            &mut runtime.provisional_prompt_title,
+        );
+        std::mem::swap(&mut self.skip_replay, &mut runtime.skip_replay);
+        std::mem::swap(
+            &mut self.pending_model_restore,
+            &mut runtime.pending_model_restore,
+        );
+        std::mem::swap(
+            &mut self.authoritative_model_selection,
+            &mut runtime.authoritative_model_selection,
+        );
+        std::mem::swap(&mut self.file_tracker, &mut runtime.file_tracker);
+        std::mem::swap(
+            &mut self.dirty_tool_call_ids,
+            &mut runtime.dirty_tool_call_ids,
+        );
+        std::mem::swap(
+            &mut self.review_changes_started,
+            &mut runtime.review_changes_started,
+        );
+        std::mem::swap(
+            &mut self.current_turn_user_message_id,
+            &mut runtime.current_turn_user_message_id,
+        );
+        std::mem::swap(
+            &mut self.inline_think_filter,
+            &mut runtime.inline_think_filter,
+        );
+    }
+
+    fn install_runtime_as_visible(&mut self, mut runtime: SessionRuntime) -> SessionRuntime {
+        let now = self.runtime_now();
+        let old_visible_session_id = self.ui.session.id;
+        let old_was_in_flight = self.in_flight_prompt.is_some();
+        self.swap_visible_state_with_runtime(&mut runtime);
+
+        runtime.local_session_id = old_visible_session_id;
+        runtime.last_viewed = now;
+        runtime.attention_state = SessionAttentionState::None;
+        if old_was_in_flight {
+            runtime.runtime_status = SessionRuntimeStatus::BackgroundRunning;
+            runtime.idle_since = None;
+        } else {
+            runtime.runtime_status = SessionRuntimeStatus::BackgroundIdle;
+            runtime.idle_since = Some(now);
+        }
+
+        self.runtime_registry
+            .clear_attention(&self.ui.session.id.to_string());
+        runtime
+    }
+
+    fn runtime_has_pending_permission(&self) -> bool {
+        self.ui.tools.iter().any(|tool| {
+            tool.kind == "permission"
+                && tool.permission_decision.is_none()
+                && matches!(tool.status, ToolStatus::Pending | ToolStatus::Running)
+        })
+    }
+
+    fn runtime_needs_attention(&self) -> bool {
+        self.runtime_has_pending_permission()
+            || matches!(self.ui.session.status, SessionStatus::Interrupted)
+    }
+}
+
+impl Drop for Application {
+    fn drop(&mut self) {
+        self.session.shutdown();
+        for runtime in self.runtime_registry.entries.values_mut() {
+            runtime.session.shutdown();
+        }
     }
 }

@@ -11,7 +11,7 @@ impl Application {
         let session_id = self.ui.session.id.to_string();
         match event {
             ClientEvent::SessionStarted { session_id: acp_id } => {
-                // Persist the ACP session ID for --resume on next startup
+                // Persist the agent-side ACP session ID for future session/load.
                 let _ = self.store.update_acp_session_id(&session_id, acp_id);
                 self.persist_current_codex_provider_if_needed();
             }

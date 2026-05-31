@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import type { FileEntry } from "../../types";
@@ -12,6 +12,8 @@ interface FileTreeProps {
   refreshSignal?: number;
   onAddComposerReference?: (filePath: string) => void;
   composerReferenceEnabled?: boolean;
+  activePath?: string | null;
+  variant?: "panel" | "inline";
 }
 
 interface SelectedEntry {
@@ -45,6 +47,7 @@ interface TreeNodeProps {
   onRenameValueChange: (value: string) => void;
   onRenameCommit: () => void;
   onRenameCancel: () => void;
+  filterText: string;
 }
 
 function TreeNode({
@@ -62,12 +65,18 @@ function TreeNode({
   onRenameValueChange,
   onRenameCommit,
   onRenameCancel,
+  filterText,
 }: TreeNodeProps) {
   const isDir = entry.kind === "Directory";
   const isExpanded = expandedDirs.has(entry.path);
   const isSelected = selectedPath === entry.path;
   const isRenaming = renamingPath === entry.path;
   const children = childrenCache.get(entry.path);
+  const hasFilter = filterText.trim().length > 0;
+
+  if (!treeNodeMatches(entry, childrenCache, filterText)) {
+    return null;
+  }
 
   const handleClick = useCallback(() => {
     if (isRenaming) return;
@@ -90,7 +99,9 @@ function TreeNode({
     <>
       <div
         className={`filetree-node ${isDir ? "filetree-dir" : "filetree-file"} ${isSelected ? "is-selected" : ""}`}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        style={{
+          paddingLeft: `calc(${depth} * var(--filetree-indent-step, 16px) + var(--filetree-indent-base, 8px))`,
+        }}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
         title={entry.path}
@@ -125,7 +136,7 @@ function TreeNode({
           <span className="filetree-name">{entry.name}</span>
         )}
       </div>
-      {isDir && isExpanded && children && (
+      {isDir && (isExpanded || hasFilter) && children && (
         <div className="filetree-children">
           {children.map((child) => (
             <TreeNode
@@ -144,6 +155,7 @@ function TreeNode({
               onRenameValueChange={onRenameValueChange}
               onRenameCommit={onRenameCommit}
               onRenameCancel={onRenameCancel}
+              filterText={filterText}
             />
           ))}
         </div>
@@ -158,6 +170,8 @@ export function FileTree({
   refreshSignal = 0,
   onAddComposerReference,
   composerReferenceEnabled = false,
+  activePath = null,
+  variant = "panel",
 }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -168,6 +182,7 @@ export function FileTree({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filterText, setFilterText] = useState("");
   const committingRenameRef = useRef(false);
   const workspaceRootRef = useRef(workspaceRoot);
   const consumedRefreshSignalRef = useRef(refreshSignal);
@@ -207,6 +222,48 @@ export function FileTree({
       }
     });
   }, [refreshDirectory, workspaceRoot]);
+
+  useEffect(() => {
+    if (!activePath) return;
+    setSelectedEntry({ path: activePath, kind: "File" });
+  }, [activePath]);
+
+  const activeParentDirs = useMemo(() => {
+    if (!activePath) return [];
+    const parts = activePath.replace(/\\/g, "/").split("/").filter(Boolean);
+    parts.pop();
+    return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
+  }, [activePath]);
+
+  useEffect(() => {
+    if (activeParentDirs.length === 0) return;
+    let cancelled = false;
+    const requestWorkspaceRoot = workspaceRoot;
+
+    setExpandedDirs((prev) => {
+      const next = new Set(prev);
+      activeParentDirs.forEach((dirPath) => next.add(dirPath));
+      return next;
+    });
+
+    (async () => {
+      for (const dirPath of activeParentDirs) {
+        if (cancelled || workspaceRootRef.current !== requestWorkspaceRoot) return;
+        try {
+          await refreshDirectory(dirPath, requestWorkspaceRoot);
+        } catch (e) {
+          if (!cancelled && workspaceRootRef.current === requestWorkspaceRoot) {
+            setError(String(e));
+          }
+          return;
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeParentDirs, refreshDirectory, workspaceRoot]);
 
   useEffect(() => {
     if (refreshSignal === 0 || refreshSignal === consumedRefreshSignalRef.current) return;
@@ -274,13 +331,13 @@ export function FileTree({
 
   const handleContextMenu = useCallback((entry: FileEntry, x: number, y: number) => {
     const width = 190;
-    const height = entry.kind === "File" ? 148 : 82;
+    const height = entry.kind === "File" && composerReferenceEnabled && onAddComposerReference ? 148 : entry.kind === "File" ? 118 : 82;
     setContextMenu({
       entry,
       x: Math.min(x, window.innerWidth - width - 8),
       y: Math.min(y, window.innerHeight - height - 8),
     });
-  }, []);
+  }, [composerReferenceEnabled, onAddComposerReference]);
 
   const startRename = useCallback((entry: FileEntry) => {
     setContextMenu(null);
@@ -370,8 +427,20 @@ export function FileTree({
   }, [composerReferenceEnabled, onAddComposerReference]);
 
   return (
-    <div className="filetree">
-      <div className="filetree-header">所有文件</div>
+    <div className={`filetree filetree-${variant}`}>
+      {variant === "panel" ? (
+        <div className="filetree-header">所有文件</div>
+      ) : (
+        <label className="filetree-search">
+          <SearchIcon />
+          <input
+            className="filetree-search-input"
+            value={filterText}
+            placeholder="筛选文件..."
+            onChange={(event) => setFilterText(event.target.value)}
+          />
+        </label>
+      )}
       {error && <div className="filetree-inline-error">{error}</div>}
       <div className="filetree-list">
         {rootEntries.map((entry) => (
@@ -393,6 +462,7 @@ export function FileTree({
             }
             onRenameCommit={commitRename}
             onRenameCancel={cancelRename}
+            filterText={filterText}
           />
         ))}
       </div>
@@ -409,12 +479,11 @@ export function FileTree({
           <button type="button" role="menuitem" onClick={() => handleReveal(contextMenu.entry)}>
             {contextMenu.entry.kind === "Directory" ? "在文件浏览器中打开" : "打开所在位置"}
           </button>
-          {contextMenu.entry.kind === "File" && (
+          {contextMenu.entry.kind === "File" && composerReferenceEnabled && onAddComposerReference && (
             <button
               type="button"
               role="menuitem"
-              disabled={!composerReferenceEnabled || !onAddComposerReference}
-              title={composerReferenceEnabled ? "添加到 Composer 引用" : "当前智能体不支持文件引用"}
+              title="添加到 Composer 引用"
               onClick={() => handleAddReference(contextMenu.entry)}
             >
               添加到 Composer 引用
@@ -440,6 +509,25 @@ function parentDirectory(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
+}
+
+function treeNodeMatches(entry: FileEntry, childrenCache: Map<string, FileEntry[]>, filterText: string): boolean {
+  const query = filterText.trim().toLowerCase();
+  if (!query) return true;
+  if (entry.name.toLowerCase().includes(query) || entry.path.toLowerCase().includes(query)) {
+    return true;
+  }
+  const children = childrenCache.get(entry.path);
+  return children?.some((child) => treeNodeMatches(child, childrenCache, filterText)) ?? false;
+}
+
+function SearchIcon() {
+  return (
+    <svg className="filetree-search-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="8.5" cy="8.5" r="5.2" />
+      <path d="m12.4 12.4 4 4" />
+    </svg>
+  );
 }
 
 function FolderTreeIcon({ className }: { className?: string }) {

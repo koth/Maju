@@ -10,7 +10,9 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-start-dragging",
     "shell:allow-open",
+    "process:default",
     "dialog:allow-message",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "updater:default"
   ]
 }

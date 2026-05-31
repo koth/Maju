@@ -74,6 +74,7 @@ export type UserPromptContent =
       data: string;
       mime_type: string;
       name: string | null;
+      display_url?: string | null;
       thumbnail_data: string | null;
       thumbnail_mime_type: string | null;
     }
@@ -309,6 +310,8 @@ export interface SessionListItem {
   message_count: number;
   acp_session_id?: string | null;
   agent_cli?: string | null;
+  runtime_status?: "none" | "active" | "background_running" | "background_idle";
+  attention_state?: "none" | "completed_unviewed" | "needs_attention";
 }
 
 export interface OpenWorkspaceItem {

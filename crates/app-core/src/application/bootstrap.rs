@@ -27,6 +27,7 @@ impl Application {
         crate::startup_perf::measure("app/bootstrap/ensure_dirs", "", || {
             app_paths.ensure_standard_dirs()
         })?;
+        let _ = crate::attachment_cache::prune_expired_attachments(&app_paths.attachments_dir());
         let mut ui = crate::startup_perf::measure(
             "app/bootstrap/build_initial_ui",
             workspace_root.display().to_string(),
@@ -67,8 +68,9 @@ impl Application {
         let agent_command = persisted_agent_command.unwrap_or(agent_command);
         crate::settings::ensure_agent_ready_for_command(&agent_command, &app_paths)?;
 
-        // Check for existing session and its ACP session ID for --resume. Empty local sessions can
-        // have a transient ACP id from session/new before the agent has a durable resource.
+        // Check for an existing local session and its agent-side ACP session ID
+        // for session/load. Empty local sessions can have a transient ACP id
+        // from session/new before the agent has a durable resource.
         let resume_session_id = most_recent_session.and_then(|session| {
             if store.session_has_activity(&session.id).unwrap_or(false) {
                 session.acp_session_id.clone()
@@ -224,6 +226,8 @@ impl Application {
         Ok(Self {
             ui,
             session,
+            runtime_registry: SessionRuntimeRegistry::default(),
+            runtime_clock: RuntimeClock::default(),
             store,
             app_paths,
             agent_command,

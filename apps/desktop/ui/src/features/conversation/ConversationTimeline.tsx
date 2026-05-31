@@ -1,4 +1,6 @@
 import { Fragment, useRef, useEffect, useMemo, useState, memo } from "react";
+import { createPortal } from "react-dom";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { FileChangeSummary, MessageRole } from "../../types";
 import type { UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
@@ -48,6 +50,7 @@ interface StreamingMarkdownProps {
 interface UserMessageImage {
   alt: string;
   src: string;
+  previewSrc: string;
 }
 
 const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: StreamingMarkdownProps) {
@@ -91,22 +94,88 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: Streamin
   );
 });
 
+const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMessageImage[] }) {
+  const [previewImage, setPreviewImage] = useState<UserMessageImage | null>(null);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewImage(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewImage]);
+
+  return (
+    <>
+      <div className="msg-user-image-strip" aria-label="附加的图片">
+        {images.map((image, index) => {
+          const label = image.alt || `图片 ${index + 1}`;
+          return (
+            <button
+              key={`${image.src}-${image.previewSrc}-${index}`}
+              type="button"
+              className="msg-user-image-button"
+              onClick={() => setPreviewImage(image)}
+              aria-label={`预览 ${label}`}
+              title="预览图片"
+            >
+              <img
+                className="msg-user-image"
+                src={image.src}
+                alt={image.alt || "附加的图片"}
+              />
+            </button>
+          );
+        })}
+      </div>
+      {previewImage && createPortal(
+        <div
+          className="msg-image-preview-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setPreviewImage(null);
+            }
+          }}
+        >
+          <div
+            className="msg-image-preview-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={previewImage.alt ? `图片预览：${previewImage.alt}` : "图片预览"}
+          >
+            <button
+              type="button"
+              className="msg-image-preview-close"
+              onClick={() => setPreviewImage(null)}
+              aria-label="关闭图片预览"
+              title="关闭"
+            >
+              ×
+            </button>
+            <img
+              className="msg-image-preview-original"
+              src={previewImage.previewSrc}
+              alt={previewImage.alt || "附加的图片"}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+});
+
 const MessageRow = memo(function MessageRow({ id, role, body, streaming }: MessageRowProps) {
   if (role === "User") {
     const { text, images } = splitUserMessageBody(body);
     if (images.length > 0) {
       return (
         <div key={id} className="msg msg-user msg-user-stacked">
-          <div className="msg-user-image-strip" aria-label="附加的图片">
-            {images.map((image, index) => (
-              <img
-                key={`${image.src}-${index}`}
-                className="msg-user-image"
-                src={image.src}
-                alt={image.alt || "附加的图片"}
-              />
-            ))}
-          </div>
+          <UserImageStrip images={images} />
           {text.trim().length > 0 && (
             <div className="msg-user-bubble">
               <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
@@ -178,13 +247,38 @@ function splitUserMessageBody(body: string): { text: string; images: UserMessage
 
 function parseImageOnlyBlock(block: string): UserMessageImage | null {
   const match = block.trim().match(
-    /^!\[([^\]]*)\]\((data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+)\)$/i,
+    /^!\[([^\]]*)\]\((data:image\/(?:apng|avif|bmp|png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+|file:\/\/[^\s)]+)(?:\s+"(file:\/\/[^"]+)")?\)$/i,
   );
   if (!match) return null;
   return {
     alt: match[1],
-    src: match[2],
+    src: imageSrcForWebview(match[2]),
+    previewSrc: imageSrcForWebview(match[3] ?? match[2]),
   };
+}
+
+function imageSrcForWebview(src: string): string {
+  if (!src.startsWith("file://") || !isTauri()) {
+    return src;
+  }
+  const path = fileUrlToPath(src);
+  return path ? convertFileSrc(path) : src;
+}
+
+function fileUrlToPath(src: string): string | null {
+  try {
+    const url = new URL(src);
+    if (url.protocol !== "file:") {
+      return null;
+    }
+    const path = decodeURIComponent(url.pathname);
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      return path.slice(1);
+    }
+    return path;
+  } catch {
+    return null;
+  }
 }
 
 export function ConversationTimeline({

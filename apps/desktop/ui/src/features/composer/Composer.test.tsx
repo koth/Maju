@@ -62,6 +62,14 @@ describe("Composer", () => {
     vi.unstubAllGlobals();
   });
 
+  it("marks the composer compact when used over expanded review", () => {
+    const { container } = render(
+      <Composer snapshot={makeSnapshot()} onStateChange={vi.fn()} compact />,
+    );
+
+    expect(container.querySelector(".composer")).toHaveClass("is-compact");
+  });
+
   it("renders image attachments as clickable previews without visible file names", async () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgo=";
     vi.mocked(editorGetContent).mockResolvedValue({

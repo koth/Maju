@@ -7,12 +7,34 @@
   padding: 12px 0 14px;
 }
 
+.composer.is-compact {
+  padding: 5px 0 8px;
+}
+
 .composer-inner {
   background: #242526;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   padding: 10px;
   box-shadow: 0 16px 42px rgba(0, 0, 0, 0.22);
+}
+
+.composer.is-compact .composer-inner {
+  position: relative;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto 34px;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 6px 8px;
+  border-radius: 24px;
+}
+
+.composer.is-compact.has-attachments .composer-inner {
+  display: block;
+  min-height: 0;
+  padding: 7px 8px;
+  border-radius: 18px;
 }
 
 .composer-inner:focus-within {
@@ -457,6 +479,18 @@
   flex-direction: column;
 }
 
+.composer.is-compact .composer-input-wrap {
+  position: static;
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.composer.is-compact.has-attachments .composer-input-wrap {
+  position: relative;
+  display: flex;
+}
+
 /* Slash command menu */
 .composer-slash-menu {
   position: absolute;
@@ -536,9 +570,28 @@
   padding: 14px 58px 12px 14px;
 }
 
+.composer.is-compact .composer-textarea {
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  overflow-y: hidden;
+  padding: 6px 0;
+  line-height: 20px;
+}
+
 .composer-textarea.has-attachments {
   min-height: 54px;
   padding-top: 8px;
+}
+
+.composer.is-compact .composer-textarea.has-attachments {
+  min-height: 34px;
+  max-height: none;
+  height: auto;
+  overflow-y: auto;
+  padding-top: 6px;
+  padding-right: 52px;
+  padding-left: 12px;
 }
 
 .composer-textarea::placeholder {
@@ -592,6 +645,11 @@
   flex: 0 0 auto;
   width: 72px;
   height: 72px;
+}
+
+.composer.is-compact .composer-image-attachment {
+  width: 46px;
+  height: 46px;
 }
 
 .composer-image-preview-btn {
@@ -726,6 +784,27 @@
   font-size: var(--font-size-shell-meta);
 }
 
+.composer.is-compact .composer-control-rail {
+  position: static;
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0;
+  gap: 6px;
+}
+
+.composer.is-compact:not(.has-attachments) .composer-rail-spacer,
+.composer.is-compact:not(.has-attachments) .composer-session-state {
+  display: none;
+}
+
+.composer.is-compact.has-attachments .composer-control-rail {
+  position: relative;
+  display: flex;
+  padding-top: 2px;
+}
+
 .composer-utility {
   position: relative;
   flex-shrink: 0;
@@ -744,6 +823,13 @@
   color: var(--text-muted);
   font-size: var(--font-size-shell-meta);
   font-weight: 500;
+}
+
+.composer.is-compact .composer-utility-btn,
+.composer.is-compact .composer-static-control,
+.composer.is-compact .composer-attachment-btn,
+.composer.is-compact .composer-control-select {
+  min-height: 28px;
 }
 
 .composer-utility-btn {
@@ -765,6 +851,20 @@
   font-weight: 600;
   cursor: pointer;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.composer.is-compact .composer-attachment-btn {
+  width: 28px;
+}
+
+.composer.is-compact:not(.has-attachments) .composer-attachment-btn {
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  z-index: 1;
+  width: 32px;
+  min-height: 32px;
+  transform: translateY(-50%);
 }
 
 .composer-utility-btn:hover,
@@ -861,6 +961,25 @@
   cursor: pointer;
   font: inherit;
   padding: 0 9px 0 11px;
+}
+
+.composer.is-compact .composer-control-trigger {
+  min-height: 26px;
+  padding-inline: 9px;
+}
+
+.composer.is-compact .composer-control-label {
+  display: none;
+}
+
+.composer.is-compact .composer-control-value {
+  max-width: 116px;
+  font-size: 12px;
+}
+
+.composer.is-compact .composer-static-control,
+.composer.is-compact .composer-control-select {
+  max-width: 150px;
 }
 
 .composer-control-label {
@@ -962,6 +1081,11 @@
   font-size: var(--font-size-shell-meta);
 }
 
+.composer.is-compact .composer-error {
+  grid-column: 1 / -1;
+  padding: 4px 8px 0;
+}
+
 /* Send button — inside textarea, bottom-right corner */
 .composer-send-btn {
   position: absolute;
@@ -980,6 +1104,24 @@
   align-items: center;
   justify-content: center;
   transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.composer.is-compact .composer-send-btn {
+  right: 7px;
+  bottom: 7px;
+  width: 34px;
+  height: 32px;
+  border-radius: 14px;
+}
+
+.composer.is-compact:not(.has-attachments) .composer-send-btn {
+  top: 50%;
+  right: 8px;
+  bottom: auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  transform: translateY(-50%);
 }
 
 .composer-send-btn-active {

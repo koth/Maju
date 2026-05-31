@@ -7,6 +7,10 @@
   background: var(--surface-muted-bg);
 }
 
+.editor-view.is-breadcrumb-toolbar {
+  background: var(--app-bg);
+}
+
 .editor-view.is-fullscreen {
   position: fixed;
   inset: var(--shell-chrome-height) 0 0 0;
@@ -39,12 +43,24 @@
   box-shadow: 0 1px 0 var(--border-subtle);
 }
 
+.editor-view.is-breadcrumb-toolbar .editor-toolbar {
+  min-height: 44px;
+  padding: 0 10px 0 14px;
+  background: var(--app-bg);
+}
+
 .editor-toolbar-main,
 .editor-toolbar-actions {
   display: flex;
   align-items: center;
   min-width: 0;
   gap: 8px;
+}
+
+.editor-toolbar-actions {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
 }
 
 .editor-toolbar-main {
@@ -57,6 +73,48 @@
   color: var(--text-soft);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.editor-breadcrumbs {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.editor-breadcrumb-item {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.editor-breadcrumb-item:not(.is-current) {
+  color: var(--text-muted);
+}
+
+.editor-breadcrumb-item.is-current {
+  min-width: 0;
+  flex-shrink: 1;
+  color: var(--text-strong);
+  font-weight: 650;
+}
+
+.editor-breadcrumb-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-breadcrumb-separator {
+  color: var(--text-soft);
+  font-size: 18px;
+  line-height: 1;
 }
 
 .editor-view.is-fullscreen .editor-toolbar-path {
@@ -138,6 +196,36 @@
   line-height: 1;
 }
 
+.editor-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.editor-more-btn {
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+
+.editor-more-btn span {
+  transform: none;
+}
+
+.editor-filetree-toggle.is-active {
+  color: var(--text-strong);
+  background: var(--interactive-hover);
+}
+
+.editor-filetree-toggle {
+  position: relative;
+  z-index: 2;
+  pointer-events: auto;
+}
+
 .editor-icon-btn span {
   display: block;
   transform: translateY(-0.5px);
@@ -185,16 +273,6 @@
 .editor-source-toggle {
   padding-inline: 11px;
   color: var(--text-soft);
-}
-
-.editor-reference-btn {
-  padding-inline: 10px;
-  border-color: var(--border-subtle);
-  color: var(--text-soft);
-}
-
-.editor-reference-btn:not(:disabled) {
-  color: var(--text-strong);
 }
 
 .editor-conflict-banner {

@@ -40,7 +40,7 @@ Hard rules:
 - **Timeline** — `Vec<TimelineItem>` interleaves `Message(Uuid)` | `Tool(Uuid)` chronologically.
 - **Tool hierarchy** — `parent_call_id` + `is_subagent` from CodeBuddy `_meta`; `finalize_running_children()` on parent transitions.
 - **Permissions** — `PermissionBroker` with `Plan` mode (reads + md edits) / `Build` mode (all workspace ops); outside-workspace always prompts.
-- **Session resume** — `acp_session_id` in SQLite → `--resume` on switch/reconnect; `load_session()` reconstructs timeline by `seq`.
+- **Session resume** — `acp_session_id` in SQLite → ACP `session/load` when supported on switch/reconnect; `load_session()` reconstructs the local timeline by `seq`.
 
 ## Frontend (`apps/desktop/ui/src/features/`)
 
