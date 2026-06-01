@@ -947,8 +947,15 @@ pub fn default_agent_for_new_work(paths: &AppPaths) -> AgentCliId {
     let settings = load_app_settings(paths);
     if settings.selected_agent == AgentCliId::ClaudeAgentAcp
         && !claude_agent_configured_for_settings(paths, &settings)
-        && detect_agent_with_paths(paths, AgentCliId::Codebuddy).installed
     {
+        if codex_agent_configured_for_settings(paths, &settings)
+            && detect_agent_with_paths(paths, AgentCliId::CodexAcp).installed
+        {
+            return AgentCliId::CodexAcp;
+        }
+        if !detect_agent_with_paths(paths, AgentCliId::Codebuddy).installed {
+            return settings.selected_agent;
+        }
         return AgentCliId::Codebuddy;
     }
     settings.selected_agent
@@ -1206,6 +1213,27 @@ fn claude_agent_configured_for_settings(paths: &AppPaths, settings: &AppSettings
         return status.token.exists && !status.token.malformed;
     }
     provider_secret(paths, AgentProviderFamily::Claude, &selected_profile_id)
+        .map(|secret| !secret.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn codex_agent_configured_for_settings(paths: &AppPaths, settings: &AppSettings) -> bool {
+    if settings.codex_connection_mode == CodexConnectionMode::Default {
+        return false;
+    }
+    let selected_profile_id = selected_codex_provider_profile_id(paths, settings);
+    if selected_profile_id == CODEX_DEFAULT_PROVIDER_ID {
+        return false;
+    }
+    if selected_profile_id == BYOK_PROVIDER_ID {
+        return !configured_codex_byok_models(paths).is_empty();
+    }
+    if selected_profile_id == CODEX_WOA_PROVIDER_ID {
+        let status =
+            crate::claude_woa::status(&managed_claude_woa_settings(paths, &settings.claude_woa));
+        return status.token.exists && !status.token.malformed;
+    }
+    provider_secret(paths, AgentProviderFamily::Codex, &selected_profile_id)
         .map(|secret| !secret.trim().is_empty())
         .unwrap_or(false)
 }
@@ -3256,6 +3284,29 @@ mod tests {
                 .to_lowercase()
                 .contains("codebuddy")
         );
+    }
+
+    #[test]
+    fn default_agent_for_new_work_prefers_configured_codex_woa_over_unconfigured_claude() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        let binary_path = codex_acp_binary_path(&paths);
+        std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
+        std::fs::write(&binary_path, "fake").unwrap();
+
+        select_agent_provider_profile(&paths, AgentProviderFamily::Codex, CODEX_WOA_PROVIDER_ID)
+            .unwrap();
+        crate::claude_woa::save_token(
+            &claude_woa_token_path(&paths),
+            &crate::claude_woa::WoaToken {
+                access_token: "access-secret".into(),
+                refresh_token: Some("refresh-secret".into()),
+                expires_at: crate::claude_woa::now_ms() + 600_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(default_agent_for_new_work(&paths), AgentCliId::CodexAcp);
     }
 
     #[test]

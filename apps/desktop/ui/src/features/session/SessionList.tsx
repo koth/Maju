@@ -452,19 +452,38 @@ function defaultAgentForNewWork(snapshot: AgentSettingsSnapshot): AgentCliId {
   const defaultInstalled = snapshot.agents.some(
     (agent) => agent.id === defaultAgent && agent.installed,
   );
+  const codexInstalled = snapshot.agents.some(
+    (agent) => agent.id === "codex-acp" && agent.installed,
+  );
   const codebuddyInstalled = snapshot.agents.some(
     (agent) => agent.id === "codebuddy" && agent.installed,
   );
   if (
     defaultAgent === "claude-agent-acp" &&
-    codebuddyInstalled &&
     !claudeAgentReady(snapshot)
   ) {
+    if (codexInstalled && codexAgentReady(snapshot)) {
+      return "codex-acp";
+    }
+    if (!codebuddyInstalled) {
+      return defaultAgent;
+    }
     return "codebuddy";
   }
   return defaultInstalled
     ? defaultAgent
     : snapshot.agents.find((agent) => agent.installed)?.id ?? defaultAgent;
+}
+
+function codexAgentReady(snapshot: AgentSettingsSnapshot) {
+  const selectedProfile = snapshot.codex_acp.profiles.find(
+    (profile) => profile.id === snapshot.codex_acp.selected_profile_id,
+  );
+  if (!selectedProfile || selectedProfile.id === "default") return false;
+  if (selectedProfile.id === "woa") {
+    return snapshot.claude_woa.token.exists && !snapshot.claude_woa.token.malformed;
+  }
+  return !selectedProfile.requires_credential || selectedProfile.configured;
 }
 
 function claudeAgentReady(snapshot: AgentSettingsSnapshot) {

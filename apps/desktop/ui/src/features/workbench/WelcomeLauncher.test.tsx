@@ -274,6 +274,33 @@ describe("WelcomeLauncher WOA onboarding", () => {
     expect(onOpenSettings).not.toHaveBeenCalled();
   });
 
+  it("auto-opens an internal workspace when Codex WOA has the shared WOA token", async () => {
+    const snapshot = agentSnapshot(true);
+    snapshot.settings.selected_agent = "claude-agent-acp";
+    snapshot.settings.selected_codex_provider_profile_id = "woa";
+    snapshot.settings.selected_claude_provider_profile_id = "byok";
+    snapshot.codex_acp.selected_profile_id = "woa";
+    snapshot.codex_acp.profiles = [
+      profile("codex", "default", false, true, false),
+      profile("codex", "woa", true, true, false),
+    ];
+    snapshot.claude_woa.selected_profile_id = "byok";
+    snapshot.claude_woa.profiles = [
+      profile("claude", "woa", false, true, false),
+      profile("claude", "byok", true, false, true),
+    ];
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
+    const onOpenSettings = vi.fn();
+    const onWorkspaceOpened = vi.fn();
+
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+
+    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
   it("auto-opens an internal workspace when Venus is configured", async () => {
     const snapshot = agentSnapshot(false);
     snapshot.settings.selected_agent = "claude-agent-acp";

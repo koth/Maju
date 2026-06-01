@@ -248,6 +248,55 @@ describe("SessionList agent picker", () => {
     await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codebuddy"));
   });
 
+  it("defaults to Codex when Claude is not configured but Codex WOA is ready", async () => {
+    const snapshot = agentSnapshot("xiaomi_mimo", false);
+    snapshot.agents.push({
+      id: "codex-acp",
+      label: "Codex",
+      binary: "codex-acp",
+      installed: true,
+      detected_path: "/Users/kothchen/.kodex/bin/codex-acp",
+      selected: false,
+    });
+    snapshot.settings.selected_codex_provider_profile_id = "woa";
+    snapshot.codex_acp.selected_profile_id = "woa";
+    snapshot.codex_acp.profiles = [
+      {
+        family: "codex",
+        id: "woa",
+        label: "WOA",
+        proxy_kind: "responses",
+        selected: true,
+        configured: true,
+        base_url: "https://copilot.code.woa.com/server/chat/codebuddy-gateway/codex",
+        default_model: "gpt-5.4",
+        models: ["gpt-5.4"],
+        credential_label: null,
+        requires_credential: false,
+        help_text: "WOA help",
+      },
+    ];
+    snapshot.claude_woa.token.exists = true;
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 Kodex 中新建会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codex-acp"));
+  });
+
   it("shows a spinner for a background session that is still running", async () => {
     vi.mocked(sessionList).mockResolvedValue(
       workspaceWithSessions([

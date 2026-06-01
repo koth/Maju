@@ -490,12 +490,8 @@ function isInternalSetupReady(settings: AgentSettingsSnapshot) {
 }
 
 function isInternalWoaReady(settings: AgentSettingsSnapshot) {
-  const selectedClaudeWoa =
-    settings.settings.selected_agent === "claude-agent-acp" &&
-    settings.claude_woa.selected_profile_id === "woa";
-  const selectedCodexWoa =
-    settings.settings.selected_agent === "codex-acp" &&
-    settings.codex_acp.selected_profile_id === "woa";
+  const selectedClaudeWoa = settings.claude_woa.selected_profile_id === "woa";
+  const selectedCodexWoa = settings.codex_acp.selected_profile_id === "woa";
   return (selectedClaudeWoa || selectedCodexWoa) && isWoaTokenUsable(settings);
 }
 
