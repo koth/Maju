@@ -6,15 +6,13 @@ Kodex 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，
 
 ## 截图
 
-| 工作台总览                                                                                                     |
-| -------------------------------------------------------------------------------------------------------------- |
-| <img src="docs/screenshots/kodex-workbench.png" alt="Kodex 工作台总览" width="720">                            |
-| `docs/screenshots/kodex-workbench.png`：建议截左侧会话/文件树、中间对话+编辑器、右侧变更审阅同时可见的主界面。 |
+| 工作台总览                                                                          |
+| ----------------------------------------------------------------------------------- |
+| <img src="docs/screenshots/kodex-workbench.png" alt="Kodex 工作台总览" width="720"> |
 
-| 首次设置                                                                                                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------ |
-| <img src="docs/screenshots/kodex-first-run-settings.png" alt="Kodex 首次设置" width="720">                                           |
-| `docs/screenshots/kodex-first-run-settings.png`：建议截首次打开后的智能体/模型通道设置页，展示 WOA、TimiAI、Venus 或 BYOK 配置入口。 |
+| 首次设置                                                                                   |
+| ------------------------------------------------------------------------------------------ |
+| <img src="docs/screenshots/kodex-first-run-settings.png" alt="Kodex 首次设置" width="720"> |
 
 ## 亮点
 
