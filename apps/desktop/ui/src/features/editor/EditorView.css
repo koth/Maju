@@ -317,17 +317,39 @@
 }
 
 .editor-document-preview {
-  padding: 28px clamp(24px, 14vw, 220px) 64px;
+  box-sizing: border-box;
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: 28px clamp(16px, 5vw, 56px) 64px;
   color: var(--text-muted);
   font-family: var(--font-chat);
   font-size: 14px;
   line-height: 1.7;
+  overflow-wrap: break-word;
 }
 
 .editor-document-preview .md-paragraph,
 .editor-document-preview .md-list,
 .editor-document-preview .md-list-item {
   color: var(--text-muted);
+}
+
+.editor-document-preview .md-image-paragraph {
+  display: block;
+  margin: 14px 0;
+}
+
+.editor-document-preview .md-image {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 70vh;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.editor-document-preview .md-table {
+  min-width: max-content;
 }
 
 .editor-html-preview {
