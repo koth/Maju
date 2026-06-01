@@ -13,7 +13,6 @@
     "claude:stage": "node scripts/stage-claude-agent-acp.mjs",
     "claude:binary": "npm --prefix ../../../kodex-claude run build:binary && npm run claude:stage",
     "build:with-claude": "npm run build && npm run claude:binary && npm run codex:binary",
-    "tauri": "tauri",
     "desktop:build": "npm run claude:binary && npm run codex:binary && cd ../src-tauri && tauri build --ci",
     "preview": "vite preview",
     "test": "vitest run",
