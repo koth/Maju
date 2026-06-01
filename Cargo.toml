@@ -22,7 +22,7 @@ agent-client-protocol = { version = "0.11.1", features = ["unstable_session_mode
 agent-client-protocol-tokio = "0.11.1"
 anyhow = "1.0"
 futures = "0.3"
-git2 = "0.20"
+git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
 portable-pty = "0.9"
 bytes = "1.11"
 http-body-util = "0.1"
