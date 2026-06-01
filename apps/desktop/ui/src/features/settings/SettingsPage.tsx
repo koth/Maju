@@ -891,6 +891,7 @@ export function SettingsPage({
 
   return (
     <div className="settings-page">
+      <div className="settings-drag-strip" data-tauri-drag-region />
       <aside className="settings-sidebar">
         <button type="button" className="settings-back" onClick={onBack}>
           <span className="settings-back-arrow">←</span> 返回应用

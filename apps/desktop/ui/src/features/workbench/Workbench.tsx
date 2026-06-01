@@ -21,6 +21,7 @@ import { ThreadSidebarShell } from "./ThreadSidebarShell";
 import { SettingsPage, type AgentSettingsTab, type SettingsStartupNotice } from "../settings/SettingsPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
+import { checkForAppUpdate, type AppUpdateInfo } from "../../lib/updater";
 import { useWorkbenchSnapshot } from "./useWorkbenchSnapshot";
 import { useWorkbenchGit } from "./useWorkbenchGit";
 import { useTimelineChangeSets } from "./useTimelineChangeSets";
@@ -38,6 +39,8 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
   kind: "base",
   tab: "Review",
 };
+
+let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
 
 export function Workbench() {
   const {
@@ -135,6 +138,8 @@ export function Workbench() {
   const [settingsStartupNotice, setSettingsStartupNotice] = useState<SettingsStartupNotice | null>(null);
   const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab | null>(null);
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
+  const [startupUpdateInfo, setStartupUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [startupUpdateDismissed, setStartupUpdateDismissed] = useState(false);
 
   const handleOpenSettings = useCallback((options?: {
     startupNotice?: SettingsStartupNotice;
@@ -161,6 +166,24 @@ export function Workbench() {
     settingsGetAgentSnapshot()
       .then((snapshot) => setAppTheme(applyAppTheme(snapshot.settings.theme)))
       .catch(() => setAppTheme(applyAppTheme(DEFAULT_APP_THEME)));
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    startupUpdateCheckPromise ??= checkForAppUpdate()
+      .catch((error) => {
+        console.info("Startup update check skipped", error);
+        return null;
+      });
+    void startupUpdateCheckPromise.then((update) => {
+      if (!disposed && update) {
+        setStartupUpdateInfo(update);
+      }
+    });
+
+    return () => {
+      disposed = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -313,6 +336,27 @@ export function Workbench() {
         : new Set<string>(),
     [pendingPlanApproval],
   );
+  const updateNotice = startupUpdateInfo && !startupUpdateDismissed ? (
+    <div className="startup-update-notice" role="status" aria-live="polite">
+      <div className="startup-update-copy">
+        <span className="startup-update-title">发现新版本 {startupUpdateInfo.version}</span>
+        <span className="startup-update-meta">当前版本 {startupUpdateInfo.currentVersion}</span>
+      </div>
+      <div className="startup-update-actions">
+        <button type="button" className="startup-update-btn" onClick={() => handleOpenSettings()}>
+          打开设置
+        </button>
+        <button
+          type="button"
+          className="startup-update-close"
+          onClick={() => setStartupUpdateDismissed(true)}
+          aria-label="关闭更新提示"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   if (settingsOpen) {
     return (
@@ -324,6 +368,7 @@ export function Workbench() {
           onStartupNoticeDismissed={() => setSettingsStartupNotice(null)}
           onThemeChange={setAppTheme}
         />
+        {updateNotice}
       </div>
     );
   }
@@ -331,10 +376,13 @@ export function Workbench() {
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
     return (
-      <WelcomeLauncher
-        onWorkspaceOpened={handleWorkspaceOpened}
-        onOpenSettings={handleOpenSettings}
-      />
+      <>
+        <WelcomeLauncher
+          onWorkspaceOpened={handleWorkspaceOpened}
+          onOpenSettings={handleOpenSettings}
+        />
+        {updateNotice}
+      </>
     );
   }
 
@@ -585,6 +633,7 @@ export function Workbench() {
           entries={snapshot.agent_plan ?? []}
           onPermissionSelect={handlePermissionSelect}
         />
+        {updateNotice}
       </div>
       </div>
     </div>
