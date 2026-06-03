@@ -102,6 +102,7 @@ export function Workbench() {
     handleConfirmDiscardClose,
     handleCancelClose,
     handleEditorDirtyChange,
+    handleEditorUserInteraction,
     handleEditorSaved,
     handleTabSelect,
   } = useWorkbenchTabs({ onAfterEditorSave: handleAfterEditorSave });
@@ -593,6 +594,7 @@ export function Workbench() {
                         appTheme={appTheme}
                         onDirtyChange={handleEditorDirtyChange}
                         onSaved={handleEditorSaved}
+                        onUserInteraction={handleEditorUserInteraction}
                         onAddComposerReference={enqueueComposerReference}
                       />
                     )}
@@ -674,7 +676,7 @@ export function Workbench() {
               <div className="remote-open-dialog-head">
                 <div>
                   <div className="remote-open-dialog-kicker">远程</div>
-                  <h2 id="remote-open-title">连接远程机器</h2>
+                  <h2 id="remote-open-title">打开远程目录</h2>
                 </div>
                 <button
                   type="button"

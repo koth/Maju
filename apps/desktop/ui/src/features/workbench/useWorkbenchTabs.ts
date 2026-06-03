@@ -26,6 +26,69 @@ interface UseWorkbenchTabsArgs {
   onAfterEditorSave: () => Promise<void>;
 }
 
+interface EditorTabOptions {
+  lineNumber?: number;
+  searchQuery?: string;
+  navToken?: number;
+}
+
+function editorTabId(filePath: string) {
+  return `editor:${filePath}`;
+}
+
+function fileNameForPath(filePath: string) {
+  return filePath.replace(/\\/g, "/").split("/").pop() || filePath;
+}
+
+function createEditorTab(filePath: string, options: EditorTabOptions = {}): TabDescriptor {
+  return {
+    id: editorTabId(filePath),
+    type: "editor",
+    label: fileNameForPath(filePath),
+    filePath,
+    ephemeral: true,
+    ...options,
+  };
+}
+
+function canReplaceEditorTab(tab: TabDescriptor | undefined, nextFilePath: string) {
+  return Boolean(
+    tab?.type === "editor" &&
+      tab.ephemeral &&
+      tab.filePath &&
+      tab.filePath !== nextFilePath &&
+      !tab.dirty &&
+      !isModelDirty(tab.filePath),
+  );
+}
+
+function openEditorTab(
+  currentTabs: TabDescriptor[],
+  activeTabId: string,
+  filePath: string,
+  options: EditorTabOptions = {},
+) {
+  const tabId = editorTabId(filePath);
+  const existingIndex = currentTabs.findIndex((tab) => tab.id === tabId);
+  const activeIndex = currentTabs.findIndex((tab) => tab.id === activeTabId);
+  const activeTab = activeIndex >= 0 ? currentTabs[activeIndex] : undefined;
+  const canReplaceActiveTab = canReplaceEditorTab(activeTab, filePath);
+
+  if (existingIndex >= 0) {
+    return currentTabs
+      .filter((_, index) => !(canReplaceActiveTab && index === activeIndex && index !== existingIndex))
+      .map((tab) => (tab.id === tabId ? { ...tab, ...options } : tab));
+  }
+
+  if (canReplaceActiveTab && activeIndex >= 0) {
+    const nextTabs = [...currentTabs];
+    nextTabs[activeIndex] = createEditorTab(filePath, options);
+    return nextTabs;
+  }
+
+  return [...currentTabs, createEditorTab(filePath, options)];
+}
+
 export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   const [tabs, setTabs] = useState<TabDescriptor[]>([CONVERSATION_TAB]);
   const [activeTabId, setActiveTabId] = useState("conversation");
@@ -77,46 +140,23 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   );
 
   const handleOpenEditorTab = useCallback((filePath: string) => {
-    const tabId = `editor:${filePath}`;
-    setTabs((prev) => {
-      if (prev.some((t) => t.id === tabId)) return prev;
-      const fileName = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
-      return [
-        ...prev,
-        { id: tabId, type: "editor" as const, label: fileName, filePath },
-      ];
-    });
+    const tabId = editorTabId(filePath);
+    setTabs((prev) => openEditorTab(prev, activeTabId, filePath));
     setActiveTabId(tabId);
-  }, []);
+  }, [activeTabId]);
 
   const handleSearchResultOpen = useCallback(
     (filePath: string, lineNumber?: number, searchQuery?: string) => {
-      const tabId = `editor:${filePath}`;
+      const tabId = editorTabId(filePath);
       const token = ++navTokenRef.current;
-      setTabs((prev) => {
-        const existing = prev.find((t) => t.id === tabId);
-        if (existing) {
-          return prev.map((t) =>
-            t.id === tabId ? { ...t, lineNumber, searchQuery, navToken: token } : t,
-          );
-        }
-        const fileName = filePath.replace(/\\/g, "/").split("/").pop() || filePath;
-        return [
-          ...prev,
-          {
-            id: tabId,
-            type: "editor" as const,
-            label: fileName,
-            filePath,
-            lineNumber,
-            searchQuery,
-            navToken: token,
-          },
-        ];
-      });
+      setTabs((prev) => openEditorTab(prev, activeTabId, filePath, {
+        lineNumber,
+        searchQuery,
+        navToken: token,
+      }));
       setActiveTabId(tabId);
     },
-    [],
+    [activeTabId],
   );
 
   const closeTabById = useCallback(
@@ -197,7 +237,19 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   const handleEditorDirtyChange = useCallback((filePath: string, dirty: boolean) => {
     setTabs((prev) =>
       prev.map((tab) =>
-        tab.type === "editor" && tab.filePath === filePath ? { ...tab, dirty } : tab,
+        tab.type === "editor" && tab.filePath === filePath
+          ? { ...tab, dirty, ephemeral: dirty ? false : tab.ephemeral }
+          : tab,
+      ),
+    );
+  }, []);
+
+  const handleEditorUserInteraction = useCallback((filePath: string) => {
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.type === "editor" && tab.filePath === filePath && tab.ephemeral
+          ? { ...tab, ephemeral: false }
+          : tab,
       ),
     );
   }, []);
@@ -207,6 +259,13 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   }, [onAfterEditorSave]);
 
   const handleTabSelect = useCallback((id: string) => {
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === id && tab.type === "editor" && tab.ephemeral
+          ? { ...tab, ephemeral: false }
+          : tab,
+      ),
+    );
     setActiveTabId(id);
   }, []);
 
@@ -277,6 +336,7 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
     handleConfirmDiscardClose,
     handleCancelClose,
     handleEditorDirtyChange,
+    handleEditorUserInteraction,
     handleEditorSaved,
     handleTabSelect,
   };

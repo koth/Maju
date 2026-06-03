@@ -144,10 +144,9 @@ jobs:
 
       - name: Build codex-acp Linux sandbox
         run: |
-          cargo install \
+          cargo install codex-linux-sandbox \
             --git https://github.com/openai/codex \
             --tag rust-v0.130.0 \
-            --package codex-linux-sandbox \
             --bin codex-linux-sandbox \
             --locked \
             --target ${{ matrix.rust_target }} \

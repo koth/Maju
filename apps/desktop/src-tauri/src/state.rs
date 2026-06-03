@@ -87,9 +87,6 @@ impl AppState {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
         guard.active_workspace = Some(key);
-        if let Some(active_key) = guard.active_workspace.clone() {
-            self.enter_remote_context_locked(&mut guard, &active_key);
-        }
         Ok(snapshot)
     }
 
@@ -320,9 +317,6 @@ impl AppState {
         if let Some(remote) = remote {
             let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
             guard.active_workspace = Some(key);
-            if let Some(active_key) = guard.active_workspace.clone() {
-                self.enter_remote_context_locked(&mut guard, &active_key);
-            }
             app_core::startup_perf::mark("state/set_active_workspace/end", "");
             return Ok(snapshot);
         }
@@ -405,14 +399,6 @@ impl AppState {
             connect_workspace_locked(&mut guard, key.clone(), path, None)?;
         }
         guard.active_workspace = Some(key.clone());
-        if guard
-            .workspaces
-            .get(&key)
-            .map(entry_is_remote)
-            .unwrap_or(false)
-        {
-            self.enter_remote_context_locked(&mut guard, &key);
-        }
         let app = match guard.workspaces.get_mut(&key) {
             Some(WorkspaceEntry::Connected(app)) => app,
             _ => return Err("Workspace is not connected".into()),
@@ -463,34 +449,6 @@ impl AppState {
         }
     }
 
-    fn enter_remote_context_locked(&self, guard: &mut WorkspaceRegistry, active_key: &str) {
-        let is_active_remote = guard
-            .workspaces
-            .get(active_key)
-            .map(entry_is_remote)
-            .unwrap_or(false);
-        if !is_active_remote {
-            return;
-        }
-
-        let remove_keys = guard
-            .workspaces
-            .keys()
-            .filter(|key| key.as_str() != active_key)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in remove_keys {
-            let Some(entry) = guard.workspaces.remove(&key) else {
-                continue;
-            };
-            if !entry_is_remote(&entry)
-                && let Some(root) = entry_path(&entry)
-            {
-                self.lsp_service.shutdown_workspace(&root);
-                self.terminal_service.shutdown_workspace(&root);
-            }
-        }
-    }
 }
 
 fn connect_workspace_locked(
@@ -812,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_remote_context_removes_local_workspace_entries() {
+    fn activating_remote_workspace_keeps_local_workspace_entries() {
         let state = AppState::new();
         let local_path = std::env::temp_dir().join(format!(
             "kodex-remote-context-local-{}",
@@ -838,14 +796,18 @@ mod tests {
         {
             let mut guard = state.workspaces.lock().unwrap();
             guard.active_workspace = Some(remote_key.clone());
-            state.enter_remote_context_locked(&mut guard, &remote_key);
         }
 
         let workspaces = state.list_workspace_sessions().unwrap();
-        assert_eq!(workspaces.len(), 1);
-        assert_eq!(workspaces[0].workspace.root, PathBuf::from(remote.key()));
+        assert_eq!(workspaces.len(), 2);
+        assert!(workspaces.iter().any(|workspace| workspace.workspace.root == local_path));
+        let remote_workspace = workspaces
+            .iter()
+            .find(|workspace| workspace.workspace.root == PathBuf::from(remote.key()))
+            .expect("remote workspace remains listed");
+        assert!(remote_workspace.is_active);
         assert!(matches!(
-            workspaces[0].workspace.location,
+            remote_workspace.workspace.location,
             WorkspaceLocation::RemoteLinux(_)
         ));
 

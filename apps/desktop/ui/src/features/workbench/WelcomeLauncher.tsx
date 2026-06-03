@@ -247,7 +247,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         <section className="welcome-launcher" aria-label="打开工作区">
           <div className="welcome-launcher-copy">
             <span className="welcome-kicker">选择工作区</span>
-            <h1>从本地项目开始</h1>
+            <h1>打开一个工作区</h1>
           </div>
           <div className="welcome-actions">
             <button
@@ -265,13 +265,13 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
               aria-expanded={remoteExpanded}
             >
               <span className="welcome-action-icon"><RemoteHostIcon /></span>
-              <span>连接远程机器</span>
+              <span>打开远程目录</span>
             </button>
           </div>
         </section>
 
         {remoteExpanded && (
-          <section className="welcome-remote-panel" aria-label="远程机器连接引导">
+          <section className="welcome-remote-panel" aria-label="打开远程目录">
             <RemoteOpenPanel
               onWorkspaceOpened={onWorkspaceOpened}
               onOpenSettings={() => onOpenSettings()}

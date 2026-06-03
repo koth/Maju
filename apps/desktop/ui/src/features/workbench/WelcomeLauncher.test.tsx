@@ -247,11 +247,11 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={vi.fn()} />);
 
     expect(screen.queryByLabelText("SSH 目标")).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "连接远程机器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开远程目录" }));
 
-    const panel = await screen.findByRole("region", { name: "远程机器连接引导" });
+    const panel = await screen.findByRole("region", { name: "打开远程目录" });
     await waitFor(() => expect(onRemoteOpenProgress).toHaveBeenCalled());
-    const openRemote = within(panel).getByRole("button", { name: "连接并打开" });
+    const openRemote = within(panel).getByRole("button", { name: "打开目录" });
     expect(await screen.findByText(/Devbox/)).toBeInTheDocument();
     const agentGroup = screen.getByRole("radiogroup", { name: "remote_open_agent" });
     expect(within(agentGroup).getByRole("radio", { name: /Claude/ })).toHaveAttribute("aria-checked", "true");

@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "./SessionList";
+import { onRemoteOpenProgress } from "../../lib/events";
 import {
   sessionCreate,
   sessionDelete,
@@ -8,8 +9,18 @@ import {
   sessionSwitch,
   workspaceSetActive,
   settingsGetAgentSnapshot,
+  settingsGetRemoteProfiles,
+  settingsValidateRemoteProfile,
+  workspaceOpenRemoteProfile,
 } from "../../lib/tauri";
-import type { AgentProviderProfile, AgentSettingsSnapshot, SessionListItem, WorkspaceSessionList } from "../../types";
+import type {
+  AgentProviderProfile,
+  AgentSettingsSnapshot,
+  RemoteMachineProfilesSnapshot,
+  RemoteOpenProgressEvent,
+  SessionListItem,
+  WorkspaceSessionList,
+} from "../../types";
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
@@ -21,12 +32,19 @@ vi.mock("../../lib/tauri", async () => {
     sessionDelete: vi.fn(),
     sessionCancel: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
+    settingsGetRemoteProfiles: vi.fn(),
+    settingsValidateRemoteProfile: vi.fn(),
     workspaceSetActive: vi.fn(),
+    workspaceOpenRemoteProfile: vi.fn(),
   };
 });
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+}));
+
+vi.mock("../../lib/events", () => ({
+  onRemoteOpenProgress: vi.fn(async (_callback: (progress: RemoteOpenProgressEvent) => void) => vi.fn()),
 }));
 
 function providerProfile(
@@ -146,14 +164,33 @@ function workspaceWithSessions(sessions: SessionListItem[]): WorkspaceSessionLis
   ];
 }
 
+function remoteProfilesSnapshot(): RemoteMachineProfilesSnapshot {
+  return {
+    profiles: [
+      {
+        id: "remote-1",
+        display_name: "Devbox",
+        ssh_target: "root@9.134.121.208",
+        ssh_port: 36000,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        last_validation: null,
+      },
+    ],
+  };
+}
+
 describe("SessionList agent picker", () => {
   beforeEach(() => {
     vi.mocked(sessionList).mockResolvedValue(workspaceSessions);
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot());
+    vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesSnapshot());
     vi.mocked(sessionCreate).mockResolvedValue(undefined);
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
     vi.mocked(sessionDelete).mockResolvedValue(undefined);
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
+    vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
 
   afterEach(() => {
@@ -278,6 +315,43 @@ describe("SessionList agent picker", () => {
     fireEvent.click(await screen.findByRole("button", { name: "创建会话" }));
 
     await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codex-acp"));
+  });
+
+  it("opens a remote workspace from the sidebar new workspace menu", async () => {
+    const onWorkspaceChanged = vi.fn();
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={onWorkspaceChanged}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "新建工作区" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /打开远程目录/ }));
+
+    const dialog = await screen.findByRole("dialog", { name: "打开远程目录" });
+    await waitFor(() => expect(onRemoteOpenProgress).toHaveBeenCalled());
+    expect(within(dialog).getByText(/Devbox/)).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("remote_open_path"), { target: { value: "/root/kodex-remote-acp-test" } });
+
+    const openRemote = within(dialog).getByRole("button", { name: "打开目录" });
+    await waitFor(() => expect(openRemote).not.toBeDisabled());
+    fireEvent.click(openRemote);
+
+    await waitFor(() =>
+      expect(workspaceOpenRemoteProfile).toHaveBeenCalledWith(expect.objectContaining({
+        request_id: expect.any(String),
+        profile_id: "remote-1",
+        remote_path: "/root/kodex-remote-acp-test",
+        agent_cli: "claude-agent-acp",
+      })),
+    );
+    await waitFor(() => expect(onWorkspaceChanged).toHaveBeenCalled());
   });
 
   it("shows a spinner for a background session that is still running", async () => {

@@ -138,8 +138,8 @@ export function GlobalChrome({
           type="button"
           className="chrome-icon-btn"
           onClick={onOpenRemoteWorkspace}
-          title="连接远程机器"
-          aria-label="连接远程机器"
+          title="打开远程目录"
+          aria-label="打开远程目录"
         >
           <RemoteHostIcon />
         </button>

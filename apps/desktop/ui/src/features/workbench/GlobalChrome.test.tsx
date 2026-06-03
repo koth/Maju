@@ -100,7 +100,7 @@ describe("GlobalChrome", () => {
 
     renderChrome({ onOpenRemoteWorkspace });
 
-    fireEvent.click(screen.getByRole("button", { name: "连接远程机器" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开远程目录" }));
 
     expect(onOpenRemoteWorkspace).toHaveBeenCalled();
   });

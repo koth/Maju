@@ -510,6 +510,7 @@ export interface TabDescriptor {
   type: "conversation" | "changes" | "diff" | "editor";
   label: string;
   dirty?: boolean;
+  ephemeral?: boolean;
   filePath?: string;
   diffSource?: "session" | "git" | "change-set";
   changeSetId?: string;

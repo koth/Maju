@@ -136,7 +136,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
       return;
     }
     if (!path.startsWith("/")) {
-      setError("打开远程项目需要填写绝对路径");
+      setError("打开远程目录需要填写绝对路径");
       return;
     }
     const requestId = newRequestId();
@@ -189,8 +189,8 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
     <div className="remote-open-panel">
       <div className="remote-open-heading">
         <div>
-          <div className="remote-open-title">连接远程机器</div>
-          <p>进入机器上下文后，在这台机器上打开项目并启动运行通道。</p>
+          <div className="remote-open-title">打开远程目录</div>
+          <p>选择一台已保存的 Linux 开发机和远程路径，作为工作区打开。</p>
         </div>
       </div>
       {error && <div className="remote-open-error">{error}</div>}
@@ -301,10 +301,10 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
           管理远程机器
         </button>
         <button type="button" className="remote-open-secondary" disabled={busy !== null} onClick={handleValidate}>
-          {busy === "validate" ? "验证中..." : "验证机器"}
+          {busy === "validate" ? "验证中..." : "验证目录"}
         </button>
         <button type="button" className="remote-open-primary" disabled={busy !== null || !remotePath.trim()} onClick={handleOpen}>
-          {busy === "open" ? "连接中..." : "连接并打开"}
+          {busy === "open" ? "打开中..." : "打开目录"}
         </button>
       </div>
     </div>

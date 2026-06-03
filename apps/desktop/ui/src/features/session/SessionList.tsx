@@ -12,6 +12,7 @@ import {
   workspaceSetActive,
 } from "../../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
+import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
 import "./SessionList.css";
 
 interface Props {
@@ -52,7 +53,10 @@ export function SessionList({
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
     sessionList().then(setWorkspaceSessions).catch(() => {});
@@ -106,9 +110,33 @@ export function SessionList({
     };
   }, [agentDropdownOpen]);
 
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (workspaceMenuRef.current?.contains(target)) return;
+      setWorkspaceMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [workspaceMenuOpen]);
+
   const openAgentModal = useCallback(async (mode: AgentModalMode) => {
     setModalError(null);
     setAgentDropdownOpen(false);
+    setWorkspaceMenuOpen(false);
     const snapshot = await settingsGetAgentSnapshot();
     setAgentSnapshot(snapshot);
     setSelectedAgent(defaultAgentForNewWork(snapshot));
@@ -116,7 +144,7 @@ export function SessionList({
     setAgentDropdownOpen(false);
   }, []);
 
-  const handleCreateWorkspace = useCallback(async () => {
+  const handleCreateLocalWorkspace = useCallback(async () => {
     try {
       setPendingWorkspacePath(null);
       setPendingWorkspaceRoot(null);
@@ -125,6 +153,25 @@ export function SessionList({
       setModalError(String(error));
     }
   }, [openAgentModal]);
+
+  const handleOpenRemoteWorkspace = useCallback(() => {
+    setWorkspaceMenuOpen(false);
+    setModalError(null);
+    setRemoteOpenVisible(true);
+  }, []);
+
+  const closeRemoteOpen = useCallback(() => {
+    setRemoteOpenVisible(false);
+  }, []);
+
+  const handleRemoteWorkspaceOpened = useCallback(
+    (snapshot: UiSnapshot) => {
+      setRemoteOpenVisible(false);
+      onWorkspaceChanged(snapshot);
+      refresh();
+    },
+    [onWorkspaceChanged, refresh],
+  );
 
   const handleChooseWorkspaceDirectory = useCallback(async () => {
     try {
@@ -274,16 +321,38 @@ export function SessionList({
     <div className="session-list">
       <div className="sl-header">
         <span className="sl-kicker">项目</span>
-        <button className="sl-new-btn" type="button" onClick={handleCreateWorkspace} title="新建工作区" aria-label="新建工作区">
-          <PlusIcon />
-        </button>
+        <div className="sl-new-workspace" ref={workspaceMenuRef}>
+          <button
+            className={`sl-new-btn ${workspaceMenuOpen ? "is-open" : ""}`}
+            type="button"
+            onClick={() => setWorkspaceMenuOpen((open) => !open)}
+            title="新建工作区"
+            aria-label="新建工作区"
+            aria-haspopup="menu"
+            aria-expanded={workspaceMenuOpen}
+          >
+            <PlusIcon />
+          </button>
+          {workspaceMenuOpen && (
+            <div className="sl-new-menu" role="menu" aria-label="新建工作区选项">
+              <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleCreateLocalWorkspace}>
+                <span>打开本地文件夹</span>
+                <small>从这台机器选择目录</small>
+              </button>
+              <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleOpenRemoteWorkspace}>
+                <span>打开远程目录</span>
+                <small>使用已保存的 Linux 机器</small>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="sl-workspaces">
         {workspaceSessions.length === 0 && (
           <div className="sl-empty">
             <span className="sl-empty-title">暂无工作区</span>
-            <span className="sl-empty-copy">点击新建打开一个工作区。</span>
+            <span className="sl-empty-copy">点击新建打开本地或远程工作区。</span>
           </div>
         )}
 
@@ -325,6 +394,32 @@ export function SessionList({
                 {isSwitching ? "正在停止..." : "停止并切换"}
               </button>
             </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {remoteOpenVisible && createPortal(
+        <div className="sl-agent-modal-backdrop" role="presentation" onClick={closeRemoteOpen}>
+          <div
+            className="sl-agent-modal sl-remote-open-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sl-remote-open-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="sl-agent-modal-header">
+              <span id="sl-remote-open-title">打开远程目录</span>
+              <button type="button" className="sl-agent-close" onClick={closeRemoteOpen}>x</button>
+            </div>
+            <RemoteOpenPanel
+              onWorkspaceOpened={handleRemoteWorkspaceOpened}
+              onOpenSettings={() => {
+                setRemoteOpenVisible(false);
+                onOpenSettings();
+              }}
+              onCancel={closeRemoteOpen}
+            />
           </div>
         </div>,
         document.body,

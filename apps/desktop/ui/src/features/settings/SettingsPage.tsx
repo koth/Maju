@@ -946,7 +946,7 @@ export function SettingsPage({
         {remoteSnapshot.profiles.length === 0 && !remoteDraft ? (
           <div className="settings-empty-panel">
             <div className="settings-row-title">还没有远程机器</div>
-            <p>添加一台 Linux 开发机后，可以验证 SSH 和默认用户目录，再从 Workbench 打开远程项目。</p>
+            <p>添加一台 Linux 开发机后，可以验证 SSH 和默认用户目录，再从 Workbench 打开远程目录。</p>
             <button type="button" className="settings-btn is-install" onClick={startNewRemoteProfile}>
               添加远程机器
             </button>
@@ -1441,7 +1441,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
 }
 
 function settingsPaneDescription(pane: SettingsPane): string {
-  if (pane === "remote") return "管理远程 Linux 开发机，并在连接远程机器前验证 SSH。";
+  if (pane === "remote") return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
   if (pane === "lsp") return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";
 }

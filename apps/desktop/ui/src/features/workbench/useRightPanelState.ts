@@ -2,8 +2,10 @@ import { useCallback, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 
 const RIGHT_PANEL_WIDTH_STORAGE_KEY = "kodex.rightPanelWidth";
-const RIGHT_PANEL_DEFAULT_WIDTH = 292;
-const RIGHT_PANEL_MIN_WIDTH = 248;
+const RIGHT_PANEL_DEFAULT_VIEWPORT_RATIO = 0.28;
+const RIGHT_PANEL_DEFAULT_MIN_WIDTH = 360;
+const RIGHT_PANEL_DEFAULT_MAX_WIDTH = 480;
+const RIGHT_PANEL_MIN_WIDTH = 360;
 const RIGHT_PANEL_MAX_WIDTH = 1280;
 const RIGHT_PANEL_MAX_VIEWPORT_RATIO = 0.78;
 const RIGHT_PANEL_MIN_CENTER_WIDTH = 360;
@@ -26,11 +28,21 @@ function clampRightPanelWidth(width: number) {
   return Math.min(getRightPanelMaxWidth(), Math.max(RIGHT_PANEL_MIN_WIDTH, width));
 }
 
+function getRightPanelDefaultWidth() {
+  if (typeof window === "undefined") return RIGHT_PANEL_DEFAULT_MIN_WIDTH;
+  const target = Math.floor(window.innerWidth * RIGHT_PANEL_DEFAULT_VIEWPORT_RATIO);
+  const width = Math.min(
+    RIGHT_PANEL_DEFAULT_MAX_WIDTH,
+    Math.max(RIGHT_PANEL_DEFAULT_MIN_WIDTH, target),
+  );
+  return clampRightPanelWidth(width);
+}
+
 export function useRightPanelState() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY));
-    return Number.isFinite(stored) ? clampRightPanelWidth(stored) : RIGHT_PANEL_DEFAULT_WIDTH;
+    return Number.isFinite(stored) ? clampRightPanelWidth(stored) : getRightPanelDefaultWidth();
   });
 
   const clampStoredRightPanelWidth = useCallback(() => {

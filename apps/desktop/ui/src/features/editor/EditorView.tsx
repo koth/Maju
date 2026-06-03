@@ -43,6 +43,7 @@ interface Props {
   fileTreeVisible?: boolean;
   onDirtyChange?: (path: string, dirty: boolean) => void;
   onSaved?: () => void;
+  onUserInteraction?: (path: string) => void;
   onAddComposerReference?: (request: {
     path: string;
     startLine: number;
@@ -62,6 +63,7 @@ export function EditorView({
   fileTreeVisible = false,
   onDirtyChange,
   onSaved,
+  onUserInteraction,
   onAddComposerReference,
   onToggleFileTree,
 }: Props) {
@@ -518,6 +520,10 @@ export function EditorView({
     };
   }, []);
 
+  const handleUserInteraction = useCallback(() => {
+    onUserInteraction?.(path);
+  }, [onUserInteraction, path]);
+
   if (error) {
     return <div className="editor-error">加载文件失败：{error}</div>;
   }
@@ -527,7 +533,13 @@ export function EditorView({
   }
 
   return (
-    <div className={`editor-view ${fullscreen ? "is-fullscreen" : ""} ${useBreadcrumbToolbar ? "is-breadcrumb-toolbar" : ""}`}>
+    <div
+      className={`editor-view ${fullscreen ? "is-fullscreen" : ""} ${useBreadcrumbToolbar ? "is-breadcrumb-toolbar" : ""}`}
+      onKeyDown={handleUserInteraction}
+      onPointerDown={handleUserInteraction}
+      onPointerMove={handleUserInteraction}
+      onWheel={handleUserInteraction}
+    >
       <div className="editor-toolbar">
         <div className="editor-toolbar-main">
           {fullscreen && <span className="editor-fullscreen-mode">全屏编辑</span>}
