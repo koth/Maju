@@ -9,7 +9,6 @@ use agent_client_protocol::{Client, ConnectTo, Lines, Role};
 use anyhow::anyhow;
 use futures::channel::mpsc as futures_mpsc;
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
@@ -17,11 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
-const CODEX_WOA_API_KEY_ENVS: &[&str] = &["AUTH_TOKEN", "CODEX_WOA_API_KEY"];
-const CODEX_WOA_GIT_REPOS_ENVS: &[&str] = &["CODEX_INTERNAL_GIT_REPOS", "CODEX_WOA_GIT_REPOS"];
-const CODEX_WOA_GIT_REPOS_ENV: &str = "CODEX_INTERNAL_GIT_REPOS";
-const CODEX_WOA_GITHUB_REPOS_HEADER: &str = "TechPlatform/MachineLearning";
+const REMOTE_AGENT_READY_MARKER: &str = "__KODEX_ACP_REMOTE_AGENT_READY__";
+const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
+const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
 pub(super) struct HiddenAgentProcess {
     pub(super) command: PathBuf,
@@ -36,14 +35,14 @@ impl HiddenAgentProcess {
     pub(super) fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
         let mut process = Self::from_command(&config.agent_command, &config.workspace_root)?;
         process.env.extend(config.agent_env.clone());
-        append_codex_woa_workspace_env(&mut process.env, Path::new(&config.workspace_root));
         let agent_command = config.agent_command.to_ascii_lowercase();
         if agent_command.contains("codex-acp") || agent_command.contains("kodex-acp") {
             for (env_key, provider) in [
+                ("TIMIAI_API_KEY", "timiai"),
+                ("COMMANDCODE_API_KEY", "commandcode"),
                 ("DEEPSEEK_API_KEY", "deepseek"),
                 ("KIMI_CODE_API_KEY", "kimi_code"),
                 ("XIAOMI_MIMO_API_KEY", "xiaomi_mimo"),
-                ("VENUS_API_KEY", "venus"),
             ] {
                 if let Some((_, api_key)) = process.env.iter().find(|(name, _)| name == env_key) {
                     ensure_codex_api_proxy(provider, api_key);
@@ -92,126 +91,6 @@ impl HiddenAgentProcess {
         self.shutdown_signal = shutdown_signal;
         self
     }
-}
-
-fn append_codex_woa_workspace_env(env: &mut Vec<(String, String)>, workspace_root: &Path) {
-    if !CODEX_WOA_API_KEY_ENVS
-        .iter()
-        .any(|name| env_has_non_empty(env, name))
-        || CODEX_WOA_GIT_REPOS_ENVS
-            .iter()
-            .any(|name| env_has_non_empty(env, name))
-    {
-        return;
-    }
-    let header = codex_woa_git_repos_header(workspace_root)
-        .unwrap_or_else(|| codex_woa_default_git_repos_header().to_string());
-    env.push((CODEX_WOA_GIT_REPOS_ENV.to_string(), header));
-}
-
-fn env_has_non_empty(env: &[(String, String)], name: &str) -> bool {
-    env.iter()
-        .any(|(key, value)| key == name && !value.trim().is_empty())
-}
-
-pub(super) fn codex_woa_git_repos_header(workspace_root: &Path) -> Option<String> {
-    let config_path = find_git_config_path(workspace_root)?;
-    let content = std::fs::read_to_string(config_path).ok()?;
-    parse_git_config_codex_woa_repos_header(&content)
-}
-
-pub(super) fn codex_woa_default_git_repos_header() -> &'static str {
-    CODEX_WOA_GITHUB_REPOS_HEADER
-}
-
-pub(super) fn parse_git_config_codex_woa_repos_header(content: &str) -> Option<String> {
-    let repos = parse_git_config_woa_repos(&content);
-    if !repos.is_empty() {
-        return Some(repos.join(","));
-    }
-    git_config_has_github_remote(content).then(|| CODEX_WOA_GITHUB_REPOS_HEADER.to_string())
-}
-
-fn find_git_config_path(workspace_root: &Path) -> Option<PathBuf> {
-    let mut current = workspace_root;
-    loop {
-        let dot_git = current.join(".git");
-        if dot_git.is_dir() {
-            return Some(dot_git.join("config"));
-        }
-        if dot_git.is_file() {
-            let content = std::fs::read_to_string(&dot_git).ok()?;
-            let git_dir = content.trim().strip_prefix("gitdir:")?.trim();
-            let git_dir = Path::new(git_dir);
-            let git_dir = if git_dir.is_absolute() {
-                git_dir.to_path_buf()
-            } else {
-                current.join(git_dir)
-            };
-            return Some(git_dir.join("config"));
-        }
-        current = current.parent()?;
-    }
-}
-
-pub(super) fn parse_git_config_woa_repos(content: &str) -> Vec<String> {
-    let mut repos = BTreeSet::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "url" {
-            continue;
-        }
-        if let Some(repo) = normalize_woa_remote_path(value) {
-            repos.insert(repo);
-        }
-    }
-
-    repos.into_iter().collect()
-}
-
-pub(super) fn normalize_woa_remote_path(remote: &str) -> Option<String> {
-    let remote = remote.trim();
-    let remote = remote.strip_prefix("git+").unwrap_or(remote);
-    let path = if let Some(rest) = remote.strip_prefix("git@git.woa.com:") {
-        rest
-    } else if let Some(rest) = remote.strip_prefix("ssh://git@git.woa.com/") {
-        rest
-    } else if let Some(rest) = remote.strip_prefix("https://git.woa.com/") {
-        rest
-    } else if let Some(rest) = remote.strip_prefix("http://git.woa.com/") {
-        rest
-    } else {
-        return None;
-    };
-    let path = path.trim_start_matches('/').trim_end_matches(".git").trim();
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
-}
-
-fn git_config_has_github_remote(content: &str) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once('=') else {
-            return false;
-        };
-        key.trim() == "url" && remote_is_github(value)
-    })
-}
-
-fn remote_is_github(remote: &str) -> bool {
-    let remote = remote.trim();
-    let remote = remote.strip_prefix("git+").unwrap_or(remote);
-    remote.starts_with("git@github.com:")
-        || remote.starts_with("ssh://git@github.com/")
-        || remote.starts_with("https://github.com/")
-        || remote.starts_with("http://github.com/")
 }
 
 impl ConnectTo<Client> for HiddenAgentProcess {
@@ -347,7 +226,6 @@ impl TcpAgentProcess {
             HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
         let mut env = parsed.env;
         env.extend(config.agent_env.clone());
-        append_codex_woa_workspace_env(&mut env, Path::new(&config.workspace_root));
         Ok(Self {
             command: parsed.command,
             args: parsed.args,
@@ -365,10 +243,63 @@ impl TcpAgentProcess {
     }
 }
 
+pub(super) struct RemoteSshAgentProcess {
+    ssh_command: PathBuf,
+    ssh_target: String,
+    ssh_port: Option<u16>,
+    ssh_password: Option<String>,
+    remote_workspace_root: String,
+    agent_command: PathBuf,
+    agent_args: Vec<String>,
+    agent_env: Vec<(String, String)>,
+    local_port: u16,
+    remote_port: u16,
+    log_config: SessionConfig,
+    shutdown_signal: ShutdownSignal,
+}
+
+impl RemoteSshAgentProcess {
+    pub(super) fn from_config(config: &SessionConfig) -> anyhow::Result<Self> {
+        let remote = config
+            .remote_ssh
+            .clone()
+            .ok_or_else(|| anyhow!("remote SSH config is required"))?;
+        let parsed = HiddenAgentProcess::from_command(
+            &config.agent_command,
+            PathBuf::from(&remote.remote_workspace_root),
+        )?;
+        let mut agent_env = parsed.env;
+        agent_env.extend(config.agent_env.clone());
+        Ok(Self {
+            ssh_command: remote
+                .ssh_command
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("ssh")),
+            ssh_target: remote.ssh_target,
+            ssh_port: remote.ssh_port,
+            ssh_password: remote.ssh_password.filter(|password| !password.is_empty()),
+            remote_workspace_root: remote.remote_workspace_root,
+            agent_command: parsed.command,
+            agent_args: parsed.args,
+            agent_env,
+            local_port: remote.local_port,
+            remote_port: remote.remote_port,
+            log_config: config.clone(),
+            shutdown_signal: ShutdownSignal::default(),
+        })
+    }
+
+    pub(super) fn shutdown_signal(mut self, shutdown_signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = shutdown_signal;
+        self
+    }
+}
+
 /// Wrapper that dispatches to either stdio or TCP transport.
 pub(super) enum AgentTransport {
     Stdio(HiddenAgentProcess),
     Tcp(TcpAgentProcess),
+    RemoteSsh(RemoteSshAgentProcess),
 }
 
 impl ConnectTo<Client> for AgentTransport {
@@ -379,6 +310,7 @@ impl ConnectTo<Client> for AgentTransport {
         match self {
             AgentTransport::Stdio(agent) => agent.connect_to(client).await,
             AgentTransport::Tcp(agent) => agent.connect_to(client).await,
+            AgentTransport::RemoteSsh(agent) => agent.connect_to(client).await,
         }
     }
 }
@@ -435,83 +367,8 @@ impl ConnectTo<Client> for TcpAgentProcess {
         let child_monitor =
             monitor_hidden_agent_child(child_guard.handle(), stderr_rx, Some(log_config.clone()));
 
-        // Wait for the agent to start listening on the port.
-        let addr: std::net::SocketAddr =
-            format!("127.0.0.1:{}", self.port).parse().map_err(|e| {
-                agent_client_protocol::util::internal_error(format!("invalid address: {e}"))
-            })?;
-
-        let stream = {
-            let mut last_err = None;
-            let mut connected = None;
-            for attempt in 0..50 {
-                match std::net::TcpStream::connect_timeout(
-                    &addr,
-                    std::time::Duration::from_millis(200),
-                ) {
-                    Ok(s) => {
-                        connected = Some(s);
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = Some(e);
-                        if attempt < 49 {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                        }
-                    }
-                }
-            }
-            connected.ok_or_else(|| {
-                agent_client_protocol::util::internal_error(format!(
-                    "failed to connect to agent at 127.0.0.1:{}: {}",
-                    self.port,
-                    last_err.map(|e| e.to_string()).unwrap_or_default()
-                ))
-            })?
-        };
-
-        stream.set_nonblocking(true).map_err(|e| {
-            agent_client_protocol::util::internal_error(format!("set_nonblocking: {e}"))
-        })?;
-
-        let tcp_stream = tokio::net::TcpStream::from_std(stream).map_err(|e| {
-            agent_client_protocol::util::internal_error(format!("TcpStream::from_std: {e}"))
-        })?;
-
-        let (read_half, write_half) = tcp_stream.into_split();
-        let reader = tokio::io::BufReader::new(read_half);
-        let incoming_lines = futures::stream::unfold(reader, |mut reader| async move {
-            let mut line = String::new();
-            match tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await {
-                Ok(0) => None,
-                Ok(_) => {
-                    trim_line_ending(&mut line);
-                    Some((Ok(line), reader))
-                }
-                Err(e) => Some((Err(e), reader)),
-            }
-        });
-
-        let writer = tokio::io::BufWriter::new(write_half);
-        let outgoing_sink =
-            futures::sink::unfold(writer, |mut writer, line: String| async move {
-                use tokio::io::AsyncWriteExt;
-                writer.write_all(line.as_bytes()).await.map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-                })?;
-                writer.write_all(b"\n").await.map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-                })?;
-                writer.flush().await.map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string())
-                })?;
-                Ok::<_, std::io::Error>(writer)
-            });
-
-        let protocol = agent_client_protocol::ConnectTo::<Client>::connect_to(
-            Lines::new(outgoing_sink, incoming_lines),
-            client,
-        );
+        let stream = connect_loopback_tcp(self.port, "agent", Some(&log_config)).await?;
+        let protocol = connect_tcp_stream(stream, client)?;
 
         let _child_guard = child_guard;
 
@@ -532,6 +389,317 @@ impl ConnectTo<Client> for TcpAgentProcess {
             },
         }
     }
+}
+
+impl ConnectTo<Client> for RemoteSshAgentProcess {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<<Client as Role>::Counterpart>,
+    ) -> agent_client_protocol::Result<()> {
+        if self.ssh_target.trim().is_empty() {
+            return Err(agent_client_protocol::util::internal_error(
+                "remote SSH target cannot be empty",
+            ));
+        }
+        if !self.remote_workspace_root.starts_with('/') {
+            return Err(agent_client_protocol::util::internal_error(
+                "remote workspace path must be absolute",
+            ));
+        }
+
+        let remote_command = build_remote_agent_command(
+            &self.remote_workspace_root,
+            &self.agent_command,
+            &self.agent_args,
+            &self.agent_env,
+            self.remote_port,
+        );
+        let args = build_remote_ssh_args(
+            &self.ssh_target,
+            self.ssh_port,
+            self.local_port,
+            self.remote_port,
+            remote_command,
+        );
+        let mut command = agent_spawn_command(&self.ssh_command, &args);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        if let Some(password) = self.ssh_password.as_deref() {
+            configure_ssh_askpass(&mut command, password).map_err(|error| {
+                agent_client_protocol::util::internal_error(format!(
+                    "failed to configure SSH password prompt: {error}"
+                ))
+            })?;
+        }
+        hide_console_window(&mut command);
+
+        let mut child = command
+            .spawn()
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let child_stderr = child.stderr.take().ok_or_else(|| {
+            agent_client_protocol::util::internal_error("failed to open ssh stderr")
+        })?;
+
+        let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let live_stderr = Arc::new(Mutex::new(String::new()));
+        let reader_live_stderr = live_stderr.clone();
+        thread::spawn(move || {
+            read_remote_ssh_stderr(child_stderr, stderr_tx, reader_live_stderr, ready_tx)
+        });
+
+        let log_config = self.log_config.clone();
+        let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
+        let child_monitor =
+            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, Some(log_config.clone()));
+
+        let _child_guard = child_guard;
+
+        let ready = wait_remote_agent_ready(ready_rx, live_stderr, Some(&log_config));
+        tokio::pin!(ready);
+        tokio::pin!(child_monitor);
+        tokio::select! {
+            result = &mut ready => result?,
+            result = &mut child_monitor => {
+                return match result {
+                    Ok(()) => Err(agent_client_protocol::util::internal_error(
+                        "ssh remote agent process exited before ACP TCP became reachable",
+                    )),
+                    Err(error) => Err(error),
+                };
+            }
+        };
+
+        let stream =
+            connect_loopback_tcp(self.local_port, "remote SSH ACP forward", Some(&log_config))
+                .await?;
+        let protocol = connect_tcp_stream(stream, client)?;
+        tokio::pin!(protocol);
+        tokio::select! {
+            result = &mut protocol => result,
+            result = &mut child_monitor => match result {
+                Ok(()) => {
+                    let _ = append_runtime_event_log(
+                        &log_config,
+                        "agent/remote_ssh_exit_waiting_for_protocol",
+                        &json!({ "reason": "ssh remote agent process exited before protocol completed" }),
+                    );
+                    (&mut protocol).await
+                }
+                Err(error) => Err(error),
+            },
+        }
+    }
+}
+
+pub(super) fn build_remote_agent_command(
+    remote_workspace_root: &str,
+    command: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    remote_port: u16,
+) -> String {
+    let port_hex = format!("{remote_port:04X}");
+    let agent_invocation = build_remote_agent_invocation(command, args, env, remote_port);
+    let mut parts = Vec::new();
+    parts.push("cd".to_string());
+    parts.push(shell_quote_single(remote_workspace_root));
+    parts.push("|| exit $?;".to_string());
+    parts.push(format!(
+        "KODEX_REMOTE_ACP_PORT_HEX={};",
+        shell_quote_single(&port_hex)
+    ));
+    parts.push(format!("{agent_invocation} &"));
+    parts.push("kodex_agent_pid=$!;".to_string());
+    parts.push("trap 'kill \"$kodex_agent_pid\" 2>/dev/null' EXIT HUP INT TERM;".to_string());
+    parts.push("kodex_i=0;".to_string());
+    parts.push("while ! awk -v port=\"$KODEX_REMOTE_ACP_PORT_HEX\" '$4==\"0A\" && toupper($2) ~ \":\" port \"$\" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; do".to_string());
+    parts.push("if ! kill -0 \"$kodex_agent_pid\" 2>/dev/null; then wait \"$kodex_agent_pid\"; exit $?; fi;".to_string());
+    parts.push("kodex_i=$((kodex_i + 1));".to_string());
+    parts.push(format!(
+        "if [ \"$kodex_i\" -ge 50 ]; then echo {} >&2; kill \"$kodex_agent_pid\" 2>/dev/null; wait \"$kodex_agent_pid\"; exit 124; fi;",
+        shell_quote_single(&format!(
+            "remote ACP agent did not listen on 127.0.0.1:{remote_port}"
+        ))
+    ));
+    parts.push("sleep 0.2;".to_string());
+    parts.push("done".to_string());
+    parts.push(";".to_string());
+    parts.push(format!(
+        "echo {} >&2;",
+        shell_quote_single(REMOTE_AGENT_READY_MARKER)
+    ));
+    parts.push("wait \"$kodex_agent_pid\"".to_string());
+    parts.join(" ")
+}
+
+fn build_remote_agent_invocation(
+    command: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    remote_port: u16,
+) -> String {
+    let mut parts = Vec::new();
+    for (name, value) in env {
+        parts.push(format!("{name}={}", shell_quote_single(value)));
+    }
+    parts.push(shell_quote_single(&command.to_string_lossy()));
+    parts.extend(args.iter().map(|arg| shell_quote_single(arg)));
+    parts.push("--port".to_string());
+    parts.push(remote_port.to_string());
+    parts.join(" ")
+}
+
+pub(super) fn build_remote_ssh_args(
+    ssh_target: &str,
+    ssh_port: Option<u16>,
+    local_port: u16,
+    remote_port: u16,
+    remote_command: String,
+) -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        "ExitOnForwardFailure=yes".to_string(),
+        "-L".to_string(),
+        format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+    ];
+    if let Some(ssh_port) = ssh_port {
+        args.push("-p".to_string());
+        args.push(ssh_port.to_string());
+    }
+    args.extend([ssh_target.to_string(), remote_command]);
+    args
+}
+
+fn configure_ssh_askpass(
+    command: &mut std::process::Command,
+    password: &str,
+) -> anyhow::Result<()> {
+    let askpass = std::env::current_exe()?;
+    command
+        .env("SSH_ASKPASS", askpass)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "kodex")
+        .env(KODEX_SSH_ASKPASS_ENV, "1")
+        .env(KODEX_SSH_ASKPASS_PASSWORD_ENV, password);
+    Ok(())
+}
+
+fn shell_quote_single(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+async fn connect_loopback_tcp(
+    port: u16,
+    label: &str,
+    log_config: Option<&SessionConfig>,
+) -> agent_client_protocol::Result<tokio::net::TcpStream> {
+    connect_loopback_tcp_with_retry(
+        port,
+        label,
+        log_config,
+        50,
+        Duration::from_millis(200),
+        Duration::from_millis(200),
+    )
+    .await
+}
+
+pub(super) async fn connect_loopback_tcp_with_retry(
+    port: u16,
+    label: &str,
+    log_config: Option<&SessionConfig>,
+    attempts: usize,
+    connect_timeout: Duration,
+    retry_delay: Duration,
+) -> agent_client_protocol::Result<tokio::net::TcpStream> {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().map_err(|e| {
+        agent_client_protocol::util::internal_error(format!("invalid address: {e}"))
+    })?;
+
+    let mut last_err = None;
+    let mut connected = None;
+    let attempts = attempts.max(1);
+    for attempt in 0..attempts {
+        match std::net::TcpStream::connect_timeout(&addr, connect_timeout) {
+            Ok(s) => {
+                connected = Some(s);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < attempts {
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    let stream = connected.ok_or_else(|| {
+        agent_client_protocol::util::internal_error(format!(
+            "failed to connect to {label} at 127.0.0.1:{port}: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        ))
+    })?;
+    if let Some(config) = log_config {
+        let _ = append_runtime_event_log(
+            config,
+            "agent/tcp_connected",
+            &json!({ "label": label, "port": port }),
+        );
+    }
+    stream.set_nonblocking(true).map_err(|e| {
+        agent_client_protocol::util::internal_error(format!("set_nonblocking: {e}"))
+    })?;
+    tokio::net::TcpStream::from_std(stream).map_err(|e| {
+        agent_client_protocol::util::internal_error(format!("TcpStream::from_std: {e}"))
+    })
+}
+
+pub(super) fn connect_tcp_stream(
+    tcp_stream: tokio::net::TcpStream,
+    client: impl ConnectTo<<Client as Role>::Counterpart>,
+) -> agent_client_protocol::Result<
+    impl std::future::Future<Output = agent_client_protocol::Result<()>>,
+> {
+    let (read_half, write_half) = tcp_stream.into_split();
+    let reader = tokio::io::BufReader::new(read_half);
+    let incoming_lines = futures::stream::unfold(reader, |mut reader| async move {
+        let mut line = String::new();
+        match tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await {
+            Ok(0) => None,
+            Ok(_) => {
+                trim_line_ending(&mut line);
+                Some((Ok(line), reader))
+            }
+            Err(e) => Some((Err(e), reader)),
+        }
+    });
+
+    let writer = tokio::io::BufWriter::new(write_half);
+    let outgoing_sink = futures::sink::unfold(writer, |mut writer, line: String| async move {
+        use tokio::io::AsyncWriteExt;
+        writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        writer
+            .write_all(b"\n")
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        writer
+            .flush()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        Ok::<_, std::io::Error>(writer)
+    });
+
+    Ok(agent_client_protocol::ConnectTo::<Client>::connect_to(
+        Lines::new(outgoing_sink, incoming_lines),
+        client,
+    ))
 }
 
 fn read_agent_stdout(
@@ -575,6 +743,78 @@ fn read_agent_stderr(stderr: std::process::ChildStderr, tx: mpsc::Sender<String>
         }
     }
     let _ = tx.send(collected);
+}
+
+fn read_remote_ssh_stderr(
+    stderr: std::process::ChildStderr,
+    tx: mpsc::Sender<String>,
+    live_stderr: Arc<Mutex<String>>,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
+) {
+    let mut reader = BufReader::new(stderr);
+    let mut collected = String::new();
+    let mut ready_tx = Some(ready_tx);
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                trim_line_ending(&mut line);
+                if line == REMOTE_AGENT_READY_MARKER {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    continue;
+                }
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(&line);
+                if let Ok(mut live) = live_stderr.lock() {
+                    if !live.is_empty() {
+                        live.push('\n');
+                    }
+                    live.push_str(&line);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = tx.send(collected);
+}
+
+async fn wait_remote_agent_ready(
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+    live_stderr: Arc<Mutex<String>>,
+    log_config: Option<&SessionConfig>,
+) -> agent_client_protocol::Result<()> {
+    match tokio::time::timeout(Duration::from_secs(10), ready_rx).await {
+        Ok(Ok(())) => {
+            if let Some(config) = log_config {
+                let _ = append_runtime_event_log(
+                    config,
+                    "agent/remote_ready",
+                    &json!({ "marker": REMOTE_AGENT_READY_MARKER }),
+                );
+            }
+            Ok(())
+        }
+        Ok(Err(_)) => Err(agent_client_protocol::util::internal_error(
+            "ssh remote agent process ended before readiness was reported",
+        )),
+        Err(_) => {
+            let stderr = live_stderr
+                .lock()
+                .map(|stderr| stderr.clone())
+                .unwrap_or_default();
+            let message = if stderr.trim().is_empty() {
+                "timed out waiting for remote ACP agent readiness".to_string()
+            } else {
+                format!("timed out waiting for remote ACP agent readiness: {stderr}")
+            };
+            Err(agent_client_protocol::util::internal_error(message))
+        }
+    }
 }
 
 fn write_agent_stdin(

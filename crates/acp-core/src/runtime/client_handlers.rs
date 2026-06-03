@@ -16,6 +16,7 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo};
 use anyhow::anyhow;
+use serde_json::Value;
 use std::fs;
 use std::sync::{Arc, mpsc};
 use workspace_model::PermissionOption;
@@ -78,11 +79,16 @@ pub(super) async fn connect_agent_client(
                     .iter()
                     .map(|option| option.label.clone())
                     .collect::<Vec<_>>();
-                let selected_option_id = match decide_permission(
-                    permission_request_broker.mode(),
-                    &permission_workspace_root,
-                    &request,
-                ) {
+                let decision = if is_codebuddy_exit_plan_permission(&request_payload) {
+                    PermissionDecision::Ask
+                } else {
+                    decide_permission(
+                        permission_request_broker.mode(),
+                        &permission_workspace_root,
+                        &request,
+                    )
+                };
+                let selected_option_id = match decision {
                     PermissionDecision::Select(option_id) => Some(option_id),
                     PermissionDecision::Cancel => None,
                     PermissionDecision::Ask => {
@@ -90,12 +96,7 @@ pub(super) async fn connect_agent_client(
 
                         let _ = tx_permissions.send(ClientEvent::ToolPermissionRequest {
                             id: request_id.clone(),
-                            name: request
-                                .tool_call
-                                .fields
-                                .title
-                                .clone()
-                                .unwrap_or_else(|| "Permission request".into()),
+                            name: permission_request_name(&request, &request_payload),
                             options: options.clone(),
                             details: permission_request_details(&request),
                         });
@@ -393,4 +394,86 @@ fn permission_request_details(request: &RequestPermissionRequest) -> Option<Stri
     }
 
     (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn permission_request_name(request: &RequestPermissionRequest, payload: &Value) -> String {
+    request
+        .tool_call
+        .fields
+        .title
+        .as_ref()
+        .filter(|title| !title.trim().is_empty())
+        .cloned()
+        .or_else(|| codebuddy_permission_tool_name(payload))
+        .unwrap_or_else(|| "Permission request".into())
+}
+
+fn codebuddy_permission_tool_name(request: &Value) -> Option<String> {
+    request
+        .get("toolCall")
+        .and_then(|tool_call| tool_call.get("_meta"))
+        .and_then(|meta| meta.get("codebuddy.ai/toolName"))
+        .and_then(Value::as_str)
+        .filter(|tool_name| !tool_name.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn is_codebuddy_exit_plan_permission(request: &Value) -> bool {
+    codebuddy_permission_tool_name(request)
+        .as_deref()
+        .is_some_and(|tool_name| tool_name.eq_ignore_ascii_case("ExitPlanMode"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn codebuddy_exit_plan_permission_is_detected_from_meta() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "ExitPlanMode"
+                },
+                "rawInput": {
+                    "allowedPrompts": []
+                },
+                "toolCallId": "call_exit_plan"
+            }
+        });
+
+        assert!(is_codebuddy_exit_plan_permission(&payload));
+    }
+
+    #[test]
+    fn ordinary_codebuddy_permission_is_not_exit_plan() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "Bash"
+                },
+                "toolCallId": "call_bash"
+            }
+        });
+
+        assert!(!is_codebuddy_exit_plan_permission(&payload));
+    }
+
+    #[test]
+    fn codebuddy_permission_tool_name_falls_back_to_meta_tool_name() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "Edit"
+                },
+                "toolCallId": "call_edit"
+            }
+        });
+
+        assert_eq!(
+            codebuddy_permission_tool_name(&payload).as_deref(),
+            Some("Edit")
+        );
+    }
 }

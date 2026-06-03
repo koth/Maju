@@ -118,12 +118,14 @@ impl SessionHandle {
         &mut self,
         config_id: impl Into<String>,
         value_id: impl Into<String>,
+        provider: Option<String>,
     ) -> anyhow::Result<Vec<ClientEvent>> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_tx
             .send(RuntimeCommand::SetConfigOption {
                 config_id: config_id.into(),
                 value_id: value_id.into(),
+                provider,
                 reply_tx,
             })
             .map_err(|_| anyhow!("ACP command channel closed"))?;
@@ -145,11 +147,16 @@ impl SessionHandle {
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
     }
 
-    pub fn set_model(&mut self, model_id: impl Into<String>) -> anyhow::Result<Vec<ClientEvent>> {
+    pub fn set_model(
+        &mut self,
+        model_id: impl Into<String>,
+        provider: Option<String>,
+    ) -> anyhow::Result<Vec<ClientEvent>> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_tx
             .send(RuntimeCommand::SetModel {
                 model_id: model_id.into(),
+                provider,
                 reply_tx,
             })
             .map_err(|_| anyhow!("ACP command channel closed"))?;

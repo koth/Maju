@@ -1,11 +1,14 @@
 mod application;
 mod attachment_cache;
 mod bootstrap;
-pub mod claude_woa;
 mod editor_files;
 mod file_tracker;
 mod paths;
 mod reducer;
+pub mod remote_bootstrap;
+pub mod remote_profiles;
+pub mod remote_ssh;
+mod remote_workspace;
 pub mod settings;
 pub mod startup_perf;
 mod workspace_files;
@@ -1252,7 +1255,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             "mock agent should expose a model selector"
         );
 
-        app.set_session_config_control("model", "mock-smart")
+        app.set_session_config_control("model", "mock-smart", None)
             .unwrap();
 
         assert_eq!(app.ui.session.model, "Mock Smart");
@@ -1292,7 +1295,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         let mut app = test_app(&dir);
 
         wait_for_control(&mut app, SessionConfigCategory::Model);
-        app.set_session_config_control("model", "mock-smart")
+        app.set_session_config_control("model", "mock-smart", None)
             .unwrap();
         assert_eq!(app.ui.session.model, "Mock Smart");
 
@@ -1429,7 +1432,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         {
             let mut app = test_app(&dir);
             wait_for_control(&mut app, SessionConfigCategory::Model);
-            app.set_session_config_control("model", "mock-smart")
+            app.set_session_config_control("model", "mock-smart", None)
                 .unwrap();
             assert_eq!(app.ui.session.model, "Mock Smart");
         }
@@ -1535,19 +1538,9 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         store.insert_tool(&session_id, &tool, 1).unwrap();
         drop(store);
 
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("app-core should live under crates/app-core")
-            .join("Cargo.toml");
-        let manifest = manifest.display().to_string().replace('\\', "/");
-
         let app = Application::bootstrap_with_app_paths(
             &workspace,
-            format!(
-                "cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-                manifest
-            ),
+            mock_agent_command(),
             app_paths.clone(),
         )
         .unwrap();
@@ -1589,21 +1582,28 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
     }
 
     fn test_app(dir: &tempfile::TempDir) -> Application {
+        Application::bootstrap_with_app_paths(
+            dir.path(),
+            mock_agent_command(),
+            AppPaths::from_root(dir.path().join("home").join(".kodex")),
+        )
+        .unwrap()
+    }
+
+    fn mock_agent_command() -> String {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let cargo = cargo.replace('\\', "/");
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
             .expect("app-core should live under crates/app-core")
             .join("Cargo.toml");
         let manifest = manifest.display().to_string().replace('\\', "/");
-        Application::bootstrap_with_app_paths(
-            dir.path(),
-            format!(
-                "cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-                manifest
-            ),
-            AppPaths::from_root(dir.path().join("home").join(".kodex")),
+        format!(
+            "{} run --manifest-path {} -p mock-acp-agent --quiet --",
+            shell_words::quote(&cargo),
+            shell_words::quote(&manifest)
         )
-        .unwrap()
     }
 
     fn wait_for_control(app: &mut Application, category: SessionConfigCategory) {
@@ -1663,6 +1663,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                     id: (*choice).into(),
                     label: (*choice).into(),
                     description: None,
+                    provider: None,
                 })
                 .collect(),
             enabled: true,
@@ -1688,11 +1689,13 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                 id: "plan".into(),
                 label: "Plan".into(),
                 description: None,
+                provider: None,
             },
             SessionConfigChoice {
                 id: "build".into(),
                 label: "Build".into(),
                 description: None,
+                provider: None,
             },
         ];
         let current_value_label = choices

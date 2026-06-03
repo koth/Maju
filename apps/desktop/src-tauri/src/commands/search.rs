@@ -16,6 +16,17 @@ pub fn fs_search(state: State<'_, AppState>, query: String) -> Result<SearchResu
         return Err("Search query must not be empty".to_string());
     }
 
+    let remote_result = state.with_app(|app| {
+        if app.is_remote_workspace() {
+            app.search_workspace(&query).map(Some)
+        } else {
+            Ok(None)
+        }
+    })?;
+    if let Some(result) = remote_result {
+        return Ok(result);
+    }
+
     let workspace_root = state.with_app(|app| Ok(app.ui.workspace.root.clone()))?;
 
     let mut cmd = Command::new("rg");

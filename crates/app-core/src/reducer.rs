@@ -1340,7 +1340,7 @@ mod tests {
     use std::path::PathBuf;
     use workspace_model::{
         InspectorTab, MessageRole, RepositorySnapshot, SessionStatus, SessionSummary,
-        WorkspaceDescriptor,
+        WorkspaceDescriptor, WorkspaceLocation,
     };
 
     fn empty_ui() -> UiSnapshot {
@@ -1351,6 +1351,7 @@ mod tests {
                 id: workspace_id,
                 name: "test".into(),
                 root: PathBuf::from("/test"),
+                location: WorkspaceLocation::Local,
             },
             session: SessionSummary {
                 id: uuid::Uuid::new_v4(),

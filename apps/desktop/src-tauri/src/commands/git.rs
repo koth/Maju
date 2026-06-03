@@ -21,13 +21,11 @@ pub fn git_stage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn git_unstage(_state: State<'_, AppState>, _paths: Vec<String>) -> Result<(), String> {
-    // TODO: implement when git-service supports unstaging
-    Ok(())
+pub fn git_unstage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+    state.with_app(|app| app.unstage_files(&paths))
 }
 
 #[tauri::command]
-pub fn git_commit(_state: State<'_, AppState>, _message: String) -> Result<(), String> {
-    // TODO: implement when git-service supports committing
-    Ok(())
+pub fn git_commit(state: State<'_, AppState>, message: String) -> Result<(), String> {
+    state.with_app(|app| app.commit_files(&message))
 }

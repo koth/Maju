@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use workspace_model::RemoteLinuxWorkspace;
 
 const FILE_NAME: &str = "open-workspaces.json";
 
@@ -12,6 +13,8 @@ pub struct OpenWorkspaceState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenWorkspaceRecord {
     pub path: String,
+    #[serde(default)]
+    pub remote: Option<RemoteLinuxWorkspace>,
 }
 
 pub struct OpenWorkspaces {

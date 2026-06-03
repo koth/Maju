@@ -82,3 +82,121 @@ jobs:
           args: --ci --target ${{ matrix.target }} --config tauri.release.conf.json
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
+
+  remote-agent-assets:
+    name: Remote agent assets (${{ matrix.asset_suffix }})
+    needs: release
+    runs-on: ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_suffix: linux-x64
+            platform: ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+          - asset_suffix: linux-arm64
+            platform: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve release tag
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' apps/desktop/src-tauri/tauri.conf.json | head -n 1)"
+            test -n "${version}"
+            tag="app-v${version}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: kodex-claude/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: codex-acp -> codex-acp/target
+
+      - name: Install Claude agent dependencies
+        run: npm ci --prefix kodex-claude
+
+      - name: Build codex-acp
+        run: cargo build --manifest-path codex-acp/Cargo.toml --release --target ${{ matrix.rust_target }}
+
+      - name: Build codex-acp Linux sandbox
+        run: |
+          cargo install \
+            --git https://github.com/openai/codex \
+            --tag rust-v0.130.0 \
+            --package codex-linux-sandbox \
+            --bin codex-linux-sandbox \
+            --locked \
+            --target ${{ matrix.rust_target }} \
+            --root dist/codex-sandbox-${{ matrix.asset_suffix }}
+
+      - name: Build kodex-claude
+        run: npm --prefix kodex-claude run build:binary
+
+      - name: Package remote agent assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix="${{ matrix.asset_suffix }}"
+          rust_target="${{ matrix.rust_target }}"
+          out_dir="dist/remote-agents"
+
+          rm -rf "${out_dir}"
+          mkdir -p "${out_dir}/codex-acp/bin" "${out_dir}/kodex-claude/bin" dist
+
+          codex_binary="codex-acp/target/${rust_target}/release/codex-acp"
+          claude_binary="kodex-claude/bin/claude-agent-acp"
+          test -x "${codex_binary}"
+          test -x "${claude_binary}"
+
+          cp "${codex_binary}" "${out_dir}/codex-acp/bin/codex-acp"
+          cp "${claude_binary}" "${out_dir}/kodex-claude/bin/claude-agent-acp"
+          chmod +x "${out_dir}/codex-acp/bin/codex-acp" "${out_dir}/kodex-claude/bin/claude-agent-acp"
+
+          sandbox_binary="dist/codex-sandbox-${suffix}/bin/codex-linux-sandbox"
+          test -x "${sandbox_binary}"
+          mkdir -p "${out_dir}/codex-acp/codex-resources"
+          cp "${sandbox_binary}" "${out_dir}/codex-acp/codex-resources/bwrap"
+          chmod +x "${out_dir}/codex-acp/codex-resources/bwrap"
+
+          tar -C "${out_dir}/codex-acp" -czf "dist/codex-acp-${suffix}.tar.gz" .
+          tar -C "${out_dir}/kodex-claude" -czf "dist/kodex-claude-${suffix}.tar.gz" .
+
+          tar -tzf "dist/codex-acp-${suffix}.tar.gz" | grep -qx "./bin/codex-acp"
+          tar -tzf "dist/codex-acp-${suffix}.tar.gz" | grep -qx "./codex-resources/bwrap"
+          tar -tzf "dist/kodex-claude-${suffix}.tar.gz" | grep -qx "./bin/claude-agent-acp"
+
+      - name: Upload remote agent assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/codex-acp-${{ matrix.asset_suffix }}.tar.gz
+            dist/kodex-claude-${{ matrix.asset_suffix }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

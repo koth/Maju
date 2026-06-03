@@ -1,37 +1,36 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WelcomeLauncher } from "./WelcomeLauncher";
+import { onRemoteOpenProgress } from "../../lib/events";
 import {
-  openExternalUrl,
-  settingsDetectIoaEnvironment,
   settingsGetAgentSnapshot,
-  settingsSaveClaudeWoaConfig,
+  settingsGetRemoteProfiles,
   settingsSelectAgent,
   settingsSelectAgentProviderProfile,
-  settingsStartClaudeWoaLogin,
   startupPerfMark,
   workspaceGetRecent,
   workspaceOpen,
+  workspaceOpenRemoteLinux,
+  workspaceOpenRemoteProfile,
   workspaceRestoreOpen,
 } from "../../lib/tauri";
-import type { AgentProviderProfile, AgentSettingsSnapshot, IoaEnvironmentStatus } from "../../types";
+import type { AgentProviderProfile, AgentSettingsSnapshot, RemoteMachineProfilesSnapshot, RemoteOpenProgressEvent } from "../../types";
+
+let remoteOpenProgressCallback: ((progress: RemoteOpenProgressEvent) => void) | null = null;
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
   return {
     ...actual,
-    openExternalUrl: vi.fn(),
-    settingsCancelClaudeWoaLogin: vi.fn(),
-    settingsDetectIoaEnvironment: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
-    settingsGetClaudeWoaLogin: vi.fn(),
-    settingsSaveClaudeWoaConfig: vi.fn(),
+    settingsGetRemoteProfiles: vi.fn(),
     settingsSelectAgent: vi.fn(),
     settingsSelectAgentProviderProfile: vi.fn(),
-    settingsStartClaudeWoaLogin: vi.fn(),
     startupPerfMark: vi.fn(),
     workspaceGetRecent: vi.fn(),
     workspaceOpen: vi.fn(),
+    workspaceOpenRemoteLinux: vi.fn(),
+    workspaceOpenRemoteProfile: vi.fn(),
     workspaceRemoveRecent: vi.fn(),
     workspaceRestoreOpen: vi.fn(),
   };
@@ -39,6 +38,13 @@ vi.mock("../../lib/tauri", async () => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+}));
+
+vi.mock("../../lib/events", () => ({
+  onRemoteOpenProgress: vi.fn(async (callback: (progress: RemoteOpenProgressEvent) => void) => {
+    remoteOpenProgressCallback = callback;
+    return vi.fn();
+  }),
 }));
 
 vi.mock("./WindowControls", () => ({
@@ -55,8 +61,8 @@ function profile(
   return {
     family,
     id,
-    label: id === "woa" ? "WOA" : "BYOK",
-    proxy_kind: id === "woa" ? "claude_woa" : "claude_native",
+    label: id,
+    proxy_kind: "claude_native",
     selected,
     configured,
     base_url: null,
@@ -68,7 +74,7 @@ function profile(
   };
 }
 
-function agentSnapshot(tokenExists = false): AgentSettingsSnapshot {
+function agentSnapshot(): AgentSettingsSnapshot {
   return {
     settings: {
       selected_agent: "claude-agent-acp",
@@ -77,10 +83,8 @@ function agentSnapshot(tokenExists = false): AgentSettingsSnapshot {
       lsp_servers: {},
       codex_connection_mode: "managed",
       selected_codex_provider_profile_id: "default",
-      selected_claude_provider_profile_id: "woa",
-      claude_woa: {
-        channel: "default",
-        token_path: null,
+      selected_claude_provider_profile_id: "byok",
+      claude: {
         available_models: ["claude-opus-4-7[1m]"],
       },
     },
@@ -100,79 +104,49 @@ function agentSnapshot(tokenExists = false): AgentSettingsSnapshot {
       selected_profile_id: "default",
       profiles: [profile("codex", "default", true, true, false)],
       connection_mode: "managed",
-      venus_key_configured: false,
       deepseek_key_configured: false,
       config_path: "C:\\Users\\yvonchen\\.kodex\\config.toml",
     },
-    claude_woa: {
-      channel: "default",
-      selected_profile_id: "woa",
+    claude: {
+      selected_profile_id: "byok",
       profiles: [
-        profile("claude", "woa", true, true, false),
-        profile("claude", "byok", false, false, true),
+        profile("claude", "byok", true, false, true),
       ],
-      token_path: "C:\\Users\\yvonchen\\.kodex\\claude-woa-token.json",
-      token: {
-        exists: tokenExists,
-        malformed: false,
-        access_token: null,
-        refresh_token: null,
-        expires_at: null,
-        valid_for_minutes: null,
-        refresh_needed: false,
-        message: tokenExists ? "WOA token ready." : "Run WOA login to create a token.",
-      },
     },
   };
 }
 
-function ioaEnvironment(company = true): IoaEnvironmentStatus {
+function remoteProfilesSnapshot(): RemoteMachineProfilesSnapshot {
   return {
-    is_company_export_ip: company,
-    is_internal: false,
-    company_environment: company,
-    recommended_setup: company ? "woa" as const : "codex_byok" as const,
-    detected: true,
-    timestamp_ms: Date.now(),
-    message: null,
+    profiles: [
+      {
+        id: "remote-1",
+        display_name: "Devbox",
+        ssh_target: "root@9.134.121.208",
+        ssh_port: 36000,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        last_validation: null,
+      },
+    ],
   };
 }
 
-function inconclusiveIoaEnvironment(): IoaEnvironmentStatus {
-  return {
-    is_company_export_ip: false,
-    is_internal: false,
-    company_environment: false,
-    recommended_setup: "codex_byok",
-    detected: false,
-    timestamp_ms: Date.now(),
-    message: "request timed out",
-  };
-}
-
-describe("WelcomeLauncher WOA onboarding", () => {
+describe("WelcomeLauncher BYOK onboarding", () => {
   beforeEach(() => {
+    remoteOpenProgressCallback = null;
     vi.mocked(startupPerfMark).mockResolvedValue(undefined);
     vi.mocked(workspaceGetRecent).mockResolvedValue([
       { path: "D:\\work\\kodex", exists: true },
     ]);
-    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot(false));
-    vi.mocked(settingsDetectIoaEnvironment).mockResolvedValue(ioaEnvironment(true));
-    vi.mocked(settingsSaveClaudeWoaConfig).mockResolvedValue(agentSnapshot(false));
-    vi.mocked(settingsSelectAgent).mockResolvedValue(agentSnapshot(false));
-    vi.mocked(settingsSelectAgentProviderProfile).mockResolvedValue(agentSnapshot(false));
-    vi.mocked(settingsStartClaudeWoaLogin).mockResolvedValue({
-      login_id: "login-1",
-      verification_uri: "https://copilot.code.woa.com/login",
-      verification_uri_complete: null,
-      user_code: "ABCD-EFGH",
-      expires_at_ms: Date.now() + 600_000,
-      interval_ms: 5000,
-      channel: "default",
-      token_path: "C:\\Users\\yvonchen\\.kodex\\claude-woa-token.json",
-    });
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot());
+    vi.mocked(settingsSelectAgent).mockResolvedValue(agentSnapshot());
+    vi.mocked(settingsSelectAgentProviderProfile).mockResolvedValue(agentSnapshot());
     vi.mocked(workspaceRestoreOpen).mockResolvedValue(null);
     vi.mocked(workspaceOpen).mockResolvedValue({} as never);
+    vi.mocked(workspaceOpenRemoteLinux).mockResolvedValue({} as never);
+    vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
 
   afterEach(() => {
@@ -180,81 +154,24 @@ describe("WelcomeLauncher WOA onboarding", () => {
     vi.clearAllMocks();
   });
 
-  it("opens Settings with a WOA warning before auto-opening a WOA-backed workspace", async () => {
+  it("opens Codex BYOK settings when no provider is configured", async () => {
     const onOpenSettings = vi.fn();
     render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
 
-    await waitFor(() =>
-      expect(onOpenSettings).toHaveBeenCalledWith({
-        startupNotice: { kind: "woa" },
-        initialAgentTab: "claude-agent-acp",
-      }),
-    );
-
-    expect(screen.getByText("Run WOA login to create a token.")).toBeInTheDocument();
-    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
-    expect(workspaceOpen).not.toHaveBeenCalled();
-  });
-
-  it("falls back to Codex BYOK onboarding when network detection is inconclusive", async () => {
-    vi.mocked(settingsDetectIoaEnvironment).mockResolvedValue(inconclusiveIoaEnvironment());
-    const onOpenSettings = vi.fn();
-
-    render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
-
-    await waitFor(() =>
-      expect(onOpenSettings).toHaveBeenCalledWith({
-        startupNotice: { kind: "codex_byok", message: "request timed out" },
-        initialAgentTab: "codex-acp",
-      }),
-    );
-
-    expect(screen.getByText("request timed out")).toBeInTheDocument();
-    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
-    expect(workspaceOpen).not.toHaveBeenCalled();
-  });
-
-  it("starts WOA login directly from the welcome screen", async () => {
-    render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={vi.fn()} />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "使用 Claude WOA" }));
-
-    await waitFor(() => expect(settingsSelectAgent).toHaveBeenCalledWith("claude-agent-acp"));
-    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("claude", "woa"));
-    await waitFor(() =>
-      expect(settingsSaveClaudeWoaConfig).toHaveBeenCalledWith({
-        channel: "default",
-        tokenPath: null,
-        availableModels: ["claude-opus-4-7[1m]"],
-      }),
-    );
-    await waitFor(() => expect(settingsStartClaudeWoaLogin).toHaveBeenCalled());
-    expect(await screen.findByText(/ABCD-EFGH/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "https://copilot.code.woa.com/login" }));
-    await waitFor(() => expect(openExternalUrl).toHaveBeenCalledWith("https://copilot.code.woa.com/login"));
-  });
-
-  it("opens Settings with a Codex BYOK warning on external networks instead of WOA login", async () => {
-    vi.mocked(settingsDetectIoaEnvironment).mockResolvedValue(ioaEnvironment(false));
-    const onOpenSettings = vi.fn();
-
-    render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
-
+    await waitFor(() => expect(settingsSelectAgent).toHaveBeenCalledWith("codex-acp"));
+    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "byok"));
     await waitFor(() =>
       expect(onOpenSettings).toHaveBeenCalledWith({
         startupNotice: { kind: "codex_byok" },
         initialAgentTab: "codex-acp",
       }),
     );
-
-    expect(screen.queryByRole("heading", { name: "初始化内网通道" })).not.toBeInTheDocument();
     expect(workspaceRestoreOpen).not.toHaveBeenCalled();
     expect(workspaceOpen).not.toHaveBeenCalled();
   });
 
   it("auto-opens an internal workspace when TimiAI is configured", async () => {
-    const snapshot = agentSnapshot(false);
+    const snapshot = agentSnapshot();
     snapshot.settings.selected_agent = "codex-acp";
     snapshot.settings.selected_codex_provider_profile_id = "timiai";
     snapshot.codex_acp.selected_profile_id = "timiai";
@@ -274,75 +191,98 @@ describe("WelcomeLauncher WOA onboarding", () => {
     expect(onOpenSettings).not.toHaveBeenCalled();
   });
 
-  it("auto-opens an internal workspace when Codex WOA has the shared WOA token", async () => {
-    const snapshot = agentSnapshot(true);
+  it("auto-opens when CodeBuddy is installed", async () => {
+    const snapshot = agentSnapshot();
+    snapshot.agents.push({
+      id: "codebuddy",
+      label: "CodeBuddy",
+      binary: "codebuddy",
+      installed: true,
+      detected_path: "C:\\tools\\codebuddy.exe",
+      selected: false,
+    });
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
+    const onOpenSettings = vi.fn();
+    const onWorkspaceOpened = vi.fn();
+
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+
+    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
+  it("auto-opens an internal workspace when BYOK is configured", async () => {
+    const snapshot = agentSnapshot();
     snapshot.settings.selected_agent = "claude-agent-acp";
-    snapshot.settings.selected_codex_provider_profile_id = "woa";
     snapshot.settings.selected_claude_provider_profile_id = "byok";
-    snapshot.codex_acp.selected_profile_id = "woa";
+    snapshot.claude.selected_profile_id = "byok";
+    snapshot.claude.profiles = [
+      profile("claude", "byok", true, true, false),
+      profile("claude", "timiai", false, true, true),
+    ];
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
+    const onOpenSettings = vi.fn();
+    const onWorkspaceOpened = vi.fn();
+
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+
+    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+    expect(onOpenSettings).not.toHaveBeenCalled();
+  });
+
+  it("opens a guided remote Linux workspace flow from a saved machine", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([]);
+    const snapshot = agentSnapshot();
     snapshot.codex_acp.profiles = [
       profile("codex", "default", false, true, false),
-      profile("codex", "woa", true, true, false),
-    ];
-    snapshot.claude_woa.selected_profile_id = "byok";
-    snapshot.claude_woa.profiles = [
-      profile("claude", "woa", false, true, false),
-      profile("claude", "byok", true, false, true),
+      profile("codex", "timiai", true, true, true),
     ];
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
-    const onOpenSettings = vi.fn();
     const onWorkspaceOpened = vi.fn();
 
-    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={vi.fn()} />);
 
-    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
-    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
-    expect(onOpenSettings).not.toHaveBeenCalled();
-  });
+    expect(screen.queryByLabelText("SSH 目标")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "连接远程机器" }));
 
-  it("auto-opens an internal workspace when Venus is configured", async () => {
-    const snapshot = agentSnapshot(false);
-    snapshot.settings.selected_agent = "claude-agent-acp";
-    snapshot.settings.selected_claude_provider_profile_id = "venus";
-    snapshot.claude_woa.selected_profile_id = "venus";
-    snapshot.claude_woa.profiles = [
-      profile("claude", "woa", false, true, false),
-      profile("claude", "venus", true, true, true),
-      profile("claude", "byok", false, false, true),
-    ];
-    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
-    const onOpenSettings = vi.fn();
-    const onWorkspaceOpened = vi.fn();
+    const panel = await screen.findByRole("region", { name: "远程机器连接引导" });
+    await waitFor(() => expect(onRemoteOpenProgress).toHaveBeenCalled());
+    const openRemote = within(panel).getByRole("button", { name: "连接并打开" });
+    expect(await screen.findByText(/Devbox/)).toBeInTheDocument();
+    const agentGroup = screen.getByRole("radiogroup", { name: "remote_open_agent" });
+    expect(within(agentGroup).getByRole("radio", { name: /Claude/ })).toHaveAttribute("aria-checked", "true");
+    fireEvent.change(screen.getByLabelText("remote_open_path"), { target: { value: "/root/kodex-remote-acp-test" } });
+    fireEvent.change(screen.getByLabelText("remote_open_password"), { target: { value: "ssh-secret" } });
 
-    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
-
-    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
-    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
-    expect(onOpenSettings).not.toHaveBeenCalled();
-  });
-
-  it("does not treat TimiAI credentials as external Codex BYOK setup", async () => {
-    const snapshot = agentSnapshot(false);
-    snapshot.codex_acp.profiles = [
-      profile("codex", "default", true, true, false),
-      profile("codex", "timiai", false, true, true),
-    ];
-    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
-    vi.mocked(settingsDetectIoaEnvironment).mockResolvedValue(ioaEnvironment(false));
-    const onOpenSettings = vi.fn();
-
-    render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
+    await waitFor(() => expect(openRemote).not.toBeDisabled());
+    fireEvent.click(openRemote);
 
     await waitFor(() =>
-      expect(onOpenSettings).toHaveBeenCalledWith({
-        startupNotice: { kind: "codex_byok" },
-        initialAgentTab: "codex-acp",
-      }),
+      expect(workspaceOpenRemoteProfile).toHaveBeenCalledWith(expect.objectContaining({
+        request_id: expect.any(String),
+        profile_id: "remote-1",
+        remote_path: "/root/kodex-remote-acp-test",
+        ssh_password: "ssh-secret",
+        agent_cli: "claude-agent-acp",
+      })),
     );
-
-    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
-    expect(workspaceOpen).not.toHaveBeenCalled();
+    const requestId = vi.mocked(workspaceOpenRemoteProfile).mock.calls[0][0].request_id!;
+    act(() => {
+      remoteOpenProgressCallback?.({
+        request_id: requestId,
+        phase: "platform",
+        status: "running",
+        elapsed_ms: 0,
+        message: "正在检测远程平台",
+      });
+    });
+    expect(await screen.findByLabelText("remote_open_progress")).toBeInTheDocument();
+    expect(screen.getByText("正在检测远程平台")).toBeInTheDocument();
+    expect(workspaceOpenRemoteLinux).not.toHaveBeenCalled();
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
   });
 });

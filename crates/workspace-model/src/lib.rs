@@ -40,6 +40,195 @@ pub struct WorkspaceDescriptor {
     pub id: Uuid,
     pub name: String,
     pub root: PathBuf,
+    #[serde(default)]
+    pub location: WorkspaceLocation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceLocation {
+    Local,
+    RemoteLinux(RemoteLinuxWorkspace),
+}
+
+impl Default for WorkspaceLocation {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteLinuxWorkspace {
+    #[serde(default)]
+    pub profile_id: Option<Uuid>,
+    pub ssh_target: String,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    pub remote_path: String,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub ssh_password: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<AgentCliId>,
+    #[serde(default)]
+    pub agent_command: Option<String>,
+    #[serde(default)]
+    pub local_port: Option<u16>,
+    #[serde(default)]
+    pub remote_port: Option<u16>,
+}
+
+impl RemoteLinuxWorkspace {
+    pub fn key(&self) -> String {
+        let port = self
+            .ssh_port
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        format!(
+            "ssh://{}{}{}",
+            self.ssh_target.trim(),
+            port,
+            normalize_remote_path_for_key(&self.remote_path)
+        )
+    }
+
+    pub fn display_name(&self) -> String {
+        self.remote_path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("远程工作区")
+            .to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMachineProfile {
+    pub id: Uuid,
+    pub display_name: String,
+    pub ssh_target: String,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    #[serde(default)]
+    pub last_validation: Option<RemoteMachineValidation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMachineProfileInput {
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    pub display_name: String,
+    pub ssh_target: String,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RemoteMachineProfilesSnapshot {
+    #[serde(default)]
+    pub profiles: Vec<RemoteMachineProfile>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteValidationPhaseKind {
+    Ssh,
+    RemotePath,
+    AgentCommand,
+    AcpReady,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteValidationPhaseStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMachineValidationPhase {
+    pub phase: RemoteValidationPhaseKind,
+    pub status: RemoteValidationPhaseStatus,
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMachineValidation {
+    pub ok: bool,
+    pub checked_at_ms: u64,
+    #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
+    pub phases: Vec<RemoteMachineValidationPhase>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMachineValidationRequest {
+    pub profile_id: Uuid,
+    #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
+    pub ssh_password: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<AgentCliId>,
+    #[serde(default)]
+    pub include_acp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteOpenRequest {
+    #[serde(default)]
+    pub request_id: Option<Uuid>,
+    pub profile_id: Uuid,
+    pub remote_path: String,
+    #[serde(default, skip_serializing)]
+    pub ssh_password: Option<String>,
+    pub agent_cli: AgentCliId,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteOpenPhaseKind {
+    Ssh,
+    Platform,
+    RemotePath,
+    RuntimeDirectory,
+    AgentInstall,
+    AgentVerify,
+    AcpLaunch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteOpenPhaseStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteOpenProgressEvent {
+    pub request_id: Uuid,
+    pub phase: RemoteOpenPhaseKind,
+    pub status: RemoteOpenPhaseStatus,
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+fn normalize_remote_path_for_key(path: &str) -> String {
+    let path = path.trim();
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +265,8 @@ pub struct SessionConfigChoice {
     pub id: String,
     pub label: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -843,7 +1034,6 @@ pub enum AgentProviderProxyKind {
     CodexDefault,
     Responses,
     CompletionToResponses,
-    ClaudeWoa,
     ClaudeNative,
     CompletionToClaude,
 }
@@ -865,25 +1055,8 @@ pub struct AgentProviderProfile {
     pub help_text: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeWoaChannel {
-    Default,
-    Offline,
-}
-
-impl Default for ClaudeWoaChannel {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ClaudeWoaSettings {
-    #[serde(default)]
-    pub channel: ClaudeWoaChannel,
-    #[serde(default)]
-    pub token_path: Option<PathBuf>,
+pub struct ClaudeProviderSettings {
     #[serde(default)]
     pub available_models: Vec<String>,
 }
@@ -905,7 +1078,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub selected_claude_provider_profile_id: Option<String>,
     #[serde(default)]
-    pub claude_woa: ClaudeWoaSettings,
+    pub claude: ClaudeProviderSettings,
 }
 
 fn default_acp_port() -> u16 {
@@ -978,25 +1151,7 @@ pub struct AgentSettingsSnapshot {
     pub agents: Vec<AgentCliStatus>,
     pub env_override: Option<String>,
     pub codex_acp: CodexAcpSettingsStatus,
-    pub claude_woa: ClaudeWoaSettingsStatus,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum InitialSetupRecommendation {
-    Woa,
-    CodexByok,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IoaEnvironmentStatus {
-    pub is_company_export_ip: bool,
-    pub is_internal: bool,
-    pub company_environment: bool,
-    pub recommended_setup: InitialSetupRecommendation,
-    pub detected: bool,
-    pub timestamp_ms: u64,
-    pub message: Option<String>,
+    pub claude: ClaudeProviderSettingsStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1006,71 +1161,15 @@ pub struct CodexAcpSettingsStatus {
     #[serde(default)]
     pub profiles: Vec<AgentProviderProfile>,
     pub connection_mode: CodexConnectionMode,
-    pub venus_key_configured: bool,
     pub deepseek_key_configured: bool,
     pub config_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeWoaSettingsStatus {
-    pub channel: ClaudeWoaChannel,
+pub struct ClaudeProviderSettingsStatus {
     pub selected_profile_id: String,
     #[serde(default)]
     pub profiles: Vec<AgentProviderProfile>,
-    pub token_path: PathBuf,
-    pub token: ClaudeWoaTokenStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeWoaTokenStatus {
-    pub exists: bool,
-    pub malformed: bool,
-    pub access_token: Option<String>,
-    pub refresh_token: Option<String>,
-    pub expires_at: Option<String>,
-    pub valid_for_minutes: Option<i64>,
-    pub refresh_needed: bool,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeWoaConfigInput {
-    pub channel: ClaudeWoaChannel,
-    #[serde(default)]
-    pub token_path: Option<String>,
-    #[serde(default)]
-    pub available_models: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeWoaLoginState {
-    Pending,
-    Succeeded,
-    Failed,
-    Expired,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeWoaLoginStart {
-    pub login_id: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: Option<String>,
-    pub user_code: String,
-    pub expires_at_ms: u64,
-    pub interval_ms: u64,
-    pub channel: ClaudeWoaChannel,
-    pub token_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClaudeWoaLoginStatus {
-    pub login_id: String,
-    pub state: ClaudeWoaLoginState,
-    pub message: Option<String>,
-    pub snapshot: Option<Box<AgentSettingsSnapshot>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

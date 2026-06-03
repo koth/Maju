@@ -230,6 +230,7 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                 description: Some(
                     "Allow workspace reads and markdown writes; reject shell execution".into(),
                 ),
+                provider: None,
             },
             SessionConfigChoice {
                 id: BUILD_MODE_ID.into(),
@@ -238,6 +239,7 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                     "Allow workspace work; ask before reading or writing outside the workspace"
                         .into(),
                 ),
+                provider: None,
             },
         ],
         enabled: true,
@@ -289,6 +291,12 @@ fn session_config_control_from_models(models: &SessionModelState) -> SessionConf
             id: model.model_id.0.to_string(),
             label: model.name.clone(),
             description: model.description.clone(),
+            provider: model
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
         })
         .collect::<Vec<_>>();
     let current_value_id = models.current_model_id.0.to_string();
@@ -374,6 +382,12 @@ fn flatten_select_options(options: SessionConfigSelectOptions) -> Vec<SessionCon
                 id: option.value.0.to_string(),
                 label: option.name,
                 description: option.description,
+                provider: option
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("provider"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             })
             .collect(),
         SessionConfigSelectOptions::Grouped(groups) => groups
@@ -383,6 +397,12 @@ fn flatten_select_options(options: SessionConfigSelectOptions) -> Vec<SessionCon
                 id: option.value.0.to_string(),
                 label: option.name,
                 description: option.description,
+                provider: option
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("provider"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             })
             .collect(),
         _ => Vec::new(),
@@ -664,6 +684,9 @@ fn emit_codebuddy_tool_call(
     let kind = tool_kind_label(update);
     let summary = tool_summary(update, &name);
     let raw_input = tool_raw_input_for_ui(update);
+    let raw_output_fallback = codebuddy_raw_output_fallback(update);
+    let raw_output = update.get("rawOutput").or(raw_output_fallback.as_ref());
+    let effective_status = effective_codebuddy_tool_status(update, status.as_deref(), raw_output);
 
     tx.send(ClientEvent::ToolStarted {
         id: id.clone(),
@@ -678,18 +701,35 @@ fn emit_codebuddy_tool_call(
 
     emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
     emit_codebuddy_text_content(tx, &id, update)?;
-    emit_tool_diff_previews_from_raw_output(tx, &id, update.get("rawOutput"))?;
+    emit_tool_diff_previews_from_raw_output(tx, &id, raw_output)?;
 
-    if status.as_deref() == Some("completed") {
-        let terminal_output = update.get("rawOutput").and_then(parse_terminal_output);
-        tx.send(ClientEvent::ToolCompleted {
-            id,
-            name: Some(name),
-            outcome: summary,
-            raw_output: update.get("rawOutput").map(format_value_for_ui),
-            terminal_output,
-        })
-        .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool completion"))?;
+    match effective_status.as_deref() {
+        Some("completed") => {
+            let terminal_output = raw_output.and_then(parse_terminal_output);
+            tx.send(ClientEvent::ToolCompleted {
+                id,
+                name: Some(name),
+                outcome: summary,
+                raw_output: raw_output.map(format_value_for_ui),
+                terminal_output,
+            })
+            .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool completion"))?;
+        }
+        Some("failed") => {
+            let terminal_output = raw_output.and_then(parse_terminal_output);
+            let error = codebuddy_hard_error_text(update, raw_output)
+                .or_else(|| raw_output.map(format_value_for_ui))
+                .unwrap_or_else(|| "Tool call failed".into());
+            tx.send(ClientEvent::ToolFailed {
+                id,
+                name: Some(name),
+                error,
+                raw_output: raw_output.map(format_value_for_ui),
+                terminal_output,
+            })
+            .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool failure"))?;
+        }
+        _ => {}
     }
 
     Ok(())
@@ -730,11 +770,16 @@ fn emit_codebuddy_tool_call_update(
         let s = tool_summary(update, n);
         (!s.is_empty()).then_some(s)
     };
-    let raw_output = update.get("rawOutput").or_else(|| {
-        update
-            .get("fields")
-            .and_then(|fields| fields.get("rawOutput"))
-    });
+    let raw_output_fallback = codebuddy_raw_output_fallback(update);
+    let raw_output = update
+        .get("rawOutput")
+        .or_else(|| {
+            update
+                .get("fields")
+                .and_then(|fields| fields.get("rawOutput"))
+        })
+        .or(raw_output_fallback.as_ref());
+    let effective_status = effective_codebuddy_tool_status(update, status.as_deref(), raw_output);
     let terminal_output = raw_output.and_then(parse_terminal_output);
     // Only send rawInput on final updates to avoid sending incomplete JSON fragments
     let raw_input = if is_partial {
@@ -763,7 +808,7 @@ fn emit_codebuddy_tool_call_update(
     })
     .map_err(|_| anyhow!("failed to emit CodeBuddy tool update"))?;
 
-    match status.as_deref() {
+    match effective_status.as_deref() {
         Some("completed") => tx
             .send(ClientEvent::ToolCompleted {
                 id,
@@ -777,8 +822,8 @@ fn emit_codebuddy_tool_call_update(
             })
             .map_err(|_| anyhow!("failed to emit CodeBuddy tool completion")),
         Some("failed") => {
-            let error_msg = raw_output
-                .map(format_value_for_ui)
+            let error_msg = codebuddy_hard_error_text(update, raw_output)
+                .or_else(|| raw_output.map(format_value_for_ui))
                 .unwrap_or_else(|| "Tool call failed".to_string());
             let name_for_error = name.clone().unwrap_or_else(|| "tool".to_string());
             let error = if is_vague_error(&error_msg) {
@@ -1362,6 +1407,9 @@ fn is_stable_claude_tool_metadata_update(update: &Value) -> bool {
 
 fn tool_raw_input_for_ui(update: &Value) -> Option<Value> {
     let mut raw_input = update.get("rawInput").cloned();
+    if let Some(plan) = codebuddy_plan_content(update) {
+        raw_input = Some(insert_raw_input_string(raw_input, "plan", plan));
+    }
     let Some(path) = tool_file_path(update) else {
         return raw_input;
     };
@@ -1375,6 +1423,38 @@ fn tool_raw_input_for_ui(update: &Value) -> Option<Value> {
         }
         Some(value) => Some(value),
         None => Some(serde_json::json!({ "file_path": path })),
+    }
+}
+
+fn codebuddy_plan_content(update: &Value) -> Option<String> {
+    update
+        .get("_meta")
+        .and_then(|meta| meta.get("codebuddy.ai/planContent"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            update
+                .get("_meta")
+                .and_then(|meta| meta.get("codebuddy.ai/rawResponse"))
+                .and_then(|raw_response| raw_response.get("plan"))
+                .and_then(Value::as_str)
+        })
+        .filter(|plan| !plan.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn insert_raw_input_string(raw_input: Option<Value>, key: &str, value: String) -> Value {
+    match raw_input {
+        Some(Value::Object(mut map)) => {
+            map.entry(key.to_string()).or_insert(Value::String(value));
+            Value::Object(map)
+        }
+        Some(existing) => {
+            let mut map = serde_json::Map::new();
+            map.insert("input".into(), existing);
+            map.insert(key.to_string(), Value::String(value));
+            Value::Object(map)
+        }
+        None => serde_json::json!({ key: value }),
     }
 }
 
@@ -1414,6 +1494,51 @@ fn claude_code_tool_name(update: &Value) -> Option<String> {
 
 fn claude_code_meta(update: &Value) -> Option<&Value> {
     update.get("_meta").and_then(|meta| meta.get("claudeCode"))
+}
+
+fn codebuddy_raw_output_fallback(update: &Value) -> Option<Value> {
+    claude_code_tool_response_text(update).map(Value::String)
+}
+
+fn effective_codebuddy_tool_status(
+    update: &Value,
+    status: Option<&str>,
+    raw_output: Option<&Value>,
+) -> Option<String> {
+    if status == Some("completed") && codebuddy_hard_error_text(update, raw_output).is_some() {
+        return Some("failed".into());
+    }
+
+    status.map(str::to_string)
+}
+
+fn codebuddy_hard_error_text(update: &Value, raw_output: Option<&Value>) -> Option<String> {
+    raw_output
+        .map(|value| extract_text(Some(value)))
+        .filter(|text| looks_like_hard_tool_error(text))
+        .or_else(|| {
+            claude_code_tool_response_text(update).filter(|text| looks_like_hard_tool_error(text))
+        })
+}
+
+fn claude_code_tool_response_text(update: &Value) -> Option<String> {
+    let response = claude_code_meta(update).and_then(|meta| meta.get("toolResponse"))?;
+    let text = response
+        .get("content")
+        .map(|content| extract_text(Some(content)))
+        .or_else(|| {
+            response
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| response.as_str().map(str::to_string))?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn looks_like_hard_tool_error(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("API Error:") || trimmed.contains("指定模型不存在")
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
@@ -2436,6 +2561,41 @@ mod tests {
     }
 
     #[test]
+    fn codebuddy_exit_plan_mode_preserves_plan_content_in_raw_input() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "codebuddy.ai/toolName": "ExitPlanMode",
+                        "codebuddy.ai/planContent": "# Plan\n\nShip the fix."
+                    },
+                    "rawInput": {
+                        "allowedPrompts": []
+                    },
+                    "sessionUpdate": "tool_call",
+                    "title": "ExitPlanMode",
+                    "toolCallId": "call-exit-plan"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        match rx.try_recv().unwrap() {
+            ClientEvent::ToolStarted { raw_input, .. } => {
+                let raw_input = raw_input.unwrap();
+                assert!(raw_input.contains("# Plan"));
+                assert!(raw_input.contains("allowedPrompts"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn codebuddy_task_tool_call_marks_latest_subagent_format_as_subagent() {
         let (tx, rx) = mpsc::channel();
 
@@ -2657,6 +2817,60 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn claude_tool_response_api_error_is_mapped_as_tool_failure() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "claudeCode": {
+                            "toolName": "Agent",
+                            "toolResponse": {
+                                "content": [
+                                    {
+                                        "text": "API Error: 400 指定模型不存在，请重启 claude-internal 后重试",
+                                        "type": "text"
+                                    }
+                                ],
+                                "status": "completed"
+                            }
+                        }
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "status": "completed",
+                    "toolCallId": "tooluse_agent_error"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolUpdated { id, raw_output, .. }
+                if id == "tooluse_agent_error"
+                    && raw_output.as_deref().is_some_and(|output| output.contains("API Error: 400"))
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolFailed { id, name, error, raw_output, .. }
+                if id == "tooluse_agent_error"
+                    && name.as_deref() == Some("Agent")
+                    && error.contains("指定模型不存在")
+                    && raw_output.as_deref().is_some_and(|output| output.contains("API Error: 400"))
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolCompleted { id, .. } if id == "tooluse_agent_error"
+        )));
     }
 
     #[test]

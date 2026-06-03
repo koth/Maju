@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Composer } from "./Composer";
-import { editorGetContent, sessionSendPrompt } from "../../lib/tauri";
+import { editorGetContent, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
 import type { UiSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", () => ({
@@ -157,5 +157,44 @@ describe("Composer", () => {
       ]);
     });
     expect(editorGetContent).not.toHaveBeenCalled();
+  });
+
+  it("splits BYOK model choices by provider in the composer controls", async () => {
+    vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "deepseek-v4-pro",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "deepseek-v4-pro",
+            current_value_label: "deepseek-v4-pro",
+            enabled: true,
+            choices: [
+              { id: "deepseek-v4-pro", label: "deepseek-v4-pro", description: null, provider: "deepseek" },
+              { id: "kimi-for-coding", label: "kimi-for-coding", description: null, provider: "kimi_code" },
+              { id: "mimo-v2.5-pro", label: "MiMo-V2.5-Pro", description: null, provider: "xiaomi_mimo" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider.*DeepSeek/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "Kimi Code" }));
+
+    await waitFor(() =>
+      expect(sessionSetConfigControl).toHaveBeenCalledWith("model", "kimi-for-coding", "kimi_code"),
+    );
   });
 });

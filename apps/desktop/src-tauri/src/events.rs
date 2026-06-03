@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Emitter};
 use terminal_service::TerminalServiceEvent;
-use workspace_model::{UiSnapshot, UiSnapshotPatch};
+use workspace_model::{RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch};
 
 pub fn emit_ui_snapshot(app: &AppHandle, snapshot: &UiSnapshot) {
     let _ = app.emit("ui:snapshot", snapshot);
@@ -26,4 +26,8 @@ pub fn emit_terminal_event(app: &AppHandle, event: TerminalServiceEvent) {
             let _ = app.emit("terminal:exit", exit);
         }
     }
+}
+
+pub fn emit_remote_open_progress(app: &AppHandle, progress: &RemoteOpenProgressEvent) {
+    let _ = app.emit("remote_open:progress", progress);
 }

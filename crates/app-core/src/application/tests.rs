@@ -3,12 +3,15 @@ use super::diff_utils::{
     expand_tool_diff_fragment_from_disk, is_file_write_tool_identity,
     is_trustworthy_review_change_text, looks_like_fragment_to_full_file_text,
     looks_like_whole_file_addition_hunks, reverse_apply_unified_diff,
-    sanitize_session_file_changes, tool_diff_hunks, tool_diff_hunks_for_tracker_change,
-    tool_event_hint_paths, tool_hunks_for_tracker_update,
+    sanitize_session_file_changes, tool_command_write_hint_paths, tool_diff_hunks,
+    tool_diff_hunks_for_tracker_change, tool_event_hint_paths, tool_hunks_for_tracker_update,
 };
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
-use super::{Application, current_timestamp, humanize_acp_disconnect_reason, turn_finished_notice};
+use super::{
+    Application, current_timestamp, humanize_acp_disconnect_reason, normalize_tracked_path,
+    turn_finished_notice,
+};
 use acp_core::{ClientEvent, diff_to_hunks};
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 use workspace_model::{
@@ -17,7 +20,7 @@ use workspace_model::{
     MessageRole, SessionAttentionState, SessionConfigCategory, SessionConfigChoice,
     SessionConfigControl, SessionConfigSource, SessionConfigState, SessionFileChange,
     SessionRuntimeStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
-    TurnFileChanges,
+    TurnFileChanges, WorkspaceLocation,
 };
 
 mod change_set_tests;
@@ -48,21 +51,123 @@ fn commit_paths(repo: &git2::Repository, paths: &[&str]) {
 }
 
 fn test_app(dir: &tempfile::TempDir) -> Application {
+    Application::bootstrap_with_app_paths(
+        dir.path(),
+        mock_agent_command(),
+        crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
+    )
+    .unwrap()
+}
+
+fn mock_agent_command() -> String {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let cargo = cargo.replace('\\', "/");
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())
         .expect("app-core should live under crates/app-core")
         .join("Cargo.toml");
     let manifest = manifest.display().to_string().replace('\\', "/");
-    Application::bootstrap_with_app_paths(
-        dir.path(),
-        format!(
-            "cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-            manifest
-        ),
-        crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
+    format!(
+        "{} run --manifest-path {} -p mock-acp-agent --quiet --",
+        shell_words::quote(&cargo),
+        shell_words::quote(&manifest)
     )
-    .unwrap()
+}
+
+#[test]
+fn local_workspace_smoke_preserves_file_git_shell_and_restore_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("README.md"), "hello\n").unwrap();
+    let repo = init_test_git_repo(dir.path());
+    commit_paths(&repo, &[".gitignore", "README.md"]);
+
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
+    let first_session_id = {
+        let mut app = Application::bootstrap_with_app_paths(
+            dir.path(),
+            mock_agent_command(),
+            app_paths.clone(),
+        )
+        .unwrap();
+
+        assert!(!app.is_remote_workspace());
+        assert!(matches!(
+            app.ui.workspace.location,
+            WorkspaceLocation::Local
+        ));
+        assert_eq!(app.ui.workspace.root, dir.path());
+
+        let root_entries = app.list_workspace_dir("").unwrap();
+        assert!(
+            root_entries.iter().any(|entry| entry.name == "README.md"),
+            "local file tree should list workspace files: {root_entries:?}"
+        );
+
+        let original = app.editor_open_file("README.md").unwrap();
+        assert_eq!(original.path, "README.md");
+        assert_eq!(original.content, "hello\n");
+
+        let saved = app
+            .editor_save_file(
+                "README.md",
+                "hello\nlocal workspace smoke\n",
+                Some(&original.version),
+                false,
+            )
+            .unwrap();
+        assert_eq!(saved.content, "hello\nlocal workspace smoke\n");
+
+        app.refresh_repository();
+        assert!(
+            app.ui
+                .repository
+                .changed_files
+                .iter()
+                .any(|file| file.path == std::path::PathBuf::from("README.md")),
+            "local git refresh should report README.md as changed: {:?}",
+            app.ui.repository.changed_files
+        );
+
+        let diff = app
+            .review_git_diff_content("README.md")
+            .unwrap()
+            .expect("local git review should load README.md diff");
+        assert_eq!(diff.path, "README.md");
+        assert_eq!(diff.old_text.as_deref(), Some("hello\n"));
+        assert_eq!(diff.new_text, "hello\nlocal workspace smoke\n");
+
+        let resolved = app.resolve_workspace_entry_for_shell("README.md").unwrap();
+        assert_eq!(
+            normalize_tracked_path(&resolved.display().to_string()),
+            normalize_tracked_path(&dir.path().join("README.md").display().to_string())
+        );
+
+        app.stage_files(&["README.md".into()]).unwrap();
+        assert!(
+            app.ui
+                .repository
+                .changed_files
+                .iter()
+                .any(|file| file.path == std::path::PathBuf::from("README.md")),
+            "local git stage should keep README.md visible in the repository snapshot"
+        );
+
+        app.ui.session.id
+    };
+
+    let restored =
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths).unwrap();
+    assert!(!restored.is_remote_workspace());
+    assert!(matches!(
+        restored.ui.workspace.location,
+        WorkspaceLocation::Local
+    ));
+    assert_eq!(restored.ui.workspace.root, dir.path());
+    assert_eq!(
+        restored.ui.session.id, first_session_id,
+        "local workspace bootstrap should restore the existing session from the local store"
+    );
 }
 
 #[test]
@@ -332,6 +437,7 @@ fn model_config_state(
                     id: (*choice).into(),
                     label: (*choice).into(),
                     description: None,
+                    provider: None,
                 })
                 .collect(),
             enabled: true,

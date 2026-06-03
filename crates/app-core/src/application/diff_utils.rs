@@ -415,8 +415,9 @@ fn collect_command_write_hint_paths(value: &serde_json::Value, paths: &mut Vec<S
         serde_json::Value::Object(object) => {
             for (key, value) in object {
                 let key = key.to_ascii_lowercase();
+                let key = key.trim_matches('"');
                 if matches!(
-                    key.as_str(),
+                    key,
                     "command" | "cmd" | "shell_command" | "script" | "source"
                 ) {
                     collect_command_value_write_paths(value, paths);
@@ -459,6 +460,7 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     let mut paths = Vec::new();
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
     collect_shell_redirection_paths(&command, &mut paths);
+    collect_python_pathlib_write_paths(&command, &mut paths);
     paths.retain(|path| is_usable_write_path(path));
     paths.sort();
     paths.dedup();
@@ -736,6 +738,157 @@ fn collect_shell_redirection_paths(command: &str, paths: &mut Vec<String>) {
         }
         previous = ch;
     }
+}
+
+fn collect_python_pathlib_write_paths(command: &str, paths: &mut Vec<String>) {
+    if !command.contains("write_text(") && !command.contains("write_bytes(") {
+        return;
+    }
+
+    let mut offset = 0;
+    while let Some(index) = find_next_python_path_call(command, offset) {
+        if let Some((path, end)) = parse_python_path_call_at(command, index) {
+            let after = command[end..].trim_start();
+            if after.starts_with(".write_text(") || after.starts_with(".write_bytes(") {
+                paths.push(path);
+            }
+            offset = end;
+        } else {
+            offset = index + 1;
+        }
+    }
+
+    for (name, path) in python_pathlib_assignments(command) {
+        if contains_python_method_call(command, &name, "write_text")
+            || contains_python_method_call(command, &name, "write_bytes")
+        {
+            paths.push(path);
+        }
+    }
+}
+
+fn python_pathlib_assignments(command: &str) -> Vec<(String, String)> {
+    let mut assignments = Vec::new();
+    for line in command.lines() {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some(eq_index) = line.find('=') else {
+            continue;
+        };
+        let name = line[..eq_index].trim();
+        if !is_python_identifier(name) {
+            continue;
+        }
+        let right = line[eq_index + 1..].trim_start();
+        if let Some((path, _)) = parse_python_path_call_at(right, 0) {
+            assignments.push((name.to_string(), path));
+        }
+    }
+    assignments
+}
+
+fn contains_python_method_call(command: &str, name: &str, method: &str) -> bool {
+    let pattern = format!("{name}.{method}(");
+    let mut offset = 0;
+    while let Some(relative) = command[offset..].find(&pattern) {
+        let index = offset + relative;
+        let before = command[..index].chars().next_back();
+        if before.map_or(true, |ch| !is_python_identifier_char(ch)) {
+            return true;
+        }
+        offset = index + pattern.len();
+    }
+    false
+}
+
+fn find_next_python_path_call(command: &str, start: usize) -> Option<usize> {
+    let path = command[start..].find("Path(").map(|index| start + index);
+    let pathlib = command[start..]
+        .find("pathlib.Path(")
+        .map(|index| start + index);
+    match (path, pathlib) {
+        (Some(path), Some(pathlib)) => Some(path.min(pathlib)),
+        (Some(path), None) => Some(path),
+        (None, Some(pathlib)) => Some(pathlib),
+        (None, None) => None,
+    }
+}
+
+fn parse_python_path_call_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let rest = &text[start..];
+    let arg_start = if rest.starts_with("pathlib.Path(") {
+        start + "pathlib.Path(".len()
+    } else if rest.starts_with("Path(") {
+        start + "Path(".len()
+    } else {
+        return None;
+    };
+    let (path, value_end) = parse_python_string_literal_at(text, arg_start)?;
+    let close_paren = skip_ascii_whitespace(text, value_end);
+    if text[close_paren..].starts_with(')') {
+        Some((path, close_paren + 1))
+    } else {
+        None
+    }
+}
+
+fn parse_python_string_literal_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let mut index = skip_ascii_whitespace(text, start);
+    while let Some(ch) = text[index..].chars().next() {
+        if matches!(ch, 'r' | 'R' | 'u' | 'U' | 'b' | 'B' | 'f' | 'F') {
+            index += ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    let quote = text[index..].chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let body_start = index + quote.len_utf8();
+    let mut escaped = false;
+    for (relative, ch) in text[body_start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return Some((
+                text[body_start..body_start + relative].to_string(),
+                body_start + relative + quote.len_utf8(),
+            ));
+        }
+    }
+    None
+}
+
+fn skip_ascii_whitespace(text: &str, start: usize) -> usize {
+    let mut index = start;
+    while let Some(ch) = text[index..].chars().next() {
+        if !ch.is_ascii_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
+fn is_python_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic()) && chars.all(is_python_identifier_char)
+}
+
+fn is_python_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn is_usable_write_path(path: &str) -> bool {

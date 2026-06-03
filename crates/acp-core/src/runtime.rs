@@ -19,7 +19,7 @@ mod terminal;
 #[cfg(test)]
 mod tests;
 mod workspace_paths;
-use agent_process::{AgentTransport, HiddenAgentProcess, TcpAgentProcess};
+use agent_process::{AgentTransport, HiddenAgentProcess, RemoteSshAgentProcess, TcpAgentProcess};
 pub(crate) use permissions::PermissionBroker;
 pub(crate) use shutdown::ShutdownSignal;
 
@@ -28,6 +28,7 @@ pub(crate) enum RuntimeCommand {
     SetConfigOption {
         config_id: String,
         value_id: String,
+        provider: Option<String>,
         reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
     SetMode {
@@ -36,6 +37,7 @@ pub(crate) enum RuntimeCommand {
     },
     SetModel {
         model_id: String,
+        provider: Option<String>,
         reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
     ResolveCodeBuddyInterruption {
@@ -77,7 +79,12 @@ pub(crate) fn run_session(
 
     let log_config = config.clone();
     let result: anyhow::Result<()> = runtime.block_on(async move {
-        let agent = if config.acp_port > 0 {
+        let agent = if config.remote_ssh.is_some() {
+            AgentTransport::RemoteSsh(
+                RemoteSshAgentProcess::from_config(&config)?
+                    .shutdown_signal(shutdown_signal.clone()),
+            )
+        } else if config.acp_port > 0 {
             AgentTransport::Tcp(
                 TcpAgentProcess::from_config(&config)?.shutdown_signal(shutdown_signal.clone()),
             )

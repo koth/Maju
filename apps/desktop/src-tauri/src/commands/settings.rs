@@ -1,17 +1,15 @@
 use crate::lsp::{LanguageServerRegistry, probe_command};
-use crate::state::{AppState, PendingClaudeWoaLogin};
+use crate::state::AppState;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::watch;
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
-    ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginState, ClaudeWoaLoginStatus,
-    IoaEnvironmentStatus, LspProbeResult, LspServerConfigInput, LspServerSettingsEntry,
-    LspSettingsSnapshot,
+    LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
+    RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
+    RemoteMachineValidationRequest,
 };
 
 #[cfg(windows)]
@@ -23,44 +21,97 @@ const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
 const BUNDLED_CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "bundled-claude-agent-acp";
 
 #[tauri::command]
-pub fn settings_get_agent_snapshot() -> Result<AgentSettingsSnapshot, String> {
+pub fn settings_get_agent_snapshot(
+    state: State<'_, AppState>,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_settings_snapshot(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+        )
+        .map_err(|e| e.to_string());
+    }
     Ok(app_core::settings::settings_snapshot(&paths))
 }
 
 #[tauri::command]
-pub fn settings_detect_agents() -> Result<AgentSettingsSnapshot, String> {
-    settings_get_agent_snapshot()
-}
-
-#[tauri::command]
-pub async fn settings_detect_ioa_environment() -> Result<IoaEnvironmentStatus, String> {
-    Ok(app_core::settings::detect_ioa_environment().await)
+pub fn settings_detect_agents(
+    state: State<'_, AppState>,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    settings_get_agent_snapshot(state, remote_profile_id)
 }
 
 #[tauri::command]
 pub fn settings_select_agent(
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     agent: AgentCliId,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_agent(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            agent,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::select_agent(&paths, agent).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn settings_select_theme(theme: AppTheme) -> Result<AgentSettingsSnapshot, String> {
+pub fn settings_select_theme(
+    state: State<'_, AppState>,
+    theme: AppTheme,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_theme(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            theme,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::select_theme(&paths, theme).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn settings_save_codex_acp_venus_key(
-    state: State<'_, AppState>,
-    venus_key: String,
-) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
+pub fn settings_get_remote_profiles() -> Result<RemoteMachineProfilesSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    app_core::settings::save_codex_acp_venus_key(&paths, &venus_key).map_err(|e| e.to_string())
+    Ok(app_core::remote_profiles::load_remote_machine_profiles(
+        &paths,
+    ))
+}
+
+#[tauri::command]
+pub fn settings_save_remote_profile(
+    input: RemoteMachineProfileInput,
+) -> Result<RemoteMachineProfilesSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::remote_profiles::save_remote_machine_profile(&paths, input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_delete_remote_profile(
+    profile_id: uuid::Uuid,
+) -> Result<RemoteMachineProfilesSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::remote_profiles::delete_remote_machine_profile(&paths, profile_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_validate_remote_profile(
+    request: RemoteMachineValidationRequest,
+) -> Result<RemoteMachineProfilesSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::remote_profiles::validate_remote_machine_profile(&paths, request)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -68,9 +119,20 @@ pub fn settings_save_codex_acp_provider_key(
     state: State<'_, AppState>,
     provider: String,
     api_key: String,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_save_agent_provider_secret(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            AgentProviderFamily::Codex,
+            &provider,
+            &api_key,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::save_codex_acp_provider_key(&paths, &provider, &api_key)
         .map_err(|e| e.to_string())
 }
@@ -79,18 +141,38 @@ pub fn settings_save_codex_acp_provider_key(
 pub fn settings_select_codex_acp_provider(
     state: State<'_, AppState>,
     provider: String,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_agent_provider_profile(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            AgentProviderFamily::Codex,
+            &provider,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::select_codex_acp_provider(&paths, &provider).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn settings_select_codex_default_mode(
     state: State<'_, AppState>,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_agent_provider_profile(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            AgentProviderFamily::Codex,
+            "default",
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::select_codex_default_mode(&paths).map_err(|e| e.to_string())
 }
 
@@ -99,11 +181,21 @@ pub fn settings_select_agent_provider_profile(
     state: State<'_, AppState>,
     family: AgentProviderFamily,
     profile_id: String,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     if family == AgentProviderFamily::Codex {
         ensure_no_running_codex_acp_session(&state)?;
     }
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_agent_provider_profile(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            family,
+            &profile_id,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::select_agent_provider_profile(&paths, family, &profile_id)
         .map_err(|e| e.to_string())
 }
@@ -114,185 +206,93 @@ pub fn settings_save_agent_provider_secret(
     family: AgentProviderFamily,
     profile_id: String,
     secret: String,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     if family == AgentProviderFamily::Codex && codex_secret_updates_active_channel(&profile_id) {
         ensure_no_running_codex_acp_session(&state)?;
     }
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_save_agent_provider_secret(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            family,
+            &profile_id,
+            &secret,
+        )
+        .map_err(|e| e.to_string());
+    }
     app_core::settings::save_agent_provider_secret(&paths, family, &profile_id, &secret)
         .map_err(|e| e.to_string())
 }
 
-fn codex_secret_updates_active_channel(profile_id: &str) -> bool {
-    profile_id == "venus"
-}
-
 #[tauri::command]
-pub fn settings_save_claude_woa_config(
-    config: ClaudeWoaConfigInput,
+pub fn settings_save_provider_models(
+    state: State<'_, AppState>,
+    provider: String,
+    models: Vec<String>,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    app_core::settings::save_claude_woa_config(&paths, config).map_err(|e| e.to_string())
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_save_provider_models(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &provider,
+            models,
+        )
+        .map_err(|e| e.to_string());
+    }
+    app_core::settings::save_provider_models(&paths, &provider, models).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn settings_start_claude_woa_login(
+pub fn settings_reset_provider_models(
     state: State<'_, AppState>,
-) -> Result<ClaudeWoaLoginStart, String> {
+    provider: String,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    let settings = app_core::settings::load_app_settings(&paths);
-    let device = app_core::claude_woa::request_device_code()
-        .await
-        .map_err(|e| e.to_string())?;
-    let login_id = uuid::Uuid::new_v4().to_string();
-    let token_path = app_core::settings::claude_woa_token_path(&paths);
-    let start = ClaudeWoaLoginStart {
-        login_id: login_id.clone(),
-        verification_uri: device.verification_uri.clone(),
-        verification_uri_complete: device.verification_uri_complete.clone(),
-        user_code: device.user_code.clone(),
-        expires_at_ms: device.expires_at_ms,
-        interval_ms: device.interval_ms,
-        channel: settings.claude_woa.channel,
-        token_path: token_path.clone(),
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_reset_provider_models(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &provider,
+        )
+        .map_err(|e| e.to_string());
+    }
+    app_core::settings::reset_provider_models(&paths, &provider).map_err(|e| e.to_string())
+}
+
+fn codex_secret_updates_active_channel(profile_id: &str) -> bool {
+    profile_id != "default"
+}
+
+struct RemoteSettingsScope {
+    profile: RemoteMachineProfile,
+    ssh_password: Option<String>,
+}
+
+fn remote_settings_scope(
+    state: &AppState,
+    paths: &app_core::AppPaths,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<Option<RemoteSettingsScope>, String> {
+    let Some(profile_id) = remote_profile_id else {
+        return Ok(None);
     };
-    let status = Arc::new(Mutex::new(ClaudeWoaLoginStatus {
-        login_id: login_id.clone(),
-        state: ClaudeWoaLoginState::Pending,
-        message: None,
-        snapshot: None,
-    }));
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-    state.insert_claude_woa_login(
-        login_id.clone(),
-        PendingClaudeWoaLogin {
-            status: status.clone(),
-            cancel: cancel_tx,
-        },
-    )?;
-    tokio::spawn(poll_claude_woa_login(
-        paths,
-        device.device_code,
-        device.expires_at_ms,
-        device.interval_ms,
-        token_path,
-        status,
-        cancel_rx,
-    ));
-    Ok(start)
-}
-
-#[tauri::command]
-pub fn settings_get_claude_woa_login(
-    state: State<'_, AppState>,
-    login_id: String,
-) -> Result<ClaudeWoaLoginStatus, String> {
-    state
-        .get_claude_woa_login(&login_id)?
-        .ok_or_else(|| "WOA login not found".into())
-}
-
-#[tauri::command]
-pub fn settings_cancel_claude_woa_login(
-    state: State<'_, AppState>,
-    login_id: String,
-) -> Result<ClaudeWoaLoginStatus, String> {
-    let found = state.cancel_claude_woa_login(&login_id)?;
-    if !found {
-        return Err("WOA login not found".into());
-    }
-    Ok(ClaudeWoaLoginStatus {
-        login_id,
-        state: ClaudeWoaLoginState::Cancelled,
-        message: Some("WOA login cancelled".into()),
-        snapshot: None,
-    })
-}
-
-#[tauri::command]
-pub fn settings_refresh_claude_woa_token() -> Result<AgentSettingsSnapshot, String> {
-    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    app_core::settings::refresh_claude_woa_token(&paths).map_err(|e| e.to_string())
-}
-
-async fn poll_claude_woa_login(
-    paths: app_core::AppPaths,
-    device_code: String,
-    expires_at_ms: u64,
-    mut interval_ms: u64,
-    token_path: PathBuf,
-    status: Arc<Mutex<ClaudeWoaLoginStatus>>,
-    mut cancel_rx: watch::Receiver<bool>,
-) {
-    loop {
-        let now = app_core::claude_woa::now_ms();
-        if now >= expires_at_ms {
-            set_login_status(
-                &status,
-                ClaudeWoaLoginState::Expired,
-                Some("WOA device code expired".into()),
-                None,
-            );
-            return;
-        }
-        let sleep_ms = interval_ms.min(expires_at_ms.saturating_sub(now));
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {}
-            changed = cancel_rx.changed() => {
-                if changed.is_ok() && *cancel_rx.borrow() {
-                    set_login_status(&status, ClaudeWoaLoginState::Cancelled, Some("WOA login cancelled".into()), None);
-                    return;
-                }
-            }
-        }
-        match app_core::claude_woa::poll_device_token(&device_code).await {
-            Ok(app_core::claude_woa::WoaPollResult::Pending) => {}
-            Ok(app_core::claude_woa::WoaPollResult::SlowDown) => {
-                interval_ms = (interval_ms + 2_000).min(15_000);
-            }
-            Ok(app_core::claude_woa::WoaPollResult::Token(token)) => {
-                let result = app_core::claude_woa::save_token(&token_path, &token)
-                    .map(|_| app_core::settings::settings_snapshot(&paths));
-                match result {
-                    Ok(snapshot) => set_login_status(
-                        &status,
-                        ClaudeWoaLoginState::Succeeded,
-                        Some("WOA login completed".into()),
-                        Some(snapshot),
-                    ),
-                    Err(error) => set_login_status(
-                        &status,
-                        ClaudeWoaLoginState::Failed,
-                        Some(error.to_string()),
-                        None,
-                    ),
-                }
-                return;
-            }
-            Err(error) => {
-                set_login_status(
-                    &status,
-                    ClaudeWoaLoginState::Failed,
-                    Some(error.to_string()),
-                    None,
-                );
-                return;
-            }
-        }
-    }
-}
-
-fn set_login_status(
-    status: &Arc<Mutex<ClaudeWoaLoginStatus>>,
-    state: ClaudeWoaLoginState,
-    message: Option<String>,
-    snapshot: Option<AgentSettingsSnapshot>,
-) {
-    if let Ok(mut guard) = status.lock() {
-        guard.state = state;
-        guard.message = message;
-        guard.snapshot = snapshot.map(Box::new);
-    }
+    let profile = app_core::remote_profiles::get_remote_machine_profile(paths, profile_id)
+        .map_err(|e| e.to_string())?;
+    let active_remote = state.active_remote_linux_workspace()?;
+    let ssh_password = active_remote
+        .filter(|remote| remote.profile_id == Some(profile_id))
+        .and_then(|remote| remote.ssh_password);
+    Ok(Some(RemoteSettingsScope {
+        profile,
+        ssh_password,
+    }))
 }
 
 fn ensure_no_running_codex_acp_session(state: &State<'_, AppState>) -> Result<(), String> {
@@ -348,16 +348,34 @@ pub async fn settings_install_agent(
 #[tauri::command]
 pub fn settings_get_lsp_snapshot(
     state: State<'_, AppState>,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<LspSettingsSnapshot, String> {
-    lsp_snapshot(&state)
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_lsp_settings_snapshot(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+        )
+        .map_err(|e| e.to_string());
+    }
+    lsp_snapshot_with_paths(state.inner(), &paths)
 }
 
 #[tauri::command]
 pub fn settings_save_lsp_server(
     state: State<'_, AppState>,
     config: LspServerConfigInput,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<LspSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_save_lsp_server_config(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            config,
+        )
+        .map_err(|e| e.to_string());
+    }
     save_lsp_server_with_paths(state.inner(), &paths, config)
 }
 
@@ -365,19 +383,36 @@ pub fn settings_save_lsp_server(
 pub fn settings_reset_lsp_server(
     state: State<'_, AppState>,
     language_id: String,
+    remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<LspSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_reset_lsp_server_config(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &language_id,
+        )
+        .map_err(|e| e.to_string());
+    }
     reset_lsp_server_with_paths(state.inner(), &paths, &language_id)
 }
 
 #[tauri::command]
-pub fn settings_probe_lsp_server(command: String) -> Result<LspProbeResult, String> {
-    Ok(probe_command(&command))
-}
-
-fn lsp_snapshot(state: &State<'_, AppState>) -> Result<LspSettingsSnapshot, String> {
+pub fn settings_probe_lsp_server(
+    state: State<'_, AppState>,
+    command: String,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<LspProbeResult, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    lsp_snapshot_with_paths(state.inner(), &paths)
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_probe_lsp_server(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &command,
+        )
+        .map_err(|e| e.to_string());
+    }
+    Ok(probe_command(&command))
 }
 
 fn save_lsp_server_with_paths(
@@ -1096,11 +1131,11 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
                 .to_string(),
         ),
         AgentCliId::CodexAcp => Some(
-            "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 Venus 或 DeepSeek API key。"
+            "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 BYOK API key。"
                 .to_string(),
         ),
         AgentCliId::ClaudeAgentAcp => Some(
-            "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；默认使用 BYOK 通道，请先保存至少一个 BYOK 模型 API key，或切换到 Venus / WOA。"
+            "点击下载会优先把安装包内置的 Claude Agent ACP 安装到 `~/.kodex/bin`，未内置时再在线下载；默认使用 BYOK 通道，请先保存至少一个 BYOK 模型 API key。"
                 .to_string(),
         ),
     }
@@ -1202,7 +1237,7 @@ mod tests {
 
     #[test]
     fn lsp_probe_command_reports_missing_command() {
-        let result = settings_probe_lsp_server("definitely-not-a-kodex-lsp".into()).unwrap();
+        let result = probe_command("definitely-not-a-kodex-lsp");
 
         assert!(!result.available);
         assert!(result.resolved_path.is_none());

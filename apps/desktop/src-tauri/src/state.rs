@@ -4,18 +4,16 @@ use app_core::{Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_p
 use session_store::SessionStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use terminal_service::{TerminalEventSink, TerminalService};
-use tokio::sync::watch;
 use workspace_model::{
-    AgentCliId, ClaudeWoaLoginState, ClaudeWoaLoginStatus, OpenWorkspaceItem, SessionListItem,
-    TerminalOpenRequest, TerminalResizeRequest, TerminalSession, TerminalWriteRequest, UiSnapshot,
-    WorkspaceDescriptor, WorkspaceSessionList,
+    AgentCliId, OpenWorkspaceItem, RemoteLinuxWorkspace, SessionListItem, TerminalOpenRequest,
+    TerminalResizeRequest, TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor,
+    WorkspaceLocation, WorkspaceSessionList,
 };
 
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
-    claude_woa_logins: Mutex<HashMap<String, PendingClaudeWoaLogin>>,
     lsp_service: LspService,
     terminal_service: TerminalService,
 }
@@ -36,11 +34,6 @@ struct WorkspaceMetadata {
     sessions: Vec<SessionListItem>,
 }
 
-pub struct PendingClaudeWoaLogin {
-    pub status: Arc<Mutex<ClaudeWoaLoginStatus>>,
-    pub cancel: watch::Sender<bool>,
-}
-
 impl AppState {
     pub fn new() -> Self {
         app_core::startup_perf::mark("state/new", "");
@@ -49,45 +42,9 @@ impl AppState {
         let terminal_service = TerminalService::new();
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
-            claude_woa_logins: Mutex::new(HashMap::new()),
             lsp_service,
             terminal_service,
         }
-    }
-
-    pub fn insert_claude_woa_login(
-        &self,
-        login_id: String,
-        login: PendingClaudeWoaLogin,
-    ) -> Result<(), String> {
-        let mut guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
-        guard.insert(login_id, login);
-        Ok(())
-    }
-
-    pub fn get_claude_woa_login(
-        &self,
-        login_id: &str,
-    ) -> Result<Option<ClaudeWoaLoginStatus>, String> {
-        let guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
-        let Some(login) = guard.get(login_id) else {
-            return Ok(None);
-        };
-        let status = login.status.lock().map_err(|e| e.to_string())?.clone();
-        Ok(Some(status))
-    }
-
-    pub fn cancel_claude_woa_login(&self, login_id: &str) -> Result<bool, String> {
-        let mut guard = self.claude_woa_logins.lock().map_err(|e| e.to_string())?;
-        let Some(login) = guard.remove(login_id) else {
-            return Ok(false);
-        };
-        let _ = login.cancel.send(true);
-        if let Ok(mut status) = login.status.lock() {
-            status.state = ClaudeWoaLoginState::Cancelled;
-            status.message = Some("WOA login cancelled".into());
-        }
-        Ok(true)
     }
 
     pub fn set_terminal_event_sink(&self, sink: TerminalEventSink) {
@@ -110,6 +67,29 @@ impl AppState {
             })?;
         guard.active_workspace = Some(key);
         app_core::startup_perf::mark("state/open_workspace/end", "");
+        Ok(snapshot)
+    }
+
+    pub fn open_remote_linux_workspace(
+        &self,
+        remote: RemoteLinuxWorkspace,
+    ) -> Result<UiSnapshot, String> {
+        if remote.ssh_target.trim().is_empty() {
+            return Err("SSH target cannot be empty".into());
+        }
+        if remote.ssh_port == Some(0) {
+            return Err("SSH port must be between 1 and 65535".into());
+        }
+        if !remote.remote_path.trim().starts_with('/') {
+            return Err("Remote workspace path must be absolute".into());
+        }
+        let key = remote_workspace_key(&remote);
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+        guard.active_workspace = Some(key);
+        if let Some(active_key) = guard.active_workspace.clone() {
+            self.enter_remote_context_locked(&mut guard, &active_key);
+        }
         Ok(snapshot)
     }
 
@@ -139,22 +119,56 @@ impl AppState {
         Ok(())
     }
 
+    pub fn restore_dormant_remote_workspace(
+        &self,
+        remote: RemoteLinuxWorkspace,
+    ) -> Result<(), String> {
+        let key = remote_workspace_key(&remote);
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if guard.workspaces.contains_key(&key) {
+            return Ok(());
+        }
+        let workspace = remote_workspace_descriptor(remote);
+        let sessions = load_lightweight_sessions(&workspace.root).unwrap_or_default();
+        guard.workspaces.insert(
+            key,
+            WorkspaceEntry::Dormant(WorkspaceMetadata {
+                workspace,
+                sessions,
+            }),
+        );
+        Ok(())
+    }
+
     pub fn close_workspace(&self) -> Result<(), String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let Some(active_key) = guard.active_workspace.clone() else {
             return Ok(());
         };
 
+        let closing_entry_remote = guard
+            .workspaces
+            .get(&active_key)
+            .map(entry_is_remote)
+            .unwrap_or(false);
         let closing_root = guard.workspaces.get(&active_key).and_then(entry_path);
         guard.workspaces.remove(&active_key);
-        if let Some(root) = closing_root {
+        if let Some(root) = closing_root
+            && !closing_entry_remote
+        {
             self.lsp_service.shutdown_workspace(&root);
             self.terminal_service.shutdown_workspace(&root);
         }
         let next_key = guard.workspaces.keys().next().cloned();
         guard.active_workspace = next_key.clone();
         if let Some(next_key) = next_key {
-            if let Some(path) = entry_path(&guard.workspaces[&next_key]) {
+            let (remote, path) = {
+                let entry = &guard.workspaces[&next_key];
+                (entry_remote(entry), entry_path(entry))
+            };
+            if let Some(remote) = remote {
+                let _ = connect_remote_workspace_locked(&mut guard, next_key, remote);
+            } else if let Some(path) = path {
                 let _ = connect_workspace_locked(&mut guard, next_key, path, None);
             }
         }
@@ -245,13 +259,14 @@ impl AppState {
             .active_workspace
             .as_deref()
             .ok_or("No workspace open")?;
-        entry_path(
-            guard
-                .workspaces
-                .get(active_key)
-                .ok_or("Workspace is not open")?,
-        )
-        .ok_or_else(|| "Workspace is not open".into())
+        let entry = guard
+            .workspaces
+            .get(active_key)
+            .ok_or("Workspace is not open")?;
+        if entry_is_remote(entry) {
+            return Err("Remote workspaces do not support the local terminal dock yet".into());
+        }
+        entry_path(entry).ok_or_else(|| "Workspace is not open".into())
     }
 
     pub fn list_open_workspaces(&self) -> Result<Vec<OpenWorkspaceItem>, String> {
@@ -269,6 +284,10 @@ impl AppState {
             .into_iter()
             .map(|item| OpenWorkspaceRecord {
                 path: item.workspace.root.display().to_string(),
+                remote: match item.workspace.location {
+                    WorkspaceLocation::RemoteLinux(remote) => Some(remote),
+                    WorkspaceLocation::Local => None,
+                },
             })
             .collect();
         Ok(OpenWorkspaceState {
@@ -295,9 +314,20 @@ impl AppState {
 
     pub fn set_active_workspace(&self, path: String) -> Result<UiSnapshot, String> {
         app_core::startup_perf::mark("state/set_active_workspace/start", &path);
+        let key = normalize_tracked_path(&path);
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let remote = guard.workspaces.get(&key).and_then(entry_remote);
+        if let Some(remote) = remote {
+            let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+            guard.active_workspace = Some(key);
+            if let Some(active_key) = guard.active_workspace.clone() {
+                self.enter_remote_context_locked(&mut guard, &active_key);
+            }
+            app_core::startup_perf::mark("state/set_active_workspace/end", "");
+            return Ok(snapshot);
+        }
         let path = PathBuf::from(path);
         let key = workspace_key(&path);
-        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let snapshot =
             app_core::startup_perf::measure("state/set_active_workspace/connect", &key, || {
                 connect_workspace_locked(&mut guard, key.clone(), path, None)
@@ -318,6 +348,14 @@ impl AppState {
             WorkspaceEntry::Connected(app) => app.has_running_codex_acp_session(),
             WorkspaceEntry::Dormant(_) => false,
         }))
+    }
+
+    pub fn active_remote_linux_workspace(&self) -> Result<Option<RemoteLinuxWorkspace>, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let Some(active_key) = guard.active_workspace.as_deref() else {
+            return Ok(None);
+        };
+        Ok(guard.workspaces.get(active_key).and_then(entry_remote))
     }
 
     pub fn poll_active_and_get_update(
@@ -353,13 +391,28 @@ impl AppState {
     {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let key = match path {
-            Some(path) => workspace_key(&PathBuf::from(path)),
+            Some(path) => normalize_tracked_path(&path),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
-        let path = entry_path(guard.workspaces.get(&key).ok_or("Workspace is not open")?)
-            .ok_or("Workspace is not open")?;
-        connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+        let (remote, path) = {
+            let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+            (entry_remote(entry), entry_path(entry))
+        };
+        if let Some(remote) = remote {
+            connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+        } else {
+            let path = path.ok_or("Workspace is not open")?;
+            connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+        }
         guard.active_workspace = Some(key.clone());
+        if guard
+            .workspaces
+            .get(&key)
+            .map(entry_is_remote)
+            .unwrap_or(false)
+        {
+            self.enter_remote_context_locked(&mut guard, &key);
+        }
         let app = match guard.workspaces.get_mut(&key) {
             Some(WorkspaceEntry::Connected(app)) => app,
             _ => return Err("Workspace is not connected".into()),
@@ -370,15 +423,22 @@ impl AppState {
     pub fn delete_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let key = match workspace_root {
-            Some(path) => workspace_key(&PathBuf::from(path)),
+            Some(path) => normalize_tracked_path(&path),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
         let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
 
         if is_active_workspace {
-            let path = entry_path(guard.workspaces.get(&key).ok_or("Workspace is not open")?)
-                .ok_or("Workspace is not open")?;
-            connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+            let (remote, path) = {
+                let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+                (entry_remote(entry), entry_path(entry))
+            };
+            if let Some(remote) = remote {
+                connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+            } else {
+                let path = path.ok_or("Workspace is not open")?;
+                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+            }
             let app = match guard.workspaces.get_mut(&key) {
                 Some(WorkspaceEntry::Connected(app)) => app,
                 _ => return Err("Workspace is not connected".into()),
@@ -399,6 +459,35 @@ impl AppState {
                 store.delete_session(id).map_err(|e| e.to_string())?;
                 metadata.sessions = load_lightweight_sessions(&metadata.workspace.root)?;
                 Ok(())
+            }
+        }
+    }
+
+    fn enter_remote_context_locked(&self, guard: &mut WorkspaceRegistry, active_key: &str) {
+        let is_active_remote = guard
+            .workspaces
+            .get(active_key)
+            .map(entry_is_remote)
+            .unwrap_or(false);
+        if !is_active_remote {
+            return;
+        }
+
+        let remove_keys = guard
+            .workspaces
+            .keys()
+            .filter(|key| key.as_str() != active_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in remove_keys {
+            let Some(entry) = guard.workspaces.remove(&key) else {
+                continue;
+            };
+            if !entry_is_remote(&entry)
+                && let Some(root) = entry_path(&entry)
+            {
+                self.lsp_service.shutdown_workspace(&root);
+                self.terminal_service.shutdown_workspace(&root);
             }
         }
     }
@@ -448,6 +537,39 @@ fn connect_workspace_locked(
         .workspaces
         .insert(key, WorkspaceEntry::Connected(application));
     app_core::startup_perf::mark("state/connect_workspace/end", "");
+    Ok(snapshot)
+}
+
+fn connect_remote_workspace_locked(
+    guard: &mut WorkspaceRegistry,
+    key: String,
+    remote: RemoteLinuxWorkspace,
+) -> Result<UiSnapshot, String> {
+    app_core::startup_perf::mark("state/connect_remote_workspace/start", &key);
+    if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
+        return Ok(application.lightweight_ui_snapshot());
+    }
+
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let agent_command = remote
+        .agent_command
+        .clone()
+        .or_else(|| {
+            let agent = remote
+                .agent_cli
+                .unwrap_or_else(|| app_core::settings::default_agent_for_new_work(&paths));
+            app_core::settings::remote_linux_command_for_agent(agent)
+        })
+        .unwrap_or_else(acp_core::platform_default_agent_command);
+
+    let application =
+        Application::bootstrap_remote_linux_with_app_paths(remote, agent_command, paths)
+            .map_err(|e| e.to_string())?;
+    let snapshot = application.lightweight_ui_snapshot();
+    guard
+        .workspaces
+        .insert(key, WorkspaceEntry::Connected(application));
+    app_core::startup_perf::mark("state/connect_remote_workspace/end", "");
     Ok(snapshot)
 }
 
@@ -537,6 +659,21 @@ fn entry_path(entry: &WorkspaceEntry) -> Option<PathBuf> {
     })
 }
 
+fn entry_is_remote(entry: &WorkspaceEntry) -> bool {
+    entry_remote(entry).is_some()
+}
+
+fn entry_remote(entry: &WorkspaceEntry) -> Option<RemoteLinuxWorkspace> {
+    let location = match entry {
+        WorkspaceEntry::Connected(app) => &app.ui.workspace.location,
+        WorkspaceEntry::Dormant(metadata) => &metadata.workspace.location,
+    };
+    match location {
+        WorkspaceLocation::RemoteLinux(remote) => Some(remote.clone()),
+        WorkspaceLocation::Local => None,
+    }
+}
+
 fn workspace_descriptor(workspace_root: &Path) -> WorkspaceDescriptor {
     WorkspaceDescriptor {
         id: uuid::Uuid::new_v4(),
@@ -546,6 +683,16 @@ fn workspace_descriptor(workspace_root: &Path) -> WorkspaceDescriptor {
             .unwrap_or("工作区")
             .to_string(),
         root: workspace_root.to_path_buf(),
+        location: WorkspaceLocation::Local,
+    }
+}
+
+fn remote_workspace_descriptor(remote: RemoteLinuxWorkspace) -> WorkspaceDescriptor {
+    WorkspaceDescriptor {
+        id: uuid::Uuid::new_v4(),
+        name: remote.display_name(),
+        root: PathBuf::from(remote.key()),
+        location: WorkspaceLocation::RemoteLinux(remote),
     }
 }
 
@@ -562,6 +709,10 @@ fn workspace_key(path: &PathBuf) -> String {
     normalize_tracked_path(&path.display().to_string())
 }
 
+fn remote_workspace_key(remote: &RemoteLinuxWorkspace) -> String {
+    normalize_tracked_path(&remote.key())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +723,7 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             name: "Dormant".into(),
             root: PathBuf::from("D:/work/Dormant"),
+            location: WorkspaceLocation::Local,
         };
         let session = SessionListItem {
             id: uuid::Uuid::new_v4().to_string(),
@@ -596,5 +748,165 @@ mod tests {
         assert_eq!(list.sessions.len(), 1);
         assert_eq!(list.sessions[0].title, "Stored session");
         assert_eq!(list.sessions[0].message_count, 0);
+    }
+
+    #[test]
+    fn dormant_remote_workspace_session_list_preserves_remote_location() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: None,
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: None,
+            remote_port: None,
+        };
+        let workspace = remote_workspace_descriptor(remote.clone());
+        let key = remote_workspace_key(&remote);
+        let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
+            workspace,
+            sessions: Vec::new(),
+        });
+
+        let list = workspace_session_list(&key, &entry, true).unwrap();
+
+        assert!(!list.connected);
+        assert!(list.is_active);
+        assert_eq!(list.workspace.root, PathBuf::from(remote.key()));
+        assert_eq!(entry_remote(&entry), Some(remote));
+    }
+
+    #[test]
+    fn restore_dormant_remote_workspace_registers_without_connecting() {
+        let state = AppState::new();
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: None,
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        };
+
+        state
+            .restore_dormant_remote_workspace(remote.clone())
+            .unwrap();
+
+        let workspaces = state.list_workspace_sessions().unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert!(!workspaces[0].connected);
+        assert_eq!(workspaces[0].workspace.root, PathBuf::from(remote.key()));
+        assert!(matches!(
+            workspaces[0].workspace.location,
+            WorkspaceLocation::RemoteLinux(_)
+        ));
+
+        let open = state.list_open_workspaces().unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(!open[0].connected);
+    }
+
+    #[test]
+    fn entering_remote_context_removes_local_workspace_entries() {
+        let state = AppState::new();
+        let local_path = std::env::temp_dir().join(format!(
+            "kodex-remote-context-local-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&local_path).unwrap();
+        state.restore_dormant_workspace(local_path.clone()).unwrap();
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(36000),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        };
+        state
+            .restore_dormant_remote_workspace(remote.clone())
+            .unwrap();
+        let remote_key = remote_workspace_key(&remote);
+        {
+            let mut guard = state.workspaces.lock().unwrap();
+            guard.active_workspace = Some(remote_key.clone());
+            state.enter_remote_context_locked(&mut guard, &remote_key);
+        }
+
+        let workspaces = state.list_workspace_sessions().unwrap();
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].workspace.root, PathBuf::from(remote.key()));
+        assert!(matches!(
+            workspaces[0].workspace.location,
+            WorkspaceLocation::RemoteLinux(_)
+        ));
+
+        state.shutdown_all();
+        let _ = std::fs::remove_dir_all(&local_path);
+    }
+
+    #[test]
+    fn active_local_workspace_opens_terminal_dock_session() {
+        let path = std::env::temp_dir().join(format!(
+            "kodex-local-terminal-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let key = workspace_key(&path);
+        let state = AppState::new();
+        {
+            let mut guard = state.workspaces.lock().unwrap();
+            guard.active_workspace = Some(key.clone());
+            guard.workspaces.insert(
+                key,
+                WorkspaceEntry::Dormant(WorkspaceMetadata {
+                    workspace: workspace_descriptor(&path),
+                    sessions: Vec::new(),
+                }),
+            );
+        }
+
+        let session = state
+            .terminal_open(TerminalOpenRequest {
+                workspace_root: None,
+                force_new: false,
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+
+        assert!(!session.terminal_id.is_empty());
+        assert_eq!(session.cols, 80);
+        assert_eq!(session.rows, 24);
+        assert_eq!(
+            normalize_tracked_path(&session.workspace_root),
+            normalize_tracked_path(&path.display().to_string())
+        );
+
+        let resized = state
+            .terminal_resize(TerminalResizeRequest {
+                terminal_id: session.terminal_id.clone(),
+                cols: 100,
+                rows: 30,
+            })
+            .unwrap();
+        assert_eq!(resized.cols, 100);
+        assert_eq!(resized.rows, 30);
+
+        let listed = state.terminal_list(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].terminal_id, session.terminal_id);
+
+        state.terminal_terminate(&session.terminal_id).unwrap();
+        state.shutdown_all();
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

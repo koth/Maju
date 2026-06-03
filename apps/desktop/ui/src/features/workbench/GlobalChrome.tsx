@@ -7,6 +7,7 @@ import { WindowControls } from "./WindowControls";
 
 interface Props {
   workspace: WorkspaceDescriptor;
+  remoteWorkspace: boolean;
   sidebarCollapsed: boolean;
   refreshing: boolean;
   rightPanelCollapsed: boolean;
@@ -15,11 +16,13 @@ interface Props {
   onToggleTerminal: () => void;
   onRefreshGit: () => void;
   onToggleRightPanel: () => void;
+  onOpenRemoteWorkspace: () => void;
   onFileOpen: (filePath: string, lineNumber?: number, searchQuery?: string) => void;
 }
 
 export function GlobalChrome({
   workspace,
+  remoteWorkspace,
   sidebarCollapsed,
   refreshing,
   rightPanelCollapsed,
@@ -28,6 +31,7 @@ export function GlobalChrome({
   onToggleTerminal,
   onRefreshGit,
   onToggleRightPanel,
+  onOpenRemoteWorkspace,
   onFileOpen,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -102,6 +106,13 @@ export function GlobalChrome({
 
   const showDropdown = searchOpen && (searchLoading || searchError !== null || searchResult !== null);
   const chromeClassName = `global-chrome ${isMacOS() ? "is-macos" : ""}`;
+  const terminalTitle = remoteWorkspace
+    ? "远程工作区暂不支持本地终端"
+    : terminalDockVisible
+      ? "隐藏终端"
+      : "打开终端";
+  const searchTitle = "搜索工作区";
+  const gitRefreshTitle = "刷新 Git 状态";
 
   return (
     <header className={chromeClassName} data-tauri-drag-region>
@@ -125,11 +136,21 @@ export function GlobalChrome({
       <div className="global-chrome-actions">
         <button
           type="button"
-          className={`chrome-icon-btn ${terminalDockVisible ? "is-active" : ""}`}
+          className="chrome-icon-btn"
+          onClick={onOpenRemoteWorkspace}
+          title="连接远程机器"
+          aria-label="连接远程机器"
+        >
+          <RemoteHostIcon />
+        </button>
+        <button
+          type="button"
+          className={`chrome-icon-btn ${!remoteWorkspace && terminalDockVisible ? "is-active" : ""}`}
           onClick={onToggleTerminal}
-          title={terminalDockVisible ? "隐藏终端" : "打开终端"}
-          aria-label={terminalDockVisible ? "隐藏终端" : "打开终端"}
-          aria-pressed={terminalDockVisible}
+          disabled={remoteWorkspace}
+          title={terminalTitle}
+          aria-label={terminalTitle}
+          aria-pressed={!remoteWorkspace && terminalDockVisible}
         >
           <TerminalIcon />
         </button>
@@ -138,8 +159,8 @@ export function GlobalChrome({
             type="button"
             className={`chrome-icon-btn ${searchOpen ? "is-active" : ""}`}
             onClick={toggleSearch}
-            title="搜索工作区"
-            aria-label="搜索工作区"
+            title={searchTitle}
+            aria-label={searchTitle}
           >
             <SearchIcon />
           </button>
@@ -169,8 +190,8 @@ export function GlobalChrome({
           className="chrome-icon-btn"
           onClick={onRefreshGit}
           disabled={refreshing}
-          title="刷新 Git 状态"
-          aria-label="刷新 Git 状态"
+          title={gitRefreshTitle}
+          aria-label={gitRefreshTitle}
         >
           <GitBranchIcon />
         </button>
@@ -229,6 +250,19 @@ function TerminalIcon() {
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <path d="m8 10 3 2-3 2" />
       <path d="M13 15h3" />
+    </svg>
+  );
+}
+
+function RemoteHostIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="10" rx="2" />
+      <path d="M8 19h8" />
+      <path d="M12 15v4" />
+      <path d="M8 10h.01" />
+      <path d="M12 10h.01" />
+      <path d="M16 10h.01" />
     </svg>
   );
 }

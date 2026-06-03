@@ -51,8 +51,12 @@ impl Application {
             let exact_edit = self.exact_edit_text_for_tool(call_id, &normalized);
             let exact_edit_hunks = exact_edit.as_ref().map(|edit| edit.hunks.clone());
             let existing_tool_hunks = self.existing_tool_diff_hunks(call_id, &normalized);
-            let landed_tool_hunks =
-                compatible_landed_tool_hunks(existing_tool_hunks.clone(), &change.new_text);
+            let landed_tool_hunks = compatible_landed_tool_hunks(
+                existing_tool_hunks.clone(),
+                change.old_text.as_deref(),
+                change.change_type == FileChangeType::Created,
+                &change.new_text,
+            );
             let tool_hunks = landed_tool_hunks.clone().unwrap_or_else(|| {
                 tool_hunks_for_tracker_update(
                     change.skipped_diff,
@@ -77,6 +81,7 @@ impl Application {
                             self.upsert_review_file_change_from_landed_tool_hunks(
                                 &change.path,
                                 change.change_type.clone(),
+                                change.old_text.as_deref(),
                                 &change.new_text,
                                 hunks,
                             )
@@ -132,6 +137,7 @@ impl Application {
                         self.upsert_review_file_change_from_landed_tool_hunks(
                             &change.path,
                             change.change_type.clone(),
+                            change.old_text.as_deref(),
                             &change.new_text,
                             hunks,
                         )
@@ -353,10 +359,46 @@ impl Application {
         true
     }
 
+    pub(super) fn tool_diff_preview_matches_recording_window(
+        &self,
+        call_id: &str,
+        normalized_path: &str,
+        hunks: &[DiffHunk],
+    ) -> bool {
+        if hunks.is_empty() {
+            return false;
+        }
+
+        let normalized_path = normalize_path_for_storage(normalized_path, &self.ui.workspace.root);
+        let abs_path = self.ui.workspace.root.join(&normalized_path);
+        let Ok(new_text) = std::fs::read_to_string(abs_path) else {
+            return false;
+        };
+        let new_text = normalize_diff_text_for_session_change(&new_text);
+        let Some(old_text) = reverse_apply_diff_hunks(&new_text, hunks) else {
+            return false;
+        };
+        if old_text == new_text {
+            return false;
+        }
+
+        if let Some(baseline) = self
+            .file_tracker
+            .get_baseline_text(call_id, &normalized_path)
+        {
+            return normalized_old_text_matches(&old_text, Some(baseline), false);
+        }
+
+        self.file_tracker
+            .was_missing_at_start(call_id, &normalized_path)
+            .is_some_and(|missing| missing && old_text.is_empty())
+    }
+
     pub(super) fn upsert_review_file_change_from_landed_tool_hunks(
         &mut self,
         path: &str,
         change_type: FileChangeType,
+        expected_old_text: Option<&str>,
         new_text: &str,
         hunks: &[DiffHunk],
     ) -> Option<bool> {
@@ -367,6 +409,13 @@ impl Application {
         let normalized_new_text = normalize_diff_text_for_session_change(new_text);
         let old_text = reverse_apply_diff_hunks(&normalized_new_text, hunks)?;
         if old_text == normalized_new_text {
+            return None;
+        }
+        if !normalized_old_text_matches(
+            &old_text,
+            expected_old_text,
+            change_type == FileChangeType::Created,
+        ) {
             return None;
         }
 
@@ -529,20 +578,6 @@ impl Application {
                 }
             };
 
-            // Check diff_paths first (set by ToolDiff events from ACP WriteTextFileRequest).
-            // Only treat it as a real write when the preview has actual changed lines;
-            // a path-only or context-only preview is often just a no-op edit notification.
-            if let Some(preview) = tool.diff_previews.iter().find(|preview| {
-                preview.hunks.iter().any(|hunk| {
-                    hunk.lines.iter().any(|line| {
-                        matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed)
-                    })
-                })
-            }) {
-                let path = preview.path.display().to_string();
-                add_path(path);
-            }
-
             // Check summary for common edit result patterns.
             for prefix in ["Editing ", "Edited ", "已编辑 "] {
                 if let Some(path) = tool.summary.strip_prefix(prefix) {
@@ -591,12 +626,14 @@ impl Application {
                     .position(|c| normalize_path(&c.path) == normalized)
             {
                 let exact_edit = self.exact_edit_text_for_tool(&call_id, &normalized);
-                let landed_tool_hunks = compatible_landed_tool_hunks(
-                    self.existing_tool_diff_hunks(&call_id, &normalized),
-                    &new_text,
-                );
                 let old_text = self.ui.session_changes[index].old_text.clone();
                 let previous_session_new_text = self.ui.session_changes[index].new_text.clone();
+                let landed_tool_hunks = compatible_landed_tool_hunks(
+                    self.existing_tool_diff_hunks(&call_id, &normalized),
+                    Some(&previous_session_new_text),
+                    false,
+                    &new_text,
+                );
                 let tool_hunks = landed_tool_hunks.clone().unwrap_or_else(|| {
                     exact_edit
                         .as_ref()
@@ -617,6 +654,7 @@ impl Application {
                             self.upsert_review_file_change_from_landed_tool_hunks(
                                 &normalized,
                                 FileChangeType::Modified,
+                                Some(&previous_session_new_text),
                                 &new_text,
                                 hunks,
                             )
@@ -665,6 +703,7 @@ impl Application {
                         self.upsert_review_file_change_from_landed_tool_hunks(
                             &normalized,
                             review_change_type.clone(),
+                            Some(&previous_session_new_text),
                             &new_text,
                             hunks,
                         )
@@ -715,6 +754,8 @@ impl Application {
 
 fn compatible_landed_tool_hunks(
     hunks: Option<Vec<DiffHunk>>,
+    expected_old_text: Option<&str>,
+    allow_empty_old_text: bool,
     new_text: &str,
 ) -> Option<Vec<DiffHunk>> {
     let hunks = hunks?;
@@ -723,5 +764,21 @@ fn compatible_landed_tool_hunks(
     }
     let normalized_new_text = normalize_diff_text_for_session_change(new_text);
     let old_text = reverse_apply_diff_hunks(&normalized_new_text, &hunks)?;
-    (old_text != normalized_new_text).then_some(hunks)
+    if old_text == normalized_new_text
+        || !normalized_old_text_matches(&old_text, expected_old_text, allow_empty_old_text)
+    {
+        return None;
+    }
+    Some(hunks)
+}
+
+fn normalized_old_text_matches(
+    actual_old_text: &str,
+    expected_old_text: Option<&str>,
+    allow_empty_old_text: bool,
+) -> bool {
+    if let Some(expected_old_text) = expected_old_text {
+        return actual_old_text == normalize_diff_text_for_session_change(expected_old_text);
+    }
+    allow_empty_old_text && actual_old_text.is_empty()
 }

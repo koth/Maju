@@ -20,6 +20,8 @@ use serde_json::json;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use workspace_model::PromptInputCapabilities;
 
+const KODEX_PROVIDER_VALUE_PREFIX: &str = "kodex-provider:";
+
 pub(super) async fn run_command_loop(
     session: &mut ActiveSession<'static, Agent>,
     config: &SessionConfig,
@@ -263,8 +265,14 @@ pub(super) async fn run_command_loop(
             RuntimeCommand::SetConfigOption {
                 config_id,
                 value_id,
+                provider,
                 reply_tx,
             } => {
+                let request_value_id = encode_model_value_with_provider(
+                    config_id.as_str(),
+                    value_id.clone(),
+                    provider,
+                );
                 let result = async {
                     let response = session
                         .connection()
@@ -273,7 +281,7 @@ pub(super) async fn run_command_loop(
                             SetSessionConfigOptionRequest::new(
                                 session.session_id().clone(),
                                 config_id,
-                                value_id,
+                                request_value_id,
                             ),
                         )
                         .block_task()
@@ -309,7 +317,12 @@ pub(super) async fn run_command_loop(
                 .await;
                 let _ = reply_tx.send(result);
             }
-            RuntimeCommand::SetModel { model_id, reply_tx } => {
+            RuntimeCommand::SetModel {
+                model_id,
+                provider,
+                reply_tx,
+            } => {
+                let request_model_id = encode_provider_value(model_id.clone(), provider);
                 let result = async {
                     session
                         .connection()
@@ -317,7 +330,7 @@ pub(super) async fn run_command_loop(
                             Agent,
                             SetSessionModelRequest::new(
                                 session.session_id().clone(),
-                                model_id.clone(),
+                                request_model_id,
                             ),
                         )
                         .block_task()
@@ -364,6 +377,31 @@ pub(super) async fn run_command_loop(
     }
 
     Ok(())
+}
+
+fn encode_model_value_with_provider(
+    config_id: &str,
+    value_id: String,
+    provider: Option<String>,
+) -> String {
+    if config_id == "model" {
+        encode_provider_value(value_id, provider)
+    } else {
+        value_id
+    }
+}
+
+fn encode_provider_value(value_id: String, provider: Option<String>) -> String {
+    if value_id.starts_with(KODEX_PROVIDER_VALUE_PREFIX) {
+        return value_id;
+    }
+    let Some(provider) = provider.map(|provider| provider.trim().to_string()) else {
+        return value_id;
+    };
+    if provider.is_empty() {
+        return value_id;
+    }
+    format!("{KODEX_PROVIDER_VALUE_PREFIX}{provider}:{value_id}")
 }
 
 async fn drain_idle_session_state_update(

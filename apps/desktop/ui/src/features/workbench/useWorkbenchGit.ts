@@ -31,7 +31,8 @@ export function useWorkbenchGit({
       gitRefreshPending.current = true;
       return;
     }
-    const workspaceRoot = snapshotRef.current?.workspace.root;
+    const currentSnapshot = snapshotRef.current;
+    const workspaceRoot = currentSnapshot?.workspace.root;
     if (!workspaceRoot) return;
     const requestKey = ++gitHydrationKey.current;
     gitRefreshInFlight.current = true;
@@ -104,7 +105,7 @@ export function useWorkbenchGit({
     return () => {
       disposed = true;
     };
-  }, [setSnapshot, snapshot?.workspace.root, workspaceReady]);
+  }, [setSnapshot, snapshot?.workspace.location?.kind, snapshot?.workspace.root, workspaceReady]);
 
   return {
     gitRefreshing,

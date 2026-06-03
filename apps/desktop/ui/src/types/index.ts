@@ -18,6 +18,95 @@ export interface WorkspaceDescriptor {
   id: string;
   name: string;
   root: string;
+  location?: WorkspaceLocation;
+}
+
+export type WorkspaceLocation =
+  | { kind: "local" }
+  | { kind: "remote_linux"; profile_id?: string | null; ssh_target: string; ssh_port?: number | null; remote_path: string; agent_cli?: AgentCliId | null; agent_command?: string | null; local_port?: number | null; remote_port?: number | null };
+
+export interface RemoteLinuxWorkspace {
+  profile_id?: string | null;
+  ssh_target: string;
+  ssh_port?: number | null;
+  remote_path: string;
+  ssh_password?: string | null;
+  agent_cli?: AgentCliId | null;
+  agent_command?: string | null;
+  local_port?: number | null;
+  remote_port?: number | null;
+}
+
+export interface RemoteMachineProfile {
+  id: string;
+  display_name: string;
+  ssh_target: string;
+  ssh_port?: number | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  last_validation?: RemoteMachineValidation | null;
+}
+
+export interface RemoteMachineProfileInput {
+  id?: string | null;
+  display_name: string;
+  ssh_target: string;
+  ssh_port?: number | null;
+}
+
+export interface RemoteMachineProfilesSnapshot {
+  profiles: RemoteMachineProfile[];
+}
+
+export type RemoteValidationPhaseKind = "ssh" | "remote_path" | "agent_command" | "acp_ready";
+export type RemoteValidationPhaseStatus = "succeeded" | "failed" | "skipped";
+
+export interface RemoteMachineValidationPhase {
+  phase: RemoteValidationPhaseKind;
+  status: RemoteValidationPhaseStatus;
+  elapsed_ms: number;
+  message?: string | null;
+}
+
+export interface RemoteMachineValidation {
+  ok: boolean;
+  checked_at_ms: number;
+  remote_path?: string | null;
+  phases: RemoteMachineValidationPhase[];
+}
+
+export interface RemoteMachineValidationRequest {
+  profile_id: string;
+  remote_path?: string | null;
+  ssh_password?: string | null;
+  agent_cli?: AgentCliId | null;
+  include_acp?: boolean;
+}
+
+export interface RemoteOpenRequest {
+  request_id?: string | null;
+  profile_id: string;
+  remote_path: string;
+  ssh_password?: string | null;
+  agent_cli: AgentCliId;
+}
+
+export type RemoteOpenPhaseKind =
+  | "ssh"
+  | "platform"
+  | "remote_path"
+  | "runtime_directory"
+  | "agent_install"
+  | "agent_verify"
+  | "acp_launch";
+export type RemoteOpenPhaseStatus = "running" | "succeeded" | "failed" | "skipped";
+
+export interface RemoteOpenProgressEvent {
+  request_id: string;
+  phase: RemoteOpenPhaseKind;
+  status: RemoteOpenPhaseStatus;
+  elapsed_ms: number;
+  message?: string | null;
 }
 
 export interface SessionSummary {
@@ -34,6 +123,7 @@ export interface SessionConfigChoice {
   id: string;
   label: string;
   description: string | null;
+  provider: string | null;
 }
 
 export interface SessionConfigControl {
@@ -299,6 +389,7 @@ export interface TurnFileChanges {
 export interface RecentWorkspace {
   path: string;
   exists: boolean;
+  remote?: RemoteLinuxWorkspace | null;
 }
 
 export interface SessionListItem {
@@ -493,13 +584,11 @@ export interface SearchResult {
 export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp";
 export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest" | "light";
 export type CodexConnectionMode = "managed" | "default";
-export type ClaudeWoaChannel = "default" | "offline";
 export type AgentProviderFamily = "codex" | "claude";
 export type AgentProviderProxyKind =
   | "codex_default"
   | "responses"
   | "completion_to_responses"
-  | "claude_woa"
   | "claude_native"
   | "completion_to_claude";
 
@@ -526,12 +615,10 @@ export interface AppSettings {
   codex_connection_mode: CodexConnectionMode;
   selected_codex_provider_profile_id: string | null;
   selected_claude_provider_profile_id: string | null;
-  claude_woa: ClaudeWoaSettings;
+  claude: ClaudeProviderSettings;
 }
 
-export interface ClaudeWoaSettings {
-  channel: ClaudeWoaChannel;
-  token_path: string | null;
+export interface ClaudeProviderSettings {
   available_models: string[];
 }
 
@@ -587,74 +674,21 @@ export interface AgentSettingsSnapshot {
   agents: AgentCliStatus[];
   env_override: string | null;
   codex_acp: CodexAcpSettingsStatus;
-  claude_woa: ClaudeWoaSettingsStatus;
-}
-
-export type InitialSetupRecommendation = "woa" | "codex_byok";
-
-export interface IoaEnvironmentStatus {
-  is_company_export_ip: boolean;
-  is_internal: boolean;
-  company_environment: boolean;
-  recommended_setup: InitialSetupRecommendation;
-  detected: boolean;
-  timestamp_ms: number;
-  message: string | null;
+  claude: ClaudeProviderSettingsStatus;
 }
 
 export interface CodexAcpSettingsStatus {
-  provider: "default" | "venus" | "deepseek" | string;
+  provider: "default" | "byok" | "deepseek" | string;
   selected_profile_id: string;
   profiles: AgentProviderProfile[];
   connection_mode: CodexConnectionMode;
-  venus_key_configured: boolean;
   deepseek_key_configured: boolean;
   config_path: string;
 }
 
-export interface ClaudeWoaSettingsStatus {
-  channel: ClaudeWoaChannel;
+export interface ClaudeProviderSettingsStatus {
   selected_profile_id: string;
   profiles: AgentProviderProfile[];
-  token_path: string;
-  token: ClaudeWoaTokenStatus;
-}
-
-export interface ClaudeWoaTokenStatus {
-  exists: boolean;
-  malformed: boolean;
-  access_token: string | null;
-  refresh_token: string | null;
-  expires_at: string | null;
-  valid_for_minutes: number | null;
-  refresh_needed: boolean;
-  message: string | null;
-}
-
-export interface ClaudeWoaConfigInput {
-  channel: ClaudeWoaChannel;
-  tokenPath?: string | null;
-  availableModels?: string[];
-}
-
-export type ClaudeWoaLoginState = "pending" | "succeeded" | "failed" | "expired" | "cancelled";
-
-export interface ClaudeWoaLoginStart {
-  login_id: string;
-  verification_uri: string;
-  verification_uri_complete: string | null;
-  user_code: string;
-  expires_at_ms: number;
-  interval_ms: number;
-  channel: ClaudeWoaChannel;
-  token_path: string;
-}
-
-export interface ClaudeWoaLoginStatus {
-  login_id: string;
-  state: ClaudeWoaLoginState;
-  message: string | null;
-  snapshot: AgentSettingsSnapshot | null;
 }
 
 export interface AgentInstallResult {

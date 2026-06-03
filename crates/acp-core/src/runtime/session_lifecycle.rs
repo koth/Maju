@@ -1,8 +1,7 @@
 use super::prompt_content::prompt_capabilities_from_acp;
 use super::session_titles::{
     advertised_session_list_capability, command_implies_codex_session_list,
-    command_uses_codex_woa_side_query_titles, supports_session_list_title_sync,
-    sync_session_title_from_list,
+    supports_session_list_title_sync, sync_session_title_from_list,
 };
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{
@@ -63,7 +62,6 @@ pub(super) async fn start_session(
             "sessionCapabilities": &init_response.agent_capabilities.session_capabilities,
             "advertisedSessionList": advertised_session_list,
             "codexAcpSessionListFallback": codex_session_list_fallback,
-            "codexWoaTitleSideQuery": command_uses_codex_woa_side_query_titles(config),
             "supportsSessionList": supports_session_list,
         }),
     )?;

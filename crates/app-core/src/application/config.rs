@@ -47,6 +47,7 @@ impl Application {
         &mut self,
         control_id: &str,
         value_id: &str,
+        provider: Option<&str>,
     ) -> Result<workspace_model::SessionConfigState, String> {
         if self.in_flight_prompt.is_some() || self.ui.session.status != SessionStatus::Idle {
             return Err("会话控件只能在会话空闲时更改".into());
@@ -64,22 +65,40 @@ impl Application {
         if !control.enabled {
             return Err(format!("会话控件不可用：{}", control.label));
         }
-        if !control.choices.iter().any(|choice| choice.id == value_id) {
+        let selected_choice = control
+            .choices
+            .iter()
+            .find(|choice| {
+                choice.id == value_id
+                    && provider.map_or(true, |provider| {
+                        choice.provider.as_deref() == Some(provider)
+                    })
+            })
+            .cloned()
+            .or_else(|| {
+                provider.is_none().then(|| {
+                    control
+                        .choices
+                        .iter()
+                        .find(|choice| choice.id == value_id)
+                        .cloned()
+                })?
+            });
+        let Some(selected_choice) = selected_choice else {
             return Err(format!("{} 的值未知：{value_id}", control.label));
-        }
+        };
 
         let is_model_control = control.category == workspace_model::SessionConfigCategory::Model;
         let selected_control_id = control.id.clone();
-        let selected_label = control
-            .choices
-            .iter()
-            .find(|choice| choice.id == value_id)
-            .map(|choice| choice.label.clone());
+        let selected_label = Some(selected_choice.label.clone());
+        let selected_provider = provider
+            .map(str::to_string)
+            .or_else(|| selected_choice.provider.clone());
 
         let events = match control.source.clone() {
             SessionConfigSource::ConfigOption => self
                 .session
-                .set_config_option(control.id.clone(), value_id.to_string())
+                .set_config_option(control.id.clone(), value_id.to_string(), selected_provider)
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LegacyMode => self
                 .session
@@ -87,7 +106,7 @@ impl Application {
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::SessionModel => self
                 .session
-                .set_model(value_id.to_string())
+                .set_model(value_id.to_string(), selected_provider)
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LocalMode => {
                 self.session
@@ -207,13 +226,17 @@ impl Application {
         let value_id = choice.id.clone();
         let value_label = choice.label.clone();
         let result = match model_control.source {
-            SessionConfigSource::ConfigOption => self
+            SessionConfigSource::ConfigOption => self.session.set_config_option(
+                control_id.clone(),
+                value_id.clone(),
+                choice.provider.clone(),
+            ),
+            SessionConfigSource::SessionModel => self
                 .session
-                .set_config_option(control_id.clone(), value_id.clone()),
-            SessionConfigSource::SessionModel => self.session.set_model(value_id.clone()),
-            SessionConfigSource::LegacyMode | SessionConfigSource::LocalMode => {
-                self.session.set_model(value_id.clone())
-            }
+                .set_model(value_id.clone(), choice.provider.clone()),
+            SessionConfigSource::LegacyMode | SessionConfigSource::LocalMode => self
+                .session
+                .set_model(value_id.clone(), choice.provider.clone()),
         };
         let Ok(events) = result else {
             return;

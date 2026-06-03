@@ -1,21 +1,22 @@
 use super::agent_process::{
-    normalize_woa_remote_path, parse_git_config_codex_woa_repos_header, parse_git_config_woa_repos,
+    RemoteSshAgentProcess, build_remote_agent_command, build_remote_ssh_args,
+    connect_loopback_tcp_with_retry, connect_tcp_stream, kill_child_handle,
 };
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::prompt_content::prompt_title_text;
 use super::session_titles::{
-    advertised_session_list_capability, codex_woa_title_conversation_id, codex_woa_title_git_repos,
-    codex_woa_title_payload, command_implies_codex_session_list,
-    command_uses_codex_woa_side_query_titles, command_uses_codex_woa_titles,
-    extract_codex_woa_title, extract_codex_woa_title_from_body, select_session_title_for_sync,
-    supports_session_list_title_sync,
+    advertised_session_list_capability, command_implies_codex_session_list,
+    select_session_title_for_sync, supports_session_list_title_sync,
 };
 use super::*;
+use crate::events::RemoteSshSessionConfig;
 use agent_client_protocol::schema::{
     AgentCapabilities, SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities,
 };
+use agent_client_protocol::{Channel, ConnectTo};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use workspace_model::UserPromptContent;
 
@@ -32,71 +33,343 @@ fn hidden_agent_process_uses_workspace_as_current_dir() {
 }
 
 #[test]
-fn codex_woa_remote_path_normalizes_woa_git_urls() {
-    assert_eq!(
-        normalize_woa_remote_path(
-            "https://git.woa.com/TechPlatform/MachineLearning/ArashiIconAIGenTool.git"
-        ),
-        Some("TechPlatform/MachineLearning/ArashiIconAIGenTool".into())
+fn remote_agent_command_quotes_workspace_args_and_env() {
+    let command = build_remote_agent_command(
+        "/home/alice/project with space",
+        Path::new("codex-acp"),
+        &["--config".into(), "profile='dev'".into()],
+        &[("TOKEN".into(), "a'b".into())],
+        4567,
     );
-    assert_eq!(
-        normalize_woa_remote_path("git@git.woa.com:foo/bar.git"),
-        Some("foo/bar".into())
+
+    assert!(command.contains("cd '/home/alice/project with space' || exit $?;"));
+    assert!(
+        command.contains(
+            "TOKEN='a'\\''b' 'codex-acp' '--config' 'profile='\\''dev'\\''' --port 4567 &"
+        )
     );
-    assert_eq!(
-        normalize_woa_remote_path("git@github.com:koth/Kodex.git"),
-        None
-    );
+    assert!(command.contains("KODEX_REMOTE_ACP_PORT_HEX='11D7';"));
+    assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
+    assert!(command.contains("wait \"$kodex_agent_pid\""));
 }
 
 #[test]
-fn codex_woa_git_config_parser_collects_woa_urls() {
-    let content = r#"
-[remote "origin"]
-    url = https://git.woa.com/TechPlatform/MachineLearning/ArashiIconAIGenTool.git
-[remote "github"]
-    url = git@github.com:koth/Kodex.git
-[submodule "reference/ArtWebBackend"]
-    url = https://git.woa.com/TechPlatform/MachineLearning/ArtWebBackend
-"#;
+fn remote_agent_command_accepts_bootstrapped_absolute_agent_path() {
+    let command = build_remote_agent_command(
+        "/srv/project",
+        Path::new("/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy"),
+        &["--acp".into()],
+        &[],
+        4567,
+    );
+
+    assert!(command.contains("cd '/srv/project' || exit $?;"));
+    assert!(command.contains(
+        "'/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy' '--acp' --port 4567 &"
+    ));
+    assert!(command.contains("trap 'kill \"$kodex_agent_pid\" 2>/dev/null'"));
+    assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
+}
+
+#[test]
+fn remote_ssh_args_use_loopback_forwarding_and_exit_on_forward_failure() {
+    let args = build_remote_ssh_args(
+        "alice@devbox",
+        None,
+        3456,
+        4567,
+        "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+    );
 
     assert_eq!(
-        parse_git_config_woa_repos(content),
+        args,
         vec![
-            "TechPlatform/MachineLearning/ArashiIconAIGenTool".to_string(),
-            "TechPlatform/MachineLearning/ArtWebBackend".to_string(),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            "127.0.0.1:3456:127.0.0.1:4567",
+            "alice@devbox",
+            "cd '/srv/project' && exec 'codex-acp' --port 4567",
         ]
     );
 }
 
 #[test]
-fn codex_woa_git_repos_header_uses_fixed_header_for_github_repos() {
-    let content = r#"
-[remote "origin"]
-    url = git@github.com:koth/Kodex.git
-[submodule "codex-acp"]
-    url = https://github.com/koth/kodex-acp.git
-"#;
+fn remote_ssh_args_include_custom_ssh_port_when_configured() {
+    let args = build_remote_ssh_args(
+        "alice@devbox",
+        Some(2222),
+        3456,
+        4567,
+        "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+    );
 
     assert_eq!(
-        parse_git_config_codex_woa_repos_header(content),
-        Some("TechPlatform/MachineLearning".to_string())
+        args,
+        vec![
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            "127.0.0.1:3456:127.0.0.1:4567",
+            "-p",
+            "2222",
+            "alice@devbox",
+            "cd '/srv/project' && exec 'codex-acp' --port 4567",
+        ]
     );
 }
 
 #[test]
-fn codex_woa_git_repos_header_prefers_real_woa_repos_over_github_fallback() {
-    let content = r#"
-[remote "origin"]
-    url = git@github.com:koth/Kodex.git
-[submodule "reference/ArtWebBackend"]
-    url = https://git.woa.com/TechPlatform/MachineLearning/ArtWebBackend
-"#;
+fn remote_ssh_agent_process_waits_for_forward_and_finishes_after_tcp_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_ssh = create_fake_ssh_command(dir.path());
+    let local_port = unused_loopback_port();
+    let remote_port = unused_loopback_port();
+    let config = SessionConfig {
+        workspace_root: "/srv/project".into(),
+        app_data_root: dir.path().display().to_string(),
+        model: String::new(),
+        agent_command: "mock-acp-agent".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: String::new(),
+        acp_port: local_port,
+        remote_ssh: Some(RemoteSshSessionConfig {
+            ssh_target: "fake-host".into(),
+            ssh_port: None,
+            remote_workspace_root: "/srv/project".into(),
+            local_port,
+            remote_port,
+            ssh_command: Some(fake_ssh.display().to_string()),
+            ssh_password: None,
+        }),
+    };
+    let agent = RemoteSshAgentProcess::from_config(&config).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
-    assert_eq!(
-        parse_git_config_codex_woa_repos_header(content),
-        Some("TechPlatform/MachineLearning/ArtWebBackend".to_string())
-    );
+    let result = runtime.block_on(async move {
+        let (agent_side, client_side) = Channel::duplex();
+        drop(agent_side);
+        tokio::time::timeout(Duration::from_secs(5), agent.connect_to(client_side)).await
+    });
+
+    match result {
+        Ok(protocol_result) => {
+            assert!(
+                protocol_result.is_ok(),
+                "protocol result: {protocol_result:?}"
+            );
+        }
+        Err(_) => panic!("remote SSH agent process did not finish"),
+    }
+}
+
+#[test]
+fn connect_loopback_tcp_reports_unavailable_endpoint_with_phase() {
+    let port = unused_loopback_port();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let error = runtime
+        .block_on(connect_loopback_tcp_with_retry(
+            port,
+            "test ACP endpoint",
+            None,
+            2,
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+        ))
+        .unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("failed to connect to test ACP endpoint"));
+    assert!(message.contains(&format!("127.0.0.1:{port}")));
+}
+
+#[test]
+fn connect_loopback_tcp_waits_until_endpoint_becomes_reachable() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accept_thread = std::thread::spawn(move || {
+        let _ = listener.accept();
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let stream = runtime
+        .block_on(connect_loopback_tcp_with_retry(
+            port,
+            "ready ACP endpoint",
+            None,
+            2,
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+        ))
+        .unwrap();
+
+    drop(stream);
+    accept_thread.join().unwrap();
+}
+
+#[test]
+fn connect_tcp_stream_finishes_when_peer_drops_connection() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accept_thread = std::thread::spawn(move || {
+        let _ = listener.accept();
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let result = runtime.block_on(async move {
+        let stream = connect_loopback_tcp_with_retry(
+            port,
+            "dropping ACP endpoint",
+            None,
+            2,
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+        )
+        .await?;
+        let (agent_side, client_side) = Channel::duplex();
+        drop(agent_side);
+        let protocol = connect_tcp_stream(stream, client_side)?;
+        tokio::time::timeout(Duration::from_secs(1), protocol)
+            .await
+            .map_err(|_| agent_client_protocol::util::internal_error("protocol did not finish"))?
+    });
+
+    accept_thread.join().unwrap();
+    assert!(result.is_ok(), "protocol result: {result:?}");
+}
+
+#[test]
+fn kill_child_handle_terminates_running_child() {
+    let child = spawn_sleep_child();
+    let child = Arc::new(Mutex::new(Some(child)));
+
+    kill_child_handle(&child).unwrap();
+
+    assert!(child.lock().unwrap().is_none());
+}
+
+fn unused_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn spawn_sleep_child() -> Child {
+    #[cfg(windows)]
+    {
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("sleep").arg("30").spawn().unwrap()
+    }
+}
+
+fn create_fake_ssh_command(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let ps1 = dir.join("fake-ssh.ps1");
+        std::fs::write(
+            &ps1,
+            r#"
+$ErrorActionPreference = "Stop"
+$forward = $null
+for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq "-L") {
+        $forward = $args[$i + 1]
+        break
+    }
+}
+if (-not $forward) {
+    Write-Error "missing -L"
+    exit 1
+}
+$parts = $forward -split ":"
+$localPort = [int]$parts[1]
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), $localPort)
+$listener.Start()
+[Console]::Error.WriteLine("__KODEX_ACP_REMOTE_AGENT_READY__")
+try {
+    $client = $listener.AcceptTcpClient()
+    $client.Close()
+    Start-Sleep -Milliseconds 100
+} finally {
+    $listener.Stop()
+}
+"#,
+        )
+        .unwrap();
+        let cmd = dir.join("fake-ssh.cmd");
+        std::fs::write(
+            &cmd,
+            "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-ssh.ps1\" %*\r\n",
+        )
+        .unwrap();
+        cmd
+    }
+
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ssh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+forward=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-L" ]; then
+    forward="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [ -z "$forward" ]; then
+  echo "missing -L" >&2
+  exit 1
+fi
+local_port=$(printf "%s" "$forward" | cut -d: -f2)
+python3 - "$local_port" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", port))
+server.listen(1)
+print("__KODEX_ACP_REMOTE_AGENT_READY__", file=sys.stderr, flush=True)
+conn, _ = server.accept()
+conn.close()
+server.close()
+time.sleep(0.1)
+PY
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        script
+    }
 }
 
 #[test]
@@ -189,6 +462,7 @@ fn test_session_config(agent_command: &str) -> SessionConfig {
         resume_session_id: None,
         log_id: String::new(),
         acp_port: 0,
+        remote_ssh: None,
     }
 }
 
@@ -235,103 +509,6 @@ fn codex_agent_command_can_use_session_list_title_sync_without_advertising_it() 
 }
 
 #[test]
-fn codex_woa_agent_command_uses_native_title_and_session_list_fallback_by_default() {
-    let mut config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#);
-    config
-        .agent_env
-        .push(("CODEX_WOA_API_KEY".into(), "access-token".into()));
-
-    assert!(command_uses_codex_woa_titles(&config));
-    assert!(!command_uses_codex_woa_side_query_titles(&config));
-    assert!(supports_session_list_title_sync(&config, true));
-    assert!(supports_session_list_title_sync(&config, false));
-}
-
-#[test]
-fn codex_woa_title_side_query_requires_explicit_escape_hatch() {
-    let mut config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#);
-    config
-        .agent_env
-        .push(("CODEX_WOA_API_KEY".into(), "access-token".into()));
-    config
-        .agent_env
-        .push(("KODEX_ENABLE_CODEX_WOA_TITLE_SIDE_QUERY".into(), "1".into()));
-
-    assert!(command_uses_codex_woa_titles(&config));
-    assert!(command_uses_codex_woa_side_query_titles(&config));
-    assert!(supports_session_list_title_sync(&config, true));
-    assert!(supports_session_list_title_sync(&config, false));
-}
-
-#[test]
-fn codex_woa_title_query_reuses_configured_conversation_id() {
-    let mut config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#);
-    config.agent_env.push((
-        "CODEX_INTERNAL_CONVERSATION_ID".into(),
-        "conversation-from-agent-env".into(),
-    ));
-
-    assert_eq!(
-        codex_woa_title_conversation_id(&config),
-        "conversation-from-agent-env"
-    );
-}
-
-#[test]
-fn codex_woa_title_query_prefers_configured_git_repos_header() {
-    let mut config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#);
-    config.agent_env.push((
-        "CODEX_INTERNAL_GIT_REPOS".into(),
-        "TechPlatform/MachineLearning/ArashiIconAIGenTool".into(),
-    ));
-
-    assert_eq!(
-        codex_woa_title_git_repos(&config),
-        "TechPlatform/MachineLearning/ArashiIconAIGenTool"
-    );
-}
-
-#[test]
-fn codex_woa_title_query_uses_fixed_git_repos_fallback() {
-    let config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#);
-
-    assert_eq!(
-        codex_woa_title_git_repos(&config),
-        "TechPlatform/MachineLearning"
-    );
-}
-
-#[test]
-fn codex_woa_title_query_uses_codex_responses_payload_shape() {
-    let mut config = test_session_config(r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#);
-    config.model = "gpt-5.4".into();
-    let payload = codex_woa_title_payload(
-        &config,
-        "修复 WOA 标题生成",
-        "session-123",
-        "installation-456",
-    );
-
-    assert_eq!(payload["model"], "gpt-5.4");
-    assert_eq!(payload["tool_choice"], "auto");
-    assert_eq!(payload["stream"], true);
-    assert_eq!(payload["prompt_cache_key"], "session-123");
-    assert_eq!(
-        payload["client_metadata"]["x-codex-installation-id"],
-        "installation-456"
-    );
-    assert_eq!(payload["input"][0]["type"], "message");
-    assert_eq!(payload["input"][0]["role"], "user");
-    assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
-    assert!(
-        payload["input"][0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("<user_request>")
-    );
-}
-
-#[test]
 fn advertised_non_claude_agent_can_use_session_list_title_sync() {
     let config = test_session_config("codebuddy.exe --acp");
 
@@ -361,53 +538,6 @@ fn session_title_sync_ignores_titles_from_other_sessions() {
     assert_eq!(
         select_session_title_for_sync(&sessions, &SessionId::from("acp-session")),
         None
-    );
-}
-
-#[test]
-fn codex_woa_title_extraction_handles_responses_output() {
-    let value = serde_json::json!({
-        "output": [{
-            "type": "message",
-            "content": [{
-                "type": "output_text",
-                "text": "\"检查 WOA 标题更新\""
-            }]
-        }]
-    });
-
-    assert_eq!(
-        extract_codex_woa_title(&value),
-        Some("检查 WOA 标题更新".into())
-    );
-}
-
-#[test]
-fn codex_woa_title_extraction_handles_streaming_response_body() {
-    let body = [
-        r#"event: response.output_text.delta"#,
-        r#"data: {"type":"response.output_text.delta","delta":"修复"}"#,
-        "",
-        r#"event: response.output_text.delta"#,
-        r#"data: {"type":"response.output_text.delta","delta":"标题生成"}"#,
-        "",
-        r#"data: [DONE]"#,
-    ]
-    .join("\n");
-
-    assert_eq!(
-        extract_codex_woa_title_from_body(&body),
-        Some("修复标题生成".into())
-    );
-}
-
-#[test]
-fn codex_woa_title_extraction_handles_streaming_completed_event() {
-    let body = r#"data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"\"稳定标题请求\""}]}]}}"#;
-
-    assert_eq!(
-        extract_codex_woa_title_from_body(body),
-        Some("稳定标题请求".into())
     );
 }
 

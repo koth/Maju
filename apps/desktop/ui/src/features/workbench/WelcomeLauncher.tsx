@@ -1,17 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
-import type { AgentCliId, AgentSettingsSnapshot, ClaudeWoaLoginStart, IoaEnvironmentStatus, RecentWorkspace, UiSnapshot } from "../../types";
+import type { AgentSettingsSnapshot, RecentWorkspace, UiSnapshot } from "../../types";
 import {
-  settingsCancelClaudeWoaLogin,
-  settingsDetectIoaEnvironment,
   settingsGetAgentSnapshot,
-  settingsGetClaudeWoaLogin,
-  settingsSaveClaudeWoaConfig,
   settingsSelectAgent,
   settingsSelectAgentProviderProfile,
-  settingsStartClaudeWoaLogin,
-  openExternalUrl,
   startupPerfMark,
   workspaceOpen,
+  workspaceOpenRemoteLinux,
   workspaceGetRecent,
   workspaceRemoveRecent,
   workspaceRestoreOpen,
@@ -19,6 +14,7 @@ import {
 import { isMacOS } from "../../lib/platform";
 import { open } from "@tauri-apps/plugin-dialog";
 import { WindowControls } from "./WindowControls";
+import { RemoteOpenPanel } from "./RemoteOpenPanel";
 import "./WelcomeLauncher.css";
 
 interface Props {
@@ -26,36 +22,20 @@ interface Props {
   onOpenSettings: (options?: WelcomeSettingsOpenOptions) => void;
 }
 
-type InitialSetupKind = "woa" | "codex_byok";
-type WelcomeAgentSettingsTab = Extract<AgentCliId, "codex-acp" | "claude-agent-acp">;
+type InitialSetupKind = "codex_byok";
 
 interface WelcomeSettingsOpenOptions {
   startupNotice?: { kind: InitialSetupKind; message?: string | null };
-  initialAgentTab?: WelcomeAgentSettingsTab;
+  initialAgentTab?: "codex-acp";
 }
-
-const DEFAULT_IOA_ENVIRONMENT: IoaEnvironmentStatus = {
-  is_company_export_ip: false,
-  is_internal: false,
-  company_environment: false,
-  recommended_setup: "codex_byok",
-  detected: false,
-  timestamp_ms: 0,
-  message: null,
-};
-
-const CODEX_BYOK_SOURCE_PROFILE_IDS = new Set(["deepseek", "kimi_code", "xiaomi_mimo"]);
-const INTERNAL_SETUP_PROFILE_IDS = new Set(["timiai", "venus"]);
 
 export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
   const [recents, setRecents] = useState<RecentWorkspace[]>([]);
   const [agentSettings, setAgentSettings] = useState<AgentSettingsSnapshot | null>(null);
-  const [ioaEnvironment, setIoaEnvironment] = useState<IoaEnvironmentStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [woaMessage, setWoaMessage] = useState<string | null>(null);
-  const [woaLogin, setWoaLogin] = useState<ClaudeWoaLoginStart | null>(null);
-  const [woaBusy, setWoaBusy] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [remoteExpanded, setRemoteExpanded] = useState(false);
 
   const [autoOpened, setAutoOpened] = useState(false);
 
@@ -67,13 +47,9 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         const loadStart = performance.now();
         void startupPerfMark("welcome/load_initial_start", `performance_now=${loadStart.toFixed(1)}`);
         const recentStart = performance.now();
-        const [list, settings, env] = await Promise.all([
+        const [list, settings] = await Promise.all([
           workspaceGetRecent(),
           settingsGetAgentSnapshot().catch(() => null),
-          settingsDetectIoaEnvironment().catch((error) => ({
-            ...DEFAULT_IOA_ENVIRONMENT,
-            message: String(error),
-          })),
         ]);
         void startupPerfMark(
           "welcome/get_recent_end",
@@ -82,18 +58,28 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         if (disposed) return;
         setRecents(list);
         setAgentSettings(settings);
-        setIoaEnvironment(env);
-        void startupPerfMark(
-          "welcome/ioa_env_detect_result",
-          `detected=${env.detected} company_environment=${env.company_environment} is_company_export_ip=${env.is_company_export_ip} is_internal=${env.is_internal} recommended_setup=${env.recommended_setup} message=${env.message ?? ""}`,
-        );
 
         if (!autoOpened) {
           setAutoOpened(true);
-          const requiredSetup = settings ? setupRecommendationFor(settings, env) : null;
+          const requiredSetup = settings ? setupRecommendationFor(settings) : null;
           if (settings && requiredSetup) {
             setLoading(false);
-            onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, settings, env));
+            setSetupBusy(true);
+            try {
+              await settingsSelectAgent("codex-acp");
+              const nextSnapshot = await settingsSelectAgentProviderProfile("codex", "byok");
+              if (disposed) return;
+              setAgentSettings(nextSnapshot);
+              onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, nextSnapshot));
+            } catch (_error) {
+              if (!disposed) {
+                onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, settings));
+              }
+            } finally {
+              if (!disposed) {
+                setSetupBusy(false);
+              }
+            }
             return;
           }
           setLoading(true);
@@ -114,7 +100,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
             return;
           }
 
-          const first = list.find((r) => r.exists);
+          const first = list.find((r) => r.exists && !r.remote);
           if (first) {
             const openStart = performance.now();
             void startupPerfMark("welcome/open_recent_start", first.path);
@@ -146,62 +132,9 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!woaLogin) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const status = await settingsGetClaudeWoaLogin(woaLogin.login_id);
-        if (status.state === "succeeded" && status.snapshot) {
-          setAgentSettings(status.snapshot);
-          setWoaLogin(null);
-          setWoaMessage("WOA 登录已完成，可以打开工作区了");
-        } else if (status.state !== "pending") {
-          setWoaLogin(null);
-          setWoaMessage(status.message ?? `WOA 登录${status.state}`);
-        }
-      } catch (e) {
-        setWoaLogin(null);
-        setError(String(e));
-      }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [woaLogin]);
-
-  const handleStartWoaLogin = useCallback(async (agent?: Extract<AgentCliId, "codex-acp" | "claude-agent-acp">) => {
-    setWoaBusy(true);
-    setError(null);
-    setWoaMessage(null);
-    try {
-      let nextSettings = agentSettings;
-      if (agent) {
-        nextSettings = await settingsSelectAgent(agent);
-        nextSettings = await settingsSelectAgentProviderProfile(agent === "codex-acp" ? "codex" : "claude", "woa");
-        setAgentSettings(nextSettings);
-      }
-      if (nextSettings && isWoaTokenUsable(nextSettings)) {
-        setWoaMessage("WOA 通道已选择，可以打开工作区了");
-        return;
-      }
-      const channel = nextSettings?.claude_woa.channel ?? "default";
-      await settingsSaveClaudeWoaConfig({
-        channel,
-        tokenPath: null,
-        availableModels: nextSettings?.settings.claude_woa.available_models ?? [],
-      });
-      const login = await settingsStartClaudeWoaLogin();
-      setWoaLogin(login);
-      setWoaMessage("在浏览器完成验证后，Kodex 会自动继续");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setWoaBusy(false);
-    }
-  }, [agentSettings]);
-
   const handleUseCodexByok = useCallback(async () => {
-    setWoaBusy(true);
+    setSetupBusy(true);
     setError(null);
-    setWoaMessage(null);
     try {
       await settingsSelectAgent("codex-acp");
       const nextSnapshot = await settingsSelectAgentProviderProfile("codex", "byok");
@@ -211,32 +144,9 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
       setError(String(e));
       onOpenSettings({ initialAgentTab: "codex-acp" });
     } finally {
-      setWoaBusy(false);
+      setSetupBusy(false);
     }
   }, [onOpenSettings]);
-
-  const handleCancelWoaLogin = useCallback(async () => {
-    if (!woaLogin) return;
-    setWoaBusy(true);
-    try {
-      await settingsCancelClaudeWoaLogin(woaLogin.login_id);
-      setWoaLogin(null);
-      setWoaMessage("WOA 登录已取消");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setWoaBusy(false);
-    }
-  }, [woaLogin]);
-
-  const handleOpenWoaLoginUrl = useCallback(async () => {
-    if (!woaLogin) return;
-    try {
-      await openExternalUrl(woaLogin.verification_uri_complete ?? woaLogin.verification_uri);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [woaLogin]);
 
   const handleOpenFolder = useCallback(async () => {
     try {
@@ -251,28 +161,31 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
       setError(message);
       setLoading(false);
       if (isAgentSetupError(message)) {
-        onOpenSettings(settingsOpenOptionsForCurrentState(agentSettings, ioaEnvironment));
+        onOpenSettings(settingsOpenOptionsForCurrentState(agentSettings));
       }
     }
-  }, [agentSettings, ioaEnvironment, onOpenSettings, onWorkspaceOpened]);
+  }, [agentSettings, onOpenSettings, onWorkspaceOpened]);
 
   const handleOpenRecent = useCallback(
     async (path: string) => {
       try {
         setLoading(true);
         setError(null);
-        const snapshot = await workspaceOpen(path);
+        const recent = recents.find((item) => item.path === path);
+        const snapshot = recent?.remote
+          ? await workspaceOpenRemoteLinux(recent.remote)
+          : await workspaceOpen(path);
         onWorkspaceOpened(snapshot);
       } catch (e) {
         const message = String(e);
         setError(message);
         setLoading(false);
         if (isAgentSetupError(message)) {
-          onOpenSettings(settingsOpenOptionsForCurrentState(agentSettings, ioaEnvironment));
+          onOpenSettings(settingsOpenOptionsForCurrentState(agentSettings));
         }
       }
     },
-    [agentSettings, ioaEnvironment, onOpenSettings, onWorkspaceOpened]
+    [agentSettings, onOpenSettings, onWorkspaceOpened, recents]
   );
 
   const handleRemoveRecent = useCallback(async (path: string) => {
@@ -284,16 +197,13 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     const parts = path.replace(/\\/g, "/").split("/");
     return parts[parts.length - 1] || path;
   };
-  const setupRecommendation = agentSettings && ioaEnvironment
-    ? setupRecommendationFor(agentSettings, ioaEnvironment)
-    : null;
-  const showWoaOnboarding = setupRecommendation === "woa";
+  const remoteDisplayPath = (remote: RecentWorkspace["remote"]) => {
+    if (!remote) return "";
+    const port = remote.ssh_port ? `:${remote.ssh_port}` : "";
+    return `${remote.ssh_target}${port}:${remote.remote_path}`;
+  };
+  const setupRecommendation = agentSettings ? setupRecommendationFor(agentSettings) : null;
   const showByokOnboarding = setupRecommendation === "codex_byok";
-  const mustCompleteSetup = agentSettings && ioaEnvironment
-    ? shouldPauseWorkspaceAutoOpen(agentSettings, ioaEnvironment)
-    : false;
-  const woaTokenMessage = agentSettings?.claude_woa.token.message;
-  const woaOnboardingKicker = "内网环境 · 开始前需要完成";
   const titlebarClassName = `welcome-titlebar ${isMacOS() ? "is-macos" : ""}`;
 
   return (
@@ -302,73 +212,30 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         <WindowControls />
       </div>
       <div className="welcome-content">
-        <pre className="welcome-ascii">
+        <div className="welcome-brand">
+          <pre className="welcome-ascii">
 {` ██╗  ██╗ ██████╗ ██████╗ ███████╗██╗  ██╗
  ██║ ██╔╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
  █████╔╝ ██║   ██║██║  ██║█████╗   ╚███╔╝ 
  ██╔═██╗ ██║   ██║██║  ██║██╔══╝   ██╔██╗ 
  ██║  ██╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
  ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝`}
-        </pre>
-        <p className="welcome-subtitle">智能体代码编辑器</p>
-
-        {showWoaOnboarding && (
-          <section className={`welcome-woa ${mustCompleteSetup ? "is-required" : ""}`} aria-label="内网通道引导">
-            <div className="welcome-woa-copy">
-              <span className="welcome-woa-kicker">{mustCompleteSetup ? woaOnboardingKicker : "内网环境 · 推荐先完成"}</span>
-              <h1>初始化内网通道</h1>
-              <p>
-                当前网络适合使用内网通道。完成 WOA、TimiAI 或 Venus 任意一个配置后即可打开工作区。
-              </p>
-            </div>
-            {woaTokenMessage && <div className="welcome-woa-status">{woaTokenMessage}</div>}
-            {woaLogin && (
-              <div className="welcome-woa-code">
-                <span>
-                  打开{" "}
-                  <button type="button" className="welcome-link-btn" onClick={handleOpenWoaLoginUrl}>
-                    {woaLogin.verification_uri_complete ?? woaLogin.verification_uri}
-                  </button>
-                </span>
-                <span>输入 <code>{woaLogin.user_code}</code></span>
-              </div>
-            )}
-            {woaMessage && <div className="welcome-woa-message">{woaMessage}</div>}
-            <div className="welcome-woa-actions">
-              {woaLogin ? (
-                <button type="button" className="welcome-secondary-btn" disabled={woaBusy} onClick={handleCancelWoaLogin}>
-                  取消登录
-                </button>
-              ) : (
-                <>
-                  <button type="button" className="welcome-open-btn" disabled={woaBusy} onClick={() => handleStartWoaLogin("claude-agent-acp")}>
-                    {woaBusy ? "处理中..." : "使用 Claude WOA"}
-                  </button>
-                  <button type="button" className="welcome-secondary-btn" disabled={woaBusy} onClick={() => handleStartWoaLogin("codex-acp")}>
-                    使用 Codex WOA
-                  </button>
-                </>
-              )}
-              <button type="button" className="welcome-secondary-btn" onClick={() => onOpenSettings(settingsOpenOptionsForSetup("woa", agentSettings ?? undefined))}>
-                打开设置
-              </button>
-            </div>
-          </section>
-        )}
+          </pre>
+          <p className="welcome-subtitle">智能体代码编辑器</p>
+        </div>
 
         {showByokOnboarding && (
-          <section className="welcome-woa is-required" aria-label="Codex BYOK 引导">
-            <div className="welcome-woa-copy">
-              <span className="welcome-woa-kicker">{ioaEnvironment?.detected ? "外网环境 · 开始前需要完成" : "环境检测失败 · 已按外网处理"}</span>
+          <section className="welcome-byok is-required" aria-label="Codex BYOK 引导">
+            <div className="welcome-byok-copy">
+              <span className="welcome-byok-kicker">开始前需要完成</span>
               <h1>初始化 Codex BYOK</h1>
               <p>
-                当前网络不推荐 WOA 登录。请先给 Codex 配置一个自带 API key 的模型来源。
+                还没有可用的模型来源。配置 Codex BYOK 后即可打开本地或远程工作区。
               </p>
             </div>
-            {ioaEnvironment?.message && <div className="welcome-woa-status">{ioaEnvironment.message}</div>}
-            <div className="welcome-woa-actions">
-              <button type="button" className="welcome-open-btn" disabled={woaBusy} onClick={handleUseCodexByok}>
-                {woaBusy ? "处理中..." : "设置 Codex BYOK"}
+            <div className="welcome-byok-actions">
+              <button type="button" className="welcome-open-btn" disabled={setupBusy} onClick={handleUseCodexByok}>
+                {setupBusy ? "处理中..." : "设置 Codex BYOK"}
               </button>
               <button type="button" className="welcome-secondary-btn" onClick={() => onOpenSettings(settingsOpenOptionsForSetup("codex_byok", agentSettings ?? undefined))}>
                 打开设置
@@ -377,13 +244,41 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
           </section>
         )}
 
-        <button
-          className="welcome-open-btn"
-          onClick={handleOpenFolder}
-          disabled={loading}
-        >
-          {loading ? "正在打开..." : "打开文件夹"}
-        </button>
+        <section className="welcome-launcher" aria-label="打开工作区">
+          <div className="welcome-launcher-copy">
+            <span className="welcome-kicker">选择工作区</span>
+            <h1>从本地项目开始</h1>
+          </div>
+          <div className="welcome-actions">
+            <button
+              className="welcome-primary-action"
+              onClick={handleOpenFolder}
+              disabled={loading}
+            >
+              <span className="welcome-action-icon"><LocalFolderIcon /></span>
+              <span>{loading ? "正在打开..." : "打开本地文件夹"}</span>
+            </button>
+            <button
+              type="button"
+              className={`welcome-remote-entry ${remoteExpanded ? "is-active" : ""}`}
+              onClick={() => setRemoteExpanded((expanded) => !expanded)}
+              aria-expanded={remoteExpanded}
+            >
+              <span className="welcome-action-icon"><RemoteHostIcon /></span>
+              <span>连接远程机器</span>
+            </button>
+          </div>
+        </section>
+
+        {remoteExpanded && (
+          <section className="welcome-remote-panel" aria-label="远程机器连接引导">
+            <RemoteOpenPanel
+              onWorkspaceOpened={onWorkspaceOpened}
+              onOpenSettings={() => onOpenSettings()}
+              onCancel={() => setRemoteExpanded(false)}
+            />
+          </section>
+        )}
 
         {error && <p className="welcome-error">{error}</p>}
 
@@ -402,7 +297,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
                     disabled={!r.exists || loading}
                   >
                     <span className="recent-name">{folderName(r.path)}</span>
-                    <span className="recent-path">{r.path}</span>
+                    <span className="recent-path">{r.remote ? remoteDisplayPath(r.remote) : r.path}</span>
                     {!r.exists && (
                       <span className="recent-missing">未找到</span>
                     )}
@@ -431,82 +326,58 @@ function isAgentSetupError(message: string) {
   return (
     message.includes("BYOK") ||
     message.includes("API key") ||
-    message.includes("WOA") ||
     message.includes("请先填写") ||
     message.includes("请先在")
   );
 }
 
-function setupRecommendationFor(
-  settings: AgentSettingsSnapshot,
-  env: IoaEnvironmentStatus,
-): InitialSetupKind | null {
-  if (shouldPreferWoaSetup(env)) {
-    return isInternalSetupReady(settings) ? null : "woa";
-  }
-  return hasConfiguredCodexByok(settings) ? null : "codex_byok";
-}
-
-function shouldPreferWoaSetup(env: IoaEnvironmentStatus) {
-  return env.company_environment || env.recommended_setup === "woa";
-}
-
-function shouldPauseWorkspaceAutoOpen(
-  settings: AgentSettingsSnapshot,
-  env: IoaEnvironmentStatus,
-) {
-  return setupRecommendationFor(settings, env) !== null;
+function setupRecommendationFor(settings: AgentSettingsSnapshot): InitialSetupKind | null {
+  return hasAnyConfiguredProvider(settings) ? null : "codex_byok";
 }
 
 function settingsOpenOptionsForSetup(
   kind: InitialSetupKind,
-  settings?: AgentSettingsSnapshot,
-  env?: IoaEnvironmentStatus,
+  _settings?: AgentSettingsSnapshot,
 ): WelcomeSettingsOpenOptions {
   return {
-    startupNotice: {
-      kind,
-      ...(env?.message ? { message: env.message } : {}),
-    },
-    initialAgentTab: kind === "codex_byok" ? "codex-acp" : preferredWoaSettingsTab(settings),
+    startupNotice: { kind },
+    initialAgentTab: "codex-acp",
   };
 }
 
 function settingsOpenOptionsForCurrentState(
   settings: AgentSettingsSnapshot | null,
-  env: IoaEnvironmentStatus | null,
 ): WelcomeSettingsOpenOptions | undefined {
-  if (!settings || !env) return undefined;
-  const recommendation = setupRecommendationFor(settings, env);
-  return recommendation ? settingsOpenOptionsForSetup(recommendation, settings, env) : undefined;
+  if (!settings) return undefined;
+  const recommendation = setupRecommendationFor(settings);
+  return recommendation ? settingsOpenOptionsForSetup(recommendation, settings) : undefined;
 }
 
-function preferredWoaSettingsTab(settings?: AgentSettingsSnapshot): WelcomeAgentSettingsTab {
-  return settings?.settings.selected_agent === "codex-acp" ? "codex-acp" : "claude-agent-acp";
-}
-
-function isInternalSetupReady(settings: AgentSettingsSnapshot) {
-  return isInternalWoaReady(settings) || hasConfiguredInternalProvider(settings);
-}
-
-function isInternalWoaReady(settings: AgentSettingsSnapshot) {
-  const selectedClaudeWoa = settings.claude_woa.selected_profile_id === "woa";
-  const selectedCodexWoa = settings.codex_acp.selected_profile_id === "woa";
-  return (selectedClaudeWoa || selectedCodexWoa) && isWoaTokenUsable(settings);
-}
-
-function isWoaTokenUsable(settings: AgentSettingsSnapshot) {
-  return settings.claude_woa.token.exists && !settings.claude_woa.token.malformed;
-}
-
-function hasConfiguredInternalProvider(settings: AgentSettingsSnapshot) {
-  return [...settings.codex_acp.profiles, ...settings.claude_woa.profiles].some(
-    (profile) => INTERNAL_SETUP_PROFILE_IDS.has(profile.id) && profile.configured,
+function hasAnyConfiguredProvider(settings: AgentSettingsSnapshot) {
+  const codebuddyInstalled = settings.agents.some((agent) => agent.id === "codebuddy" && agent.installed);
+  if (codebuddyInstalled) return true;
+  return [...settings.codex_acp.profiles, ...settings.claude.profiles].some(
+    (profile) => profile.requires_credential && profile.configured,
   );
 }
 
-function hasConfiguredCodexByok(settings: AgentSettingsSnapshot) {
-  return settings.codex_acp.profiles.some(
-    (profile) => CODEX_BYOK_SOURCE_PROFILE_IDS.has(profile.id) && profile.configured,
+function LocalFolderIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.1l1.4 1.5h6.9c1 0 1.8.8 1.8 1.8v6.5c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+      <path d="M2.5 8.1h15" />
+    </svg>
+  );
+}
+
+function RemoteHostIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="3" y="4" width="14" height="10" rx="1.7" />
+      <path d="M7.2 16h5.6" />
+      <path d="M10 14v2" />
+      <path d="M7.2 8.1 5.8 9.5l1.4 1.4" />
+      <path d="m12.8 8.1 1.4 1.4-1.4 1.4" />
+    </svg>
   );
 }

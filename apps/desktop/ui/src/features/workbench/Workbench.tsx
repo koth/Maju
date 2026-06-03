@@ -6,6 +6,8 @@ import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
   AgentPlanPanel,
   PlanApprovalModal,
+  findPlanAcceptOption,
+  findPlanRejectOption,
   shouldShowAgentPlanNearComposer,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
@@ -16,9 +18,16 @@ import { WelcomeLauncher } from "./WelcomeLauncher";
 import { SessionList } from "../session/SessionList";
 import { TabBar } from "./TabBar";
 import { GlobalChrome } from "./GlobalChrome";
+import { RemoteOpenPanel } from "./RemoteOpenPanel";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadSidebarShell } from "./ThreadSidebarShell";
-import { SettingsPage, type AgentSettingsTab, type SettingsStartupNotice } from "../settings/SettingsPage";
+import {
+  SettingsPage,
+  type AgentSettingsTab,
+  type RemoteSettingsContext,
+  type SettingsPane,
+  type SettingsStartupNotice,
+} from "../settings/SettingsPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import { checkForAppUpdate, type AppUpdateInfo } from "../../lib/updater";
@@ -135,25 +144,47 @@ export function Workbench() {
     handleTerminalDockHeightChange,
   } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [settingsStartupNotice, setSettingsStartupNotice] = useState<SettingsStartupNotice | null>(null);
+  const [settingsInitialPane, setSettingsInitialPane] = useState<SettingsPane | null>(null);
   const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab | null>(null);
+  const [settingsRemoteContext, setSettingsRemoteContext] = useState<RemoteSettingsContext | null>(null);
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [startupUpdateInfo, setStartupUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [startupUpdateDismissed, setStartupUpdateDismissed] = useState(false);
 
   const handleOpenSettings = useCallback((options?: {
     startupNotice?: SettingsStartupNotice;
+    initialPane?: SettingsPane;
     initialAgentTab?: AgentSettingsTab;
   }) => {
+    const currentSnapshot = snapshotRef.current;
+    const remote = currentSnapshot?.workspace.location?.kind === "remote_linux"
+      ? currentSnapshot.workspace.location
+      : null;
+    const remoteContext: RemoteSettingsContext | null = remote
+      ? {
+          profileId: remote.profile_id ?? null,
+          workspaceName: currentSnapshot?.workspace.name ?? "远程工作区",
+          sshTarget: remote.ssh_target,
+          sshPort: remote.ssh_port,
+          remotePath: remote.remote_path,
+          agentLabel: currentSnapshot?.session.agent_cli ?? remote.agent_cli ?? null,
+        }
+      : null;
     setSettingsStartupNotice(options?.startupNotice ?? null);
+    setSettingsInitialPane(options?.initialPane ?? (remoteContext ? "remote" : null));
     setSettingsInitialAgentTab(options?.initialAgentTab ?? null);
+    setSettingsRemoteContext(remoteContext);
     setSettingsOpen(true);
-  }, []);
+  }, [snapshotRef]);
 
   const handleCloseSettings = useCallback(() => {
     setSettingsOpen(false);
     setSettingsStartupNotice(null);
+    setSettingsInitialPane(null);
     setSettingsInitialAgentTab(null);
+    setSettingsRemoteContext(null);
   }, []);
 
   const resetReviewPanelTabs = useCallback(() => {
@@ -204,6 +235,7 @@ export function Workbench() {
   const handleWorkspaceOpened = useCallback((nextSnapshot: UiSnapshot) => {
     void startupPerfMark("workbench/handle_workspace_opened", "");
     acceptSnapshot(nextSnapshot);
+    setRemoteOpenVisible(false);
     clearChangeSets();
     setComposerReferenceRequests([]);
     resetGitHydration();
@@ -215,6 +247,7 @@ export function Workbench() {
 
   const handleWorkspaceChanged = useCallback((nextSnapshot: UiSnapshot) => {
     acceptSnapshot(nextSnapshot);
+    setRemoteOpenVisible(false);
     clearChangeSets();
     setComposerReferenceRequests([]);
     resetGitHydration();
@@ -362,7 +395,9 @@ export function Workbench() {
     return (
       <div className="workbench">
         <SettingsPage
+          initialPane={settingsInitialPane ?? undefined}
           initialAgentTab={settingsInitialAgentTab ?? undefined}
+          remoteContext={settingsRemoteContext}
           startupNotice={settingsStartupNotice}
           onBack={handleCloseSettings}
           onStartupNoticeDismissed={() => setSettingsStartupNotice(null)}
@@ -396,11 +431,14 @@ export function Workbench() {
     );
   }
 
+  const isRemoteWorkspace = snapshot.workspace.location?.kind === "remote_linux";
+  const terminalDockAvailable = !isRemoteWorkspace;
+  const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentLabel = snapshot.session.agent_cli || "智能体";
   const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
   const workbenchBodyClassName = [
     "workbench-body",
-    terminalDockVisible ? "has-terminal-dock" : "",
+    terminalDockActive ? "has-terminal-dock" : "",
     reviewPanelExpanded ? "is-review-expanded" : "",
     reviewPanelExpanded && expandedReviewSideTreeVisible ? "has-expanded-review-side-tree" : "",
   ].filter(Boolean).join(" ");
@@ -432,14 +470,16 @@ export function Workbench() {
     <div className="workbench">
       <GlobalChrome
         workspace={snapshot.workspace}
+        remoteWorkspace={isRemoteWorkspace}
         sidebarCollapsed={sidebarCollapsed}
         refreshing={gitRefreshing}
         rightPanelCollapsed={rightPanelCollapsed}
-        terminalDockVisible={terminalDockVisible}
+        terminalDockVisible={terminalDockActive}
         onToggleSidebar={handleToggleThreads}
-        onToggleTerminal={handleToggleTerminalDock}
+        onToggleTerminal={terminalDockAvailable ? handleToggleTerminalDock : () => undefined}
         onRefreshGit={handleRefreshGit}
         onToggleRightPanel={handleToggleRightPanel}
+        onOpenRemoteWorkspace={() => setRemoteOpenVisible(true)}
         onFileOpen={handleSearchResultOpen}
       />
 
@@ -593,12 +633,12 @@ export function Workbench() {
             </aside>
           )}
         </div>
-        {terminalDockMounted && (
+        {terminalDockAvailable && terminalDockMounted && (
           <TerminalDock
             key={snapshot.workspace.root}
             workspaceRoot={snapshot.workspace.root}
             appTheme={appTheme}
-            visible={terminalDockVisible}
+            visible={terminalDockActive}
             height={terminalDockHeight}
             layoutSignal={`${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`}
             onHeightChange={handleTerminalDockHeightChange}
@@ -628,6 +668,34 @@ export function Workbench() {
             </div>
           </div>
         )}
+        {remoteOpenVisible && (
+          <div className="remote-open-backdrop" role="presentation">
+            <div className="remote-open-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-open-title">
+              <div className="remote-open-dialog-head">
+                <div>
+                  <div className="remote-open-dialog-kicker">远程</div>
+                  <h2 id="remote-open-title">连接远程机器</h2>
+                </div>
+                <button
+                  type="button"
+                  className="remote-open-close"
+                  onClick={() => setRemoteOpenVisible(false)}
+                  aria-label="关闭远程打开"
+                >
+                  ×
+                </button>
+              </div>
+              <RemoteOpenPanel
+                onWorkspaceOpened={handleWorkspaceChanged}
+                onOpenSettings={() => {
+                  setRemoteOpenVisible(false);
+                  handleOpenSettings();
+                }}
+                onCancel={() => setRemoteOpenVisible(false)}
+              />
+            </div>
+          </div>
+        )}
         <PlanApprovalModal
           approval={pendingPlanApproval}
           entries={snapshot.agent_plan ?? []}
@@ -640,16 +708,15 @@ export function Workbench() {
   );
 }
 
-function findPendingPlanApproval(tools: ToolInvocation[]) {
+export function findPendingPlanApproval(tools: ToolInvocation[]) {
   const tool = tools.find(
     (tool) =>
       tool.kind === "permission" &&
       tool.status === "Running" &&
       !tool.permission_decision &&
-      tool.permission_options.some((option) => option.id === "plan") &&
-      tool.permission_options.some(
-        (option) => option.id === "default" || option.kind.toLowerCase().includes("allow"),
-      ),
+      isPlanApprovalPermission(tool) &&
+      !!findPlanAcceptOption(tool.permission_options) &&
+      !!findPlanRejectOption(tool.permission_options),
   );
 
   if (!tool) {
@@ -661,4 +728,13 @@ function findPendingPlanApproval(tools: ToolInvocation[]) {
     planText: tool.raw_input || tool.detail_text || null,
     options: tool.permission_options,
   };
+}
+
+function isPlanApprovalPermission(tool: ToolInvocation) {
+  if (tool.name.toLowerCase() === "exitplanmode") {
+    return true;
+  }
+  return tool.permission_options.some((option) =>
+    ["plan", "reject_and_exit_plan", "rejectAndExitPlan"].includes(option.id),
+  );
 }

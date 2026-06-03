@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 shell-words.workspace = true
+similar.workspace = true
 session-store = { path = "../session-store" }
 tokio.workspace = true
 toml_edit.workspace = true

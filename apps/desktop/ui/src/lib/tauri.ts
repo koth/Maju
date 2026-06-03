@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, ClaudeWoaConfigInput, ClaudeWoaLoginStart, ClaudeWoaLoginStatus, IoaEnvironmentStatus } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
   await shellOpen(url);
@@ -22,8 +22,12 @@ export async function sessionSendPrompt(prompt: UserPromptContent[]): Promise<vo
   return invoke("session_send_prompt", { prompt });
 }
 
-export async function sessionSetConfigControl(controlId: string, valueId: string): Promise<SessionConfigState> {
-  return invoke<SessionConfigState>("session_set_config_control", { controlId, valueId });
+export async function sessionSetConfigControl(
+  controlId: string,
+  valueId: string,
+  provider?: string | null,
+): Promise<SessionConfigState> {
+  return invoke<SessionConfigState>("session_set_config_control", { controlId, valueId, provider: provider ?? null });
 }
 
 export async function sessionResolvePermission(requestId: string, optionId: string | null): Promise<void> {
@@ -124,6 +128,14 @@ export async function workspaceOpen(path: string, agent?: AgentCliId): Promise<U
   return invoke<UiSnapshot>("workspace_open", { path, agent });
 }
 
+export async function workspaceOpenRemoteLinux(remote: RemoteLinuxWorkspace): Promise<UiSnapshot> {
+  return invoke<UiSnapshot>("workspace_open_remote_linux", { remote });
+}
+
+export async function workspaceOpenRemoteProfile(request: RemoteOpenRequest): Promise<UiSnapshot> {
+  return invoke<UiSnapshot>("workspace_open_remote_profile", { request });
+}
+
 export async function workspaceClose(): Promise<void> {
   return invoke("workspace_close");
 }
@@ -212,95 +224,100 @@ export async function fsSearch(query: string): Promise<SearchResult> {
   return invoke<SearchResult>("fs_search", { query });
 }
 
-export async function settingsGetAgentSnapshot(): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_get_agent_snapshot");
+export async function settingsGetAgentSnapshot(remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_get_agent_snapshot", { remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsDetectAgents(): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_detect_agents");
+export async function settingsDetectAgents(remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_detect_agents", { remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsDetectIoaEnvironment(): Promise<IoaEnvironmentStatus> {
-  return invoke<IoaEnvironmentStatus>("settings_detect_ioa_environment");
+export async function settingsSelectAgent(agent: AgentCliId, remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_agent", { agent, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsSelectAgent(agent: AgentCliId): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_agent", { agent });
+export async function settingsSelectTheme(theme: AppTheme, remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_theme", { theme, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsSelectTheme(theme: AppTheme): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_theme", { theme });
+export async function settingsGetRemoteProfiles(): Promise<RemoteMachineProfilesSnapshot> {
+  return invoke<RemoteMachineProfilesSnapshot>("settings_get_remote_profiles");
 }
 
-export async function settingsSaveCodexAcpVenusKey(venusKey: string): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_venus_key", { venusKey });
+export async function settingsSaveRemoteProfile(input: RemoteMachineProfileInput): Promise<RemoteMachineProfilesSnapshot> {
+  return invoke<RemoteMachineProfilesSnapshot>("settings_save_remote_profile", { input });
 }
 
-export async function settingsSaveCodexAcpProviderKey(provider: string, apiKey: string): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_provider_key", { provider, apiKey });
+export async function settingsDeleteRemoteProfile(profileId: string): Promise<RemoteMachineProfilesSnapshot> {
+  return invoke<RemoteMachineProfilesSnapshot>("settings_delete_remote_profile", { profileId });
 }
 
-export async function settingsSelectCodexAcpProvider(provider: string): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_codex_acp_provider", { provider });
+export async function settingsValidateRemoteProfile(request: RemoteMachineValidationRequest): Promise<RemoteMachineProfilesSnapshot> {
+  return invoke<RemoteMachineProfilesSnapshot>("settings_validate_remote_profile", { request });
 }
 
-export async function settingsSelectCodexDefaultMode(): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode");
+export async function settingsSaveCodexAcpProviderKey(provider: string, apiKey: string, remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_provider_key", { provider, apiKey, remoteProfileId: remoteProfileId ?? null });
+}
+
+export async function settingsSelectCodexAcpProvider(provider: string, remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_codex_acp_provider", { provider, remoteProfileId: remoteProfileId ?? null });
+}
+
+export async function settingsSelectCodexDefaultMode(remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode", { remoteProfileId: remoteProfileId ?? null });
 }
 
 export async function settingsSelectAgentProviderProfile(
   family: AgentProviderFamily,
   profileId: string,
+  remoteProfileId?: string | null,
 ): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_agent_provider_profile", { family, profileId });
+  return invoke<AgentSettingsSnapshot>("settings_select_agent_provider_profile", { family, profileId, remoteProfileId: remoteProfileId ?? null });
 }
 
 export async function settingsSaveAgentProviderSecret(
   family: AgentProviderFamily,
   profileId: string,
   secret: string,
+  remoteProfileId?: string | null,
 ): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_save_agent_provider_secret", { family, profileId, secret });
+  return invoke<AgentSettingsSnapshot>("settings_save_agent_provider_secret", { family, profileId, secret, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsSaveClaudeWoaConfig(config: ClaudeWoaConfigInput): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_save_claude_woa_config", { config });
+export async function settingsSaveProviderModels(
+  provider: string,
+  models: string[],
+  remoteProfileId?: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_provider_models", { provider, models, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsStartClaudeWoaLogin(): Promise<ClaudeWoaLoginStart> {
-  return invoke<ClaudeWoaLoginStart>("settings_start_claude_woa_login");
-}
-
-export async function settingsGetClaudeWoaLogin(loginId: string): Promise<ClaudeWoaLoginStatus> {
-  return invoke<ClaudeWoaLoginStatus>("settings_get_claude_woa_login", { loginId });
-}
-
-export async function settingsCancelClaudeWoaLogin(loginId: string): Promise<ClaudeWoaLoginStatus> {
-  return invoke<ClaudeWoaLoginStatus>("settings_cancel_claude_woa_login", { loginId });
-}
-
-export async function settingsRefreshClaudeWoaToken(): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_refresh_claude_woa_token");
+export async function settingsResetProviderModels(
+  provider: string,
+  remoteProfileId?: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_reset_provider_models", { provider, remoteProfileId: remoteProfileId ?? null });
 }
 
 export async function settingsInstallAgent(agent: AgentCliId): Promise<AgentInstallResult> {
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
 }
 
-export async function settingsGetLspSnapshot(): Promise<LspSettingsSnapshot> {
-  return invoke<LspSettingsSnapshot>("settings_get_lsp_snapshot");
+export async function settingsGetLspSnapshot(remoteProfileId?: string | null): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_get_lsp_snapshot", { remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsSaveLspServer(config: LspServerConfigInput): Promise<LspSettingsSnapshot> {
-  return invoke<LspSettingsSnapshot>("settings_save_lsp_server", { config });
+export async function settingsSaveLspServer(config: LspServerConfigInput, remoteProfileId?: string | null): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_save_lsp_server", { config, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsResetLspServer(languageId: string): Promise<LspSettingsSnapshot> {
-  return invoke<LspSettingsSnapshot>("settings_reset_lsp_server", { languageId });
+export async function settingsResetLspServer(languageId: string, remoteProfileId?: string | null): Promise<LspSettingsSnapshot> {
+  return invoke<LspSettingsSnapshot>("settings_reset_lsp_server", { languageId, remoteProfileId: remoteProfileId ?? null });
 }
 
-export async function settingsProbeLspServer(command: string): Promise<LspProbeResult> {
-  return invoke<LspProbeResult>("settings_probe_lsp_server", { command });
+export async function settingsProbeLspServer(command: string, remoteProfileId?: string | null): Promise<LspProbeResult> {
+  return invoke<LspProbeResult>("settings_probe_lsp_server", { command, remoteProfileId: remoteProfileId ?? null });
 }
 
 export async function terminalOpen(request: TerminalOpenRequest): Promise<TerminalSession> {

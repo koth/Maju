@@ -525,6 +525,21 @@ fn powershell_positional_set_content_yields_written_file_hint() {
 }
 
 #[test]
+fn codebuddy_python_pathlib_command_yields_written_file_hint() {
+    let raw_input = serde_json::json!({
+        "\"command": "python - <<'PY'\nfrom pathlib import Path\np=Path('D:/work/ArtAssets/packages/frontend/src/pages/GalleryPage.tsx')\ntext=p.read_text(encoding='utf-8')\nold='''before'''\nnew='''after'''\np.write_text(text.replace(old, new), encoding='utf-8')\nPY",
+    })
+    .to_string();
+
+    let paths = tool_command_write_hint_paths(Some(&raw_input));
+
+    assert_eq!(
+        paths,
+        vec!["D:/work/ArtAssets/packages/frontend/src/pages/GalleryPage.tsx"]
+    );
+}
+
+#[test]
 fn completed_shell_write_hint_enters_review_via_git_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -595,6 +610,72 @@ fn completed_shell_write_hint_enters_review_via_git_fallback() {
 }
 
 #[test]
+fn completed_codebuddy_python_write_enters_review_via_git_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/frontend/src/pages/GalleryPage.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "const label = 'before';\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, "const label = 'after';\n").unwrap();
+
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ntext=p.read_text(encoding='utf-8')\nold='''before'''\nnew='''after'''\np.write_text(text.replace(old, new), encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+    })
+    .to_string();
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "call-codebuddy-python".into(),
+        parent_call_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Restyle image collection floating panel".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: Some(raw_input),
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(app.detect_file_writes_from_tools(&["call-codebuddy-python".into()]));
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some("const label = 'before';\n")
+    );
+    assert_eq!(
+        app.ui.review_changes[0].new_text,
+        "const label = 'after';\n"
+    );
+    assert_eq!(app.ui.session_changes.len(), 1);
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-codebuddy-python")
+        .unwrap();
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| !preview.hunks.is_empty())
+    );
+}
+
+#[test]
 fn completed_read_tool_does_not_claim_preexisting_git_change() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -633,6 +714,51 @@ fn completed_read_tool_does_not_claim_preexisting_git_change() {
     });
 
     assert!(!app.detect_file_writes_from_tools(&["read-main".into()]));
+    assert!(app.ui.review_changes.is_empty());
+    assert!(app.ui.session_changes.is_empty());
+}
+
+#[test]
+fn completed_tool_preview_does_not_claim_preexisting_git_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "src/main.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, "fn main() { println!(\"dirty\"); }\n").unwrap();
+    let preview_hunks = diff_to_hunks(
+        Some("fn main() {}\n"),
+        "fn main() { println!(\"dirty\"); }\n",
+    );
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "preview-main".into(),
+        parent_call_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Completed".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![relative_path.into()],
+        diff_previews: vec![ToolDiffPreview {
+            path: relative_path.into(),
+            hunks: preview_hunks,
+        }],
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(!app.detect_file_writes_from_tools(&["preview-main".into()]));
     assert!(app.ui.review_changes.is_empty());
     assert!(app.ui.session_changes.is_empty());
 }
@@ -1124,11 +1250,16 @@ fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
         "",
     ]
     .join("\n");
-    fs::write(&file_path, &after).unwrap();
-
     let mut app = test_app(&dir);
     let hunks = diff_to_hunks(Some(&before), &after);
+    fs::write(&file_path, &before).unwrap();
+    app.file_tracker
+        .start_recording("edit-topbar", vec![relative_path.into()]);
+    fs::write(&file_path, &after).unwrap();
+    app.file_tracker
+        .add_candidate("edit-topbar", relative_path.into());
 
+    assert!(app.tool_diff_preview_matches_recording_window("edit-topbar", relative_path, &hunks));
     assert!(app.apply_tool_diff_preview_to_review(relative_path, relative_path, &hunks));
     assert_eq!(app.ui.review_changes.len(), 1);
     let change = &app.ui.review_changes[0];
@@ -1137,4 +1268,43 @@ fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
     assert_eq!(change.new_text, after);
     assert_eq!(change.added_lines, 0);
     assert_eq!(change.removed_lines, 4);
+}
+
+#[test]
+fn raw_output_diff_preview_without_tool_start_baseline_stays_out_of_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let unrelated_path = "frontend/src/components/layout/TopBar.tsx";
+    let hinted_path = "frontend/src/components/layout/Sidebar.tsx";
+    let unrelated_file = dir.path().join(unrelated_path);
+    let hinted_file = dir.path().join(hinted_path);
+    fs::create_dir_all(unrelated_file.parent().unwrap()).unwrap();
+
+    let before = "export const label = 'before'\n";
+    let after = "export const label = 'after'\n";
+    fs::write(&unrelated_file, before).unwrap();
+    fs::write(&hinted_file, "export const sidebar = true\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.file_tracker
+        .start_recording("edit-sidebar", vec![hinted_path.into()]);
+
+    fs::write(&unrelated_file, after).unwrap();
+    let hunks = diff_to_hunks(Some(before), after);
+
+    // This simulates CodeBuddy exposing a raw_output changes entry only after the
+    // file has already been written. It is still useful on the tool card, but it
+    // must not be trusted as this tool's review/change-set diff without a
+    // pre-tool baseline for the path.
+    app.file_tracker
+        .add_candidate("edit-sidebar", unrelated_path.into());
+
+    assert!(!app.tool_diff_preview_matches_recording_window(
+        "edit-sidebar",
+        unrelated_path,
+        &hunks
+    ));
+    if app.tool_diff_preview_matches_recording_window("edit-sidebar", unrelated_path, &hunks) {
+        app.apply_tool_diff_preview_to_review(unrelated_path, unrelated_path, &hunks);
+    }
+    assert!(app.ui.review_changes.is_empty());
 }

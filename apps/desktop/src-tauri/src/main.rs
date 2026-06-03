@@ -18,8 +18,20 @@ use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
+const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
+const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
 fn main() {
+    if std::env::var_os(KODEX_SSH_ASKPASS_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        if let Some(password) = std::env::var_os(KODEX_SSH_ASKPASS_PASSWORD_ENV) {
+            let mut stdout = std::io::stdout();
+            let _ = std::io::Write::write_all(&mut stdout, password.to_string_lossy().as_bytes());
+            let _ = std::io::Write::write_all(&mut stdout, b"\n");
+            let _ = std::io::Write::flush(&mut stdout);
+        }
+        return;
+    }
+
     app_core::startup_perf::start_run("kodex-desktop");
     app_core::startup_perf::mark("desktop/main_enter", "");
     install_panic_logger();
@@ -104,20 +116,19 @@ fn main() {
             commands::search::fs_search,
             commands::settings::settings_get_agent_snapshot,
             commands::settings::settings_detect_agents,
-            commands::settings::settings_detect_ioa_environment,
             commands::settings::settings_select_agent,
             commands::settings::settings_select_theme,
-            commands::settings::settings_save_codex_acp_venus_key,
+            commands::settings::settings_get_remote_profiles,
+            commands::settings::settings_save_remote_profile,
+            commands::settings::settings_delete_remote_profile,
+            commands::settings::settings_validate_remote_profile,
             commands::settings::settings_save_codex_acp_provider_key,
             commands::settings::settings_select_codex_acp_provider,
             commands::settings::settings_select_codex_default_mode,
             commands::settings::settings_select_agent_provider_profile,
             commands::settings::settings_save_agent_provider_secret,
-            commands::settings::settings_save_claude_woa_config,
-            commands::settings::settings_start_claude_woa_login,
-            commands::settings::settings_get_claude_woa_login,
-            commands::settings::settings_cancel_claude_woa_login,
-            commands::settings::settings_refresh_claude_woa_token,
+            commands::settings::settings_save_provider_models,
+            commands::settings::settings_reset_provider_models,
             commands::settings::settings_install_agent,
             commands::settings::settings_get_lsp_snapshot,
             commands::settings::settings_save_lsp_server,
@@ -128,6 +139,8 @@ fn main() {
             commands::review::review_apply_patch,
             commands::review::review_reject_patch,
             commands::workspace::workspace_open,
+            commands::workspace::workspace_open_remote_linux,
+            commands::workspace::workspace_open_remote_profile,
             commands::workspace::workspace_close,
             commands::workspace::workspace_list_open,
             commands::workspace::workspace_has_open,

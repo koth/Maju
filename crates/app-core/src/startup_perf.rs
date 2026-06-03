@@ -80,7 +80,9 @@ fn append_line(stage: &str, detail: &str) {
 fn log_path() -> Option<&'static PathBuf> {
     LOG_PATH
         .get_or_init(|| {
-            dirs_next::home_dir().map(|home| home.join(".kodex/logs/kodex-startup.log"))
+            crate::paths::AppPaths::resolve()
+                .ok()
+                .map(|paths| paths.logs_dir().join("kodex-startup.log"))
         })
         .as_ref()
 }

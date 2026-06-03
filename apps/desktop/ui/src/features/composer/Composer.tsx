@@ -36,6 +36,12 @@ interface Attachment {
   thumbnailMimeType: string | null;
 }
 
+interface ModelProviderGroup {
+  id: string;
+  label: string;
+  choices: SessionConfigControl["choices"];
+}
+
 export function Composer({
   snapshot,
   onStateChange,
@@ -63,6 +69,22 @@ export function Composer({
   const modelControl = useMemo(
     () => controls.find((control) => control.category === "Model"),
     [controls],
+  );
+  const modelProviderGroups = useMemo(
+    () => (modelControl ? byokModelProviderGroupsForControl(modelControl) : []),
+    [modelControl],
+  );
+  const activeModelProviderGroup = useMemo(
+    () => activeModelProviderGroupForControl(modelControl, modelProviderGroups),
+    [modelControl, modelProviderGroups],
+  );
+  const modelProviderControl = useMemo(
+    () => buildModelProviderControl(modelControl, modelProviderGroups, activeModelProviderGroup),
+    [activeModelProviderGroup, modelControl, modelProviderGroups],
+  );
+  const visibleModelControl = useMemo(
+    () => filterModelControlForProvider(modelControl, activeModelProviderGroup),
+    [activeModelProviderGroup, modelControl],
   );
   const modeControl = useMemo(
     () => controls.find((control) => control.category === "Mode"),
@@ -322,7 +344,8 @@ export function Composer({
       setPendingControlId(control.id);
       setControlError(null);
       try {
-        await sessionSetConfigControl(control.id, valueId);
+        const selectedChoice = control.choices.find((choice) => choice.id === valueId);
+        await sessionSetConfigControl(control.id, valueId, selectedChoice?.provider ?? null);
         onStateChange();
       } catch (error) {
         setControlError(String(error));
@@ -331,6 +354,30 @@ export function Composer({
       }
     },
     [controlsEnabled, onStateChange],
+  );
+
+  const handleModelProviderChange = useCallback(
+    async (_control: SessionConfigControl, providerId: string) => {
+      if (!controlsEnabled || !modelControl) return;
+      const group = modelProviderGroups.find((candidate) => candidate.id === providerId);
+      const targetChoice =
+        group?.choices.find((choice) => choice.id === modelControl.current_value_id) ??
+        group?.choices.find((choice) => choice.label === modelControl.current_value_label) ??
+        group?.choices[0];
+      if (!targetChoice) return;
+      const providerControlId = modelProviderControlId(modelControl.id);
+      setPendingControlId(providerControlId);
+      setControlError(null);
+      try {
+        await sessionSetConfigControl(modelControl.id, targetChoice.id, targetChoice.provider ?? group?.id ?? null);
+        onStateChange();
+      } catch (error) {
+        setControlError(String(error));
+      } finally {
+        setPendingControlId(null);
+      }
+    },
+    [controlsEnabled, modelControl, modelProviderGroups, onStateChange],
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -458,7 +505,7 @@ export function Composer({
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={turnActive ? "智能体正在工作...添加指引或停止本轮" : "委托任务，附加上下文，然后按 Ctrl+Enter 发送"}
+            placeholder={turnActive ? "补充约束，或停止当前轮次" : "交给 Kodex 一个明确目标"}
             rows={compact ? 1 : 2}
           />
           <button
@@ -468,7 +515,7 @@ export function Composer({
             title={turnActive ? "取消当前轮次" : "发送提示"}
             aria-label={turnActive ? "取消当前轮次" : "发送提示"}
           >
-            {turnActive ? <span className="composer-stop-icon" /> : "↑"}
+            {turnActive ? <span className="composer-stop-icon" /> : <SendIcon />}
           </button>
         </div>
         <div className="composer-control-rail">
@@ -487,15 +534,25 @@ export function Composer({
             title={attachmentInputEnabled ? "附加图片或文件" : "当前智能体不支持附件"}
             aria-label="附加图片或文件"
           >
-            +
+            <PaperclipIcon />
           </button>
-          {modelControl ? (
+          {modelProviderControl && (
             <SessionControlSelect
-              control={modelControl}
+              control={modelProviderControl}
               disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === modelControl.id}
-              open={openControlId === modelControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? modelControl.id : null)}
+              pending={pendingControlId === modelProviderControl.id}
+              open={openControlId === modelProviderControl.id}
+              onOpenChange={(open) => setOpenControlId(open ? modelProviderControl.id : null)}
+              onChange={handleModelProviderChange}
+            />
+          )}
+          {visibleModelControl ? (
+            <SessionControlSelect
+              control={visibleModelControl}
+              disabled={!controlsEnabled || pendingControlId !== null}
+              pending={pendingControlId === visibleModelControl.id}
+              open={openControlId === visibleModelControl.id}
+              onOpenChange={(open) => setOpenControlId(open ? visibleModelControl.id : null)}
               onChange={handleControlChange}
             />
           ) : (
@@ -523,7 +580,10 @@ export function Composer({
             />
           ))}
           <span className="composer-rail-spacer" />
-          <span className="composer-session-state">{snapshot.session.status}</span>
+          <span className="composer-session-state">
+            <span className="composer-session-state-dot" />
+            {snapshot.session.status}
+          </span>
         </div>
         {controlError && (
           <div className="composer-error">{controlError}</div>
@@ -555,6 +615,90 @@ export function Composer({
       )}
     </div>
   );
+}
+
+const MODEL_PROVIDER_LABELS: Record<string, string> = {
+  timiai: "TimiAI",
+  commandcode: "CommandCode",
+  deepseek: "DeepSeek",
+  kimi_code: "Kimi Code",
+  xiaomi_mimo: "Xiaomi Token Plan",
+};
+
+const MODEL_PROVIDER_ORDER = ["timiai", "commandcode", "deepseek", "kimi_code", "xiaomi_mimo"];
+
+function byokModelProviderGroupsForControl(control: SessionConfigControl): ModelProviderGroup[] {
+  const groups = new Map<string, SessionConfigControl["choices"]>();
+  const choices = dedupeControlChoices(control.choices);
+  for (const choice of choices) {
+    const providerId = choice.provider;
+    if (!providerId) return [];
+    const current = groups.get(providerId) ?? [];
+    current.push(choice);
+    groups.set(providerId, current);
+  }
+  if (groups.size === 0) return [];
+  return [...groups.entries()]
+    .sort(([left], [right]) => MODEL_PROVIDER_ORDER.indexOf(left) - MODEL_PROVIDER_ORDER.indexOf(right))
+    .map(([id, groupChoices]) => ({
+      id,
+      label: MODEL_PROVIDER_LABELS[id] ?? id,
+      choices: groupChoices,
+    }));
+}
+
+function activeModelProviderGroupForControl(
+  control: SessionConfigControl | undefined,
+  groups: ModelProviderGroup[],
+) {
+  if (!control || groups.length === 0) return null;
+  return groups.find((group) =>
+    group.choices.some((choice) => choice.id === control.current_value_id),
+  ) ?? groups[0];
+}
+
+function buildModelProviderControl(
+  modelControl: SessionConfigControl | undefined,
+  groups: ModelProviderGroup[],
+  activeGroup: ModelProviderGroup | null,
+): SessionConfigControl | null {
+  if (!modelControl || groups.length === 0 || !activeGroup) return null;
+  return {
+    id: modelProviderControlId(modelControl.id),
+    label: "Provider",
+    description: "BYOK provider",
+    category: "Other",
+    source: modelControl.source,
+    current_value_id: activeGroup.id,
+    current_value_label: activeGroup.label,
+    choices: groups.map((group) => ({
+      id: group.id,
+      label: group.label,
+      description: `${group.choices.length} models`,
+      provider: null,
+    })),
+    enabled: modelControl.enabled,
+  };
+}
+
+function filterModelControlForProvider(
+  modelControl: SessionConfigControl | undefined,
+  activeGroup: ModelProviderGroup | null,
+): SessionConfigControl | undefined {
+  if (!modelControl || !activeGroup) return modelControl;
+  const selected =
+    activeGroup.choices.find((choice) => choice.id === modelControl.current_value_id) ??
+    activeGroup.choices[0];
+  return {
+    ...modelControl,
+    current_value_id: selected?.id ?? modelControl.current_value_id,
+    current_value_label: selected?.label ?? modelControl.current_value_label,
+    choices: activeGroup.choices,
+  };
+}
+
+function modelProviderControlId(modelControlId: string) {
+  return `${modelControlId}:provider`;
 }
 
 function readAttachment(file: File): Promise<Attachment> {
@@ -877,7 +1021,9 @@ function SessionControlSelect({
       >
         {label && <span className="composer-control-label">{label}</span>}
         <span className="composer-control-value">{pending ? "更新中" : selected.label}</span>
-        <span className="composer-control-chevron">v</span>
+        <span className="composer-control-chevron">
+          <ChevronDownIcon />
+        </span>
       </button>
       {open && !unavailable && (
         <div className="composer-control-menu" role="listbox">
@@ -885,7 +1031,7 @@ function SessionControlSelect({
             const selectedChoice = choice.id === control.current_value_id;
             return (
               <button
-                key={choice.id}
+                key={`${choice.provider ?? ""}:${choice.id}`}
                 className={`composer-control-option ${selectedChoice ? "is-selected" : ""}`}
                 type="button"
                 role="option"
@@ -905,11 +1051,38 @@ function SessionControlSelect({
   );
 }
 
+function SendIcon() {
+  return (
+    <svg className="composer-send-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 13V3" />
+      <path d="M4.25 6.75 8 3l3.75 3.75" />
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg className="composer-control-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="m6.25 8.45 3.38-3.38a2.1 2.1 0 0 1 2.97 2.97l-4.24 4.24a3 3 0 0 1-4.24-4.24l4.6-4.6" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg className="composer-chevron-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
+    </svg>
+  );
+}
+
 function dedupeControlChoices(controlChoices: SessionConfigControl["choices"]) {
   const seen = new Set<string>();
   return controlChoices.filter((choice) => {
-    const id = choice.id.trim();
-    if (!id || seen.has(id)) return false;
+    const choiceId = choice.id.trim();
+    if (!choiceId) return false;
+    const id = `${choice.provider ?? ""}:${choiceId}`;
+    if (seen.has(id)) return false;
     seen.add(id);
     return true;
   });

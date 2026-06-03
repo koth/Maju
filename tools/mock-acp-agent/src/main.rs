@@ -7,10 +7,56 @@ use agent_client_protocol::schema::{
     ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Result};
+use std::env;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let port = parse_port_arg()?;
+    if let Some(port) = port {
+        let listener = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(agent_client_protocol::Error::into_internal_error)?;
+        let (reader, writer) = stream.into_split();
+        return run_agent(reader, writer).await;
+    }
+
+    run_agent(tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+fn parse_port_arg() -> Result<Option<u16>> {
+    let mut port = None;
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--port" {
+            let value = args.next().ok_or_else(|| {
+                agent_client_protocol::util::internal_error("--port requires a value")
+            })?;
+            port = Some(value.parse::<u16>().map_err(|error| {
+                agent_client_protocol::util::internal_error(format!(
+                    "invalid --port value: {error}"
+                ))
+            })?);
+        } else {
+            return Err(agent_client_protocol::util::internal_error(format!(
+                "unsupported argument: {arg}"
+            )));
+        }
+    }
+    Ok(port)
+}
+
+async fn run_agent<R, W>(reader: R, writer: W) -> Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
     Agent
         .builder()
         .name("mock-acp-agent")
@@ -238,8 +284,8 @@ async fn main() -> Result<()> {
             agent_client_protocol::on_receive_dispatch!(),
         )
         .connect_to(agent_client_protocol::ByteStreams::new(
-            tokio::io::stdout().compat_write(),
-            tokio::io::stdin().compat(),
+            writer.compat_write(),
+            reader.compat(),
         ))
         .await
 }

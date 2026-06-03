@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AgentPlanPanel,
   PlanApprovalModal,
+  findPlanAcceptOption,
+  findPlanRejectOption,
   shouldShowAgentPlanNearComposer,
 } from "./AgentPlanPanel";
 import type { AgentPlanEntry, UiSnapshot } from "../../types";
@@ -95,5 +97,27 @@ describe("PlanApprovalModal", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "继续规划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "plan");
+  });
+
+  it("prefers one-shot CodeBuddy plan options over allow always", () => {
+    const options = [
+      { id: "allow_always", label: "Always Allow", kind: "AllowAlways" },
+      { id: "allow", label: "Allow", kind: "AllowOnce" },
+      { id: "reject", label: "Reject", kind: "RejectOnce" },
+      { id: "reject_and_exit_plan", label: "Exit plan mode", kind: "RejectOnce" },
+    ];
+
+    expect(findPlanAcceptOption(options)?.id).toBe("allow");
+    expect(findPlanRejectOption(options)?.id).toBe("reject");
+  });
+
+  it("recognizes CodeBuddy interruption plan reject option", () => {
+    const options = [
+      { id: "allow", label: "allow", kind: "CodeBuddy" },
+      { id: "rejectAndExitPlan", label: "rejectAndExitPlan", kind: "CodeBuddy" },
+    ];
+
+    expect(findPlanAcceptOption(options)?.id).toBe("allow");
+    expect(findPlanRejectOption(options)?.id).toBe("rejectAndExitPlan");
   });
 });

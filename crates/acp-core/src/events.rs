@@ -22,6 +22,22 @@ pub struct SessionConfig {
     /// When set to 0, stdio transport is used.
     #[serde(default)]
     pub acp_port: u16,
+    #[serde(default)]
+    pub remote_ssh: Option<RemoteSshSessionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSshSessionConfig {
+    pub ssh_target: String,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    pub remote_workspace_root: String,
+    pub local_port: u16,
+    pub remote_port: u16,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub ssh_command: Option<String>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub ssh_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

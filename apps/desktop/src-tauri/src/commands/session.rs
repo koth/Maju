@@ -32,9 +32,11 @@ pub fn session_set_config_control(
     state: State<'_, AppState>,
     control_id: String,
     value_id: String,
+    provider: Option<String>,
 ) -> Result<SessionConfigState, String> {
     state.with_app(|app_state| {
-        let session_config = app_state.set_session_config_control(&control_id, &value_id)?;
+        let session_config =
+            app_state.set_session_config_control(&control_id, &value_id, provider.as_deref())?;
         crate::events::emit_session_config_updated(&app, &app_state.ui);
         Ok(session_config)
     })

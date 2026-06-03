@@ -6,7 +6,7 @@ mod runtime;
 
 pub use client::{PromptTask, SessionHandle};
 pub use codex_api_proxy::{codex_api_proxy_base_url, ensure_codex_api_proxy};
-pub use events::{ClientEvent, SessionConfig};
+pub use events::{ClientEvent, RemoteSshSessionConfig, SessionConfig};
 pub use mapping::diff_to_hunks;
 
 pub const DEFAULT_AGENT_COMMAND: &str = "codebuddy --acp";

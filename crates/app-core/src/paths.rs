@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, anyhow};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+pub const KODEX_DATA_ROOT_ENV: &str = "KODEX_DATA_ROOT";
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
@@ -8,6 +11,13 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn resolve() -> Result<Self> {
+        Self::resolve_with_data_root(std::env::var_os(KODEX_DATA_ROOT_ENV))
+    }
+
+    fn resolve_with_data_root(data_root: Option<OsString>) -> Result<Self> {
+        if let Some(root) = data_root.filter(|root| !root.is_empty()) {
+            return Ok(Self::from_root(PathBuf::from(root)));
+        }
         let home = dirs_next::home_dir().ok_or_else(|| anyhow!("无法解析当前用户的主目录"))?;
         Ok(Self::from_root(home.join(".kodex")))
     }
@@ -60,5 +70,21 @@ impl AppPaths {
                 .with_context(|| format!("创建 Kodex 数据目录 {} 失败", dir.display()))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_with_data_root_override_uses_exact_root() {
+        let root = PathBuf::from("C:/tmp/kodex-data-root-test");
+
+        let paths = AppPaths::resolve_with_data_root(Some(root.as_os_str().to_os_string()))
+            .expect("override path should resolve");
+
+        assert_eq!(paths.root(), root.as_path());
+        assert_eq!(paths.logs_dir(), root.join("logs"));
     }
 }

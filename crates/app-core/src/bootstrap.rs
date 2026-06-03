@@ -1,12 +1,11 @@
 use std::path::Path;
 use workspace_model::{
-    ChatMessage, InspectorTab, MessageRole, RepositorySnapshot, SessionStatus, SessionSummary,
-    SidebarSection, TimelineItem, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
-    WorkspaceDescriptor,
+    ChatMessage, InspectorTab, MessageRole, RemoteLinuxWorkspace, RepositorySnapshot,
+    SessionStatus, SessionSummary, SidebarSection, TimelineItem, ToolInvocation, ToolLogEntry,
+    ToolStatus, UiSnapshot, WorkspaceDescriptor, WorkspaceLocation,
 };
 
 pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapshot> {
-    let created_at = current_timestamp();
     let descriptor = WorkspaceDescriptor {
         id: uuid::Uuid::new_v4(),
         name: workspace_root
@@ -15,8 +14,23 @@ pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapsh
             .unwrap_or("工作区")
             .to_string(),
         root: workspace_root.to_path_buf(),
+        location: WorkspaceLocation::Local,
     };
+    build_initial_ui_for_descriptor(descriptor)
+}
 
+pub(crate) fn build_initial_remote_ui(remote: RemoteLinuxWorkspace) -> anyhow::Result<UiSnapshot> {
+    let descriptor = WorkspaceDescriptor {
+        id: uuid::Uuid::new_v4(),
+        name: remote.display_name(),
+        root: std::path::PathBuf::from(remote.key()),
+        location: WorkspaceLocation::RemoteLinux(remote),
+    };
+    build_initial_ui_for_descriptor(descriptor)
+}
+
+fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::Result<UiSnapshot> {
+    let created_at = current_timestamp();
     let repository = RepositorySnapshot {
         branch: "加载中".into(),
         head: "待刷新".into(),

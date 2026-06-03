@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -35,4 +35,8 @@ export function onTerminalStatus(callback: (status: TerminalStatusEvent) => void
 
 export function onTerminalExit(callback: (exit: TerminalExitEvent) => void): Promise<UnlistenFn> {
   return listen<TerminalExitEvent>("terminal:exit", (event) => callback(event.payload));
+}
+
+export function onRemoteOpenProgress(callback: (progress: RemoteOpenProgressEvent) => void): Promise<UnlistenFn> {
+  return listen<RemoteOpenProgressEvent>("remote_open:progress", (event) => callback(event.payload));
 }

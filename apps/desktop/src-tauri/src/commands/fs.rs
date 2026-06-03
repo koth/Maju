@@ -25,9 +25,18 @@ pub fn fs_delete_file(state: State<'_, AppState>, path: String) -> Result<(), St
 #[tauri::command]
 pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Result<(), String> {
     state.with_app(|app| {
+        ensure_local_workspace(app)?;
         let target = app.resolve_workspace_entry_for_shell(&path)?;
         reveal_path(&target, select).map_err(|e| format!("Cannot open file explorer: {e}"))
     })
+}
+
+fn ensure_local_workspace(app: &app_core::Application) -> Result<(), String> {
+    if app.is_remote_workspace() {
+        Err("Remote workspaces do not support local filesystem commands yet".into())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]

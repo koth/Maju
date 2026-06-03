@@ -260,16 +260,12 @@ export function SessionList({
   const modalButtonText = modalMode === "workspace" ? "创建工作区" : "创建会话";
   const loadingText = modalMode === "workspace" ? "正在创建工作区..." : "正在创建会话...";
   const selectedAgentStatus = agentSnapshot?.agents.find((agent) => agent.id === selectedAgent) ?? null;
-  const selectedClaudeProfile = agentSnapshot?.claude_woa.profiles.find(
-    (profile) => profile.id === agentSnapshot.claude_woa.selected_profile_id,
+  const selectedClaudeProfile = agentSnapshot?.claude.profiles.find(
+    (profile) => profile.id === agentSnapshot.claude.selected_profile_id,
   );
   const selectedClaudeSetupMessage =
     selectedAgent === "claude-agent-acp" && agentSnapshot && selectedClaudeProfile
-      ? selectedClaudeProfile.id === "woa"
-        ? !agentSnapshot.claude_woa.token.exists || agentSnapshot.claude_woa.token.malformed
-          ? "Claude Agent ACP 需要先在设置中完成 WOA 登录。"
-          : null
-        : selectedClaudeProfile.requires_credential && !selectedClaudeProfile.configured
+      ? selectedClaudeProfile.requires_credential && !selectedClaudeProfile.configured
           ? `Claude ${selectedClaudeProfile.label} 需要先在设置中保存 ${selectedClaudeProfile.credential_label ?? "API key"}。`
           : null
       : null;
@@ -480,20 +476,14 @@ function codexAgentReady(snapshot: AgentSettingsSnapshot) {
     (profile) => profile.id === snapshot.codex_acp.selected_profile_id,
   );
   if (!selectedProfile || selectedProfile.id === "default") return false;
-  if (selectedProfile.id === "woa") {
-    return snapshot.claude_woa.token.exists && !snapshot.claude_woa.token.malformed;
-  }
   return !selectedProfile.requires_credential || selectedProfile.configured;
 }
 
 function claudeAgentReady(snapshot: AgentSettingsSnapshot) {
-  const selectedProfile = snapshot.claude_woa.profiles.find(
-    (profile) => profile.id === snapshot.claude_woa.selected_profile_id,
+  const selectedProfile = snapshot.claude.profiles.find(
+    (profile) => profile.id === snapshot.claude.selected_profile_id,
   );
   if (!selectedProfile) return false;
-  if (selectedProfile.id === "woa") {
-    return snapshot.claude_woa.token.exists && !snapshot.claude_woa.token.malformed;
-  }
   return !selectedProfile.requires_credential || selectedProfile.configured;
 }
 

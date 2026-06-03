@@ -146,7 +146,7 @@ impl FileChangeTracker {
             self.index.insert(path.clone(), meta);
         }
         if let Some(window) = self.active_windows.get_mut(call_id) {
-            if !window.baseline.contains_key(&path) {
+            if !window.baseline.contains_key(&path) && !window.missing_at_start.contains(&path) {
                 if let Some(meta) = observed_meta {
                     if meta.len <= MAX_DIFF_FILE_SIZE {
                         let full_path = self.workspace_root.join(&path);
@@ -189,10 +189,9 @@ impl FileChangeTracker {
 
     pub(crate) fn was_missing_at_start(&self, call_id: &str, path: &str) -> Option<bool> {
         let normalized = self.normalize_candidate_path(path);
-        self.active_windows.get(call_id).map(|window| {
-            window.missing_at_start.contains(&normalized)
-                && !window.baseline.contains_key(&normalized)
-        })
+        self.active_windows
+            .get(call_id)
+            .map(|window| window.missing_at_start.contains(&normalized))
     }
 
     fn normalize_candidate_path(&self, path: &str) -> String {
@@ -506,6 +505,22 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, FileChangeType::Created);
         assert!(changes[0].old_text.is_none());
+    }
+
+    #[test]
+    fn late_candidate_does_not_overwrite_missing_start_baseline() {
+        let dir = tempdir();
+        let mut tracker = FileChangeTracker::new(dir.path());
+        tracker.start_recording("call-1", vec!["new_file.txt".to_string()]);
+
+        fs::write(dir.path().join("new_file.txt"), "content").unwrap();
+        tracker.add_candidate("call-1", "new_file.txt".to_string());
+
+        let changes = tracker.finish_recording("call-1");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].change_type, FileChangeType::Created);
+        assert!(changes[0].old_text.is_none());
+        assert_eq!(changes[0].new_text, "content");
     }
 
     #[test]

@@ -16,15 +16,13 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
-const VENUS_CHAT_COMPLETIONS_URL: &str =
-    "https://v2.open.venus.woa.com/llmproxy/v1/chat/completions";
-const CODEX_WOA_RESPONSES_URL: &str =
-    "https://copilot.code.woa.com/server/chat/codebuddy-gateway/codex/responses";
-const CODEX_WOA_APP_VERSION: &str = "0.0.9";
 const TIMIAI_RESPONSES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses";
 const TIMIAI_RESPONSES_COMPACT_URL: &str =
     "https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact";
 const TIMIAI_MESSAGES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/v1/messages";
+const COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
+    "https://api.commandcode.ai/provider/v1/chat/completions";
+const COMMANDCODE_UPSTREAM_MESSAGES_URL: &str = "https://api.commandcode.ai/provider/v1/messages";
 const DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 const KIMI_UPSTREAM_CHAT_COMPLETIONS_URL: &str = "https://api.kimi.com/coding/v1/chat/completions";
 const KIMI_UPSTREAM_MESSAGES_URL: &str = "https://api.kimi.com/coding/v1/messages";
@@ -68,7 +66,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
     let config = CODEX_API_PROXY_CONFIG
         .get_or_init(|| {
             Arc::new(RwLock::new(CodexApiProxyConfig {
-                provider: "venus".to_string(),
+                provider: "timiai".to_string(),
                 api_key: String::new(),
                 api_keys: BTreeMap::new(),
                 session_ids: BTreeMap::new(),
@@ -216,11 +214,13 @@ async fn proxy_codex_api_request(
         ));
     }
     let path = request.uri().path().to_string();
+    let explicit_provider = proxy_provider_from_path(&path);
     if path.ends_with("/messages") {
-        return proxy_anthropic_messages_request(request, config).await;
+        return proxy_anthropic_messages_request(request, config, explicit_provider).await;
     }
     if path.ends_with("/responses/compact") {
-        return proxy_native_codex_responses_compact_request(request, config).await;
+        return proxy_native_codex_responses_compact_request(request, config, explicit_provider)
+            .await;
     }
     if !path.ends_with("/responses") {
         return Ok(response_with_status(
@@ -235,7 +235,7 @@ async fn proxy_codex_api_request(
         .read()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| CodexApiProxyConfig {
-            provider: "venus".to_string(),
+            provider: "timiai".to_string(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
@@ -250,7 +250,8 @@ async fn proxy_codex_api_request(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let provider = proxy_provider_for_model(&requested_model, &config.provider);
+    let provider = explicit_provider
+        .unwrap_or_else(|| proxy_provider_for_model(&requested_model, &config.provider));
     let payload = prepare_responses_payload_for_provider(payload, provider);
     log_responses_payload_summary("responses_request", &payload, provider);
     let api_key = api_key_for_proxy_provider(&config, provider);
@@ -262,7 +263,7 @@ async fn proxy_codex_api_request(
             "application/json",
         ));
     }
-    if matches!(normalize_proxy_provider(provider), "woa" | "timiai") {
+    if normalize_proxy_provider(provider) == "timiai" {
         let session_id = session_id_for_proxy_provider(&config, provider);
         return proxy_native_codex_responses_request(payload, &api_key, provider, &session_id)
             .await;
@@ -280,6 +281,7 @@ async fn proxy_codex_api_request(
     };
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
     match normalize_proxy_provider(provider) {
+        "commandcode" => log_chat_payload_summary("commandcode_request", &chat_payload),
         "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
         "xiaomi_mimo" => log_chat_payload_summary("xiaomi_request", &chat_payload),
         _ => {}
@@ -293,15 +295,15 @@ async fn proxy_codex_api_request(
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
-    let request = if normalize_proxy_provider(provider) == "woa" {
-        with_woa_gateway_headers(request, &api_key)
-    } else {
-        request.bearer_auth(api_key)
+    let request = request.bearer_auth(api_key);
+    let request_body = serde_json::to_vec(&chat_payload)?;
+    let upstream = match request.body(request_body).send().await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            log_chat_completions_upstream_error(provider, upstream_url, &chat_payload, &error);
+            return Err(error.into());
+        }
     };
-    let upstream = request
-        .body(serde_json::to_vec(&chat_payload)?)
-        .send()
-        .await?;
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -309,6 +311,13 @@ async fn proxy_codex_api_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    log_chat_completions_upstream_response(
+        provider,
+        upstream_url,
+        &chat_payload,
+        status,
+        &content_type,
+    );
     if is_event_stream(&content_type) {
         if status.is_success() {
             append_codex_api_proxy_log(&format!(
@@ -335,10 +344,10 @@ async fn proxy_codex_api_request(
             serde_json::to_vec(&response)?
         }
     } else {
-        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
         body.to_vec()
     };
-    log_suspicious_venus_response(status, &content_type, &body);
+    log_suspicious_upstream_response(status, &content_type, &body);
 
     let mut response = Response::new(full_body(Bytes::from(body)));
     *response.status_mut() = status;
@@ -415,7 +424,7 @@ async fn proxy_native_codex_responses_request(
     let request = client
         .post(upstream_responses_url(provider))
         .header(CONTENT_TYPE, "application/json");
-    let upstream = with_native_responses_headers(request, api_key, provider, session_id)
+    let upstream = with_native_responses_headers(request, api_key, session_id)
         .body(serde_json::to_vec(&payload)?)
         .send()
         .await?;
@@ -458,18 +467,19 @@ async fn proxy_native_codex_responses_request(
 async fn proxy_native_codex_responses_compact_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
+    explicit_provider: Option<&'static str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
         .read()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| CodexApiProxyConfig {
-            provider: "venus".to_string(),
+            provider: "timiai".to_string(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
         });
-    let provider = normalize_proxy_provider(&config.provider);
+    let provider = explicit_provider.unwrap_or_else(|| normalize_proxy_provider(&config.provider));
     if provider != "timiai" {
         return Ok(response_with_status(
             StatusCode::NOT_FOUND,
@@ -517,13 +527,14 @@ async fn proxy_native_codex_responses_compact_request(
 async fn proxy_anthropic_messages_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
+    explicit_provider: Option<&'static str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
         .read()
         .map(|guard| guard.clone())
         .unwrap_or_else(|_| CodexApiProxyConfig {
-            provider: "venus".to_string(),
+            provider: "timiai".to_string(),
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
@@ -534,7 +545,8 @@ async fn proxy_anthropic_messages_request(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let provider = proxy_provider_for_model(&requested_model, &config.provider);
+    let provider = explicit_provider
+        .unwrap_or_else(|| proxy_provider_for_model(&requested_model, &config.provider));
     log_anthropic_payload_summary(
         &format!("anthropic_messages_request provider={provider}"),
         &payload,
@@ -559,7 +571,7 @@ async fn proxy_anthropic_messages_request(
         .await;
     }
     match normalize_proxy_provider(provider) {
-        "kimi_code" | "xiaomi_mimo" | "timiai" => {
+        "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
             proxy_native_anthropic_messages_request(payload, &api_key, provider, &session_id).await
         }
         _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, provider).await,
@@ -640,7 +652,14 @@ async fn proxy_native_anthropic_messages_request(
     } else {
         request.header("x-api-key", api_key)
     };
-    let upstream = request.body(serde_json::to_vec(&payload)?).send().await?;
+    let request_body = serde_json::to_vec(&payload)?;
+    let upstream = match request.body(request_body).send().await {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            log_native_anthropic_upstream_send_error(provider, upstream_url, &payload, &error);
+            return Err(error.into());
+        }
+    };
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -648,6 +667,7 @@ async fn proxy_native_anthropic_messages_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    log_native_anthropic_upstream_response(provider, upstream_url, &payload, status, &content_type);
     if is_event_stream(&content_type) {
         return Ok(streaming_passthrough_response(
             upstream,
@@ -668,7 +688,7 @@ async fn proxy_native_anthropic_messages_request(
                 .unwrap_or_default(),
             status.as_u16()
         ));
-        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
     }
     let mut response = Response::new(full_body(body));
     *response.status_mut() = status;
@@ -744,7 +764,7 @@ async fn proxy_timiai_responses_to_anthropic_messages_request(
                 .unwrap_or_default(),
             status.as_u16()
         ));
-        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
     }
     let mut response_content_type = content_type.clone();
     let body = if requested_stream && status.is_success() {
@@ -783,11 +803,7 @@ async fn proxy_completion_to_anthropic_messages_request(
     let request = client
         .post(upstream_chat_completions_url(provider))
         .header(CONTENT_TYPE, "application/json");
-    let request = if normalize_proxy_provider(provider) == "woa" {
-        with_woa_gateway_headers(request, api_key)
-    } else {
-        request.bearer_auth(api_key)
-    };
+    let request = request.bearer_auth(api_key);
     let upstream = request
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
@@ -809,7 +825,7 @@ async fn proxy_completion_to_anthropic_messages_request(
         let chat_response: Value = serde_json::from_slice(body.as_ref())?;
         serde_json::to_vec(&chat_response_to_anthropic_response(chat_response))?
     } else {
-        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
         body.to_vec()
     };
     let response_content_type = content_type;
@@ -834,29 +850,22 @@ async fn proxy_completion_to_anthropic_messages_request(
 
 fn normalize_proxy_provider(provider: &str) -> &'static str {
     match provider.trim().to_ascii_lowercase().as_str() {
-        "woa" | "codebuddy" | "codebuddy_gateway" | "codebuddy-gateway" => "woa",
         "timiai" | "timi" | "timi-ai" | "timi_ai" => "timiai",
+        "commandcode" | "command-code" | "command_code" => "commandcode",
         "deepseek" => "deepseek",
         "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
         "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
-        _ => "venus",
+        _ => "timiai",
     }
 }
 
-fn proxy_provider_for_model<'a>(model: &str, fallback_provider: &'a str) -> &'a str {
-    if normalize_proxy_provider(fallback_provider) == "timiai" {
-        return "timiai";
-    }
-    let normalized = model.trim().to_ascii_lowercase();
-    if normalized.contains("kimi-for-coding") {
-        return "kimi_code";
-    }
-    if normalized.contains("deepseek") {
-        return "deepseek";
-    }
-    if normalized.contains("mimo") {
-        return "xiaomi_mimo";
-    }
+fn proxy_provider_from_path(path: &str) -> Option<&'static str> {
+    let (_, rest) = path.split_once("/providers/")?;
+    let provider = rest.split('/').next().unwrap_or_default().trim();
+    (!provider.is_empty()).then(|| normalize_proxy_provider(provider))
+}
+
+fn proxy_provider_for_model<'a>(_model: &str, fallback_provider: &'a str) -> &'a str {
     normalize_proxy_provider(fallback_provider)
 }
 
@@ -878,50 +887,27 @@ fn session_id_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -
 
 fn upstream_chat_completions_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
+        "commandcode" => COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL,
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
         "kimi_code" => KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_CHAT_COMPLETIONS_URL,
-        _ => VENUS_CHAT_COMPLETIONS_URL,
+        _ => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
     }
 }
 
 fn upstream_responses_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
-        "woa" => CODEX_WOA_RESPONSES_URL,
         "timiai" => TIMIAI_RESPONSES_URL,
-        _ => CODEX_WOA_RESPONSES_URL,
+        _ => TIMIAI_RESPONSES_URL,
     }
 }
 
 fn with_native_responses_headers(
     request: reqwest::RequestBuilder,
     api_key: &str,
-    provider: &str,
     session_id: &str,
 ) -> reqwest::RequestBuilder {
-    if normalize_proxy_provider(provider) == "timiai" {
-        with_timiai_headers(request, api_key, session_id)
-    } else {
-        with_woa_gateway_headers(request, api_key)
-    }
-}
-
-fn with_woa_gateway_headers(
-    request: reqwest::RequestBuilder,
-    access_token: &str,
-) -> reqwest::RequestBuilder {
-    request
-        .header("x-app-name", "codex-internal")
-        .header("x-request-platform", "codex-internal")
-        .header("x-scene-name", "common_chat")
-        .header("x-channel", "codex-internal")
-        .header("x-app-version", CODEX_WOA_APP_VERSION)
-        .header(
-            "User-Agent",
-            format!("Codex-Internal/{CODEX_WOA_APP_VERSION}"),
-        )
-        .header("x-conversation-id", uuid::Uuid::new_v4().to_string())
-        .header("x-api-key", access_token)
+    with_timiai_headers(request, api_key, session_id)
 }
 
 fn with_timiai_headers(
@@ -957,6 +943,7 @@ fn timiai_authorization_log_state(api_key: &str) -> &'static str {
 fn upstream_messages_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
         "timiai" => TIMIAI_MESSAGES_URL,
+        "commandcode" => COMMANDCODE_UPSTREAM_MESSAGES_URL,
         "kimi_code" => KIMI_UPSTREAM_MESSAGES_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_MESSAGES_URL,
         _ => KIMI_UPSTREAM_MESSAGES_URL,
@@ -1135,10 +1122,10 @@ async fn proxy_kimi_codex_api_request(
             serde_json::to_vec(&response)?
         }
     } else {
-        log_suspicious_venus_response(status, &content_type, body.as_ref());
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
         body.to_vec()
     };
-    log_suspicious_venus_response(status, &content_type, &body);
+    log_suspicious_upstream_response(status, &content_type, &body);
 
     let mut response = Response::new(full_body(Bytes::from(body)));
     *response.status_mut() = status;
@@ -1707,7 +1694,7 @@ fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
         }
     }
     let mut chat = json!({
-        "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String(VENUS_MODEL_FALLBACK.to_string())),
+        "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String(CHAT_MODEL_FALLBACK.to_string())),
         "messages": messages,
         "stream": anthropic.get("stream").and_then(Value::as_bool).unwrap_or(false)
     });
@@ -1728,7 +1715,7 @@ fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
     chat
 }
 
-const VENUS_MODEL_FALLBACK: &str = "glm-5.1";
+const CHAT_MODEL_FALLBACK: &str = "gpt-5.5";
 
 fn anthropic_assistant_message_to_chat_message(item: &Value) -> Value {
     let mut text_parts = Vec::new();
@@ -1921,7 +1908,7 @@ fn chat_response_to_anthropic_response(chat: Value) -> Value {
         "id": chat.get("id").cloned().unwrap_or_else(|| Value::String("msg_proxy".to_string())),
         "type": "message",
         "role": "assistant",
-        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String(VENUS_MODEL_FALLBACK.to_string())),
+        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String(CHAT_MODEL_FALLBACK.to_string())),
         "content": if content.is_empty() {
             json!([])
         } else {
@@ -1941,7 +1928,7 @@ fn anthropic_response_to_sse(response: &Value) -> Vec<u8> {
     let model = response
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or(VENUS_MODEL_FALLBACK);
+        .unwrap_or(CHAT_MODEL_FALLBACK);
     let mut output = String::new();
     push_sse(
         &mut output,
@@ -2149,18 +2136,18 @@ fn chat_response_to_responses_response(chat: Value) -> anyhow::Result<Value> {
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .context("Venus chat response did not contain choices[0]")?;
+        .context("chat response did not contain choices[0]")?;
     let message = choice
         .get("message")
-        .context("Venus chat response did not contain message")?;
+        .context("chat response did not contain message")?;
     let output = chat_message_to_responses_output(message);
     remember_message_reasoning(message);
     let usage = normalized_chat_usage(chat.get("usage"));
     Ok(json!({
-        "id": chat.get("id").cloned().unwrap_or_else(|| Value::String("resp_venus".to_string())),
+        "id": chat.get("id").cloned().unwrap_or_else(|| Value::String("resp_proxy".to_string())),
         "object": "response",
         "created_at": chat.get("created").cloned().unwrap_or_else(|| Value::from(0)),
-        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String("glm-5.1".to_string())),
+        "model": chat.get("model").cloned().unwrap_or_else(|| Value::String(CHAT_MODEL_FALLBACK.to_string())),
         "status": "completed",
         "output": output,
         "usage": usage,
@@ -2187,7 +2174,7 @@ fn chat_message_to_responses_output(message: &Value) -> Vec<Value> {
 
 fn response_message_item_with_reasoning(text: &str, reasoning_content: Option<&str>) -> Value {
     let mut item = json!({
-        "id": "msg_venus",
+        "id": "msg_proxy",
         "type": "message",
         "role": "assistant",
         "status": "completed",
@@ -2203,7 +2190,7 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
     let id = tool_call
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("call_venus");
+        .unwrap_or("call_proxy");
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     let name = function
         .get("name")
@@ -2511,7 +2498,7 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
                 "type": "response.output_item.added",
                 "output_index": 0,
                 "item": {
-                    "id": "msg_venus",
+                    "id": "msg_proxy",
                     "type": "message",
                     "role": "assistant",
                     "status": "in_progress",
@@ -2526,7 +2513,7 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
                 "type": "response.content_part.added",
                 "output_index": 0,
                 "content_index": 0,
-                "item_id": "msg_venus",
+                "item_id": "msg_proxy",
                 "part": { "type": "output_text", "text": "" }
             }),
         );
@@ -2539,7 +2526,7 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
             "type": "response.output_text.delta",
             "output_index": 0,
             "content_index": 0,
-            "item_id": "msg_venus",
+            "item_id": "msg_proxy",
             "delta": delta
         }),
     );
@@ -2558,7 +2545,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
         call.id = id.to_string();
     }
     if call.id.is_empty() {
-        call.id = format!("call_venus_{index}");
+        call.id = format!("call_proxy_{index}");
     }
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     if let Some(name) = function.get("name").and_then(Value::as_str) {
@@ -2634,7 +2621,7 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
                 "type": "response.output_text.done",
                 "output_index": 0,
                 "content_index": 0,
-                "item_id": "msg_venus",
+                "item_id": "msg_proxy",
                 "text": state.text
             }),
         );
@@ -2645,7 +2632,7 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
                 "type": "response.content_part.done",
                 "output_index": 0,
                 "content_index": 0,
-                "item_id": "msg_venus",
+                "item_id": "msg_proxy",
                 "part": { "type": "output_text", "text": state.text }
             }),
         );
@@ -3061,8 +3048,8 @@ impl ChatSseStreamConverter {
         Self {
             buffer: String::new(),
             state: ChatStreamState {
-                response_id: "resp_venus".to_string(),
-                model: "glm-5.1".to_string(),
+                response_id: "resp_proxy".to_string(),
+                model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
                 ..Default::default()
             },
@@ -3110,7 +3097,7 @@ impl ChatAnthropicSseStreamConverter {
             buffer: String::new(),
             state: ChatStreamState {
                 response_id: "msg_proxy".to_string(),
-                model: VENUS_MODEL_FALLBACK.to_string(),
+                model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
                 ..Default::default()
             },
@@ -3381,7 +3368,7 @@ fn responses_response_to_sse(response: &Value) -> Vec<u8> {
                     let item_id = item
                         .get("id")
                         .and_then(Value::as_str)
-                        .unwrap_or("msg_venus");
+                        .unwrap_or("msg_proxy");
                     let text = item
                         .get("content")
                         .and_then(Value::as_array)
@@ -3681,6 +3668,120 @@ fn log_chat_payload_summary(label: &str, payload: &Value) {
     ));
 }
 
+fn log_chat_completions_upstream_error(
+    provider: &str,
+    url: &str,
+    payload: &Value,
+    error: &reqwest::Error,
+) {
+    append_codex_api_proxy_log(&format!(
+        "chat_completions_upstream_error provider={} url={} model={} stream={} tools={} error={} debug={:?}",
+        normalize_proxy_provider(provider),
+        url,
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>"),
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        error,
+        error
+    ));
+}
+
+fn log_chat_completions_upstream_response(
+    provider: &str,
+    url: &str,
+    payload: &Value,
+    status: StatusCode,
+    content_type: &str,
+) {
+    append_codex_api_proxy_log(&format!(
+        "chat_completions_upstream_response provider={} url={} model={} stream={} tools={} status={} content_type={}",
+        normalize_proxy_provider(provider),
+        url,
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>"),
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        status.as_u16(),
+        content_type
+    ));
+}
+
+fn log_native_anthropic_upstream_send_error(
+    provider: &str,
+    url: &str,
+    payload: &Value,
+    error: &reqwest::Error,
+) {
+    append_codex_api_proxy_log(&format!(
+        "native_anthropic_upstream_send_error provider={} url={} model={} stream={} tools={} error={} debug={:?}",
+        normalize_proxy_provider(provider),
+        url,
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>"),
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        error,
+        error
+    ));
+}
+
+fn log_native_anthropic_upstream_response(
+    provider: &str,
+    url: &str,
+    payload: &Value,
+    status: StatusCode,
+    content_type: &str,
+) {
+    append_codex_api_proxy_log(&format!(
+        "native_anthropic_upstream_response provider={} url={} model={} stream={} tools={} status={} content_type={}",
+        normalize_proxy_provider(provider),
+        url,
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>"),
+        payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        status.as_u16(),
+        content_type
+    ));
+}
+
 fn log_anthropic_payload_summary(label: &str, payload: &Value) {
     let model = payload
         .get("model")
@@ -3781,7 +3882,7 @@ fn is_event_stream(content_type: &str) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-fn log_suspicious_venus_response(status: StatusCode, content_type: &str, body: &[u8]) {
+fn log_suspicious_upstream_response(status: StatusCode, content_type: &str, body: &[u8]) {
     if is_event_stream(content_type) {
         let Ok(text) = std::str::from_utf8(body) else {
             return;
@@ -3918,7 +4019,7 @@ mod tests {
             "stream": true
         });
 
-        let chat = responses_payload_to_chat_payload(payload, "venus").unwrap();
+        let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
 
         assert_eq!(chat["model"], "glm-5.1");
         assert_eq!(chat["stream"], true);
@@ -3968,7 +4069,7 @@ mod tests {
             }]
         });
 
-        let chat = responses_payload_to_chat_payload(payload, "venus").unwrap();
+        let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
 
         assert_eq!(
             chat["tools"][0]["function"]["parameters"]["properties"]["patch"]["type"],
@@ -4001,11 +4102,9 @@ mod tests {
     }
 
     #[test]
-    fn woa_provider_uses_native_codex_gateway_responses() {
-        assert_eq!(normalize_proxy_provider("woa"), "woa");
-        assert_eq!(normalize_proxy_provider("codebuddy-gateway"), "woa");
-        assert_eq!(upstream_responses_url("woa"), CODEX_WOA_RESPONSES_URL);
-        assert!(upstream_responses_url("woa").ends_with("/codex/responses"));
+    fn unsupported_provider_aliases_fall_back_to_timiai() {
+        assert_eq!(normalize_proxy_provider("unsupported"), "timiai");
+        assert_eq!(normalize_proxy_provider("legacy-gateway"), "timiai");
     }
 
     #[test]
@@ -4569,7 +4668,7 @@ mod tests {
             "model": "deepseek-v4-pro",
             "status": "completed",
             "output": [{
-                "id": "msg_venus",
+                "id": "msg_proxy",
                 "type": "message",
                 "role": "assistant",
                 "status": "completed",

@@ -371,7 +371,9 @@ impl Application {
                     had_file_changes = true;
                 }
             }
-            if let ClientEvent::ToolDiffPreview { path, hunks, .. } = event {
+            if let ClientEvent::ToolDiffPreview { id, path, hunks } = event
+                && self.tool_diff_preview_matches_recording_window(id, path, hunks)
+            {
                 had_file_changes |= self.apply_tool_diff_preview_to_review(path, path, hunks);
             }
         }

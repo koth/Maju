@@ -1,0 +1,323 @@
+.remote-open-panel,
+.remote-open-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.remote-open-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.remote-open-heading p {
+  margin: 4px 0 0;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.remote-open-status,
+.remote-open-empty p,
+.remote-open-validation,
+.remote-open-note {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.remote-open-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.remote-open-title {
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.remote-open-context {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 10px;
+}
+
+.remote-open-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(215, 225, 223, 0.035);
+}
+
+.remote-open-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.remote-open-step-head > span {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border: 1px solid var(--interactive-selected-border);
+  border-radius: 999px;
+  background: var(--interactive-selected);
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.remote-open-step-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.remote-open-step-head strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.remote-open-step-head small {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-open-field {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.remote-open-field input,
+.remote-open-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+}
+
+.remote-open-field input {
+  font-family: var(--font-mono);
+}
+
+.remote-open-agent-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.remote-open-agent-option {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.remote-open-agent-option strong,
+.remote-open-agent-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-open-agent-option strong {
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.remote-open-agent-option small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.remote-open-agent-option:hover {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+}
+
+.remote-open-agent-option.is-selected {
+  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.remote-open-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.remote-open-primary,
+.remote-open-secondary {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.remote-open-primary {
+  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
+  color: var(--text-strong);
+}
+
+.remote-open-secondary {
+  background: rgba(215, 225, 223, 0.04);
+}
+
+.remote-open-primary:hover:not(:disabled),
+.remote-open-secondary:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.remote-open-primary:disabled,
+.remote-open-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.remote-open-error,
+.remote-open-success {
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.remote-open-error {
+  color: var(--danger);
+  background: var(--danger-soft, rgba(229, 90, 90, 0.12));
+}
+
+.remote-open-success {
+  color: var(--success);
+  background: var(--success-soft, rgba(106, 168, 159, 0.14));
+}
+
+.remote-open-validation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remote-open-validation .is-ok {
+  color: var(--success);
+}
+
+.remote-open-validation .is-failed {
+  color: var(--warning);
+}
+
+.remote-open-progress {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(215, 225, 223, 0.035);
+}
+
+.remote-open-progress-item {
+  display: grid;
+  grid-template-rows: 14px auto minmax(0, 1fr);
+  justify-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.remote-open-progress-dot {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(215, 225, 223, 0.08);
+}
+
+.remote-open-progress-item small {
+  width: 100%;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.remote-open-progress-item.is-running {
+  color: var(--text-strong);
+}
+
+.remote-open-progress-item.is-running .remote-open-progress-dot {
+  border-color: var(--interactive-selected-border);
+  background: var(--interactive-selected);
+}
+
+.remote-open-progress-item.is-succeeded .remote-open-progress-dot {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.remote-open-progress-item.is-failed {
+  color: var(--danger);
+}
+
+.remote-open-progress-item.is-failed .remote-open-progress-dot {
+  border-color: var(--danger);
+  background: var(--danger);
+}
+
+@media (max-width: 760px) {
+  .remote-open-context {
+    grid-template-columns: 1fr;
+  }
+
+  .remote-open-progress {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .remote-open-agent-options {
+    grid-template-columns: 1fr;
+  }
+}

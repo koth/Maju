@@ -74,12 +74,8 @@ export function PlanApprovalModal({
 }: PlanApprovalModalProps) {
   if (!approval) return null;
 
-  const acceptOption =
-    approval.options.find((option) => option.id === "default") ??
-    approval.options.find((option) => option.kind.toLowerCase().includes("allow"));
-  const rejectOption =
-    approval.options.find((option) => option.id === "plan") ??
-    approval.options.find((option) => option.kind.toLowerCase().includes("reject"));
+  const acceptOption = findPlanAcceptOption(approval.options);
+  const rejectOption = findPlanRejectOption(approval.options);
   const canAct = !!onPermissionSelect;
   const completed = entries.filter((entry) => entry.status === "completed").length;
 
@@ -145,6 +141,26 @@ export function PlanApprovalModal({
         </div>
       </section>
     </div>
+  );
+}
+
+export function findPlanAcceptOption(options: PermissionOption[]) {
+  return (
+    options.find((option) => option.id === "default") ??
+    options.find((option) => option.id === "allow") ??
+    options.find((option) => option.id === "allow_once") ??
+    options.find((option) => option.kind.toLowerCase().includes("allow"))
+  );
+}
+
+export function findPlanRejectOption(options: PermissionOption[]) {
+  return (
+    options.find((option) => option.id === "plan") ??
+    options.find((option) => option.id === "reject") ??
+    options.find((option) => option.id === "deny") ??
+    options.find((option) => option.id === "reject_and_exit_plan") ??
+    options.find((option) => option.id === "rejectAndExitPlan") ??
+    options.find((option) => option.kind.toLowerCase().includes("reject"))
   );
 }
 

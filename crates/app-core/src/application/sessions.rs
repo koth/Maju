@@ -127,6 +127,7 @@ impl Application {
             resume_session_id: resume_id,
             log_id: make_log_id(),
             acp_port: self.acp_port,
+            remote_ssh: self.remote_ssh_session_config(),
         })
         .map_err(|e| e.to_string())?;
         if let Some(acp_id) = resume_id_for_handle {
@@ -224,6 +225,7 @@ impl Application {
             resume_session_id: resume_acp_id,
             log_id: make_log_id(),
             acp_port: self.acp_port,
+            remote_ssh: self.remote_ssh_session_config(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
@@ -327,6 +329,7 @@ impl Application {
             resume_session_id: None,
             log_id: make_log_id(),
             acp_port: self.acp_port,
+            remote_ssh: self.remote_ssh_session_config(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");

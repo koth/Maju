@@ -1,17 +1,17 @@
-use crate::bootstrap::{build_initial_ui, update_initial_agent_notice};
+use crate::bootstrap::{build_initial_remote_ui, build_initial_ui, update_initial_agent_notice};
 use crate::file_tracker::FileChangeTracker;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
-use acp_core::{ClientEvent, PromptTask, SessionConfig, SessionHandle};
+use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, SessionConfig, SessionHandle};
 use git_service::GitService;
 use session_store::SessionStore;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, MessageRole, SessionAttentionState, SessionConfigSource,
-    SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem, ToolInvocation,
-    ToolLogEntry, ToolStatus, UserPromptContent,
+    AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
+    SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
+    ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
 };
 
 mod bootstrap;
@@ -178,6 +178,7 @@ pub struct Application {
     app_paths: AppPaths,
     pub agent_command: String,
     acp_port: u16,
+    remote_ssh: Option<RemoteSshSessionConfig>,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,
@@ -299,7 +300,8 @@ fn normalize_title_for_prompt_compare(value: &str) -> String {
 fn display_codex_provider(provider: &str) -> &str {
     match provider {
         "default" => "默认",
-        "venus" => "Venus",
+        "byok" => "BYOK",
+        "timiai" => "TimiAI",
         "deepseek" => "DeepSeek",
         other => other,
     }
@@ -401,6 +403,25 @@ impl Application {
     fn runtime_needs_attention(&self) -> bool {
         self.runtime_has_pending_permission()
             || matches!(self.ui.session.status, SessionStatus::Interrupted)
+    }
+
+    pub(super) fn remote_ssh_session_config(&self) -> Option<RemoteSshSessionConfig> {
+        self.remote_ssh.clone()
+    }
+
+    pub fn is_remote_workspace(&self) -> bool {
+        matches!(
+            self.ui.workspace.location,
+            workspace_model::WorkspaceLocation::RemoteLinux(_)
+        )
+    }
+
+    pub(crate) fn ensure_local_workspace_for(&self, operation: &str) -> Result<(), String> {
+        if self.is_remote_workspace() {
+            Err(format!("Remote workspaces do not support {operation} yet"))
+        } else {
+            Ok(())
+        }
     }
 }
 
