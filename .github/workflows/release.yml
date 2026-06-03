@@ -184,9 +184,11 @@ jobs:
           tar -C "${out_dir}/codex-acp" -czf "dist/codex-acp-${suffix}.tar.gz" .
           tar -C "${out_dir}/kodex-claude" -czf "dist/kodex-claude-${suffix}.tar.gz" .
 
-          tar -tzf "dist/codex-acp-${suffix}.tar.gz" | grep -qx "./bin/codex-acp"
-          tar -tzf "dist/codex-acp-${suffix}.tar.gz" | grep -qx "./codex-resources/bwrap"
-          tar -tzf "dist/kodex-claude-${suffix}.tar.gz" | grep -qx "./bin/claude-agent-acp"
+          tar -tzf "dist/codex-acp-${suffix}.tar.gz" > "dist/codex-acp-${suffix}.files"
+          tar -tzf "dist/kodex-claude-${suffix}.tar.gz" > "dist/kodex-claude-${suffix}.files"
+          grep -Fx "./bin/codex-acp" "dist/codex-acp-${suffix}.files"
+          grep -Fx "./codex-resources/bwrap" "dist/codex-acp-${suffix}.files"
+          grep -Fx "./bin/claude-agent-acp" "dist/kodex-claude-${suffix}.files"
 
       - name: Upload remote agent assets
         uses: softprops/action-gh-release@v2
