@@ -25,10 +25,9 @@ Kodex 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，
 ## 初次使用
 
 1. 启动 Kodex 后，先进入设置页选择默认智能体。
-2. 如果在公司网络或已有 WOA 登录能力，优先选择 **WOA** 通道；Kodex 会引导浏览器登录并复用 token。
-3. 如果使用自己的模型 key，选择 **Codex / Claude → BYOK**，再配置 DeepSeek、Kimi Code、Xiaomi MiMo 等模型来源。
-4. 如果本机已经安装 CodeBuddy CLI，也可以直接使用默认 CodeBuddy ACP 后端。
-5. 打开一个代码目录作为 workspace，在底部输入需求；智能体执行后的文件改动会出现在右侧 Review/Git 区域。
+2. 如果有自己的模型 Key，选择 **BYOK** 模式，从 **CommandCode**、**DeepSeek**、**Kimi Code**、**Xiaomi Token Plan** 等模型来源中选择一个，填入对应的 API Key。
+3. 如果本机已经安装 CodeBuddy CLI，也可以选择 CodeBuddy 作为 ACP 后端。
+4. 打开一个代码目录作为 workspace，在底部输入需求；智能体执行后的文件改动会出现在右侧 Review/Git 区域。
 
 ## 常见工作流
 
@@ -180,27 +179,24 @@ The `.github/workflows/release.yml` workflow builds Windows x64, macOS Intel, an
 
 ## 运行时数据
 
-Packaged and development builds store Kodex-owned data under the current user's home directory:
+Packaged and development builds store Kodex-owned data under `~/.kodex/` (overridable via `KODEX_DATA_ROOT`):
 
 ```text
 ~/.kodex/
   config/
   logs/
   sessions/sessions.db
-  workspaces/recent-workspaces.json
+  workspaces/
+  attachments/
 ```
 
 Workspace source files, git operations, and file edits remain scoped to the selected workspace. Kodex does not create workspace-local `.kodex` application data for new workspaces. Existing `{workspace}/.kodex/sessions.db` files are imported into `~/.kodex/sessions/sessions.db` without deleting the original file.
 
 ## ACP 后端
 
-Kodex can launch the selected ACP backend from settings. The legacy/default CodeBuddy command is:
+Kodex 默认使用 Claude Agent ACP（`claude-agent-acp`）作为 ACP 后端，也可在设置中选择 Codex ACP（`codex-acp`）或 CodeBuddy（`codebuddy`）。
 
-```bash
-codebuddy --acp
-```
-
-On Windows, the spawned command is resolved as `codebuddy.cmd --acp` so child-process launch works correctly.
+CodeBuddy 对应的启动命令为 `codebuddy --acp`；在 Windows 上，该命令会被解析为 `codebuddy.cmd --acp` 以正确启动子进程。
 
 To override the backend agent command during development, set `ACP_AGENT_COMMAND` before launching:
 

@@ -82,6 +82,7 @@ const MIMO_MODEL_CONTEXT_WINDOW: i64 = 1_000_000;
 const MIMO_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
 const CODEX_AUTH_METHOD_API_KEY: &str = "apikey";
 const CODEX_REASONING_EFFORT_NONE: &str = "none";
+const PROVIDER_MODEL_ID_PREFIX: &str = "kodex-provider/";
 
 const DEEPSEEK_CATALOG_MODELS: &[&str] = &["deepseek-v4-pro", "deepseek-v4-flash"];
 const COMMANDCODE_CATALOG_MODELS: &[&str] = &[
@@ -128,12 +129,12 @@ const COMMANDCODE_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("zai-org/GLM-5.1", 200_000),
     ("zai-org/GLM-5", 200_000),
     ("MiniMaxAI/MiniMax-M3", 1_000_000),
-    ("MiniMaxAI/MiniMax-M2.7", 200_000),
-    ("MiniMaxAI/MiniMax-M2.5", 200_000),
+    ("MiniMaxAI/MiniMax-M2.7", 204_800),
+    ("MiniMaxAI/MiniMax-M2.5", 204_800),
     ("deepseek/deepseek-v4-pro", 1_000_000),
     ("deepseek/deepseek-v4-flash", 1_000_000),
-    ("Qwen/Qwen3.6-Max-Preview", 200_000),
-    ("Qwen/Qwen3.6-Plus", 200_000),
+    ("Qwen/Qwen3.6-Max-Preview", 256_000),
+    ("Qwen/Qwen3.6-Plus", 1_000_000),
     ("Qwen/Qwen3.7-Max", 1_000_000),
     ("stepfun/Step-3.7-Flash", 256_000),
     ("stepfun/Step-3.5-Flash", 1_000_000),
@@ -141,6 +142,15 @@ const COMMANDCODE_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("xiaomi/mimo-v2.5", 1_000_000),
     ("google/gemini-3.5-flash", 1_000_000),
     ("google/gemini-3.1-flash-lite", 1_000_000),
+];
+const COMMANDCODE_MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
+    ("Qwen/Qwen3.7-Max-Free", 65_536),
+    ("MiniMaxAI/MiniMax-M3", 128_000),
+    ("MiniMaxAI/MiniMax-M2.7", 128_000),
+    ("MiniMaxAI/MiniMax-M2.5", 128_000),
+    ("Qwen/Qwen3.6-Max-Preview", 65_536),
+    ("Qwen/Qwen3.6-Plus", 65_536),
+    ("Qwen/Qwen3.7-Max", 65_536),
 ];
 const KIMI_CATALOG_MODELS: &[&str] = &[KIMI_MODEL];
 const MIMO_CATALOG_MODELS: &[&str] = &["MiMo-V2.5-Pro", "MiMo-V2.5"];
@@ -589,6 +599,17 @@ fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
         settings.selected_codex_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
         changed = true;
     }
+    if settings
+        .selected_codex_provider_profile_id
+        .as_deref()
+        .is_some_and(|profile_id| {
+            profile_definition(AgentProviderFamily::Codex, profile_id).is_none()
+        })
+    {
+        settings.selected_codex_provider_profile_id =
+            Some(infer_legacy_codex_provider_profile_id(paths, settings).to_string());
+        changed = true;
+    }
 
     if settings.selected_claude_provider_profile_id.is_none() {
         settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
@@ -598,6 +619,16 @@ fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
         .selected_claude_provider_profile_id
         .as_deref()
         .is_some_and(claude_is_byok_source)
+    {
+        settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
+        changed = true;
+    }
+    if settings
+        .selected_claude_provider_profile_id
+        .as_deref()
+        .is_some_and(|profile_id| {
+            profile_definition(AgentProviderFamily::Claude, profile_id).is_none()
+        })
     {
         settings.selected_claude_provider_profile_id = Some(BYOK_PROVIDER_ID.to_string());
         changed = true;
@@ -1432,7 +1463,9 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
     } else {
         provider_keys
     };
-    if let Some(provider_map) = codex_model_provider_map_env(paths) {
+    let provider_map = codex_model_provider_map_env(paths);
+    sync_codex_api_proxy_model_provider_map(provider_map.as_ref().map(|(_, value)| value.as_str()));
+    if let Some(provider_map) = provider_map {
         env.push(provider_map);
     }
     env
@@ -1944,6 +1977,12 @@ pub fn select_codex_acp_provider(
         anyhow::bail!("请先填写并保存 {} API key", provider_label(provider));
     }
 
+    if codex_is_byok_source(provider) {
+        save_codex_byok_source_secret(paths, provider, &api_key)?;
+        save_codex_managed_mode_with_profile(paths, BYOK_PROVIDER_ID)?;
+        return Ok(settings_snapshot(paths));
+    }
+
     write_codex_acp_provider_config(paths, provider, &api_key)?;
     save_codex_managed_mode_with_profile(
         paths,
@@ -1991,12 +2030,8 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
             .unwrap_or_else(|| (TIMIAI_CODEX_MODEL.to_string(), TIMIAI_PROVIDER_ID));
     let default_provider_key =
         byok_source_secret(paths, AgentProviderFamily::Codex, default_model_provider);
-    let runtime_provider = if default_provider_key.is_some() {
-        default_model_provider
-    } else {
-        BYOK_PROVIDER_ID
-    };
-    doc["model"] = value(model_slug_for_provider(
+    let runtime_provider = BYOK_PROVIDER_ID;
+    doc["model"] = value(byok_encoded_model_slug(
         &default_model,
         default_model_provider,
     ));
@@ -2006,7 +2041,10 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
         &default_model,
         default_model_provider,
     ));
-    doc["model_max_output_tokens"] = value(model_max_output_tokens(&default_model));
+    doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
+        &default_model,
+        default_model_provider,
+    ));
     doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
@@ -2019,7 +2057,9 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     }
     std::fs::write(&path, doc.to_string())
         .with_context(|| format!("failed to write Codex config {}", path.display()))?;
-    write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)
+    write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)?;
+    sync_codex_api_proxy_model_provider_map_for_paths(paths);
+    Ok(())
 }
 
 pub fn write_codex_acp_provider_config(
@@ -2052,7 +2092,10 @@ pub fn write_codex_acp_provider_config(
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
     doc["model_context_window"] =
         value(model_context_window_for_provider(&default_model, provider));
-    doc["model_max_output_tokens"] = value(model_max_output_tokens(&default_model));
+    doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
+        &default_model,
+        provider,
+    ));
     doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
@@ -2066,7 +2109,9 @@ pub fn write_codex_acp_provider_config(
 
     std::fs::write(&path, doc.to_string())
         .with_context(|| format!("failed to write Codex config {}", path.display()))?;
-    write_codex_acp_model_catalog(paths, catalog_provider_for_active_provider(active_provider))
+    write_codex_acp_model_catalog(paths, catalog_provider_for_active_provider(active_provider))?;
+    sync_codex_api_proxy_model_provider_map_for_paths(paths);
+    Ok(())
 }
 
 fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str) -> Result<()> {
@@ -2101,33 +2146,33 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
     write_codex_byok_provider_table(&mut doc);
 
     if active_provider == BYOK_PROVIDER_ID || codex_is_byok_source(active_provider) {
-        let runtime_provider = if active_provider == BYOK_PROVIDER_ID {
-            provider
-        } else {
-            active_provider
-        };
+        let source_provider_hint = codex_is_byok_source(active_provider).then_some(active_provider);
+        let runtime_provider = BYOK_PROVIDER_ID;
         doc["model_provider"] = value(runtime_provider);
         let active_model = doc
             .get("model")
             .and_then(|item| item.as_str())
             .unwrap_or_else(|| default_model_for_provider(provider))
             .to_string();
-        let active_model_slug = byok_model_slug(&active_model);
+        let active_model_slug = byok_model_slug_with_hint(&active_model, source_provider_hint);
         if active_model_slug != active_model {
             doc["model"] = value(active_model_slug);
         }
+        let active_source_provider =
+            byok_source_provider_for_model_with_hint(&active_model, source_provider_hint);
+        let active_upstream_model =
+            byok_upstream_model_for_model_with_hint(&active_model, source_provider_hint);
         if doc.get("preferred_auth_method").is_none() {
             doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
         }
-        if doc.get("model_context_window").is_none() {
-            doc["model_context_window"] = value(model_context_window_for_provider(
-                &active_model,
-                runtime_provider,
-            ));
-        }
-        if doc.get("model_max_output_tokens").is_none() {
-            doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model));
-        }
+        doc["model_context_window"] = value(model_context_window_for_provider(
+            &active_upstream_model,
+            active_source_provider,
+        ));
+        doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
+            &active_upstream_model,
+            active_source_provider,
+        ));
         if doc.get("model_reasoning_effort").is_none() {
             doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
         }
@@ -2144,6 +2189,7 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
         .with_context(|| format!("failed to write Codex config {}", path.display()))?;
     if active_provider == BYOK_PROVIDER_ID || codex_is_byok_source(active_provider) {
         write_codex_acp_model_catalog(paths, BYOK_PROVIDER_ID)?;
+        sync_codex_api_proxy_model_provider_map_for_paths(paths);
     }
     Ok(())
 }
@@ -2162,11 +2208,16 @@ fn codex_channel_provider_for_source(provider: &str) -> &'static str {
 }
 
 fn catalog_provider_for_active_provider(provider: &str) -> &str {
-    if provider == BYOK_PROVIDER_ID || codex_is_byok_source(provider) {
+    if provider == BYOK_PROVIDER_ID {
         BYOK_PROVIDER_ID
     } else {
         provider
     }
+}
+
+fn codex_selected_catalog_provider(paths: &AppPaths) -> String {
+    let settings = load_app_settings(paths);
+    selected_codex_provider_profile_id(paths, &settings)
 }
 
 fn codex_is_byok_source(provider: &str) -> bool {
@@ -2201,8 +2252,9 @@ fn configured_codex_byok_models(paths: &AppPaths) -> Vec<String> {
             continue;
         }
         for model in effective_catalog_models_for_provider(paths, provider) {
-            if !models.contains(&model) {
-                models.push(model);
+            let display_name = byok_display_model_name(&model, provider);
+            if !models.contains(&display_name) {
+                models.push(display_name);
             }
         }
     }
@@ -2260,25 +2312,74 @@ fn codex_provider_keys(paths: &AppPaths) -> Vec<(String, String)> {
 }
 
 fn codex_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
-    let config_path = codex_config_path(paths);
-    let active_provider = codex_active_provider(&config_path);
-    let catalog_provider = catalog_provider_for_active_provider(&active_provider);
-    let entries = catalog_models_for_provider_with_paths(paths, catalog_provider)
+    let catalog_provider = codex_selected_catalog_provider(paths);
+    if catalog_provider == CODEX_DEFAULT_PROVIDER_ID {
+        return None;
+    }
+    let entries = catalog_models_for_provider_with_paths(paths, &catalog_provider)
+        .into_iter()
+        .collect::<Vec<_>>();
+    model_provider_map_env_from_entries(entries, catalog_provider == BYOK_PROVIDER_ID)
+}
+
+fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
+    let mut entries = Vec::new();
+    for provider in BYOK_SOURCE_PROVIDER_IDS {
+        if byok_source_secret(paths, AgentProviderFamily::Claude, provider).is_none() {
+            continue;
+        }
+        entries.extend(
+            effective_catalog_models_for_provider(paths, provider)
+                .into_iter()
+                .map(|model| (model, *provider)),
+        );
+    }
+    model_provider_map_env_from_entries(entries, true)
+}
+
+fn model_provider_map_env_from_entries(
+    entries: Vec<(String, &'static str)>,
+    encode_provider_models: bool,
+) -> Option<(String, String)> {
+    if entries.is_empty() {
+        return None;
+    }
+    let entries = entries
         .into_iter()
         .map(|(model, provider)| {
+            let model_id = if encode_provider_models {
+                byok_encoded_model_slug(&model, provider)
+            } else {
+                model_slug_for_provider(&model, provider).to_string()
+            };
+            let display_name = if encode_provider_models {
+                byok_display_model_name(&model, provider)
+            } else {
+                model.clone()
+            };
             json!({
-                "model": model_slug_for_provider(&model, provider),
-                "display_name": model,
+                "model": model_id,
+                "display_name": display_name,
                 "provider": provider,
             })
         })
         .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return None;
-    }
     serde_json::to_string(&entries)
         .ok()
         .map(|value| (KODEX_MODEL_PROVIDER_MAP_ENV.to_string(), value))
+}
+
+fn sync_codex_api_proxy_model_provider_map(provider_map: Option<&str>) {
+    if let Some(value) = provider_map {
+        acp_core::configure_codex_api_proxy_model_provider_map(value);
+    } else {
+        acp_core::clear_codex_api_proxy_model_provider_map();
+    }
+}
+
+fn sync_codex_api_proxy_model_provider_map_for_paths(paths: &AppPaths) {
+    let provider_map = codex_model_provider_map_env(paths);
+    sync_codex_api_proxy_model_provider_map(provider_map.as_ref().map(|(_, value)| value.as_str()));
 }
 
 fn codex_active_provider_key(path: &Path) -> Option<(String, String)> {
@@ -2325,35 +2426,54 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
     }
     if provider == BYOK_PROVIDER_ID || codex_is_byok_source(provider) {
         let mut changed = repaired_provider;
+        let source_provider_hint = codex_is_byok_source(provider).then_some(provider);
+        let runtime_provider = BYOK_PROVIDER_ID;
+        if doc.get("model_provider").and_then(|item| item.as_str()) != Some(runtime_provider) {
+            doc["model_provider"] = value(runtime_provider);
+            changed = true;
+        }
         write_codex_byok_provider_table(&mut doc);
         let active_model = doc
             .get("model")
             .and_then(|item| item.as_str())
             .unwrap_or_else(|| default_model_for_provider(provider))
             .to_string();
-        let active_model_slug = byok_model_slug(&active_model);
+        let active_model_slug = byok_model_slug_with_hint(&active_model, source_provider_hint);
         if active_model_slug != active_model {
             doc["model"] = value(active_model_slug.clone());
             changed = true;
         }
-        let base_url = base_url_for_provider(provider);
-        if !provider_field_eq(&doc, provider, "base_url", &base_url) {
-            doc["model_providers"][provider]["base_url"] = value(base_url);
+        let active_model_provider =
+            byok_source_provider_for_model_with_hint(&active_model, source_provider_hint);
+        let base_url = base_url_for_provider(runtime_provider);
+        if !provider_field_eq(&doc, runtime_provider, "base_url", &base_url) {
+            doc["model_providers"][runtime_provider]["base_url"] = value(base_url);
             changed = true;
         }
         if doc.get("preferred_auth_method").is_none() {
             doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
             changed = true;
         }
-        if doc.get("model_context_window").is_none() {
-            doc["model_context_window"] = value(model_context_window_for_provider(
-                &active_model_slug,
-                provider,
-            ));
+        let active_upstream_model =
+            byok_upstream_model_for_model_with_hint(&active_model, source_provider_hint);
+        let expected_context_window =
+            model_context_window_for_provider(&active_upstream_model, active_model_provider);
+        if doc
+            .get("model_context_window")
+            .and_then(|item| item.as_integer())
+            != Some(expected_context_window)
+        {
+            doc["model_context_window"] = value(expected_context_window);
             changed = true;
         }
-        if doc.get("model_max_output_tokens").is_none() {
-            doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model_slug));
+        let expected_max_output_tokens =
+            model_max_output_tokens_for_provider(&active_upstream_model, active_model_provider);
+        if doc
+            .get("model_max_output_tokens")
+            .and_then(|item| item.as_integer())
+            != Some(expected_max_output_tokens)
+        {
+            doc["model_max_output_tokens"] = value(expected_max_output_tokens);
             changed = true;
         }
         if doc.get("model_reasoning_effort").is_none() {
@@ -2422,12 +2542,22 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         doc["model_providers"][provider]["base_url"] = value(proxy_base_url);
         changed = true;
     }
-    if doc.get("model_context_window").is_none() {
-        doc["model_context_window"] = value(model_context_window(&active_model));
+    let expected_context_window = model_context_window_for_provider(&active_model, provider);
+    if doc
+        .get("model_context_window")
+        .and_then(|item| item.as_integer())
+        != Some(expected_context_window)
+    {
+        doc["model_context_window"] = value(expected_context_window);
         changed = true;
     }
-    if doc.get("model_max_output_tokens").is_none() {
-        doc["model_max_output_tokens"] = value(model_max_output_tokens(&active_model));
+    let expected_max_output_tokens = model_max_output_tokens_for_provider(&active_model, provider);
+    if doc
+        .get("model_max_output_tokens")
+        .and_then(|item| item.as_integer())
+        != Some(expected_max_output_tokens)
+    {
+        doc["model_max_output_tokens"] = value(expected_max_output_tokens);
         changed = true;
     }
     if doc.get("model_reasoning_effort").is_none() {
@@ -2602,21 +2732,22 @@ fn refresh_codex_model_catalog_after_provider_models_change(paths: &AppPaths) ->
     if !config_path.exists() {
         return Ok(());
     }
-    let provider = codex_active_provider(&config_path);
+    let provider = codex_selected_catalog_provider(paths);
     if provider == CODEX_DEFAULT_PROVIDER_ID {
         return Ok(());
     }
-    write_codex_acp_model_catalog(paths, catalog_provider_for_active_provider(&provider))
+    write_codex_acp_model_catalog(paths, &provider)
 }
 
 fn write_codex_acp_model_catalog(paths: &AppPaths, provider: &str) -> Result<()> {
     let path = codex_model_catalog_path(paths);
     let catalog_models = catalog_models_for_provider_with_paths(paths, provider);
+    let encode_provider_models = provider == BYOK_PROVIDER_ID;
     let models = catalog_models
         .iter()
         .enumerate()
         .map(|(priority, (model, source_provider))| {
-            codex_acp_model_catalog_entry(model, source_provider, priority)
+            codex_acp_model_catalog_entry(model, source_provider, priority, encode_provider_models)
         })
         .collect::<Vec<_>>();
     let catalog = json!({
@@ -2670,16 +2801,27 @@ fn codex_acp_model_catalog_entry(
     model: &str,
     provider: &str,
     priority: usize,
+    encode_provider_models: bool,
 ) -> serde_json::Value {
-    let slug = model_slug_for_provider(model, provider).to_string();
+    let slug = if encode_provider_models {
+        byok_encoded_model_slug(model, provider)
+    } else {
+        model_slug_for_provider(model, provider).to_string()
+    };
+    let display_name = if encode_provider_models {
+        byok_display_model_name(model, provider)
+    } else {
+        model.to_string()
+    };
     let context_window = model_context_window_for_provider(model, provider);
-    let max_output_tokens = model_max_output_tokens(model);
+    let max_output_tokens = model_max_output_tokens_for_provider(model, provider);
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
     let apply_patch_tool_type = apply_patch_tool_type_for_provider(provider);
+    let description = format!("Codex {display_name}");
     json!({
         "slug": slug,
-        "display_name": model,
-        "description": format!("Codex {model}"),
+        "display_name": display_name,
+        "description": description,
         "default_reasoning_level": CODEX_REASONING_EFFORT_NONE,
         "supported_reasoning_levels": [{
             "effort": CODEX_REASONING_EFFORT_NONE,
@@ -2745,6 +2887,29 @@ fn model_slug_for_provider<'a>(display_name: &'a str, provider: &str) -> &'a str
     }
 }
 
+fn byok_encoded_model_slug(model: &str, provider: &str) -> String {
+    format!(
+        "{PROVIDER_MODEL_ID_PREFIX}{}/{}",
+        normalize_codex_provider(provider).unwrap_or(TIMIAI_PROVIDER_ID),
+        model_slug_for_provider(model, provider)
+    )
+}
+
+fn byok_display_model_name(model: &str, provider: &str) -> String {
+    let _ = provider;
+    model.to_string()
+}
+
+fn decode_provider_model_id(model: &str) -> Option<(&'static str, &str)> {
+    let rest = model.trim().strip_prefix(PROVIDER_MODEL_ID_PREFIX)?;
+    let (provider, upstream_model) = rest.split_once('/')?;
+    let provider = normalize_codex_provider(provider).ok()?;
+    if upstream_model.trim().is_empty() {
+        return None;
+    }
+    Some((provider, upstream_model))
+}
+
 fn lookup_model_slug<'a>(
     display_name: &'a str,
     map: &'static [(&'static str, &'static str)],
@@ -2755,16 +2920,59 @@ fn lookup_model_slug<'a>(
 }
 
 fn byok_model_slug(model: &str) -> String {
+    byok_model_slug_with_hint(model, None)
+}
+
+fn byok_model_slug_with_hint(model: &str, provider_hint: Option<&'static str>) -> String {
+    if decode_provider_model_id(model).is_some() {
+        return model.to_string();
+    }
     if let Some(display_name) = legacy_deepseek_external_slug_display_name(model) {
         return display_name.to_string();
     }
-    let provider = byok_source_provider_for_model(model);
+    let provider = byok_source_provider_for_model_with_hint(model, provider_hint);
+    byok_encoded_model_slug(model, provider)
+}
+
+fn byok_upstream_model_for_model_with_hint(
+    model: &str,
+    provider_hint: Option<&'static str>,
+) -> String {
+    if let Some((_, upstream_model)) = decode_provider_model_id(model) {
+        return upstream_model.to_string();
+    }
+    if let Some(display_name) = legacy_deepseek_external_slug_display_name(model) {
+        return display_name.to_string();
+    }
+    let provider = byok_source_provider_for_model_with_hint(model, provider_hint);
     model_slug_for_provider(model, provider).to_string()
 }
 
+#[cfg(test)]
 fn byok_source_provider_for_model(model: &str) -> &'static str {
+    byok_source_provider_for_model_with_hint(model, None)
+}
+
+fn byok_source_provider_for_model_with_hint(
+    model: &str,
+    provider_hint: Option<&'static str>,
+) -> &'static str {
+    if let Some((provider, _)) = decode_provider_model_id(model) {
+        return provider;
+    }
+    if let Some(provider) = provider_hint {
+        return provider;
+    }
     let normalized = model.trim().to_ascii_lowercase();
-    if normalized.contains("deepseek") {
+    if normalized.starts_with("qwen/")
+        || normalized.starts_with("minimaxai/")
+        || normalized.starts_with("moonshotai/")
+        || normalized.starts_with("zai-org/")
+        || normalized.starts_with("stepfun/")
+        || normalized.starts_with("google/")
+    {
+        COMMANDCODE_PROVIDER_ID
+    } else if normalized.contains("deepseek") {
         DEEPSEEK_PROVIDER_ID
     } else if normalized.contains("kimi") {
         KIMI_PROVIDER_ID
@@ -2804,6 +3012,17 @@ fn model_max_output_tokens(model: &str) -> i64 {
         MODEL_MAX_OUTPUT_TOKENS,
         DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
     )
+}
+
+fn model_max_output_tokens_for_provider(model: &str, provider: &str) -> i64 {
+    if provider == COMMANDCODE_PROVIDER_ID {
+        return model_i64_metadata(
+            model,
+            COMMANDCODE_MODEL_MAX_OUTPUT_TOKENS,
+            model_max_output_tokens(model),
+        );
+    }
+    model_max_output_tokens(model)
 }
 
 fn model_i64_metadata(model: &str, metadata: &[(&str, i64)], fallback: i64) -> i64 {
@@ -2883,6 +3102,13 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
         for (provider, key) in &configured_sources {
             acp_core::ensure_codex_api_proxy(provider, key);
         }
+        let provider_map = claude_model_provider_map_env(paths);
+        sync_codex_api_proxy_model_provider_map(
+            provider_map.as_ref().map(|(_, value)| value.as_str()),
+        );
+        if let Some((name, value)) = provider_map {
+            env.push((name, value));
+        }
         if let Some(default_model) = default_claude_byok_model(&available_models) {
             env.push(("ANTHROPIC_MODEL".to_string(), default_model.to_string()));
         }
@@ -2903,40 +3129,16 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     let Some(profile) = selected_profile else {
         return env;
     };
-    if profile.id == TIMIAI_PROVIDER_ID {
-        if let Some(secret) = provider_secret(paths, AgentProviderFamily::Claude, profile.id) {
-            acp_core::ensure_codex_api_proxy(TIMIAI_PROVIDER_ID, &secret);
-            env.push((
-                "ANTHROPIC_API_KEY".to_string(),
-                TIMIAI_PROVIDER_ID.to_string(),
-            ));
-            env.push((
-                "ANTHROPIC_AUTH_TOKEN".to_string(),
-                TIMIAI_PROVIDER_ID.to_string(),
-            ));
-            env.push(("AUTH_TOKEN".to_string(), TIMIAI_PROVIDER_ID.to_string()));
-        }
-        env.push((
-            "ANTHROPIC_BASE_URL".to_string(),
-            claude_provider_proxy_base_url(),
-        ));
-        if let Some(model) = profile.default_model {
-            env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
-        }
-        env.push((
-            "CLAUDE_PROVIDER_PROXY_KIND".to_string(),
-            claude_proxy_kind_env(profile.proxy_kind).to_string(),
-        ));
-        return env;
-    }
     if let Some(secret) = provider_secret(paths, AgentProviderFamily::Claude, profile.id) {
-        env.push(("ANTHROPIC_API_KEY".to_string(), secret.clone()));
-        env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), secret.clone()));
-        env.push(("AUTH_TOKEN".to_string(), secret));
+        acp_core::ensure_codex_api_proxy(profile.id, &secret);
+        env.push(("ANTHROPIC_API_KEY".to_string(), profile.id.to_string()));
+        env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), profile.id.to_string()));
+        env.push(("AUTH_TOKEN".to_string(), profile.id.to_string()));
     }
-    if let Some(base_url) = profile.base_url {
-        env.push(("ANTHROPIC_BASE_URL".to_string(), base_url.to_string()));
-    }
+    env.push((
+        "ANTHROPIC_BASE_URL".to_string(),
+        claude_provider_proxy_base_url_for_provider(profile.id),
+    ));
     if let Some(model) = profile.default_model {
         env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
     }
@@ -2954,8 +3156,9 @@ fn configured_claude_byok_models(paths: &AppPaths) -> Vec<String> {
             continue;
         }
         for model in effective_catalog_models_for_provider(paths, provider) {
-            if !models.contains(&model) {
-                models.push(model);
+            let display_name = byok_display_model_name(&model, provider);
+            if !models.contains(&display_name) {
+                models.push(display_name);
             }
         }
     }
@@ -3017,6 +3220,10 @@ fn claude_provider_proxy_base_url() -> String {
         .strip_suffix("/v1")
         .unwrap_or(base_url.as_str())
         .to_string()
+}
+
+fn claude_provider_proxy_base_url_for_provider(provider: &str) -> String {
+    format!("{}/providers/{provider}", claude_provider_proxy_base_url())
 }
 
 fn claude_proxy_kind_env(proxy_kind: AgentProviderProxyKind) -> &'static str {
@@ -3438,6 +3645,43 @@ mod tests {
     }
 
     #[test]
+    fn invalid_saved_provider_profiles_migrate_to_supported_values() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        paths.ensure_root().unwrap();
+        std::fs::write(
+            codex_config_path(&paths),
+            r#"
+model = "gpt-5.5"
+model_provider = "timiai"
+"#,
+        )
+        .unwrap();
+        let settings = AppSettings {
+            selected_agent: AgentCliId::ClaudeAgentAcp,
+            acp_port: 0,
+            theme: AppTheme::Midnight,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some("woa".to_string()),
+            selected_claude_provider_profile_id: Some("legacy-claude".to_string()),
+            claude: ClaudeProviderSettings::default(),
+        };
+
+        save_app_settings(&paths, &settings).unwrap();
+        let loaded = load_app_settings(&paths);
+
+        assert_eq!(
+            loaded.selected_codex_provider_profile_id.as_deref(),
+            Some(TIMIAI_PROVIDER_ID)
+        );
+        assert_eq!(
+            loaded.selected_claude_provider_profile_id.as_deref(),
+            Some(BYOK_PROVIDER_ID)
+        );
+    }
+
+    #[test]
     fn settings_snapshot_omits_goose_and_lists_provider_profiles() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -3825,10 +4069,7 @@ mod tests {
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         assert!(content.contains("[model_providers.deepseek]"));
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(
-            doc["model"].as_str(),
-            Some(byok_model_slug(DEEPSEEK_MODEL).as_str())
-        );
+        assert_eq!(doc["model"].as_str(), Some(DEEPSEEK_MODEL));
         assert_eq!(doc["model_provider"].as_str(), Some(DEEPSEEK_PROVIDER_ID));
         assert_eq!(
             doc["model_max_output_tokens"].as_integer(),
@@ -3897,6 +4138,153 @@ mod tests {
     }
 
     #[test]
+    fn codex_acp_commandcode_catalog_uses_provider_specific_model_limits() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        write_codex_acp_provider_config(&paths, COMMANDCODE_PROVIDER_ID, "commandcode-secret")
+            .unwrap();
+
+        let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model"].as_str(), Some(COMMANDCODE_MODEL));
+        assert_eq!(
+            doc["model_provider"].as_str(),
+            Some(COMMANDCODE_PROVIDER_ID)
+        );
+        assert_eq!(
+            doc["model_context_window"].as_integer(),
+            Some(model_context_window_for_provider(
+                COMMANDCODE_MODEL,
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+        assert_eq!(
+            doc["model_max_output_tokens"].as_integer(),
+            Some(model_max_output_tokens_for_provider(
+                COMMANDCODE_MODEL,
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+
+        let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let find_model = |display_name: &str| {
+            models
+                .iter()
+                .find(|model| model["display_name"].as_str() == Some(display_name))
+                .unwrap_or_else(|| panic!("missing {display_name} in commandcode catalog"))
+        };
+
+        let qwen37 = find_model("Qwen/Qwen3.7-Max");
+        assert_eq!(qwen37["context_window"].as_i64(), Some(1_000_000));
+        assert_eq!(qwen37["max_output_tokens"].as_i64(), Some(65_536));
+
+        let qwen36_plus = find_model("Qwen/Qwen3.6-Plus");
+        assert_eq!(qwen36_plus["context_window"].as_i64(), Some(1_000_000));
+        assert_eq!(qwen36_plus["max_output_tokens"].as_i64(), Some(65_536));
+
+        let qwen36_max = find_model("Qwen/Qwen3.6-Max-Preview");
+        assert_eq!(qwen36_max["context_window"].as_i64(), Some(256_000));
+        assert_eq!(qwen36_max["max_output_tokens"].as_i64(), Some(65_536));
+
+        let minimax_m3 = find_model("MiniMaxAI/MiniMax-M3");
+        assert_eq!(minimax_m3["context_window"].as_i64(), Some(1_000_000));
+        assert_eq!(minimax_m3["max_output_tokens"].as_i64(), Some(128_000));
+
+        let minimax_m27 = find_model("MiniMaxAI/MiniMax-M2.7");
+        assert_eq!(minimax_m27["context_window"].as_i64(), Some(204_800));
+        assert_eq!(minimax_m27["max_output_tokens"].as_i64(), Some(128_000));
+    }
+
+    #[test]
+    fn codex_acp_env_repair_refreshes_known_provider_model_limits() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        paths.ensure_root().unwrap();
+        let config_path = codex_config_path(&paths);
+        std::fs::write(
+            &config_path,
+            r#"
+model = "Qwen/Qwen3.7-Max"
+model_provider = "commandcode"
+preferred_auth_method = "apikey"
+model_context_window = 200000
+model_max_output_tokens = 128000
+model_reasoning_effort = "none"
+
+[model_providers.commandcode]
+name = "CommandCode"
+base_url = "https://api.commandcode.ai/provider/v1"
+wire_api = "chat"
+env_key = "COMMANDCODE_API_KEY"
+api_key = "commandcode-secret"
+"#,
+        )
+        .unwrap();
+
+        ensure_codex_acp_env_key(&config_path).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            doc["model_context_window"].as_integer(),
+            Some(model_context_window_for_provider(
+                "Qwen/Qwen3.7-Max",
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+        assert_eq!(
+            doc["model_max_output_tokens"].as_integer(),
+            Some(model_max_output_tokens_for_provider(
+                "Qwen/Qwen3.7-Max",
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+    }
+
+    #[test]
+    fn codex_acp_env_repair_resolves_byok_commandcode_model_limits() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        paths.ensure_root().unwrap();
+        let config_path = codex_config_path(&paths);
+        std::fs::write(
+            &config_path,
+            r#"
+model = "Qwen/Qwen3.7-Max"
+model_provider = "byok"
+preferred_auth_method = "apikey"
+model_context_window = 200000
+model_max_output_tokens = 128000
+model_reasoning_effort = "none"
+"#,
+        )
+        .unwrap();
+
+        ensure_codex_acp_env_key(&config_path).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let doc = content.parse::<DocumentMut>().unwrap();
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
+        assert_eq!(
+            doc["model_context_window"].as_integer(),
+            Some(model_context_window_for_provider(
+                "Qwen/Qwen3.7-Max",
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+        assert_eq!(
+            doc["model_max_output_tokens"].as_integer(),
+            Some(model_max_output_tokens_for_provider(
+                "Qwen/Qwen3.7-Max",
+                COMMANDCODE_PROVIDER_ID
+            ))
+        );
+    }
+
+    #[test]
     fn codex_provider_profiles_generate_expected_config() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -3910,7 +4298,7 @@ mod tests {
         let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
         assert!(!command.starts_with("CODEX_HOME="));
 
-        for (provider, env_key, model) in [
+        for (provider, env_key, _model) in [
             (
                 TIMIAI_PROVIDER_ID,
                 TIMIAI_API_KEY_ENV,
@@ -3954,24 +4342,20 @@ mod tests {
 
             let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
             let doc = content.parse::<DocumentMut>().unwrap();
-            let configured_models = configured_codex_byok_models(&paths)
-                .into_iter()
-                .map(|model| byok_model_slug(&model))
-                .collect::<Vec<_>>();
+            let configured_models = configured_codex_byok_models(&paths);
             let expected_model = default_model_for_provider_with_paths(&paths, provider);
-            assert_eq!(doc["model"].as_str(), Some(expected_model.as_str()));
-            assert!(configured_models.contains(&model.to_string()));
-            let expected_channel_provider = codex_channel_provider_for_source(provider);
-            assert_eq!(
-                doc["model_provider"].as_str(),
-                Some(expected_channel_provider)
+            assert!(
+                doc["model"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(PROVIDER_MODEL_ID_PREFIX)
             );
-            if expected_channel_provider == BYOK_PROVIDER_ID {
-                assert_eq!(
-                    doc["model_providers"][BYOK_PROVIDER_ID]["base_url"].as_str(),
-                    Some(codex_proxy_base_url().as_str())
-                );
-            }
+            assert!(configured_models.contains(&expected_model));
+            assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
+            assert_eq!(
+                doc["model_providers"][BYOK_PROVIDER_ID]["base_url"].as_str(),
+                Some(codex_proxy_base_url().as_str())
+            );
             assert_eq!(
                 doc["model_providers"][provider]["env_key"].as_str(),
                 Some(env_key)
@@ -3984,19 +4368,9 @@ mod tests {
                 doc["model_providers"][provider]["api_key"].as_str(),
                 Some(secret.as_str())
             );
-            if provider == KIMI_PROVIDER_ID && doc["model"].as_str() == Some(KIMI_MODEL) {
-                assert_eq!(doc["model"].as_str(), Some(KIMI_MODEL));
-                assert_eq!(
-                    doc["model_context_window"].as_integer(),
-                    Some(KIMI_MODEL_CONTEXT_WINDOW)
-                );
-                assert_eq!(
-                    doc["model_max_output_tokens"].as_integer(),
-                    Some(KIMI_MODEL_MAX_OUTPUT_TOKENS)
-                );
-            }
             let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
             let env = agent_env_for_command(&command, &paths);
+            assert!(env.contains(&(BYOK_API_KEY_ENV.to_string(), BYOK_PROVIDER_ID.to_string())));
             assert!(env.contains(&(env_key.to_string(), secret)));
         }
     }
@@ -4034,8 +4408,15 @@ mod tests {
 
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(TIMIAI_CODEX_MODEL));
-        assert_eq!(doc["model_provider"].as_str(), Some(TIMIAI_PROVIDER_ID));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_encoded_model_slug(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID).as_str())
+        );
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
+        assert_eq!(
+            doc["model_providers"][BYOK_PROVIDER_ID]["base_url"].as_str(),
+            Some(codex_proxy_base_url().as_str())
+        );
         assert!(
             doc["model_providers"][TIMIAI_PROVIDER_ID]["base_url"]
                 .as_str()
@@ -4054,14 +4435,18 @@ mod tests {
             .iter()
             .map(|model| model["display_name"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(slugs.contains(&TIMIAI_CODEX_MODEL));
+        assert!(
+            slugs.contains(
+                &byok_encoded_model_slug(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID).as_str()
+            )
+        );
         assert!(display_names.contains(&TIMIAI_CLAUDE_MODEL));
         assert!(!slugs.contains(&DEEPSEEK_MODEL));
         assert!(!slugs.contains(&model_slug(DEEPSEEK_MODEL)));
 
         let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
         let env = agent_env_for_command(&command, &paths);
-        assert!(!env.contains(&(BYOK_API_KEY_ENV.to_string(), "byok".to_string())));
+        assert!(env.contains(&(BYOK_API_KEY_ENV.to_string(), BYOK_PROVIDER_ID.to_string())));
         assert!(env.contains(&(TIMIAI_API_KEY_ENV.to_string(), "timiai-secret".to_string())));
     }
 
@@ -4170,11 +4555,113 @@ mod tests {
         );
         assert_eq!(
             model_config["modelOverrides"][TIMIAI_CLAUDE_MODEL].as_str(),
-            Some(model_slug_for_provider(
-                TIMIAI_CLAUDE_MODEL,
-                TIMIAI_PROVIDER_ID
-            ))
+            Some(byok_encoded_model_slug(TIMIAI_CLAUDE_MODEL, TIMIAI_PROVIDER_ID).as_str())
         );
+    }
+
+    #[test]
+    fn claude_commandcode_source_key_contributes_to_byok_proxy_model_map() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            COMMANDCODE_PROVIDER_ID,
+            "commandcode-secret",
+        )
+        .unwrap();
+        let snapshot = select_agent_provider_profile(
+            &paths,
+            AgentProviderFamily::Claude,
+            COMMANDCODE_PROVIDER_ID,
+        )
+        .unwrap();
+        assert_eq!(snapshot.claude.selected_profile_id, BYOK_PROVIDER_ID);
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        ensure_agent_ready_for_command(&command, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+
+        assert!(env.contains(&(
+            "ANTHROPIC_API_KEY".to_string(),
+            BYOK_PROVIDER_ID.to_string()
+        )));
+        assert!(env.iter().any(|(name, value)| {
+            name == "ANTHROPIC_BASE_URL" && value.starts_with("http://127.0.0.1:")
+        }));
+        assert!(!env.iter().any(|(_, value)| value == "commandcode-secret"));
+        let (_, model_config) = env
+            .iter()
+            .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+            .unwrap();
+        let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
+        let available_models = model_config["availableModels"].as_array().unwrap();
+        assert!(
+            available_models.contains(&serde_json::Value::String(COMMANDCODE_MODEL.to_string()))
+        );
+        assert!(
+            available_models.contains(&serde_json::Value::String("Qwen/Qwen3.7-Max".to_string()))
+        );
+        let (_, provider_map) = env
+            .iter()
+            .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
+            .unwrap();
+        let provider_map: serde_json::Value = serde_json::from_str(provider_map).unwrap();
+        assert!(provider_map.as_array().unwrap().iter().any(|entry| {
+            entry["display_name"].as_str() == Some("Qwen/Qwen3.7-Max")
+                && entry["provider"].as_str() == Some(COMMANDCODE_PROVIDER_ID)
+        }));
+    }
+
+    #[test]
+    fn claude_byok_model_provider_map_keeps_earlier_provider_for_duplicate_models() {
+        let dir = tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            TIMIAI_PROVIDER_ID,
+            "timiai-secret",
+        )
+        .unwrap();
+        save_agent_provider_secret(
+            &paths,
+            AgentProviderFamily::Claude,
+            COMMANDCODE_PROVIDER_ID,
+            "commandcode-secret",
+        )
+        .unwrap();
+        save_provider_models(
+            &paths,
+            TIMIAI_PROVIDER_ID,
+            vec!["deepseek-v4-pro-r1".to_string()],
+        )
+        .unwrap();
+        save_provider_models(
+            &paths,
+            COMMANDCODE_PROVIDER_ID,
+            vec!["deepseek-v4-pro-r1".to_string()],
+        )
+        .unwrap();
+
+        let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+        ensure_agent_ready_for_command(&command, &paths).unwrap();
+        let env = agent_env_for_command(&command, &paths);
+        let (_, provider_map) = env
+            .iter()
+            .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
+            .unwrap();
+        let provider_map: serde_json::Value = serde_json::from_str(provider_map).unwrap();
+        let first_entry = provider_map
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["display_name"].as_str() == Some("deepseek-v4-pro-r1"))
+            .unwrap();
+
+        assert_eq!(first_entry["provider"].as_str(), Some(TIMIAI_PROVIDER_ID));
     }
 
     #[test]
@@ -4214,7 +4701,7 @@ mod tests {
             doc["model"].as_str(),
             Some(byok_model_slug(DEEPSEEK_MODEL).as_str())
         );
-        assert_eq!(doc["model_provider"].as_str(), Some(DEEPSEEK_PROVIDER_ID));
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
         assert_eq!(
             doc["model_providers"][MIMO_PROVIDER_ID]["api_key"].as_str(),
             Some("mimo-secret")
@@ -4301,7 +4788,7 @@ api_key = "mimo-secret"
         let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
         let env = agent_env_for_command(&command, &paths);
 
-        assert!(!env.contains(&(BYOK_API_KEY_ENV.to_string(), "byok".to_string())));
+        assert!(env.contains(&(BYOK_API_KEY_ENV.to_string(), BYOK_PROVIDER_ID.to_string())));
         assert!(env.contains(&(
             DEEPSEEK_API_KEY_ENV.to_string(),
             "deepseek-secret".to_string()
@@ -4310,8 +4797,11 @@ api_key = "mimo-secret"
         assert!(env.contains(&(MIMO_API_KEY_ENV.to_string(), "mimo-secret".to_string())));
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(KIMI_MODEL));
-        assert_eq!(doc["model_provider"].as_str(), Some(KIMI_PROVIDER_ID));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_encoded_model_slug(KIMI_MODEL, KIMI_PROVIDER_ID).as_str())
+        );
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
 
         let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
         let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -4320,12 +4810,12 @@ api_key = "mimo-secret"
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(slugs.contains(&byok_model_slug(DEEPSEEK_MODEL).as_str()));
-        assert!(slugs.contains(&byok_model_slug(KIMI_MODEL).as_str()));
-        assert!(slugs.contains(&byok_model_slug(MIMO_MODEL).as_str()));
+        assert!(!slugs.contains(&byok_model_slug(DEEPSEEK_MODEL).as_str()));
+        assert!(slugs.contains(&model_slug_for_provider(KIMI_MODEL, KIMI_PROVIDER_ID)));
+        assert!(!slugs.contains(&byok_model_slug(MIMO_MODEL).as_str()));
         assert!(models.iter().any(|model| {
-            model["display_name"].as_str() == Some(MIMO_MODEL)
-                && model["slug"].as_str() == Some("mimo-v2.5-pro")
+            model["display_name"].as_str() == Some(KIMI_MODEL)
+                && model["slug"].as_str() == Some(KIMI_MODEL)
         }));
     }
 
@@ -4389,6 +4879,38 @@ api_key = "mimo-secret"
         assert_eq!(model_max_output_tokens("deepseek-v4-pro"), 384_000);
         assert_eq!(model_context_window("deepseek-v4-flash"), 1_000_000);
         assert_eq!(model_max_output_tokens("deepseek-v4-flash"), 384_000);
+        assert_eq!(
+            model_context_window_for_provider("Qwen/Qwen3.7-Max", COMMANDCODE_PROVIDER_ID),
+            1_000_000
+        );
+        assert_eq!(
+            model_max_output_tokens_for_provider("Qwen/Qwen3.7-Max", COMMANDCODE_PROVIDER_ID),
+            65_536
+        );
+        assert_eq!(
+            model_context_window_for_provider("Qwen/Qwen3.6-Plus", COMMANDCODE_PROVIDER_ID),
+            1_000_000
+        );
+        assert_eq!(
+            model_context_window_for_provider("Qwen/Qwen3.6-Max-Preview", COMMANDCODE_PROVIDER_ID),
+            256_000
+        );
+        assert_eq!(
+            model_context_window_for_provider("MiniMaxAI/MiniMax-M3", COMMANDCODE_PROVIDER_ID),
+            1_000_000
+        );
+        assert_eq!(
+            model_max_output_tokens_for_provider("MiniMaxAI/MiniMax-M3", COMMANDCODE_PROVIDER_ID),
+            128_000
+        );
+        assert_eq!(
+            byok_source_provider_for_model("Qwen/Qwen3.7-Max"),
+            COMMANDCODE_PROVIDER_ID
+        );
+        assert_eq!(
+            byok_source_provider_for_model("MiniMaxAI/MiniMax-M3"),
+            COMMANDCODE_PROVIDER_ID
+        );
     }
 
     #[test]
@@ -4405,8 +4927,11 @@ api_key = "mimo-secret"
         assert!(snapshot.codex_acp.deepseek_key_configured);
         let content = std::fs::read_to_string(codex_config_path(&paths)).unwrap();
         let doc = content.parse::<DocumentMut>().unwrap();
-        assert_eq!(doc["model"].as_str(), Some(TIMIAI_CODEX_MODEL));
-        assert_eq!(doc["model_provider"].as_str(), Some(TIMIAI_PROVIDER_ID));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_encoded_model_slug(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID).as_str())
+        );
+        assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
         assert_eq!(
             doc["model_providers"][TIMIAI_PROVIDER_ID]["api_key"].as_str(),
             Some("timiai-secret")
@@ -4419,8 +4944,14 @@ api_key = "mimo-secret"
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(slugs.contains(&"gpt-5.5"));
-        assert!(slugs.contains(&"deepseek-v4-pro"));
+        assert!(
+            slugs.contains(
+                &byok_encoded_model_slug(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID).as_str()
+            )
+        );
+        assert!(
+            slugs.contains(&byok_encoded_model_slug(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID).as_str())
+        );
         assert_eq!(
             catalog["models"][0]["provider"].as_str(),
             Some(TIMIAI_PROVIDER_ID)
@@ -4554,7 +5085,12 @@ name = "Other"
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
-        for provider in [DEEPSEEK_PROVIDER_ID, KIMI_PROVIDER_ID, MIMO_PROVIDER_ID] {
+        for provider in [
+            COMMANDCODE_PROVIDER_ID,
+            DEEPSEEK_PROVIDER_ID,
+            KIMI_PROVIDER_ID,
+            MIMO_PROVIDER_ID,
+        ] {
             save_agent_provider_secret(
                 &paths,
                 AgentProviderFamily::Codex,
@@ -4586,7 +5122,7 @@ name = "Other"
         );
         assert!(
             env.iter()
-                .any(|(name, value)| name == "ANTHROPIC_MODEL" && value == DEEPSEEK_MODEL)
+                .any(|(name, value)| name == "ANTHROPIC_MODEL" && value == COMMANDCODE_MODEL)
         );
         let (_, model_config) = env
             .iter()
@@ -4595,13 +5131,25 @@ name = "Other"
         let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
         let available_models = model_config["availableModels"].as_array().unwrap();
         assert!(available_models.contains(&serde_json::Value::String(DEEPSEEK_MODEL.to_string())));
+        assert!(
+            available_models.contains(&serde_json::Value::String("Qwen/Qwen3.7-Max".to_string()))
+        );
         assert!(available_models.contains(&serde_json::Value::String(KIMI_MODEL.to_string())));
         assert!(available_models.contains(&serde_json::Value::String(MIMO_MODEL.to_string())));
         assert_eq!(
             model_config["modelOverrides"][MIMO_MODEL].as_str(),
-            Some(model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID))
+            Some(byok_encoded_model_slug(MIMO_MODEL, MIMO_PROVIDER_ID).as_str())
         );
         assert_eq!(model_config["preserveDefaultModel"].as_bool(), Some(false));
+        let (_, provider_map) = env
+            .iter()
+            .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
+            .unwrap();
+        let provider_map: serde_json::Value = serde_json::from_str(provider_map).unwrap();
+        assert!(provider_map.as_array().unwrap().iter().any(|entry| {
+            entry["display_name"].as_str() == Some("Qwen/Qwen3.7-Max")
+                && entry["provider"].as_str() == Some(COMMANDCODE_PROVIDER_ID)
+        }));
     }
 
     #[test]
@@ -4714,7 +5262,10 @@ api_key = "old-secret"
             doc["model_reasoning_effort"].as_str(),
             Some(CODEX_REASONING_EFFORT_NONE)
         );
-        assert_eq!(doc["model"].as_str(), Some("glm-5.1"));
+        assert_eq!(
+            doc["model"].as_str(),
+            Some(byok_encoded_model_slug("glm-5.1", TIMIAI_PROVIDER_ID).as_str())
+        );
     }
 
     #[test]

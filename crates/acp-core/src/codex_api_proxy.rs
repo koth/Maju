@@ -7,8 +7,8 @@ use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +32,7 @@ const MIMO_UPSTREAM_MESSAGES_URL: &str =
     "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages";
 const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
 const DEEPSEEK_REASONING_PLACEHOLDER: &str = "[previous reasoning unavailable]";
+const PROVIDER_MODEL_ID_PREFIX: &str = "kodex-provider/";
 
 #[derive(Debug, Clone)]
 struct CodexApiProxyConfig {
@@ -39,6 +40,7 @@ struct CodexApiProxyConfig {
     api_key: String,
     api_keys: BTreeMap<String, String>,
     session_ids: BTreeMap<String, String>,
+    model_providers: BTreeMap<String, String>,
 }
 
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
@@ -52,6 +54,12 @@ struct ReasoningHistoryEntry {
     content: String,
     assistant_signature: String,
     reasoning_content: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderEncodedModel {
+    provider: String,
+    model: String,
 }
 
 pub fn codex_api_proxy_base_url() -> String {
@@ -70,6 +78,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 api_key: String::new(),
                 api_keys: BTreeMap::new(),
                 session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
             }))
         })
         .clone();
@@ -108,6 +117,88 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
         }
     }
     codex_api_proxy_base_url()
+}
+
+pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
+    let (model_providers, duplicate_count) = match parse_model_provider_map(value) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
+            return;
+        }
+    };
+
+    let config = CODEX_API_PROXY_CONFIG
+        .get_or_init(|| {
+            Arc::new(RwLock::new(CodexApiProxyConfig {
+                provider: "timiai".to_string(),
+                api_key: String::new(),
+                api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
+            }))
+        })
+        .clone();
+    let count = model_providers.len();
+    if let Ok(mut current) = config.write() {
+        current.model_providers = model_providers;
+    }
+    append_codex_api_proxy_log(&format!(
+        "model_provider_map_configured entries={count} duplicates={duplicate_count}"
+    ));
+}
+
+pub fn clear_codex_api_proxy_model_provider_map() {
+    let config = CODEX_API_PROXY_CONFIG
+        .get_or_init(|| {
+            Arc::new(RwLock::new(CodexApiProxyConfig {
+                provider: "timiai".to_string(),
+                api_key: String::new(),
+                api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
+            }))
+        })
+        .clone();
+    if let Ok(mut current) = config.write() {
+        current.model_providers.clear();
+    }
+    append_codex_api_proxy_log("model_provider_map_cleared");
+}
+
+fn parse_model_provider_map(value: &str) -> anyhow::Result<(BTreeMap<String, String>, usize)> {
+    let parsed: Value = serde_json::from_str(value)?;
+    let Some(entries) = parsed.as_array() else {
+        anyhow::bail!("expected_array");
+    };
+    let mut duplicate_count = 0usize;
+    let mut model_providers = BTreeMap::new();
+    for entry in entries {
+        let provider = entry
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(normalize_proxy_provider)
+            .unwrap_or("timiai")
+            .to_string();
+        for field in ["model", "display_name"] {
+            if let Some(model) = entry
+                .get(field)
+                .and_then(Value::as_str)
+                .map(normalized_model_key)
+                .filter(|model| !model.is_empty())
+            {
+                match model_providers.entry(model) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(provider.clone());
+                    }
+                    Entry::Occupied(_) => {
+                        duplicate_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok((model_providers, duplicate_count))
 }
 
 fn set_codex_api_proxy_port(port: u16) {
@@ -239,6 +330,7 @@ async fn proxy_codex_api_request(
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            model_providers: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
@@ -250,11 +342,24 @@ async fn proxy_codex_api_request(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let provider_model = decode_provider_model_id(&requested_model);
+    let routing_model = provider_model
+        .as_ref()
+        .map(|model| model.model.as_str())
+        .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
-        .unwrap_or_else(|| proxy_provider_for_model(&requested_model, &config.provider));
-    let payload = prepare_responses_payload_for_provider(payload, provider);
-    log_responses_payload_summary("responses_request", &payload, provider);
-    let api_key = api_key_for_proxy_provider(&config, provider);
+        .map(str::to_string)
+        .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
+        .unwrap_or_else(|| {
+            proxy_provider_for_model(routing_model, &config.provider, &config.model_providers)
+        });
+    let payload = provider_model
+        .as_ref()
+        .map(|model| replace_payload_model(payload.clone(), &model.model))
+        .unwrap_or(payload);
+    let payload = prepare_responses_payload_for_provider(payload, &provider);
+    log_responses_payload_summary("responses_request", &payload, &provider);
+    let api_key = api_key_for_proxy_provider(&config, &provider);
     if api_key.trim().is_empty() {
         return Ok(response_with_status(
             StatusCode::UNAUTHORIZED,
@@ -263,12 +368,12 @@ async fn proxy_codex_api_request(
             "application/json",
         ));
     }
-    if normalize_proxy_provider(provider) == "timiai" {
-        let session_id = session_id_for_proxy_provider(&config, provider);
-        return proxy_native_codex_responses_request(payload, &api_key, provider, &session_id)
+    if normalize_proxy_provider(&provider) == "timiai" {
+        let session_id = session_id_for_proxy_provider(&config, &provider);
+        return proxy_native_codex_responses_request(payload, &api_key, &provider, &session_id)
             .await;
     }
-    let chat_payload = match responses_payload_to_chat_payload(payload, provider) {
+    let chat_payload = match responses_payload_to_chat_payload(payload, &provider) {
         Ok(payload) => payload,
         Err(error) => {
             append_codex_api_proxy_log(&format!("responses_to_chat_error error={error}"));
@@ -279,8 +384,8 @@ async fn proxy_codex_api_request(
             ));
         }
     };
-    let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
-    match normalize_proxy_provider(provider) {
+    let chat_payload = normalize_chat_payload_for_provider(chat_payload, &provider);
+    match normalize_proxy_provider(&provider) {
         "commandcode" => log_chat_payload_summary("commandcode_request", &chat_payload),
         "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
         "xiaomi_mimo" => log_chat_payload_summary("xiaomi_request", &chat_payload),
@@ -289,7 +394,7 @@ async fn proxy_codex_api_request(
     if provider == "kimi_code" {
         return proxy_kimi_codex_api_request(chat_payload, &api_key, requested_stream).await;
     }
-    let upstream_url = upstream_chat_completions_url(provider);
+    let upstream_url = upstream_chat_completions_url(&provider);
 
     let client = reqwest::Client::new();
     let request = client
@@ -300,7 +405,7 @@ async fn proxy_codex_api_request(
     let upstream = match request.body(request_body).send().await {
         Ok(upstream) => upstream,
         Err(error) => {
-            log_chat_completions_upstream_error(provider, upstream_url, &chat_payload, &error);
+            log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
             return Err(error.into());
         }
     };
@@ -312,7 +417,7 @@ async fn proxy_codex_api_request(
         .unwrap_or("application/json")
         .to_string();
     log_chat_completions_upstream_response(
-        provider,
+        &provider,
         upstream_url,
         &chat_payload,
         status,
@@ -478,8 +583,11 @@ async fn proxy_native_codex_responses_compact_request(
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            model_providers: BTreeMap::new(),
         });
-    let provider = explicit_provider.unwrap_or_else(|| normalize_proxy_provider(&config.provider));
+    let provider = explicit_provider
+        .map(str::to_string)
+        .unwrap_or_else(|| normalize_proxy_provider(&config.provider).to_string());
     if provider != "timiai" {
         return Ok(response_with_status(
             StatusCode::NOT_FOUND,
@@ -487,7 +595,7 @@ async fn proxy_native_codex_responses_compact_request(
             "text/plain; charset=utf-8",
         ));
     }
-    let api_key = api_key_for_proxy_provider(&config, provider);
+    let api_key = api_key_for_proxy_provider(&config, &provider);
     if api_key.trim().is_empty() {
         return Ok(response_with_status(
             StatusCode::UNAUTHORIZED,
@@ -496,7 +604,7 @@ async fn proxy_native_codex_responses_compact_request(
         ));
     }
 
-    let session_id = session_id_for_proxy_provider(&config, provider);
+    let session_id = session_id_for_proxy_provider(&config, &provider);
     let client = reqwest::Client::new();
     let upstream = with_timiai_headers(
         client
@@ -538,6 +646,7 @@ async fn proxy_anthropic_messages_request(
             api_key: String::new(),
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
+            model_providers: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_model = payload
@@ -545,13 +654,26 @@ async fn proxy_anthropic_messages_request(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let provider_model = decode_provider_model_id(&requested_model);
+    let routing_model = provider_model
+        .as_ref()
+        .map(|model| model.model.as_str())
+        .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
-        .unwrap_or_else(|| proxy_provider_for_model(&requested_model, &config.provider));
+        .map(str::to_string)
+        .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
+        .unwrap_or_else(|| {
+            proxy_provider_for_model(routing_model, &config.provider, &config.model_providers)
+        });
+    let payload = provider_model
+        .as_ref()
+        .map(|model| replace_payload_model(payload.clone(), &model.model))
+        .unwrap_or(payload);
     log_anthropic_payload_summary(
         &format!("anthropic_messages_request provider={provider}"),
         &payload,
     );
-    let api_key = api_key_for_proxy_provider(&config, provider);
+    let api_key = api_key_for_proxy_provider(&config, &provider);
     if api_key.trim().is_empty() {
         return Ok(response_with_status(
             StatusCode::UNAUTHORIZED,
@@ -561,8 +683,8 @@ async fn proxy_anthropic_messages_request(
         ));
     }
 
-    let session_id = session_id_for_proxy_provider(&config, provider);
-    if normalize_proxy_provider(provider) == "timiai" && !is_claude_family_model(&requested_model) {
+    let session_id = session_id_for_proxy_provider(&config, &provider);
+    if normalize_proxy_provider(&provider) == "timiai" && !is_claude_family_model(routing_model) {
         return proxy_timiai_responses_to_anthropic_messages_request(
             payload,
             &api_key,
@@ -570,11 +692,14 @@ async fn proxy_anthropic_messages_request(
         )
         .await;
     }
-    match normalize_proxy_provider(provider) {
+    if should_bridge_anthropic_messages_to_chat_completions(&provider, routing_model) {
+        return proxy_completion_to_anthropic_messages_request(payload, &api_key, &provider).await;
+    }
+    match normalize_proxy_provider(&provider) {
         "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
-            proxy_native_anthropic_messages_request(payload, &api_key, provider, &session_id).await
+            proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id).await
         }
-        _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, provider).await,
+        _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, &provider).await,
     }
 }
 
@@ -796,18 +921,30 @@ async fn proxy_completion_to_anthropic_messages_request(
         .unwrap_or(false);
     let chat_payload = anthropic_payload_to_chat_payload(payload);
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
-    if normalize_proxy_provider(provider) == "deepseek" {
-        log_chat_payload_summary("deepseek_anthropic_request", &chat_payload);
-    }
+    log_chat_payload_summary(
+        &format!(
+            "{}_anthropic_chat_bridge_request",
+            normalize_proxy_provider(provider)
+        ),
+        &chat_payload,
+    );
     let client = reqwest::Client::new();
+    let upstream_url = upstream_chat_completions_url(provider);
     let request = client
-        .post(upstream_chat_completions_url(provider))
+        .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
     let request = request.bearer_auth(api_key);
-    let upstream = request
+    let upstream = match request
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
-        .await?;
+        .await
+    {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            log_chat_completions_upstream_error(provider, upstream_url, &chat_payload, &error);
+            return Err(error.into());
+        }
+    };
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -865,8 +1002,64 @@ fn proxy_provider_from_path(path: &str) -> Option<&'static str> {
     (!provider.is_empty()).then(|| normalize_proxy_provider(provider))
 }
 
-fn proxy_provider_for_model<'a>(_model: &str, fallback_provider: &'a str) -> &'a str {
-    normalize_proxy_provider(fallback_provider)
+fn decode_provider_model_id(model: &str) -> Option<ProviderEncodedModel> {
+    let rest = model.trim().strip_prefix(PROVIDER_MODEL_ID_PREFIX)?;
+    let (provider, upstream_model) = rest.split_once('/')?;
+    let upstream_model = upstream_model.trim();
+    if upstream_model.is_empty() {
+        return None;
+    }
+    Some(ProviderEncodedModel {
+        provider: normalize_proxy_provider(provider).to_string(),
+        model: upstream_model.to_string(),
+    })
+}
+
+fn replace_payload_model(mut payload: Value, model: &str) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    payload
+}
+
+fn proxy_provider_for_model(
+    model: &str,
+    fallback_provider: &str,
+    model_providers: &BTreeMap<String, String>,
+) -> String {
+    let model_key = normalized_model_key(model);
+    if let Some(provider) = model_providers.get(&model_key) {
+        return normalize_proxy_provider(provider).to_string();
+    }
+    proxy_provider_for_model_heuristic(model)
+        .unwrap_or_else(|| normalize_proxy_provider(fallback_provider))
+        .to_string()
+}
+
+fn proxy_provider_for_model_heuristic(model: &str) -> Option<&'static str> {
+    let normalized = normalized_model_key(model);
+    if normalized.starts_with("qwen/")
+        || normalized.starts_with("minimaxai/")
+        || normalized.starts_with("moonshotai/")
+        || normalized.starts_with("zai-org/")
+        || normalized.starts_with("stepfun/")
+        || normalized.starts_with("google/")
+        || normalized.starts_with("openai/")
+    {
+        Some("commandcode")
+    } else if normalized.contains("deepseek") {
+        Some("deepseek")
+    } else if normalized.contains("kimi") {
+        Some("kimi_code")
+    } else if normalized.contains("mimo") {
+        Some("xiaomi_mimo")
+    } else {
+        None
+    }
+}
+
+fn normalized_model_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
 }
 
 fn api_key_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -> String {
@@ -950,6 +1143,13 @@ fn upstream_messages_url(provider: &str) -> &'static str {
     }
 }
 
+fn should_bridge_anthropic_messages_to_chat_completions(provider: &str, model: &str) -> bool {
+    match normalize_proxy_provider(provider) {
+        "commandcode" | "deepseek" | "kimi_code" | "xiaomi_mimo" => !is_claude_family_model(model),
+        _ => false,
+    }
+}
+
 fn normalize_native_anthropic_payload(mut payload: Value, provider: &str) -> Value {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return payload;
@@ -979,7 +1179,10 @@ fn upstream_native_anthropic_model<'a>(provider: &str, model: &'a str) -> &'a st
 }
 
 fn is_claude_family_model(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("claude-")
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized.starts_with("claude-")
+        || normalized.starts_with("anthropic/claude-")
+        || normalized.contains("/claude-")
 }
 
 fn prepare_responses_payload_for_provider(payload: Value, provider: &str) -> Value {
@@ -1212,6 +1415,7 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
 }
 
 fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Value {
+    payload = normalize_chat_completion_model(payload, provider);
     if normalize_proxy_provider(provider) != "deepseek" {
         return payload;
     }
@@ -1239,6 +1443,34 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
         message["reasoning_content"] = Value::String(reasoning_content);
     }
     payload
+}
+
+fn normalize_chat_completion_model(mut payload: Value, provider: &str) -> Value {
+    let Some(model) = payload.get("model").and_then(Value::as_str) else {
+        return payload;
+    };
+    let upstream_model = upstream_chat_completion_model(provider, model).to_string();
+    if upstream_model == model {
+        return payload;
+    }
+    append_codex_api_proxy_log(&format!(
+        "chat_model_rewrite provider={} model={} upstream_model={}",
+        normalize_proxy_provider(provider),
+        model,
+        upstream_model
+    ));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("model".to_string(), Value::String(upstream_model));
+    }
+    payload
+}
+
+fn upstream_chat_completion_model<'a>(provider: &str, model: &'a str) -> &'a str {
+    match (normalize_proxy_provider(provider), model) {
+        ("xiaomi_mimo", "MiMo-V2.5-Pro") => "mimo-v2.5-pro",
+        ("xiaomi_mimo", "MiMo-V2.5") => "mimo-v2.5",
+        _ => model,
+    }
 }
 
 fn flush_pending_tool_calls(messages: &mut Vec<Value>, pending_tool_calls: &mut Vec<Value>) {
@@ -2398,11 +2630,43 @@ fn normalized_chat_usage(value: Option<&Value>) -> Value {
         .get("total_tokens")
         .and_then(Value::as_i64)
         .unwrap_or(input + output);
+    let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
+    let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
     json!({
         "input_tokens": input,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens
+        },
         "output_tokens": output,
+        "output_tokens_details": {
+            "reasoning_tokens": reasoning_tokens
+        },
         "total_tokens": total
     })
+}
+
+fn usage_i64_field(usage: &Value, field: &str) -> Option<i64> {
+    usage.get(field).and_then(Value::as_i64)
+}
+
+fn usage_nested_i64_field(usage: &Value, object_field: &str, field: &str) -> Option<i64> {
+    usage
+        .get(object_field)
+        .and_then(|value| value.get(field))
+        .and_then(Value::as_i64)
+}
+
+fn usage_cached_input_tokens(usage: &Value) -> Option<i64> {
+    usage_nested_i64_field(usage, "input_tokens_details", "cached_tokens")
+        .or_else(|| usage_nested_i64_field(usage, "prompt_tokens_details", "cached_tokens"))
+        .or_else(|| usage_i64_field(usage, "cache_read_input_tokens"))
+        .or_else(|| usage_i64_field(usage, "cached_input_tokens"))
+}
+
+fn usage_reasoning_output_tokens(usage: &Value) -> Option<i64> {
+    usage_nested_i64_field(usage, "output_tokens_details", "reasoning_tokens")
+        .or_else(|| usage_nested_i64_field(usage, "completion_tokens_details", "reasoning_tokens"))
+        .or_else(|| usage_i64_field(usage, "reasoning_output_tokens"))
 }
 
 #[derive(Debug, Default)]
@@ -3025,8 +3289,68 @@ fn sanitize_timiai_responses_response_body(body: &[u8]) -> Option<Vec<u8>> {
 
 fn sanitize_responses_value(value: &mut Value) {
     remove_reasoning_output_items(value);
+    normalize_responses_usage_fields(value);
     if let Some(response) = value.get_mut("response") {
         remove_reasoning_output_items(response);
+        normalize_responses_usage_fields(response);
+    }
+}
+
+fn normalize_responses_usage_fields(value: &mut Value) {
+    let Some(usage) = value.get_mut("usage") else {
+        return;
+    };
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(input + output);
+    let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
+    let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
+
+    let Some(usage) = usage.as_object_mut() else {
+        return;
+    };
+    usage.insert("input_tokens".to_string(), json!(input));
+    usage.insert("output_tokens".to_string(), json!(output));
+    usage.insert("total_tokens".to_string(), json!(total));
+    upsert_usage_detail_i64(
+        usage,
+        "input_tokens_details",
+        "cached_tokens",
+        cached_tokens,
+    );
+    upsert_usage_detail_i64(
+        usage,
+        "output_tokens_details",
+        "reasoning_tokens",
+        reasoning_tokens,
+    );
+}
+
+fn upsert_usage_detail_i64(
+    usage: &mut Map<String, Value>,
+    object_field: &str,
+    field: &str,
+    value: i64,
+) {
+    let needs_object = usage
+        .get(object_field)
+        .is_none_or(|existing| !existing.is_object());
+    if needs_object {
+        usage.insert(object_field.to_string(), json!({}));
+    }
+    if let Some(details) = usage.get_mut(object_field).and_then(Value::as_object_mut) {
+        details.insert(field.to_string(), json!(value));
     }
 }
 
@@ -4113,11 +4437,97 @@ mod tests {
         assert_eq!(upstream_responses_url("timiai"), TIMIAI_RESPONSES_URL);
         assert_eq!(upstream_messages_url("timiai"), TIMIAI_MESSAGES_URL);
         assert!(is_claude_family_model("claude-sonnet-4.6"));
+        assert!(is_claude_family_model("anthropic/claude-sonnet-4.6"));
         assert!(!is_claude_family_model("gpt-5.5"));
         assert_eq!(
-            proxy_provider_for_model("deepseek-v4-pro", "timiai"),
-            "timiai"
+            proxy_provider_for_model("deepseek-v4-pro", "timiai", &BTreeMap::new()),
+            "deepseek"
         );
+    }
+
+    #[test]
+    fn routes_anthropic_messages_to_chat_completions_for_non_anthropic_models() {
+        assert!(!should_bridge_anthropic_messages_to_chat_completions(
+            "commandcode",
+            "claude-sonnet-4-6"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "commandcode",
+            "Qwen/Qwen3.7-Max"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "commandcode",
+            "MiniMaxAI/MiniMax-M3"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "deepseek",
+            "deepseek-v4-pro"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "kimi_code",
+            "kimi-for-coding"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "xiaomi_mimo",
+            "MiMo-V2.5-Pro"
+        ));
+    }
+
+    #[test]
+    fn model_provider_map_overrides_byok_provider_heuristics() {
+        let mut map = BTreeMap::new();
+        map.insert("claude-sonnet-4-6".to_string(), "commandcode".to_string());
+        map.insert("custom-lab-model".to_string(), "kimi_code".to_string());
+
+        assert_eq!(
+            proxy_provider_for_model("claude-sonnet-4-6", "xiaomi_mimo", &map),
+            "commandcode"
+        );
+        assert_eq!(
+            proxy_provider_for_model("custom-lab-model", "timiai", &map),
+            "kimi_code"
+        );
+        assert_eq!(
+            proxy_provider_for_model("Qwen/Qwen3.7-Max", "xiaomi_mimo", &map),
+            "commandcode"
+        );
+    }
+
+    #[test]
+    fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
+        let value = json!([
+            {
+                "model": "deepseek-v4-pro-r1",
+                "display_name": "deepseek-v4-pro-r1",
+                "provider": "timiai"
+            },
+            {
+                "model": "deepseek-v4-pro-r1",
+                "display_name": "deepseek-v4-pro-r1",
+                "provider": "commandcode"
+            }
+        ]);
+
+        let (map, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
+
+        assert_eq!(
+            map.get("deepseek-v4-pro-r1").map(String::as_str),
+            Some("timiai")
+        );
+        assert_eq!(duplicate_count, 3);
+    }
+
+    #[test]
+    fn decodes_provider_qualified_model_ids() {
+        let model = decode_provider_model_id("kodex-provider/timiai/gpt-5.5").unwrap();
+
+        assert_eq!(model.provider, "timiai");
+        assert_eq!(model.model, "gpt-5.5");
+
+        let model =
+            decode_provider_model_id("kodex-provider/commandcode/Qwen/Qwen3.7-Max").unwrap();
+        assert_eq!(model.provider, "commandcode");
+        assert_eq!(model.model, "Qwen/Qwen3.7-Max");
     }
 
     #[test]
@@ -4314,6 +4724,25 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_timiai_responses_sse_usage_cache_fields() {
+        let body = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":80},\"completion_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":130}}}\n\n",
+        );
+
+        let mut sanitizer = TimiaiResponsesSseSanitizer::default();
+        let mut sanitized = sanitizer.push_chunk(body.as_bytes());
+        sanitized.extend(sanitizer.finish());
+        let text = String::from_utf8(sanitized).unwrap();
+
+        assert!(text.contains("\"input_tokens\":120"));
+        assert!(text.contains("\"output_tokens\":10"));
+        assert!(text.contains("\"total_tokens\":130"));
+        assert!(text.contains("\"input_tokens_details\":{\"cached_tokens\":80}"));
+        assert!(text.contains("\"output_tokens_details\":{\"reasoning_tokens\":3}"));
+    }
+
+    #[test]
     fn sanitizes_timiai_anthropic_messages_payload_extensions() {
         let payload = json!({
             "model": "claude-opus-4.8",
@@ -4339,6 +4768,7 @@ mod tests {
             api_key: "secret".to_string(),
             api_keys: BTreeMap::new(),
             session_ids,
+            model_providers: BTreeMap::new(),
         };
 
         assert_eq!(
@@ -4425,7 +4855,13 @@ mod tests {
             }],
             "usage": {
                 "prompt_tokens": 12,
+                "prompt_tokens_details": {
+                    "cached_tokens": 8
+                },
                 "completion_tokens": 3,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 2
+                },
                 "total_tokens": 15
             }
         });
@@ -4446,7 +4882,15 @@ mod tests {
         assert_eq!(response["output"][1]["call_id"], "call_1");
         assert_eq!(response["output"][1]["name"], "list_files");
         assert_eq!(response["usage"]["input_tokens"], 12);
+        assert_eq!(
+            response["usage"]["input_tokens_details"]["cached_tokens"],
+            8
+        );
         assert_eq!(response["usage"]["output_tokens"], 3);
+        assert_eq!(
+            response["usage"]["output_tokens_details"]["reasoning_tokens"],
+            2
+        );
         assert_eq!(response["usage"]["total_tokens"], 15);
     }
 
@@ -4913,6 +5357,19 @@ mod tests {
         });
 
         let normalized = normalize_native_anthropic_payload(payload, "xiaomi_mimo");
+
+        assert_eq!(normalized["model"], "mimo-v2.5-pro");
+    }
+
+    #[test]
+    fn rewrites_xiaomi_chat_completion_display_model_to_upstream_slug() {
+        let payload = json!({
+            "model": "MiMo-V2.5-Pro",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "stream": true
+        });
+
+        let normalized = normalize_chat_payload_for_provider(payload, "xiaomi_mimo");
 
         assert_eq!(normalized["model"], "mimo-v2.5-pro");
     }

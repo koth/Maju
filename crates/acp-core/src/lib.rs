@@ -5,7 +5,10 @@ mod mapping;
 mod runtime;
 
 pub use client::{PromptTask, SessionHandle};
-pub use codex_api_proxy::{codex_api_proxy_base_url, ensure_codex_api_proxy};
+pub use codex_api_proxy::{
+    clear_codex_api_proxy_model_provider_map, codex_api_proxy_base_url,
+    configure_codex_api_proxy_model_provider_map, ensure_codex_api_proxy,
+};
 pub use events::{ClientEvent, RemoteSshSessionConfig, SessionConfig};
 pub use mapping::diff_to_hunks;
 

@@ -2,7 +2,9 @@ use super::ShutdownSignal;
 use super::process::{
     agent_spawn_command, apply_process_cwd_and_pwd, hide_console_window, parse_env_assignment,
 };
-use crate::codex_api_proxy::ensure_codex_api_proxy;
+use crate::codex_api_proxy::{
+    configure_codex_api_proxy_model_provider_map, ensure_codex_api_proxy,
+};
 use crate::events::SessionConfig;
 use crate::mapping::append_runtime_event_log;
 use agent_client_protocol::{Client, ConnectTo, Lines, Role};
@@ -36,18 +38,8 @@ impl HiddenAgentProcess {
         let mut process = Self::from_command(&config.agent_command, &config.workspace_root)?;
         process.env.extend(config.agent_env.clone());
         let agent_command = config.agent_command.to_ascii_lowercase();
-        if agent_command.contains("codex-acp") || agent_command.contains("kodex-acp") {
-            for (env_key, provider) in [
-                ("TIMIAI_API_KEY", "timiai"),
-                ("COMMANDCODE_API_KEY", "commandcode"),
-                ("DEEPSEEK_API_KEY", "deepseek"),
-                ("KIMI_CODE_API_KEY", "kimi_code"),
-                ("XIAOMI_MIMO_API_KEY", "xiaomi_mimo"),
-            ] {
-                if let Some((_, api_key)) = process.env.iter().find(|(name, _)| name == env_key) {
-                    ensure_codex_api_proxy(provider, api_key);
-                }
-            }
+        if uses_codex_api_proxy(&agent_command) {
+            register_codex_api_proxy_from_env(&process.env);
         }
         process.log_config = Some(config.clone());
         Ok(process)
@@ -205,6 +197,32 @@ impl ConnectTo<Client> for HiddenAgentProcess {
     }
 }
 
+fn uses_codex_api_proxy(agent_command: &str) -> bool {
+    agent_command.contains("codex-acp")
+        || agent_command.contains("kodex-acp")
+        || agent_command.contains("claude-agent-acp")
+}
+
+fn register_codex_api_proxy_from_env(env: &[(String, String)]) {
+    for (env_key, provider) in [
+        ("TIMIAI_API_KEY", "timiai"),
+        ("COMMANDCODE_API_KEY", "commandcode"),
+        ("DEEPSEEK_API_KEY", "deepseek"),
+        ("KIMI_CODE_API_KEY", "kimi_code"),
+        ("XIAOMI_MIMO_API_KEY", "xiaomi_mimo"),
+    ] {
+        if let Some((_, api_key)) = env.iter().find(|(name, _)| name == env_key) {
+            ensure_codex_api_proxy(provider, api_key);
+        }
+    }
+    if let Some((_, provider_map)) = env
+        .iter()
+        .find(|(name, _)| name == "KODEX_MODEL_PROVIDER_MAP")
+    {
+        configure_codex_api_proxy_model_provider_map(provider_map);
+    }
+}
+
 /// ACP transport that spawns the agent process and connects via TCP.
 ///
 /// Used for agents that listen on a TCP port instead of communicating over
@@ -226,6 +244,10 @@ impl TcpAgentProcess {
             HiddenAgentProcess::from_command(&config.agent_command, &config.workspace_root)?;
         let mut env = parsed.env;
         env.extend(config.agent_env.clone());
+        let agent_command = config.agent_command.to_ascii_lowercase();
+        if uses_codex_api_proxy(&agent_command) {
+            register_codex_api_proxy_from_env(&env);
+        }
         Ok(Self {
             command: parsed.command,
             args: parsed.args,
