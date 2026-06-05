@@ -147,12 +147,13 @@ impl Application {
         &mut self,
         request_id: &str,
         option_id: Option<String>,
+        guidance: Option<String>,
     ) -> Result<(), String> {
         self.start_permission_write_baseline_if_allowed(request_id, option_id.as_deref());
 
         let delivered_to_acp_request = self
             .session
-            .resolve_permission(request_id, option_id.clone())
+            .resolve_permission(request_id, option_id.clone(), guidance)
             .map_err(|error| error.to_string())?;
 
         if !delivered_to_acp_request {

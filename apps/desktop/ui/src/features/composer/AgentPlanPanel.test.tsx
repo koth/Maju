@@ -204,6 +204,44 @@ describe("PermissionRequestPanel", () => {
     expect(onPermissionSelect).toHaveBeenLastCalledWith("permission-bash", "reject");
   });
 
+  it("requires guidance for Codex abort feedback options", () => {
+    const onPermissionSelect = vi.fn();
+
+    render(
+      <PermissionRequestPanel
+        entries={[]}
+        request={{
+          requestId: "permission-bash",
+          title: "Bash",
+          details: "Remove-Item README.md -Force",
+          options: [
+            { id: "approved", label: "Yes", kind: "AllowOnce" },
+            {
+              id: "abort",
+              label: "No, and tell Codex what to do differently",
+              kind: "RejectOnce",
+            },
+          ],
+        }}
+        onPermissionSelect={onPermissionSelect}
+      />,
+    );
+
+    const rejectButton = screen.getByRole("button", { name: "拒绝并补充说明" });
+    expect(rejectButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("补充说明"), {
+      target: { value: "不要删除 README，先说明原因" },
+    });
+    fireEvent.click(rejectButton);
+
+    expect(onPermissionSelect).toHaveBeenLastCalledWith(
+      "permission-bash",
+      "abort",
+      "不要删除 README，先说明原因",
+    );
+  });
+
   it("renders plan approval as an inline composer panel", () => {
     render(
       <PermissionRequestPanel

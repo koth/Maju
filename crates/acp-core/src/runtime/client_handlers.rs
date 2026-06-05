@@ -1,8 +1,8 @@
 use super::agent_process::AgentTransport;
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
-    PermissionPolicyMode, codebuddy_bash_write_hint_paths, decide_codebuddy_terminal_permission,
-    decide_permission,
+    PermissionPolicyMode, PermissionResolution, codebuddy_bash_write_hint_paths,
+    decide_codebuddy_terminal_permission, decide_permission,
 };
 use super::terminal::TerminalManager;
 use super::workspace_paths::{
@@ -13,7 +13,7 @@ use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{append_runtime_event_log, format_permission_options};
 use agent_client_protocol::schema::{
-    ContentBlock, CreateTerminalRequest, KillTerminalRequest,
+    ContentBlock, CreateTerminalRequest, KillTerminalRequest, Meta,
     PermissionOptionKind as AcpPermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, TerminalOutputRequest, ToolCallContent,
@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 use workspace_model::PermissionOption;
+
+const KODEX_PERMISSION_GUIDANCE_META_KEY: &str = "kodex.ai/permissionGuidance";
 
 #[derive(Clone, Default)]
 struct CodeBuddyTerminalDenials {
@@ -188,9 +190,11 @@ pub(super) async fn connect_agent_client(
                         &request,
                     )
                 };
-                let selected_option_id = match decision {
-                    PermissionDecision::Select(option_id) => Some(option_id),
-                    PermissionDecision::Cancel => None,
+                let permission_resolution = match decision {
+                    PermissionDecision::Select(option_id) => {
+                        PermissionResolution::new(Some(option_id), None)
+                    }
+                    PermissionDecision::Cancel => PermissionResolution::default(),
                     PermissionDecision::Ask => {
                         let reply_rx = permission_request_broker.register(request_id.clone())?;
 
@@ -204,21 +208,22 @@ pub(super) async fn connect_agent_client(
                             id: request_id.clone(),
                             content: format_permission_options(&option_labels),
                         });
-                        reply_rx.recv().ok().flatten()
+                        reply_rx.recv().unwrap_or_default()
                     }
                 };
+                let selected_option_id = permission_resolution.option_id.as_deref();
                 let response_option_id = codebuddy_bash_soft_reject_response_option(
                     &request,
                     &request_payload,
-                    selected_option_id.as_deref(),
+                    selected_option_id,
                     &permission_terminal_denials,
                     &permission_log_config,
                 )?
-                .or_else(|| selected_option_id.clone());
+                .or_else(|| permission_resolution.option_id.clone());
                 register_codebuddy_bash_terminal_approval(
                     &request,
                     &request_payload,
-                    selected_option_id.as_deref(),
+                    selected_option_id,
                     &permission_terminal_approvals,
                     &permission_log_config,
                 )?;
@@ -238,8 +243,10 @@ pub(super) async fn connect_agent_client(
                     }
                     None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
                 };
+                let response =
+                    attach_permission_guidance(response, permission_resolution.guidance.as_deref());
 
-                let outcome = match selected_option_id.as_deref() {
+                let outcome = match selected_option_id {
                     Some(option_id) => {
                         let label = options
                             .iter()
@@ -791,7 +798,10 @@ fn ensure_codebuddy_terminal_create_permission(
                 content: format_permission_options(&option_labels),
             });
 
-            let selected_option_id = reply_rx.recv().ok().flatten();
+            let selected_option_id = reply_rx
+                .recv()
+                .ok()
+                .and_then(|resolution| resolution.option_id);
             let allowed = selected_option_id
                 .as_deref()
                 .is_some_and(|option_id| option_id.eq_ignore_ascii_case("allow"));
@@ -1009,6 +1019,19 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+fn attach_permission_guidance(
+    response: RequestPermissionResponse,
+    guidance: Option<&str>,
+) -> RequestPermissionResponse {
+    let Some(guidance) = guidance.map(str::trim).filter(|value| !value.is_empty()) else {
+        return response;
+    };
+    response.meta(Meta::from_iter([(
+        KODEX_PERMISSION_GUIDANCE_META_KEY.to_string(),
+        Value::String(guidance.to_string()),
+    )]))
+}
+
 fn ensure_fs_write_permission(
     permission_broker: &PermissionBroker,
     tx_events: &mpsc::Sender<ClientEvent>,
@@ -1060,7 +1083,10 @@ fn ensure_fs_write_permission(
         content: format_permission_options(&option_labels),
     });
 
-    let selected_option_id = reply_rx.recv().ok().flatten();
+    let selected_option_id = reply_rx
+        .recv()
+        .ok()
+        .and_then(|resolution| resolution.option_id);
     let allowed = selected_option_id
         .as_deref()
         .is_some_and(|option_id| option_id.eq_ignore_ascii_case("allow"));

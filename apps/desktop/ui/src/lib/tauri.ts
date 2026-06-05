@@ -30,8 +30,12 @@ export async function sessionSetConfigControl(
   return invoke<SessionConfigState>("session_set_config_control", { controlId, valueId, provider: provider ?? null });
 }
 
-export async function sessionResolvePermission(requestId: string, optionId: string | null): Promise<void> {
-  return invoke("session_resolve_permission", { requestId, optionId });
+export async function sessionResolvePermission(
+  requestId: string,
+  optionId: string | null,
+  guidance?: string | null,
+): Promise<void> {
+  return invoke("session_resolve_permission", { requestId, optionId, guidance: guidance ?? null });
 }
 
 export async function sessionCancel(): Promise<void> {

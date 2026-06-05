@@ -47,8 +47,9 @@ pub fn session_resolve_permission(
     state: State<'_, AppState>,
     request_id: String,
     option_id: Option<String>,
+    guidance: Option<String>,
 ) -> Result<(), String> {
-    state.with_app(|app| app.resolve_tool_permission(&request_id, option_id))
+    state.with_app(|app| app.resolve_tool_permission(&request_id, option_id, guidance))
 }
 
 #[tauri::command]

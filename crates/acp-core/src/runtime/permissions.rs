@@ -12,10 +12,32 @@ pub(crate) struct PermissionBroker {
     mode: Arc<Mutex<PermissionPolicyMode>>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PermissionResolution {
+    pub(crate) option_id: Option<String>,
+    pub(crate) guidance: Option<String>,
+}
+
+impl PermissionResolution {
+    pub(crate) fn new(option_id: Option<String>, guidance: Option<String>) -> Self {
+        Self {
+            option_id,
+            guidance: guidance.and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PermissionBrokerState {
-    pending: HashMap<String, mpsc::Sender<Option<String>>>,
-    early_resolutions: HashMap<String, Option<String>>,
+    pending: HashMap<String, mpsc::Sender<PermissionResolution>>,
+    early_resolutions: HashMap<String, PermissionResolution>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,7 +51,7 @@ impl PermissionBroker {
     pub(crate) fn register(
         &self,
         request_id: String,
-    ) -> anyhow::Result<mpsc::Receiver<Option<String>>> {
+    ) -> anyhow::Result<mpsc::Receiver<PermissionResolution>> {
         let (tx, rx) = mpsc::channel();
 
         let early_resolution = {
@@ -57,7 +79,9 @@ impl PermissionBroker {
         &self,
         request_id: &str,
         option_id: Option<String>,
+        guidance: Option<String>,
     ) -> anyhow::Result<bool> {
+        let resolution = PermissionResolution::new(option_id, guidance);
         let sender = {
             let mut state = self
                 .state
@@ -68,7 +92,7 @@ impl PermissionBroker {
             } else {
                 state
                     .early_resolutions
-                    .insert(request_id.to_string(), option_id.clone());
+                    .insert(request_id.to_string(), resolution.clone());
                 None
             }
         };
@@ -78,7 +102,7 @@ impl PermissionBroker {
         };
 
         sender
-            .send(option_id)
+            .send(resolution)
             .map_err(|_| anyhow!("permission request already closed"))?;
         Ok(true)
     }
@@ -119,7 +143,7 @@ impl PermissionBroker {
             std::mem::take(&mut state.pending)
         };
         for (_, sender) in pending {
-            let _ = sender.send(None);
+            let _ = sender.send(PermissionResolution::default());
         }
         Ok(())
     }
@@ -282,7 +306,7 @@ fn decide_build_permission(
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::SwitchMode => PermissionDecision::Ask,
         ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
-            select_permission_option(request, false)
+            PermissionDecision::Ask
         }
         ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
             let paths = permission_paths(request);
@@ -1526,19 +1550,19 @@ mod tests {
     }
 
     #[test]
-    fn build_permission_rejects_shell_redirection_file_writes() {
+    fn build_permission_asks_for_shell_redirection_file_writes() {
         let request = execute_request(json!({
             "command": "cat > AGENTS.md << 'ENDOFFILE'\n# Guidelines\nENDOFFILE"
         }));
 
         assert_eq!(
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
-            PermissionDecision::Select("reject".to_string()),
+            PermissionDecision::Ask,
         );
     }
 
     #[test]
-    fn build_permission_rejects_powershell_file_writes() {
+    fn build_permission_asks_for_powershell_file_writes() {
         let request = execute_request(json!({
             "command": [
                 "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
@@ -1549,7 +1573,19 @@ mod tests {
 
         assert_eq!(
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
-            PermissionDecision::Select("reject".to_string()),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn build_permission_asks_for_powershell_remove_item() {
+        let request = execute_request(json!({
+            "command": "Remove-Item README.md -Force"
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
         );
     }
 
@@ -1588,21 +1624,17 @@ mod tests {
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
             PermissionDecision::Select("allow".to_string()),
         );
+    }
 
-        let request = execute_request_with_permission_options(
-            json!({ "command": "cat > AGENTS.md << 'END'\n# Guidelines\nEND" }),
-            vec![
-                PermissionOption::new(
-                    "reject_always",
-                    "Always Reject",
-                    PermissionOptionKind::RejectAlways,
-                ),
-                PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
-            ],
-        );
+    #[test]
+    fn build_permission_asks_for_dynamic_shell_writes_without_static_path() {
+        let request = execute_request(json!({
+            "command": "python - <<'PY'\nfrom pathlib import Path\np=Path.cwd() / 'generated.ts'\np.write_text('ok', encoding='utf-8')\nPY"
+        }));
+
         assert_eq!(
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
-            PermissionDecision::Select("reject".to_string()),
+            PermissionDecision::Ask,
         );
     }
 

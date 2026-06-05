@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { AgentPlanEntry, PermissionOption, UiSnapshot } from "../../types";
 import MarkdownBody from "../conversation/MarkdownBody";
 import "./Composer.css";
@@ -24,13 +25,13 @@ export interface PendingPermissionRequest {
 interface PermissionRequestPanelProps {
   request: PendingPermissionRequest | null;
   entries: AgentPlanEntry[];
-  onPermissionSelect?: (requestId: string, optionId: string | null) => void;
+  onPermissionSelect?: (requestId: string, optionId: string | null, guidance?: string | null) => void;
 }
 
 interface PlanApprovalModalProps {
   approval: PlanApprovalRequest | null;
   entries: AgentPlanEntry[];
-  onPermissionSelect?: (requestId: string, optionId: string | null) => void;
+  onPermissionSelect?: (requestId: string, optionId: string | null, guidance?: string | null) => void;
 }
 
 export function AgentPlanPanel({ entries }: Props) {
@@ -88,6 +89,12 @@ export function PermissionRequestPanel({
   entries,
   onPermissionSelect,
 }: PermissionRequestPanelProps) {
+  const [guidance, setGuidance] = useState("");
+
+  useEffect(() => {
+    setGuidance("");
+  }, [request?.requestId]);
+
   if (!request) return null;
 
   const canAct = !!onPermissionSelect;
@@ -101,6 +108,8 @@ export function PermissionRequestPanel({
       )
     : null;
   const actionOptions = planApprovalActions ?? request.options;
+  const showGuidance = !request.isPlanApproval && actionOptions.some(requiresPermissionGuidance);
+  const guidanceText = guidance.trim();
 
   return (
     <section
@@ -143,14 +152,32 @@ export function PermissionRequestPanel({
         </div>
       )}
 
+      {showGuidance && (
+        <label className="permission-request-guidance">
+          <span>补充说明</span>
+          <textarea
+            value={guidance}
+            onChange={(event) => setGuidance(event.target.value)}
+            placeholder="告诉 Codex 应该怎么调整"
+            rows={3}
+          />
+        </label>
+      )}
+
       <div className="permission-request-actions">
         {actionOptions.map((option) => (
           <button
             key={option.id}
             type="button"
             className={`permission-request-action ${permissionOptionTone(option, request.isPlanApproval)}`}
-            disabled={!canAct}
-            onClick={() => onPermissionSelect?.(request.requestId, option.id)}
+            disabled={!canAct || (requiresPermissionGuidance(option) && !guidanceText)}
+            onClick={() => {
+              if (requiresPermissionGuidance(option)) {
+                onPermissionSelect?.(request.requestId, option.id, guidanceText);
+              } else {
+                onPermissionSelect?.(request.requestId, option.id);
+              }
+            }}
           >
             {permissionOptionLabel(option, request.isPlanApproval)}
           </button>
@@ -305,7 +332,22 @@ function permissionOptionLabel(option: PermissionOption, isPlanApproval?: boolea
       return "继续规划";
     }
   }
+  if (requiresPermissionGuidance(option)) {
+    return option.id.toLowerCase() === "timed_out" ? "超时并补充说明" : "拒绝并补充说明";
+  }
   return option.label || option.id;
+}
+
+function requiresPermissionGuidance(option: PermissionOption) {
+  const id = option.id.toLowerCase();
+  const label = option.label.toLowerCase();
+  if (id === "timed_out") return true;
+  if (!["abort", "reject", "deny", "denied"].includes(id)) return false;
+  return (
+    label.includes("tell codex") ||
+    label.includes("provide feedback") ||
+    label.includes("what to do differently")
+  );
 }
 
 function permissionOptionTone(option: PermissionOption, isPlanApproval?: boolean) {

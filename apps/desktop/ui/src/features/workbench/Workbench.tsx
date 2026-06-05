@@ -278,7 +278,7 @@ export function Workbench() {
     setReviewPanelExpanded(false);
   }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
-  const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null) => {
+  const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null, guidance?: string | null) => {
     setResolvingPermissionIds((current) => {
       if (current.has(requestId)) return current;
       const next = new Set(current);
@@ -286,7 +286,7 @@ export function Workbench() {
       return next;
     });
     try {
-      await sessionResolvePermission(requestId, optionId);
+      await sessionResolvePermission(requestId, optionId, guidance);
       await pollState();
     } catch (error) {
       setResolvingPermissionIds((current) => {

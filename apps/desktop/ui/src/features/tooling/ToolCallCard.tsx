@@ -19,7 +19,7 @@ interface Props {
   tool: ToolInvocation;
   childToolsByParent?: Map<string, ToolInvocation[]>;
   nested: boolean;
-  onPermissionSelect: (requestId: string, optionId: string | null) => void;
+  onPermissionSelect: (requestId: string, optionId: string | null, guidance?: string | null) => void;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
 }
 

@@ -409,26 +409,35 @@ fn permission_broker_delivers_pending_resolution() {
     let broker = PermissionBroker::default();
     let rx = broker.register("call-1".into()).unwrap();
 
-    let delivered = broker.resolve("call-1", Some("allow".into())).unwrap();
+    let delivered = broker
+        .resolve("call-1", Some("allow".into()), None)
+        .unwrap();
 
     assert!(delivered);
-    assert_eq!(
-        rx.recv_timeout(Duration::from_millis(50)).unwrap(),
-        Some("allow".into())
-    );
+    let resolution = rx.recv_timeout(Duration::from_millis(50)).unwrap();
+    assert_eq!(resolution.option_id.as_deref(), Some("allow"));
+    assert_eq!(resolution.guidance, None);
 }
 
 #[test]
 fn permission_broker_replays_early_resolution() {
     let broker = PermissionBroker::default();
 
-    let delivered = broker.resolve("call-1", Some("allowAll".into())).unwrap();
+    let delivered = broker
+        .resolve(
+            "call-1",
+            Some("allowAll".into()),
+            Some("  try a read-only command instead  ".into()),
+        )
+        .unwrap();
     let rx = broker.register("call-1".into()).unwrap();
 
     assert!(!delivered);
+    let resolution = rx.recv_timeout(Duration::from_millis(50)).unwrap();
+    assert_eq!(resolution.option_id.as_deref(), Some("allowAll"));
     assert_eq!(
-        rx.recv_timeout(Duration::from_millis(50)).unwrap(),
-        Some("allowAll".into())
+        resolution.guidance.as_deref(),
+        Some("try a read-only command instead")
     );
 }
 
@@ -436,7 +445,9 @@ fn permission_broker_replays_early_resolution() {
 fn permission_broker_cancel_clears_early_resolutions() {
     let broker = PermissionBroker::default();
 
-    let delivered = broker.resolve("call-1", Some("allow".into())).unwrap();
+    let delivered = broker
+        .resolve("call-1", Some("allow".into()), None)
+        .unwrap();
     broker.cancel_all().unwrap();
     let rx = broker.register("call-1".into()).unwrap();
 

@@ -22,7 +22,7 @@ function scrollElementIntoView(element: HTMLElement | null) {
 
 interface Props {
   snapshot: UiSnapshot;
-  onPermissionSelect: (requestId: string, optionId: string | null) => void;
+  onPermissionSelect: (requestId: string, optionId: string | null, guidance?: string | null) => void;
   turnChangeSetsByMessageId?: Record<string, TimelineTurnChangeSet>;
   onReviewFileSelect?: (path: string, changeSetId: string) => void;
   onReviewChangeSetSelect?: (changeSetId: string) => void;

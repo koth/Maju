@@ -169,8 +169,10 @@ impl SessionHandle {
         &self,
         request_id: &str,
         option_id: Option<String>,
+        guidance: Option<String>,
     ) -> anyhow::Result<bool> {
-        self.permission_broker.resolve(request_id, option_id)
+        self.permission_broker
+            .resolve(request_id, option_id, guidance)
     }
 
     pub fn resolve_codebuddy_interruption(

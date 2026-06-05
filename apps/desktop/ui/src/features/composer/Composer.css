@@ -218,6 +218,32 @@
   margin-top: 0;
 }
 
+.permission-request-guidance {
+  display: grid;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.permission-request-guidance textarea {
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  background: rgba(9, 12, 17, 0.36);
+  font: inherit;
+  line-height: 1.45;
+  outline: none;
+}
+
+.permission-request-guidance textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
 .permission-request-actions {
   display: flex;
   flex-wrap: wrap;
