@@ -86,6 +86,50 @@ impl TerminalManager {
         Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
     }
 
+    pub(super) fn create_denied_terminal(
+        &self,
+        request: &CreateTerminalRequest,
+        reason: &str,
+    ) -> anyhow::Result<CreateTerminalResponse> {
+        let terminal_id = format!(
+            "terminal_{}",
+            self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let output_byte_limit = request
+            .output_byte_limit
+            .map(|limit| limit.min(usize::MAX as u64) as usize);
+        let mut output = reason.trim().to_string();
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        let mut truncated = false;
+        if let Some(limit) = output_byte_limit
+            && output.len() > limit
+        {
+            let mut trim_to = output.len() - limit;
+            while trim_to < output.len() && !output.is_char_boundary(trim_to) {
+                trim_to += 1;
+            }
+            output.drain(..trim_to);
+            truncated = true;
+        }
+
+        let terminal = Arc::new(ManagedTerminal {
+            child: Mutex::new(None),
+            output: Mutex::new(output),
+            truncated: AtomicBool::new(truncated),
+            output_byte_limit,
+            exit_status: Mutex::new(Some(TerminalExitStatus::new().exit_code(Some(1)))),
+        });
+
+        self.terminals
+            .lock()
+            .map_err(|_| anyhow!("terminal registry poisoned"))?
+            .insert(terminal_id.clone(), terminal);
+
+        Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
+    }
+
     pub(super) fn terminal_output(
         &self,
         request: &TerminalOutputRequest,
@@ -307,4 +351,39 @@ where
 
 fn to_terminal_exit_status(status: ExitStatus) -> TerminalExitStatus {
     TerminalExitStatus::new().exit_code(status.code().map(|code| code.max(0) as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denied_terminal_returns_failure_without_spawning_process() {
+        let manager = TerminalManager::default();
+        let request =
+            CreateTerminalRequest::new("session-1", "pnpm".to_string()).args(vec!["build".into()]);
+
+        let created = manager
+            .create_denied_terminal(
+                &request,
+                "Permission rejected by user. Command was not executed.",
+            )
+            .expect("denied terminal should be created");
+        let output = manager
+            .terminal_output(&TerminalOutputRequest::new(
+                "session-1",
+                created.terminal_id.clone(),
+            ))
+            .expect("denied terminal should provide output");
+        let exit = manager
+            .wait_for_terminal_exit(&WaitForTerminalExitRequest::new(
+                "session-1",
+                created.terminal_id,
+            ))
+            .expect("denied terminal should be exited");
+
+        assert!(output.output.contains("Permission rejected by user"));
+        assert_eq!(output.exit_status.unwrap().exit_code, Some(1));
+        assert_eq!(exit.exit_status.exit_code, Some(1));
+    }
 }

@@ -4,9 +4,12 @@ use super::diff_utils::{
     looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
     normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
     tool_command_write_hint_paths, tool_diff_hunks_for_detected_write,
-    tool_hunks_for_tracker_update,
+    tool_hunks_for_tracker_update, write_input_content_text,
 };
-use super::{Application, current_timestamp, normalize_path_for_storage, normalize_tracked_path};
+use super::{
+    Application, current_timestamp, is_codebuddy_agent_label, normalize_path_for_storage,
+    normalize_tracked_path,
+};
 use acp_core::diff_to_hunks;
 use git_service::GitService;
 use std::collections::HashSet;
@@ -17,6 +20,50 @@ use workspace_model::{
 };
 
 impl Application {
+    pub(super) fn completed_tool_has_detectable_write_hint(&self, call_id: &str) -> bool {
+        let Some(tool) = self
+            .ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == call_id && tool.status == ToolStatus::Succeeded)
+        else {
+            return false;
+        };
+
+        if !tool_command_write_hint_paths(tool.raw_input.as_deref()).is_empty() {
+            return self.is_codebuddy_shell_command_tool(tool);
+        }
+
+        if !is_file_write_tool_identity(&tool.kind, &tool.name) {
+            return false;
+        }
+        let Some(input) = tool.raw_input.as_deref() else {
+            return false;
+        };
+        serde_json::from_str::<serde_json::Value>(input)
+            .ok()
+            .and_then(|json| {
+                json.get("file_path")
+                    .or_else(|| json.get("filePath"))
+                    .or_else(|| json.get("path"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .map(|path| !path.is_empty())
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_codebuddy_shell_command_tool(&self, tool: &workspace_model::ToolInvocation) -> bool {
+        self.ui
+            .session
+            .agent_cli
+            .as_deref()
+            .is_some_and(is_codebuddy_agent_label)
+            && [tool.kind.as_str(), tool.name.as_str()]
+                .iter()
+                .any(|value| is_shell_command_tool_label(value))
+    }
+
     /// Detect file writes from completed tool calls by examining tool summaries/titles.
     /// Apply verified file changes from the tracker to session state and tool diff previews.
     pub(super) fn apply_tracker_changes(
@@ -48,6 +95,13 @@ impl Application {
                 target_text,
                 (change.quality != DiffQuality::Exact).then_some(change.quality.clone()),
             );
+            let tracker_tool_hunks = if change.skipped_diff {
+                Vec::new()
+            } else if change.change_type == FileChangeType::Created && change.old_text.is_none() {
+                diff_to_hunks(None, &change.new_text)
+            } else {
+                diff_to_hunks(change.old_text.as_deref(), &change.new_text)
+            };
             let exact_edit = self.exact_edit_text_for_tool(call_id, &normalized);
             let exact_edit_hunks = exact_edit.as_ref().map(|edit| edit.hunks.clone());
             let existing_tool_hunks = self.existing_tool_diff_hunks(call_id, &normalized);
@@ -65,7 +119,7 @@ impl Application {
                     previous_session_new_text.as_deref(),
                     change.old_text.as_deref(),
                     &change.new_text,
-                    &canonical.hunks,
+                    &tracker_tool_hunks,
                 )
             });
 
@@ -335,7 +389,7 @@ impl Application {
 
     pub(super) fn apply_tool_diff_preview_to_review(
         &mut self,
-        path: &str,
+        _path: &str,
         normalized_path: &str,
         hunks: &[DiffHunk],
     ) -> bool {
@@ -343,7 +397,8 @@ impl Application {
             return false;
         }
 
-        let abs_path = self.ui.workspace.root.join(normalized_path);
+        let normalized_path = normalize_path_for_storage(normalized_path, &self.ui.workspace.root);
+        let abs_path = self.ui.workspace.root.join(&normalized_path);
         let Ok(new_text) = std::fs::read_to_string(abs_path) else {
             return false;
         };
@@ -355,8 +410,98 @@ impl Application {
             return false;
         }
 
-        self.upsert_review_file_change(path, FileChangeType::Modified, Some(old_text), new_text);
+        let (change_type, old_text) = if looks_like_created_file_preview(&old_text, hunks)
+            && self.git_head_text_for_path(&normalized_path).is_none()
+        {
+            (FileChangeType::Created, None)
+        } else {
+            (FileChangeType::Modified, Some(old_text))
+        };
+        self.upsert_review_file_change(&normalized_path, change_type, old_text, new_text);
         true
+    }
+
+    pub(super) fn apply_landed_tool_diff_preview_to_review(
+        &mut self,
+        call_id: &str,
+        normalized_path: &str,
+        hunks: &[DiffHunk],
+    ) -> bool {
+        if hunks.is_empty() {
+            return false;
+        }
+
+        let normalized_path = normalize_path_for_storage(normalized_path, &self.ui.workspace.root);
+        if let Some(baseline) = self
+            .file_tracker
+            .get_baseline_text(call_id, &normalized_path)
+        {
+            let abs_path = self.ui.workspace.root.join(&normalized_path);
+            let Ok(new_text) = std::fs::read_to_string(abs_path) else {
+                return false;
+            };
+            let old_text = normalize_diff_text_for_session_change(baseline);
+            let new_text = normalize_diff_text_for_session_change(&new_text);
+            if old_text != new_text {
+                self.upsert_review_file_change(
+                    &normalized_path,
+                    FileChangeType::Modified,
+                    Some(old_text),
+                    new_text,
+                );
+                return true;
+            }
+        }
+
+        if let Some(change) = self
+            .ui
+            .session_changes
+            .iter()
+            .find(|change| normalize_tracked_path(&change.path) == normalized_path)
+            .cloned()
+        {
+            return self
+                .upsert_review_file_change_from_landed_tool_hunks(
+                    &normalized_path,
+                    change.change_type,
+                    change.old_text.as_deref(),
+                    &change.new_text,
+                    hunks,
+                )
+                .unwrap_or(false);
+        }
+
+        if let Some(change) = self.git_verified_file_change(&normalized_path) {
+            return self
+                .upsert_review_file_change_from_landed_tool_hunks(
+                    &normalized_path,
+                    change.change_type,
+                    change.old_text.as_deref(),
+                    &change.new_text,
+                    hunks,
+                )
+                .unwrap_or(false);
+        }
+
+        false
+    }
+
+    pub(super) fn tool_diff_preview_needs_landing_retry(
+        &self,
+        normalized_path: &str,
+        hunks: &[DiffHunk],
+    ) -> bool {
+        if hunks.is_empty() {
+            return false;
+        }
+
+        let normalized_path = normalize_path_for_storage(normalized_path, &self.ui.workspace.root);
+        let abs_path = self.ui.workspace.root.join(&normalized_path);
+        let Ok(current_text) = std::fs::read_to_string(abs_path) else {
+            return true;
+        };
+        let current_text = normalize_diff_text_for_session_change(&current_text);
+        reverse_apply_diff_hunks(&current_text, hunks).is_none()
     }
 
     pub(super) fn tool_diff_preview_matches_recording_window(
@@ -386,12 +531,24 @@ impl Application {
             .file_tracker
             .get_baseline_text(call_id, &normalized_path)
         {
-            return normalized_old_text_matches(&old_text, Some(baseline), false);
+            if normalized_old_text_matches(&old_text, Some(baseline), false) {
+                return true;
+            }
+            return looks_like_created_file_preview(&old_text, hunks)
+                && self.git_head_text_for_path(&normalized_path).is_none()
+                && normalize_diff_text_for_session_change(baseline) == new_text;
         }
 
-        self.file_tracker
+        if self
+            .file_tracker
             .was_missing_at_start(call_id, &normalized_path)
-            .is_some_and(|missing| missing && old_text.is_empty())
+            .is_some_and(|missing| missing && is_effectively_empty_text(&old_text))
+        {
+            return true;
+        }
+
+        looks_like_created_file_preview(&old_text, hunks)
+            && self.git_head_text_for_path(&normalized_path).is_none()
     }
 
     pub(super) fn upsert_review_file_change_from_landed_tool_hunks(
@@ -455,9 +612,14 @@ impl Application {
         }
 
         let timestamp = current_timestamp();
+        let stored_old_text = if change_type == FileChangeType::Created {
+            None
+        } else {
+            canonical.old_text.clone()
+        };
         if let Some(index) = existing_index {
             let existing = &mut self.ui.review_changes[index];
-            existing.old_text = canonical.old_text;
+            existing.old_text = stored_old_text;
             existing.new_text = canonical.new_text.unwrap_or(normalized_new_text);
             existing.change_type = change_type;
             existing.added_lines = canonical.added_lines;
@@ -467,7 +629,7 @@ impl Application {
             self.ui.review_changes.push(SessionFileChange {
                 path: normalized_path,
                 change_type,
-                old_text: canonical.old_text,
+                old_text: stored_old_text,
                 new_text: canonical.new_text.unwrap_or(normalized_new_text),
                 added_lines: canonical.added_lines,
                 removed_lines: canonical.removed_lines,
@@ -555,33 +717,35 @@ impl Application {
         let workspace_root = self.ui.workspace.root.clone();
         let mut changed = false;
 
-        // Collect normalized paths already tracked in session_changes
-        let tracked_paths: HashSet<String> = self
-            .ui
-            .session_changes
-            .iter()
-            .map(|c| normalize_path(&c.path))
-            .collect();
-
         let completed_tool_ids: HashSet<&str> =
             completed_tool_ids.iter().map(String::as_str).collect();
 
         // Look only at tools that completed in this poll batch. Scanning all historical
         // tools every 220ms makes long CodeBuddy sessions burn the desktop process.
-        let mut write_paths: Vec<(String, String)> = Vec::new();
+        let mut write_paths: Vec<(String, String, Option<String>)> = Vec::new();
         for tool in self.ui.tools.iter().filter(|t| {
             t.status == ToolStatus::Succeeded && completed_tool_ids.contains(t.call_id.as_str())
         }) {
-            let mut add_path = |path: String| {
-                if !tracked_paths.contains(&normalize_path(&path)) {
-                    write_paths.push((tool.call_id.clone(), path));
+            let mut add_path = |path: String, target_text: Option<String>| {
+                let normalized_storage = normalize_path_for_storage(&path, &workspace_root);
+                let normalized = normalize_path(&normalized_storage);
+                if let Some(existing) =
+                    write_paths.iter_mut().find(|(call_id, existing_path, _)| {
+                        call_id == &tool.call_id && normalize_path(existing_path) == normalized
+                    })
+                {
+                    if existing.2.is_none() {
+                        existing.2 = target_text;
+                    }
+                } else {
+                    write_paths.push((tool.call_id.clone(), path, target_text));
                 }
             };
 
             // Check summary for common edit result patterns.
             for prefix in ["Editing ", "Edited ", "已编辑 "] {
                 if let Some(path) = tool.summary.strip_prefix(prefix) {
-                    add_path(path.to_string());
+                    add_path(path.to_string(), None);
                     break;
                 }
             }
@@ -590,13 +754,14 @@ impl Application {
             if is_file_write_tool_identity(&tool.kind, &tool.name) {
                 if let Some(ref input) = tool.raw_input {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(input) {
+                        let target_text = write_input_content_text(&json).map(str::to_string);
                         let file_path = json
                             .get("file_path")
                             .or_else(|| json.get("filePath"))
                             .or_else(|| json.get("path"))
                             .and_then(|v| v.as_str());
                         if let Some(path) = file_path {
-                            add_path(path.to_string());
+                            add_path(path.to_string(), target_text);
                         }
                     }
                 }
@@ -605,17 +770,17 @@ impl Application {
             // Shell tools can write files via command text (Set-Content, Out-File,
             // redirects, etc.) without emitting ACP ToolDiff events.
             for path in tool_command_write_hint_paths(tool.raw_input.as_deref()) {
-                add_path(path);
+                add_path(path, None);
             }
         }
-        write_paths.sort();
-        write_paths.dedup();
+        write_paths.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        write_paths.dedup_by(|a, b| a.0 == b.0 && normalize_path(&a.1) == normalize_path(&b.1));
 
         // For each detected file write, read current content and update only
         // already-tracked changes. Creating a new change without a baseline makes
         // the UI render the whole file as added, so the file tracker must be the
         // source of new session_changes.
-        for (call_id, path) in write_paths {
+        for (call_id, path, target_text) in write_paths {
             let normalized = normalize_path_for_storage(&path, &workspace_root);
             let abs_path = workspace_root.join(&normalized);
             if let Ok(new_text) = std::fs::read_to_string(&abs_path)
@@ -628,8 +793,17 @@ impl Application {
                 let exact_edit = self.exact_edit_text_for_tool(&call_id, &normalized);
                 let old_text = self.ui.session_changes[index].old_text.clone();
                 let previous_session_new_text = self.ui.session_changes[index].new_text.clone();
+                let normalized_new_text = normalize_diff_text_for_session_change(&new_text);
+                let existing_tool_hunks = self.existing_tool_diff_hunks(&call_id, &normalized);
+                if normalize_diff_text_for_session_change(&previous_session_new_text)
+                    == normalized_new_text
+                    && exact_edit.is_none()
+                    && existing_tool_hunks.as_ref().is_none_or(Vec::is_empty)
+                {
+                    continue;
+                }
                 let landed_tool_hunks = compatible_landed_tool_hunks(
-                    self.existing_tool_diff_hunks(&call_id, &normalized),
+                    existing_tool_hunks,
                     Some(&previous_session_new_text),
                     false,
                     &new_text,
@@ -721,12 +895,99 @@ impl Application {
                 changed = true;
 
                 self.attach_tool_diff_preview(&call_id, &normalized, &normalized, tool_hunks);
-            } else if let Some(change) = self.git_verified_file_change(&normalized) {
+            } else if let Some(change) = self.tracker_verified_file_change(&call_id, &normalized) {
                 changed |= self.apply_tracker_changes(&call_id, vec![change]);
+            } else if let Some(exact_edit) = self.exact_edit_text_for_tool(&call_id, &normalized) {
+                changed |= self.apply_tracker_changes(
+                    &call_id,
+                    vec![crate::file_tracker::VerifiedFileChange {
+                        path: normalized,
+                        change_type: FileChangeType::Modified,
+                        old_text: Some(exact_edit.old_text),
+                        new_text: exact_edit.new_text,
+                        skipped_diff: false,
+                        quality: DiffQuality::Exact,
+                    }],
+                );
+            } else if let (Ok(new_text), Some(target_text)) =
+                (std::fs::read_to_string(&abs_path), target_text)
+            {
+                let normalized_new_text = normalize_diff_text_for_session_change(&new_text);
+                if normalized_new_text == normalize_diff_text_for_session_change(&target_text) {
+                    let old_text = self.git_head_text_for_path(&normalized);
+                    if old_text.as_deref() != Some(normalized_new_text.as_str()) {
+                        let change_type = if old_text.is_some() {
+                            FileChangeType::Modified
+                        } else {
+                            FileChangeType::Created
+                        };
+                        changed |= self.apply_tracker_changes(
+                            &call_id,
+                            vec![crate::file_tracker::VerifiedFileChange {
+                                path: normalized,
+                                change_type,
+                                old_text,
+                                new_text: normalized_new_text,
+                                skipped_diff: false,
+                                quality: DiffQuality::Exact,
+                            }],
+                        );
+                    }
+                }
+            } else if self
+                .file_tracker
+                .has_active_candidate(&call_id, &normalized)
+            {
+                continue;
             }
         }
 
         changed
+    }
+
+    fn tracker_verified_file_change(
+        &self,
+        call_id: &str,
+        normalized_path: &str,
+    ) -> Option<crate::file_tracker::VerifiedFileChange> {
+        let abs_path = self.ui.workspace.root.join(normalized_path);
+        let baseline = self
+            .file_tracker
+            .get_baseline_text(call_id, normalized_path);
+        if let Some(baseline) = baseline {
+            let new_text = std::fs::read_to_string(abs_path).ok()?;
+            let old_text = normalize_diff_text_for_session_change(baseline);
+            let new_text = normalize_diff_text_for_session_change(&new_text);
+            if old_text == new_text {
+                return None;
+            }
+            return Some(crate::file_tracker::VerifiedFileChange {
+                path: normalized_path.to_string(),
+                change_type: FileChangeType::Modified,
+                old_text: Some(old_text),
+                new_text,
+                skipped_diff: false,
+                quality: DiffQuality::Exact,
+            });
+        }
+
+        if self
+            .file_tracker
+            .was_missing_at_start(call_id, normalized_path)
+            .is_some_and(|missing| missing)
+        {
+            let new_text = std::fs::read_to_string(abs_path).ok()?;
+            return Some(crate::file_tracker::VerifiedFileChange {
+                path: normalized_path.to_string(),
+                change_type: FileChangeType::Created,
+                old_text: None,
+                new_text: normalize_diff_text_for_session_change(&new_text),
+                skipped_diff: false,
+                quality: DiffQuality::Exact,
+            });
+        }
+
+        None
     }
 
     pub(super) fn git_verified_file_change(
@@ -750,6 +1011,10 @@ impl Application {
             quality: record.quality,
         })
     }
+}
+
+fn is_shell_command_tool_label(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "bash" | "shell")
 }
 
 fn compatible_landed_tool_hunks(
@@ -780,5 +1045,23 @@ fn normalized_old_text_matches(
     if let Some(expected_old_text) = expected_old_text {
         return actual_old_text == normalize_diff_text_for_session_change(expected_old_text);
     }
-    allow_empty_old_text && actual_old_text.is_empty()
+    allow_empty_old_text && is_effectively_empty_text(actual_old_text)
+}
+
+fn looks_like_created_file_preview(old_text: &str, hunks: &[DiffHunk]) -> bool {
+    is_effectively_empty_text(old_text)
+        && hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| matches!(line.kind, DiffLineKind::Added))
+        && !hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| matches!(line.kind, DiffLineKind::Removed | DiffLineKind::Context))
+}
+
+fn is_effectively_empty_text(text: &str) -> bool {
+    normalize_diff_text_for_session_change(text)
+        .trim_matches('\n')
+        .is_empty()
 }

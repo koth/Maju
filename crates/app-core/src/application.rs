@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
+    AgentCliId, ChatMessage, DiffHunk, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
     ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
 };
@@ -33,7 +33,7 @@ mod tool_diffs;
 mod ui_snapshot;
 use diff_utils::{
     expand_tool_diff_fragment_from_disk, looks_like_fragment_to_full_file_text,
-    normalize_diff_text_for_session_change, tool_event_hint_paths,
+    normalize_diff_text_for_session_change, raw_input_has_write_payload, tool_event_hint_paths,
 };
 use inline_think::InlineThinkFilter;
 pub use path_utils::{normalize_path_for_storage, normalize_tracked_path};
@@ -46,6 +46,9 @@ pub use ui_snapshot::{UiPatchCursor, UiSnapshotUpdate};
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";
 const RESTORED_INCOMPLETE_TOOL_REASON: &str = "上次会话结束前未完成";
 const BACKGROUND_RUNTIME_IDLE_GRACE: Duration = Duration::from_secs(10 * 60);
+const PENDING_TOOL_DIFF_PREVIEW_TTL: Duration = Duration::from_secs(5);
+const PENDING_TOOL_WRITE_DETECTION_TTL: Duration = Duration::from_secs(5);
+const PENDING_TOOL_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 fn make_log_id() -> String {
     use std::time::SystemTime;
@@ -58,6 +61,22 @@ fn make_log_id() -> String {
 
 struct InFlightPrompt {
     task: PromptTask,
+}
+
+struct PendingToolDiffPreview {
+    call_id: String,
+    path: String,
+    hunks: Vec<DiffHunk>,
+    turn_user_message_id: Option<uuid::Uuid>,
+    next_retry_at: Instant,
+    expires_at: Instant,
+}
+
+struct PendingToolWriteDetection {
+    call_id: String,
+    turn_user_message_id: Option<uuid::Uuid>,
+    next_retry_at: Instant,
+    expires_at: Instant,
 }
 
 struct SessionRuntime {
@@ -77,6 +96,8 @@ struct SessionRuntime {
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
     current_turn_user_message_id: Option<uuid::Uuid>,
+    pending_tool_diff_previews: Vec<PendingToolDiffPreview>,
+    pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
     last_viewed: Instant,
     idle_since: Option<Instant>,
@@ -196,6 +217,8 @@ pub struct Application {
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
     current_turn_user_message_id: Option<uuid::Uuid>,
+    pending_tool_diff_previews: Vec<PendingToolDiffPreview>,
+    pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
 }
 
@@ -293,6 +316,11 @@ fn is_claude_agent_label(label: &str) -> bool {
     )
 }
 
+fn is_codebuddy_agent_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    normalized == "codebuddy" || normalized == "codebuddy-acp"
+}
+
 fn normalize_title_for_prompt_compare(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -363,6 +391,14 @@ impl Application {
         std::mem::swap(
             &mut self.current_turn_user_message_id,
             &mut runtime.current_turn_user_message_id,
+        );
+        std::mem::swap(
+            &mut self.pending_tool_diff_previews,
+            &mut runtime.pending_tool_diff_previews,
+        );
+        std::mem::swap(
+            &mut self.pending_tool_write_detections,
+            &mut runtime.pending_tool_write_detections,
         );
         std::mem::swap(
             &mut self.inline_think_filter,

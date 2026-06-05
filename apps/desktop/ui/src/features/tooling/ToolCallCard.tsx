@@ -422,13 +422,33 @@ export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);
 function areToolCardPropsEqual(prev: Props, next: Props) {
   if (prev.nested !== next.nested) return false;
   if (prev.onPermissionSelect !== next.onPermissionSelect) return false;
-  if (prev.hiddenPermissionRequestIds !== next.hiddenPermissionRequestIds)
+  if (
+    !sameReadonlySet(
+      prev.hiddenPermissionRequestIds,
+      next.hiddenPermissionRequestIds,
+    )
+  )
     return false;
   if (!sameToolForRender(prev.tool, next.tool)) return false;
   return sameChildToolsForRender(
     prev.childToolsByParent?.get(prev.tool.call_id) ?? [],
     next.childToolsByParent?.get(next.tool.call_id) ?? [],
   );
+}
+
+function sameReadonlySet<T>(
+  prev: ReadonlySet<T> | undefined,
+  next: ReadonlySet<T> | undefined,
+) {
+  if (prev === next) return true;
+  const prevSize = prev?.size ?? 0;
+  const nextSize = next?.size ?? 0;
+  if (prevSize !== nextSize) return false;
+  if (!prev || !next) return prevSize === 0 && nextSize === 0;
+  for (const value of prev) {
+    if (!next.has(value)) return false;
+  }
+  return true;
 }
 
 function sameChildToolsForRender(prev: ToolInvocation[], next: ToolInvocation[]) {
@@ -1249,6 +1269,10 @@ function classifyTool(tool: ToolInvocation): ToolCategory {
     return "executing";
   }
 
+  if (isCodeBuddySkillTool(tool)) {
+    return "executing";
+  }
+
   if (rawInputHasEditPayload(tool)) {
     return "editing";
   }
@@ -1311,6 +1335,14 @@ function rawInputHasEditPayload(tool: ToolInvocation): boolean {
     stringField(input, "new_string", "newString", "after", "newText") != null ||
     stringField(input, "content", "new_content", "newContent", "replacement") != null
   );
+}
+
+function isCodeBuddySkillTool(tool: ToolInvocation): boolean {
+  if (!tool.raw_input) return false;
+  const input = parseJsonValue(tool.raw_input);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const skill = stringField(input, "skill");
+  return skill != null && skill.trim().length > 0;
 }
 
 function rawInputFilePath(tool: ToolInvocation): string | null {

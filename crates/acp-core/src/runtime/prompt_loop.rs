@@ -7,8 +7,8 @@ use super::session_titles::emit_turn_finished;
 use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{
-    append_notification_log, append_runtime_event_log, append_typed_notification_log,
-    emit_notification, is_session_state_update, session_config_from_options,
+    append_notification_log, append_runtime_event_log, emit_notification, is_session_state_update,
+    session_config_from_options,
 };
 use agent_client_protocol::schema::{
     CancelNotification, PromptRequest, PromptResponse, SessionNotification,
@@ -16,7 +16,7 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{ActiveSession, Agent, Dispatch};
 use anyhow::anyhow;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use workspace_model::PromptInputCapabilities;
 
@@ -219,26 +219,7 @@ pub(super) async fn run_command_loop(
 
                     match message {
                         agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
-                            agent_client_protocol::util::MatchDispatch::new(dispatch)
-                                .if_notification(async |notification: SessionNotification| {
-                                    append_typed_notification_log(&config, &notification)?;
-                                    emit_notification(
-                                        &tx_events,
-                                        &config.workspace_root,
-                                        notification,
-                                    )?;
-                                    Ok(())
-                                })
-                                .await
-                                .otherwise(|dispatch: Dispatch| async {
-                                    if let Dispatch::Notification(untyped) = dispatch {
-                                        let (method, payload) = untyped.into_parts();
-                                        append_notification_log(&config, &method, &payload)?;
-                                    }
-                                    Ok(())
-                                })
-                                .await
-                                .map_err(|err| anyhow!(err.to_string()))?;
+                            handle_session_dispatch(&config, &tx_events, dispatch, false)?;
                         }
                         agent_client_protocol::SessionMessage::StopReason(reason) => {
                             emit_turn_finished(
@@ -419,27 +400,46 @@ async fn drain_idle_session_state_update(
     };
 
     if let agent_client_protocol::SessionMessage::SessionMessage(dispatch) = message {
-        agent_client_protocol::util::MatchDispatch::new(dispatch)
-            .if_notification(async |notification: SessionNotification| {
-                if is_session_state_update(&notification.update) {
-                    append_typed_notification_log(config, &notification)?;
-                    emit_notification(tx_events, &config.workspace_root, notification)?;
-                }
-                Ok(())
-            })
-            .await
-            .otherwise(|dispatch: Dispatch| async {
-                if let Dispatch::Notification(untyped) = dispatch {
-                    let (method, payload) = untyped.into_parts();
-                    append_notification_log(config, &method, &payload)?;
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|err| anyhow!(err.to_string()))?;
+        handle_session_dispatch(config, tx_events, dispatch, true)?;
     }
 
     Ok(())
+}
+
+fn handle_session_dispatch(
+    config: &SessionConfig,
+    tx_events: &mpsc::Sender<ClientEvent>,
+    dispatch: Dispatch,
+    state_only: bool,
+) -> anyhow::Result<()> {
+    let Dispatch::Notification(untyped) = dispatch else {
+        return Ok(());
+    };
+    let (method, payload) = untyped.into_parts();
+    append_notification_log(config, &method, &payload)?;
+
+    if method != "session/update" {
+        return Ok(());
+    }
+    if is_codebuddy_session_end_update(&payload) {
+        append_runtime_event_log(config, "session/session_end_ignored", &payload)?;
+        return Ok(());
+    }
+
+    let notification: SessionNotification =
+        serde_json::from_value(payload).map_err(|err| anyhow!(err.to_string()))?;
+    if !state_only || is_session_state_update(&notification.update) {
+        emit_notification(tx_events, &config.workspace_root, notification)?;
+    }
+    Ok(())
+}
+
+fn is_codebuddy_session_end_update(payload: &Value) -> bool {
+    payload
+        .get("update")
+        .and_then(|update| update.get("sessionUpdate"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "session_end")
 }
 
 async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Option<StopReason> {
@@ -454,4 +454,22 @@ async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Op
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codebuddy_session_end_update_is_ignored() {
+        let payload = json!({
+            "sessionId": "session-1",
+            "update": {
+                "sessionUpdate": "session_end",
+                "stopReason": "end_turn"
+            }
+        });
+
+        assert!(is_codebuddy_session_end_update(&payload));
+    }
 }

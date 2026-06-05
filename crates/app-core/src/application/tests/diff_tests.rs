@@ -540,7 +540,56 @@ fn codebuddy_python_pathlib_command_yields_written_file_hint() {
 }
 
 #[test]
-fn completed_shell_write_hint_enters_review_via_git_fallback() {
+fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    app.ui.session.agent_cli = Some("Codex".into());
+    let raw_input = serde_json::json!({
+        "command": "python - <<'PY'\nfrom pathlib import Path\nPath('packages/frontend/src/pages/GalleryPage.tsx').write_text('after')\nPY",
+    })
+    .to_string();
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "call-bash".into(),
+        parent_call_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Bash".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: Some(raw_input),
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_decision: None,
+    });
+
+    assert!(!app.completed_tool_has_detectable_write_hint("call-bash"));
+
+    app.ui.session.agent_cli = Some("CodeBuddy".into());
+
+    assert!(app.completed_tool_has_detectable_write_hint("call-bash"));
+
+    let tool = app
+        .ui
+        .tools
+        .iter_mut()
+        .find(|tool| tool.call_id == "call-bash")
+        .unwrap();
+    tool.name = "Read".into();
+    tool.kind = "Read".into();
+
+    assert!(!app.completed_tool_has_detectable_write_hint("call-bash"));
+}
+
+#[test]
+fn completed_shell_write_hint_without_tool_baseline_does_not_use_git_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
     let repo = init_test_git_repo(dir.path());
@@ -586,31 +635,21 @@ fn completed_shell_write_hint_enters_review_via_git_fallback() {
         permission_decision: None,
     });
 
-    assert!(app.detect_file_writes_from_tools(&["call-shell".into()]));
+    assert!(!app.detect_file_writes_from_tools(&["call-shell".into()]));
 
-    assert_eq!(app.ui.review_changes.len(), 1);
-    assert_eq!(app.ui.review_changes[0].path, relative_path);
-    assert_eq!(
-        app.ui.review_changes[0].old_text.as_deref(),
-        Some("before\n")
-    );
-    assert_eq!(app.ui.review_changes[0].new_text, "after\n");
-    assert_eq!(app.ui.session_changes.len(), 1);
+    assert!(app.ui.review_changes.is_empty());
+    assert!(app.ui.session_changes.is_empty());
     let tool = app
         .ui
         .tools
         .iter()
         .find(|tool| tool.call_id == "call-shell")
         .unwrap();
-    assert!(
-        tool.diff_previews
-            .iter()
-            .any(|preview| !preview.hunks.is_empty())
-    );
+    assert!(tool.diff_previews.is_empty());
 }
 
 #[test]
-fn completed_codebuddy_python_write_enters_review_via_git_fallback() {
+fn completed_codebuddy_python_write_without_tool_baseline_does_not_use_git_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
     let repo = init_test_git_repo(dir.path());
@@ -649,29 +688,795 @@ fn completed_codebuddy_python_write_enters_review_via_git_fallback() {
         permission_decision: None,
     });
 
-    assert!(app.detect_file_writes_from_tools(&["call-codebuddy-python".into()]));
+    assert!(!app.detect_file_writes_from_tools(&["call-codebuddy-python".into()]));
 
-    assert_eq!(app.ui.review_changes.len(), 1);
-    assert_eq!(app.ui.review_changes[0].path, relative_path);
-    assert_eq!(
-        app.ui.review_changes[0].old_text.as_deref(),
-        Some("const label = 'before';\n")
-    );
-    assert_eq!(
-        app.ui.review_changes[0].new_text,
-        "const label = 'after';\n"
-    );
-    assert_eq!(app.ui.session_changes.len(), 1);
+    assert!(app.ui.review_changes.is_empty());
+    assert!(app.ui.session_changes.is_empty());
     let tool = app
         .ui
         .tools
         .iter()
         .find(|tool| tool.call_id == "call-codebuddy-python")
         .unwrap();
+    assert!(tool.diff_previews.is_empty());
+}
+
+#[test]
+fn completed_shell_write_with_dirty_file_uses_tool_start_baseline_for_tool_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/frontend/src/pages/GalleryPage.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let git_head = [
+        "const stable0 = 0;",
+        "const stable1 = 1;",
+        "const stable2 = 2;",
+        "import { Link, useSearchParams } from 'react-router-dom';",
+        "import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';",
+        "const stable3 = 3;",
+        "const stable4 = 4;",
+        "const stable5 = 5;",
+        "const footer = '负向抑制';",
+        "const stable6 = 6;",
+        "const stable7 = 7;",
+        "const stable8 = 8;",
+        "",
+    ]
+    .join("\n");
+    let before_tool = [
+        "const stable0 = 0;",
+        "const stable1 = 1;",
+        "const stable2 = 2;",
+        "import { useSearchParams } from 'react-router-dom';",
+        "import { collectionQueryKeys } from '../api/client.js';",
+        "const stable3 = 3;",
+        "const stable4 = 4;",
+        "const stable5 = 5;",
+        "const footer = '负向抑制';",
+        "const stable6 = 6;",
+        "const stable7 = 7;",
+        "const stable8 = 8;",
+        "",
+    ]
+    .join("\n");
+    let after_tool = [
+        "const stable0 = 0;",
+        "const stable1 = 1;",
+        "const stable2 = 2;",
+        "import { useSearchParams } from 'react-router-dom';",
+        "import { collectionQueryKeys } from '../api/client.js';",
+        "const stable3 = 3;",
+        "const stable4 = 4;",
+        "const stable5 = 5;",
+        "const footer = '顺序优先';",
+        "const stable6 = 6;",
+        "const stable7 = 7;",
+        "const stable8 = 8;",
+        "",
+    ]
+    .join("\n");
+
+    fs::write(&file_path, &git_head).unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, &before_tool).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ns=p.read_text(encoding='utf-8')\ns=s.replace('负向抑制', '顺序优先', 1)\np.write_text(s, encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+        "description": "Update boost footer negative copy",
+    })
+    .to_string();
+    let hint_paths = tool_event_hint_paths(Some(&raw_input))
+        .into_iter()
+        .map(|path| crate::application::normalize_path_for_storage(&path, dir.path()))
+        .collect::<Vec<_>>();
+    assert_eq!(hint_paths, vec![relative_path.to_string()]);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-python".into(),
+        parent_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Update boost footer negative copy".into(),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-python", relative_path),
+        Some(before_tool.as_str())
+    );
+
+    fs::write(&file_path, &after_tool).unwrap();
+    let tracker_hunks = diff_to_hunks(Some(&before_tool), &after_tool);
+    let tracker_added = tracker_hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tracker_added, vec!["const footer = '顺序优先';"]);
+    let raw_cumulative_hunks = diff_to_hunks(Some(&git_head), &after_tool);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolDiffPreview {
+            id: "call-python".into(),
+            path: relative_path.into(),
+            hunks: raw_cumulative_hunks,
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-python".into(),
+            name: Some("Bash".into()),
+            outcome: "Update boost footer negative copy".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some(before_tool.as_str())
+    );
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-python")
+        .unwrap();
+    assert_eq!(tool.diff_previews.len(), 1);
+    let preview = tool
+        .diff_previews
+        .iter()
+        .find(|preview| preview.path == std::path::PathBuf::from(relative_path))
+        .unwrap();
+    let removed = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(removed.contains(&"const footer = '负向抑制';"));
+    assert!(!removed.contains(&"import { Link, useSearchParams } from 'react-router-dom';"));
+    assert!(
+        !removed.contains(&"import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';")
+    );
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some(before_tool.as_str())
+    );
+    assert_eq!(app.ui.review_changes[0].new_text, after_tool);
+}
+
+#[test]
+fn codebuddy_bash_permission_allow_records_baseline_before_terminal_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/frontend/src/pages/GalleryPage.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let git_head = [
+        "import { Link, useSearchParams } from 'react-router-dom';",
+        "const footer = '负向抑制';",
+        "",
+    ]
+    .join("\n");
+    let before_tool = [
+        "import { useSearchParams } from 'react-router-dom';",
+        "const footer = '负向抑制';",
+        "",
+    ]
+    .join("\n");
+    let after_tool = [
+        "import { useSearchParams } from 'react-router-dom';",
+        "const footer = '顺序优先';",
+        "",
+    ]
+    .join("\n");
+
+    fs::write(&file_path, &git_head).unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, &before_tool).unwrap();
+
+    let mut app = test_app(&dir);
+    let command = format!(
+        "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ns=p.read_text(encoding='utf-8')\ns=s.replace('负向抑制', '顺序优先', 1)\np.write_text(s, encoding='utf-8')\nPY",
+        file_path.display().to_string().replace('\\', "/"),
+    );
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "call-python".into(),
+        name: "Bash".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!("Command:\n{command}\n\nPath: {relative_path}")),
+    }]);
+
+    assert!(app.start_permission_write_baseline_if_allowed("call-python", Some("allow")));
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-python", relative_path),
+        Some(before_tool.as_str())
+    );
+
+    fs::write(&file_path, &after_tool).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-python".into(),
+            parent_id: None,
+            name: "Bash".into(),
+            kind: "Bash".into(),
+            summary: "Update boost footer negative copy".into(),
+            is_subagent: false,
+            raw_input: None,
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-python".into(),
+            name: Some("Bash".into()),
+            outcome: "Update boost footer negative copy".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some(before_tool.as_str())
+    );
+    assert_eq!(app.ui.session_changes[0].new_text, after_tool);
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-python")
+        .unwrap();
+    let preview = tool
+        .diff_previews
+        .iter()
+        .find(|preview| preview.path == std::path::PathBuf::from(relative_path))
+        .unwrap();
+    let removed = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(removed.contains(&"const footer = '负向抑制';"));
+    assert!(!removed.contains(&"import { Link, useSearchParams } from 'react-router-dom';"));
+}
+
+#[test]
+fn codebuddy_bash_permission_paths_merge_into_existing_empty_recording_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const label = '待生效';\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-bash".into(),
+        parent_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Remove pending label".into(),
+        is_subagent: false,
+        raw_input: None,
+    }]);
+
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-bash", relative_path),
+        None
+    );
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "call-bash".into(),
+        name: "Bash".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!(
+            "Command:\npython - <<'PY'\n...\nPY\n\nPath: {relative_path}"
+        )),
+    }]);
+
+    assert!(app.start_permission_write_baseline_if_allowed("call-bash", Some("allow")));
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-bash", relative_path),
+        Some("export const label = '待生效';\n")
+    );
+
+    fs::write(&file_path, "export const label = '排除';\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-bash".into(),
+        name: Some("Bash".into()),
+        outcome: "Remove pending label".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some("export const label = '待生效';\n")
+    );
+    assert_eq!(
+        app.ui.session_changes[0].new_text,
+        "export const label = '排除';\n"
+    );
+}
+
+#[test]
+fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let boost_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
+    let exclusion_path = "packages/frontend/src/pages/gallery/components/ExclusionChip.tsx";
+    let boost_file = dir.path().join(boost_path);
+    let exclusion_file = dir.path().join(exclusion_path);
+    fs::create_dir_all(boost_file.parent().unwrap()).unwrap();
+    fs::write(&boost_file, "export const boostLabel = '待生效';\n").unwrap();
+    fs::write(&exclusion_file, "export const exclusionLabel = '待生效';\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-bash".into(),
+        parent_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Remove pending labels".into(),
+        is_subagent: false,
+        raw_input: None,
+    }]);
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "call-bash".into(),
+        name: "Bash".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!(
+            "Command:\npython - <<'PY'\n...\nPY\n\nPaths:\n- {boost_path}\n- {exclusion_path}"
+        )),
+    }]);
+
+    assert!(app.start_permission_write_baseline_if_allowed("call-bash", Some("allow")));
+    assert_eq!(
+        app.file_tracker.get_baseline_text("call-bash", boost_path),
+        Some("export const boostLabel = '待生效';\n")
+    );
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-bash", exclusion_path),
+        Some("export const exclusionLabel = '待生效';\n")
+    );
+
+    fs::write(&boost_file, "export const boostLabel = '排除';\n").unwrap();
+    fs::write(&exclusion_file, "export const exclusionLabel = '排除';\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-bash".into(),
+        name: Some("Bash".into()),
+        outcome: "Remove pending labels".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 2);
+    assert_eq!(app.ui.review_changes.len(), 2);
+
+    let boost_change = app
+        .ui
+        .session_changes
+        .iter()
+        .find(|change| change.path == boost_path)
+        .unwrap();
+    assert_eq!(
+        boost_change.old_text.as_deref(),
+        Some("export const boostLabel = '待生效';\n")
+    );
+    assert_eq!(boost_change.new_text, "export const boostLabel = '排除';\n");
+
+    let exclusion_change = app
+        .ui
+        .session_changes
+        .iter()
+        .find(|change| change.path == exclusion_path)
+        .unwrap();
+    assert_eq!(
+        exclusion_change.old_text.as_deref(),
+        Some("export const exclusionLabel = '待生效';\n")
+    );
+    assert_eq!(
+        exclusion_change.new_text,
+        "export const exclusionLabel = '排除';\n"
+    );
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-bash")
+        .unwrap();
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| preview.path == std::path::PathBuf::from(boost_path))
+    );
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| preview.path == std::path::PathBuf::from(exclusion_path))
+    );
+}
+
+#[test]
+fn write_like_permission_allow_records_baseline_before_tool_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/service.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const value = 'before';\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "call-multiedit".into(),
+        name: "MultiEdit".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!("Path: {relative_path}")),
+    }]);
+
+    assert!(app.start_permission_write_baseline_if_allowed("call-multiedit", Some("allow")));
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-multiedit", relative_path),
+        Some("export const value = 'before';\n")
+    );
+
+    fs::write(&file_path, "export const value = 'after';\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-multiedit".into(),
+            parent_id: None,
+            name: "MultiEdit".into(),
+            kind: "tool".into(),
+            summary: format!("Edit {relative_path}"),
+            is_subagent: false,
+            raw_input: None,
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-multiedit".into(),
+            name: Some("MultiEdit".into()),
+            outcome: format!("Edit {relative_path}"),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some("export const value = 'before';\n")
+    );
+    assert_eq!(
+        app.ui.session_changes[0].new_text,
+        "export const value = 'after';\n"
+    );
+}
+
+#[test]
+fn read_permission_with_path_does_not_record_write_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/service.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const value = 'before';\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "call-read".into(),
+        name: "Read".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!("Path: {relative_path}")),
+    }]);
+
+    assert!(!app.start_permission_write_baseline_if_allowed("call-read", Some("allow")));
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-read", relative_path),
+        None
+    );
+}
+
+#[test]
+fn codebuddy_bash_write_updates_existing_session_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const label = 'old';\n").unwrap();
+
+    let mut app = test_app(&dir);
+    app.ui.session.agent_cli = Some("CodeBuddy".into());
+    app.apply_tracker_changes(
+        "previous-edit",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some("export const label = 'old';\n".into()),
+            new_text: "export const label = 'middle';\n".into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    );
+    fs::write(&file_path, "export const label = 'middle';\n").unwrap();
+
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ns=p.read_text(encoding='utf-8')\np.write_text(s.replace('middle', 'new'), encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+    })
+    .to_string();
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "current-bash".into(),
+        parent_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Update chip label".into(),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+    app.file_tracker.discard_recording("current-bash");
+
+    fs::write(&file_path, "export const label = 'new';\n").unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "current-bash".into(),
+        name: Some("Bash".into()),
+        outcome: "Update chip label".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(
+        app.ui.session_changes[0].old_text.as_deref(),
+        Some("export const label = 'old';\n")
+    );
+    assert_eq!(
+        app.ui.session_changes[0].new_text,
+        "export const label = 'new';\n"
+    );
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "current-bash")
+        .unwrap();
+    let preview = tool
+        .diff_previews
+        .iter()
+        .find(|preview| preview.path == std::path::PathBuf::from(relative_path))
+        .unwrap();
+    let removed = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    let added = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(removed, vec!["export const label = 'middle';"]);
+    assert_eq!(added, vec!["export const label = 'new';"]);
+}
+
+#[test]
+fn late_completed_command_raw_input_retries_until_file_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/backend/src/services/query-understanding/sanitize.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const keepAnchorTerm = false;\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ntext=p.read_text(encoding='utf-8')\np.write_text(text.replace('false', 'true'), encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+    })
+    .to_string();
+
+    let completed = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "write-sanitize".into(),
+            parent_id: None,
+            name: "Bash".into(),
+            kind: "Bash".into(),
+            summary: "Filter non-anchor expansions before dedupe".into(),
+            is_subagent: false,
+            raw_input: None,
+        },
+        ClientEvent::ToolCompleted {
+            id: "write-sanitize".into(),
+            name: Some("Bash".into()),
+            outcome: "Filter non-anchor expansions before dedupe".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+    assert!(!completed.had_file_changes);
+
+    let late_update = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolUpdated {
+        id: "write-sanitize".into(),
+        parent_id: None,
+        name: Some("Bash".into()),
+        kind: Some("Bash".into()),
+        summary: None,
+        is_subagent: false,
+        raw_input: Some(raw_input),
+        raw_output: None,
+        terminal_output: None,
+        is_partial: false,
+    }]);
+    assert!(!late_update.had_file_changes);
+
+    fs::write(&file_path, "export const keepAnchorTerm = true;\n").unwrap();
+    app.advance_runtime_clock(Duration::from_millis(250));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some("export const keepAnchorTerm = false;\n")
+    );
+    assert_eq!(
+        app.ui.review_changes[0].new_text,
+        "export const keepAnchorTerm = true;\n"
+    );
+    assert_eq!(app.ui.session_changes.len(), 1);
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "write-sanitize")
+        .unwrap();
     assert!(
         tool.diff_previews
             .iter()
             .any(|preview| !preview.hunks.is_empty())
+    );
+}
+
+#[test]
+fn completed_command_with_known_path_retries_with_tool_start_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/backend/src/services/query-understanding/sanitize.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const keepAnchorTerm = 'head';\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+    fs::write(&file_path, "export const keepAnchorTerm = 'dirty';\n").unwrap();
+
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ntext=p.read_text(encoding='utf-8')\np.write_text(text.replace('dirty', 'after'), encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+    })
+    .to_string();
+
+    let completed = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "write-sanitize".into(),
+            parent_id: None,
+            name: "Bash".into(),
+            kind: "Bash".into(),
+            summary: "Filter non-anchor expansions before dedupe".into(),
+            is_subagent: false,
+            raw_input: Some(raw_input),
+        },
+        ClientEvent::ToolCompleted {
+            id: "write-sanitize".into(),
+            name: Some("Bash".into()),
+            outcome: "Filter non-anchor expansions before dedupe".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+    assert!(!completed.had_file_changes);
+
+    fs::write(&file_path, "export const keepAnchorTerm = 'after';\n").unwrap();
+    app.advance_runtime_clock(Duration::from_millis(250));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some("export const keepAnchorTerm = 'dirty';\n")
+    );
+    assert_eq!(
+        app.ui.review_changes[0].new_text,
+        "export const keepAnchorTerm = 'after';\n"
     );
 }
 
@@ -764,7 +1569,7 @@ fn completed_tool_preview_does_not_claim_preexisting_git_change() {
 }
 
 #[test]
-fn completed_chinese_edit_summary_enters_review_via_git_fallback() {
+fn completed_chinese_edit_summary_without_tool_baseline_does_not_use_git_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
     let repo = init_test_git_repo(dir.path());
@@ -796,10 +1601,9 @@ fn completed_chinese_edit_summary_enters_review_via_git_fallback() {
         permission_decision: None,
     });
 
-    assert!(app.detect_file_writes_from_tools(&["edit-proposal".into()]));
-    assert_eq!(app.ui.review_changes.len(), 1);
-    assert_eq!(app.ui.review_changes[0].path, relative_path);
-    assert_eq!(app.ui.session_changes.len(), 1);
+    assert!(!app.detect_file_writes_from_tools(&["edit-proposal".into()]));
+    assert!(app.ui.review_changes.is_empty());
+    assert!(app.ui.session_changes.is_empty());
 }
 
 #[test]
@@ -1307,4 +2111,446 @@ fn raw_output_diff_preview_without_tool_start_baseline_stays_out_of_review_chang
         app.apply_tool_diff_preview_to_review(unrelated_path, unrelated_path, &hunks);
     }
     assert!(app.ui.review_changes.is_empty());
+}
+
+#[test]
+fn late_tool_diff_preview_for_landed_session_change_populates_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "frontend/src/components/layout/TopBar.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const label = 'before'\n";
+    let after = "export const label = 'after'\n";
+    fs::write(&file_path, after).unwrap();
+
+    let mut app = test_app(&dir);
+    app.ui.session_changes = vec![SessionFileChange {
+        path: relative_path.into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some(before.into()),
+        new_text: after.into(),
+        added_lines: 1,
+        removed_lines: 1,
+        timestamp: current_timestamp(),
+    }];
+
+    let hunks = diff_to_hunks(Some(before), after);
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiffPreview {
+        id: "late-edit".into(),
+        path: relative_path.into(),
+        hunks: hunks.clone(),
+    }]);
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "late-edit")
+        .unwrap();
+    assert_eq!(tool.diff_previews.len(), 1);
+    assert_eq!(tool.diff_previews[0].hunks, hunks);
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Modified);
+    assert_eq!(change.old_text.as_deref(), Some(before));
+    assert_eq!(change.new_text, after);
+    assert_eq!(change.added_lines, 1);
+    assert_eq!(change.removed_lines, 1);
+}
+
+#[test]
+fn idle_late_created_file_preview_persists_completed_turn_change_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+    let new_text = [
+        "export type QueryUnderstanding = {",
+        "  subject: string",
+        "  confidence: number",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "add query understanding files".into(),
+        created_at: "2026-06-04T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-06-04T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = None;
+
+    let hunks = vec![DiffHunk {
+        heading: "@@ -0,0 +1,4 @@".into(),
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "export type QueryUnderstanding = {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "  subject: string".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "  confidence: number".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "}".into(),
+            },
+        ],
+    }];
+
+    let result =
+        app.apply_idle_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiffPreview {
+            id: "late-schema".into(),
+            path: relative_path.into(),
+            hunks,
+        }]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.current_turn_user_message_id, None);
+    assert_eq!(app.ui.review_changes.len(), 1);
+
+    let turns = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let turn = turns
+        .iter()
+        .find(|summary| summary.message_id == Some(assistant_id))
+        .expect("late preview should be attached to the completed assistant turn");
+    assert_eq!(turn.status, ChangeSetStatus::Complete);
+    assert_eq!(turn.file_count, 1);
+    assert_eq!(turn.added_lines, 4);
+    assert_eq!(turn.removed_lines, 0);
+
+    let diff = app
+        .store
+        .load_change_set_file_diff(&turn.id, relative_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(diff.path, relative_path);
+    assert_eq!(diff.change_type, FileChangeType::Created);
+    assert_eq!(diff.old_text, None);
+    assert_eq!(diff.new_text.as_deref(), Some(new_text.as_str()));
+    assert_eq!(diff.added_lines, 4);
+    assert_eq!(diff.removed_lines, 0);
+}
+
+#[test]
+fn preview_before_file_create_retries_and_enters_review_after_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/prompt.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+    let new_text = [
+        "export const queryUnderstandingPrompt = [",
+        "  'Extract the subject from the user query.',",
+        "].join('\\n')",
+        "",
+    ]
+    .join("\n");
+
+    let mut app = test_app(&dir);
+    app.set_runtime_clock_now(std::time::Instant::now());
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "add query understanding files".into(),
+        created_at: "2026-06-04T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-06-04T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = None;
+
+    let hunks = vec![DiffHunk {
+        heading: "@@ -0,0 +1,3 @@".into(),
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "export const queryUnderstandingPrompt = [".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "  'Extract the subject from the user query.',".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "].join('\\n')".into(),
+            },
+        ],
+    }];
+
+    let result =
+        app.apply_idle_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiffPreview {
+            id: "late-prompt".into(),
+            path: relative_path.into(),
+            hunks,
+        }]);
+    assert!(!result.had_file_changes);
+    assert!(app.ui.review_changes.is_empty());
+    assert!(
+        app.store
+            .list_change_sets(
+                Some(&app.ui.session.id.to_string()),
+                Some(ChangeSetSource::AgentTurn),
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    fs::write(&file_path, &new_text).unwrap();
+    app.advance_runtime_clock(Duration::from_secs(1));
+
+    assert!(app.retry_pending_tool_diff_previews());
+
+    let turns = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let turn = turns
+        .iter()
+        .find(|summary| summary.message_id == Some(assistant_id))
+        .expect("landed preview should be attached to the completed assistant turn");
+    assert_eq!(turn.status, ChangeSetStatus::Complete);
+    assert_eq!(turn.file_count, 1);
+    assert_eq!(turn.added_lines, 3);
+    assert_eq!(turn.removed_lines, 0);
+
+    let diff = app
+        .store
+        .load_change_set_file_diff(&turn.id, relative_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(diff.change_type, FileChangeType::Created);
+    assert_eq!(diff.old_text, None);
+    assert_eq!(diff.new_text.as_deref(), Some(new_text.as_str()));
+}
+
+#[test]
+fn raw_output_created_file_preview_with_late_baseline_enters_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "frontend/src/components/gallery/NewCard.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let new_text = [
+        "export function NewCard() {",
+        "  return <article>new</article>",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    app.file_tracker
+        .start_recording("write-new-card", vec![relative_path.into()]);
+    let hunks = vec![DiffHunk {
+        heading: "@@ -0,0 +1,3 @@".into(),
+        lines: vec![
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "export function NewCard() {".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "  return <article>new</article>".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Added,
+                content: "}".into(),
+            },
+        ],
+    }];
+
+    assert!(app.tool_diff_preview_matches_recording_window(
+        "write-new-card",
+        relative_path,
+        &hunks
+    ));
+    assert!(app.apply_tool_diff_preview_to_review(relative_path, relative_path, &hunks));
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, new_text);
+    assert_eq!(change.added_lines, 3);
+    assert_eq!(change.removed_lines, 0);
+}
+
+#[test]
+fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/index.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const before = true;\n").unwrap();
+
+    let mut app = test_app(&dir);
+    let new_text = [
+        "import { config } from '../../config/index.js';",
+        "export function analyzeQueryUnderstanding() {",
+        "  return config.SYNONYM_MODEL;",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &new_text).unwrap();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "write-index".into(),
+            parent_id: None,
+            name: "Write".into(),
+            kind: "edit".into(),
+            summary: format!("Write {relative_path}"),
+            is_subagent: false,
+            raw_input: Some(
+                serde_json::json!({
+                    "file_path": relative_path,
+                    "content": new_text,
+                })
+                .to_string(),
+            ),
+        },
+        ClientEvent::ToolDiff {
+            id: "write-index".into(),
+            path: relative_path.into(),
+            old_text: None,
+            new_text: new_text.clone(),
+        },
+        ClientEvent::ToolCompleted {
+            id: "write-index".into(),
+            name: Some("Write".into()),
+            outcome: format!("Successfully wrote to file: {relative_path}"),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "write-index")
+        .unwrap();
+    assert_eq!(tool.diff_previews.len(), 1);
+    let added = tool.diff_previews[0]
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .count();
+    assert_eq!(added, 4);
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, new_text);
+    assert_eq!(change.added_lines, 4);
+}
+
+#[test]
+fn completed_write_raw_input_content_without_acp_diff_enters_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let new_text = [
+        "export interface QueryUnderstanding {",
+        "  subject: string;",
+        "  confidence: number;",
+        "}",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &new_text).unwrap();
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "write-schema".into(),
+            parent_id: None,
+            name: "Write".into(),
+            kind: "edit".into(),
+            summary: format!("Write {relative_path}"),
+            is_subagent: false,
+            raw_input: Some(
+                serde_json::json!({
+                    "file_path": relative_path,
+                    "content": new_text,
+                })
+                .to_string(),
+            ),
+        },
+        ClientEvent::ToolCompleted {
+            id: "write-schema".into(),
+            name: Some("Write".into()),
+            outcome: format!("Successfully wrote to file: {relative_path}"),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, new_text);
+    assert_eq!(change.added_lines, 4);
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "write-schema")
+        .unwrap();
+    assert_eq!(tool.diff_previews.len(), 1);
 }

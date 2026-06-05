@@ -448,7 +448,6 @@ impl AppState {
             }
         }
     }
-
 }
 
 fn connect_workspace_locked(
@@ -800,7 +799,11 @@ mod tests {
 
         let workspaces = state.list_workspace_sessions().unwrap();
         assert_eq!(workspaces.len(), 2);
-        assert!(workspaces.iter().any(|workspace| workspace.workspace.root == local_path));
+        assert!(
+            workspaces
+                .iter()
+                .any(|workspace| workspace.workspace.root == local_path)
+        );
         let remote_workspace = workspaces
             .iter()
             .find(|workspace| workspace.workspace.root == PathBuf::from(remote.key()))

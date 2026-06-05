@@ -8,7 +8,7 @@ pub(super) fn read_workspace_text_file(
     workspace_root: &str,
     request: &ReadTextFileRequest,
 ) -> anyhow::Result<String> {
-    let path = validate_workspace_path(workspace_root, &request.path)?;
+    let path = validate_client_file_path(workspace_root, &request.path)?;
 
     if path.is_dir() {
         return list_workspace_directory(&path);
@@ -25,7 +25,7 @@ pub(super) fn write_workspace_text_file(
     workspace_root: &str,
     request: &WriteTextFileRequest,
 ) -> anyhow::Result<()> {
-    let path = validate_workspace_path(workspace_root, &request.path)?;
+    let path = validate_client_file_path(workspace_root, &request.path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
@@ -114,6 +114,55 @@ pub(super) fn validate_workspace_path(
     }
 
     Ok(normalized)
+}
+
+pub(super) fn validate_client_file_path(
+    workspace_root: &str,
+    requested_path: &Path,
+) -> anyhow::Result<PathBuf> {
+    validate_workspace_path(workspace_root, requested_path)
+        .or_else(|_| validate_codebuddy_plan_path(requested_path))
+}
+
+fn validate_codebuddy_plan_path(requested_path: &Path) -> anyhow::Result<PathBuf> {
+    if !requested_path.is_absolute() {
+        return Err(anyhow!(
+            "ACP file request is outside workspace: {}",
+            requested_path.display()
+        ));
+    }
+
+    let normalized = lexical_normalize(requested_path.to_path_buf());
+    if !matches!(
+        normalized
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase()),
+        Some(extension) if matches!(extension.as_str(), "md" | "mdx")
+    ) {
+        return Err(anyhow!(
+            "ACP file request is outside workspace: {}",
+            normalized.display()
+        ));
+    }
+
+    let plan_root = resolve_for_workspace_check(&codebuddy_plan_root()?)?;
+    let resolved = resolve_for_workspace_check(&normalized)?;
+    if !resolved.starts_with(&plan_root) {
+        return Err(anyhow!(
+            "ACP file request is outside workspace: {}",
+            normalized.display()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn codebuddy_plan_root() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| anyhow!("failed to resolve user home directory"))?;
+    Ok(PathBuf::from(home).join(".codebuddy").join("plans"))
 }
 
 fn resolve_for_workspace_check(path: &Path) -> anyhow::Result<PathBuf> {
@@ -205,6 +254,43 @@ mod tests {
             root.to_str().unwrap(),
             &[PathBuf::from("../outside.txt")]
         ));
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn client_file_path_allows_codebuddy_plan_markdown() {
+        let root = temp_workspace("codebuddy-plan");
+        let plan = codebuddy_plan_root().unwrap().join("draft.md");
+
+        assert_eq!(
+            validate_client_file_path(root.to_str().unwrap(), &plan).unwrap(),
+            lexical_normalize(plan),
+        );
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn client_file_path_rejects_non_plan_home_file() {
+        let root = temp_workspace("codebuddy-non-plan");
+        let path = codebuddy_plan_root()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("secret.md");
+
+        assert!(validate_client_file_path(root.to_str().unwrap(), &path).is_err());
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn client_file_path_rejects_non_markdown_codebuddy_plan_file() {
+        let root = temp_workspace("codebuddy-non-markdown");
+        let path = codebuddy_plan_root().unwrap().join("draft.txt");
+
+        assert!(validate_client_file_path(root.to_str().unwrap(), &path).is_err());
 
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }

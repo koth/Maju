@@ -113,6 +113,26 @@ describe("ToolCallCard animation states", () => {
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("任务计划");
   });
 
+  it("does not show CodeBuddy skill tools as edits without edit payloads", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      summary: "d:/work/ArtAssets/.codebuddy/skills/openspec-propose",
+      raw_input: JSON.stringify({
+        skill: "openspec-propose",
+        args: "Create OpenSpec artifacts",
+      }),
+      raw_output:
+        "Base directory for this skill: d:\\work\\ArtAssets\\.codebuddy\\skills\\openspec-propose\n",
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+  });
+
   it("keeps child tool calls collapsed until requested", () => {
     const parent = makeTool({
       id: "parent",

@@ -94,32 +94,44 @@ impl FileChangeTracker {
 
     /// Start a recording window for a tool call. Captures current file metadata.
     pub(crate) fn start_recording(&mut self, call_id: &str, hint_paths: Vec<String>) {
-        // A poll batch may contain ToolStarted followed by ToolDiff for the same
-        // call. Application pre-starts recording before diff preprocessing so the
-        // ToolDiff can use the tool-start baseline; the normal event-application
-        // pass will see ToolStarted again. Keep the earliest baseline.
-        if self.active_windows.contains_key(call_id) {
-            return;
-        }
-
         let hint_paths = hint_paths
             .into_iter()
             .map(|path| self.normalize_candidate_path(&path))
             .filter(|path| !path.is_empty() && !self.is_skipped_path(path))
             .collect::<Vec<_>>();
 
+        // A poll batch may contain ToolStarted followed by ToolDiff for the same
+        // call. Application pre-starts recording before diff preprocessing so the
+        // ToolDiff can use the tool-start baseline; the normal event-application
+        // pass will see ToolStarted again. Keep existing baselines, but do not
+        // discard newly discovered path hints. CodeBuddy often opens an empty
+        // tool window while it streams the Bash command, then exposes concrete
+        // write paths in the permission request before the terminal executes.
+        if self.active_windows.contains_key(call_id) {
+            for path in hint_paths {
+                self.record_path_baseline(call_id, path);
+            }
+            return;
+        }
+
         let mut baseline = HashMap::new();
+        let mut baseline_text = HashMap::new();
         let mut missing_at_start = HashSet::new();
         for path in &hint_paths {
             if let Some(meta) = self.read_meta_for_path(path) {
                 self.index.insert(path.clone(), meta.clone());
+                if meta.len <= MAX_DIFF_FILE_SIZE {
+                    let full_path = self.workspace_root.join(path);
+                    if let Ok(text) = fs::read_to_string(full_path) {
+                        baseline_text.insert(path.clone(), text);
+                    }
+                }
                 baseline.insert(path.clone(), meta);
             } else {
                 missing_at_start.insert(path.clone());
             }
         }
 
-        let baseline_text = self.capture_baseline_text(&baseline);
         self.active_windows.insert(
             call_id.to_string(),
             ToolRecordingWindow {
@@ -129,6 +141,41 @@ impl FileChangeTracker {
                 candidates: hint_paths,
             },
         );
+    }
+
+    fn record_path_baseline(&mut self, call_id: &str, path: String) {
+        let already_recorded = self.active_windows.get(call_id).is_some_and(|window| {
+            window.baseline.contains_key(&path) || window.missing_at_start.contains(&path)
+        });
+        if already_recorded {
+            if let Some(window) = self.active_windows.get_mut(call_id)
+                && !window.candidates.contains(&path)
+            {
+                window.candidates.push(path);
+            }
+            return;
+        }
+
+        let observed_meta = self.read_meta_for_path(&path);
+        if let Some(meta) = observed_meta.clone() {
+            self.index.insert(path.clone(), meta.clone());
+        }
+        if let Some(window) = self.active_windows.get_mut(call_id) {
+            if let Some(meta) = observed_meta {
+                if meta.len <= MAX_DIFF_FILE_SIZE {
+                    let full_path = self.workspace_root.join(&path);
+                    if let Ok(text) = fs::read_to_string(full_path) {
+                        window.baseline_text.insert(path.clone(), text);
+                    }
+                }
+                window.baseline.insert(path.clone(), meta);
+            } else {
+                window.missing_at_start.insert(path.clone());
+            }
+            if !window.candidates.contains(&path) {
+                window.candidates.push(path);
+            }
+        }
     }
 
     /// Add a candidate path hint during tool execution.
@@ -141,27 +188,29 @@ impl FileChangeTracker {
             return;
         }
 
-        let observed_meta = self.read_meta_for_path(&path);
-        if let Some(meta) = observed_meta.clone() {
-            self.index.insert(path.clone(), meta);
+        if !self.active_windows.contains_key(call_id) {
+            self.start_recording(call_id, vec![path]);
+            return;
         }
-        if let Some(window) = self.active_windows.get_mut(call_id) {
-            if !window.baseline.contains_key(&path) && !window.missing_at_start.contains(&path) {
-                if let Some(meta) = observed_meta {
-                    if meta.len <= MAX_DIFF_FILE_SIZE {
-                        let full_path = self.workspace_root.join(&path);
-                        if let Ok(text) = fs::read_to_string(full_path) {
-                            window.baseline_text.insert(path.clone(), text);
-                        }
-                    }
-                    window.baseline.insert(path.clone(), meta);
-                } else {
-                    window.missing_at_start.insert(path.clone());
-                }
-            }
-            if !window.candidates.contains(&path) {
-                window.candidates.push(path);
-            }
+
+        self.record_path_baseline(call_id, path);
+    }
+
+    /// Add a candidate path that already has an ACP-provided diff.
+    ///
+    /// ToolDiff/ToolDiffPreview events often arrive after the file has landed on
+    /// disk. Capturing the current contents as a baseline at that point makes the
+    /// preview look like a no-op, so this only expands the candidate set.
+    pub(crate) fn add_diff_candidate(&mut self, call_id: &str, path: String) {
+        let path = self.normalize_candidate_path(&path);
+        if path.is_empty() || self.is_skipped_path(&path) {
+            return;
+        }
+
+        if let Some(window) = self.active_windows.get_mut(call_id)
+            && !window.candidates.contains(&path)
+        {
+            window.candidates.push(path);
         }
     }
 
@@ -194,38 +243,29 @@ impl FileChangeTracker {
             .map(|window| window.missing_at_start.contains(&normalized))
     }
 
+    pub(crate) fn has_active_candidate(&self, call_id: &str, path: &str) -> bool {
+        let normalized = self.normalize_candidate_path(path);
+        self.active_windows
+            .get(call_id)
+            .is_some_and(|window| window.candidates.contains(&normalized))
+    }
+
     fn normalize_candidate_path(&self, path: &str) -> String {
         normalize_path_for_storage(path, &self.workspace_root)
             .trim_start_matches("./")
             .to_string()
     }
 
-    fn capture_baseline_text(
-        &self,
-        baseline: &HashMap<String, FileMeta>,
-    ) -> HashMap<String, String> {
-        let mut texts = HashMap::new();
-        for (path, meta) in baseline {
-            if meta.len > MAX_DIFF_FILE_SIZE {
-                continue;
-            }
-            let full_path = self.workspace_root.join(path);
-            if let Ok(text) = fs::read_to_string(full_path) {
-                texts.insert(path.clone(), text);
-            }
-        }
-        texts
-    }
-
     /// Finish recording for a tool call. Compares before/after state and returns
     /// verified changed files with optional diff hunks.
     pub(crate) fn finish_recording(&mut self, call_id: &str) -> Vec<VerifiedFileChange> {
-        let Some(window) = self.active_windows.remove(call_id) else {
+        let Some(window) = self.active_windows.get(call_id).cloned() else {
             return Vec::new();
         };
 
         let candidates = window.candidates;
         if candidates.is_empty() {
+            self.active_windows.remove(call_id);
             return Vec::new();
         }
 
@@ -345,7 +385,15 @@ impl FileChangeTracker {
             }
         }
 
+        if !results.is_empty() {
+            self.active_windows.remove(call_id);
+        }
+
         results
+    }
+
+    pub(crate) fn discard_recording(&mut self, call_id: &str) {
+        self.active_windows.remove(call_id);
     }
 }
 

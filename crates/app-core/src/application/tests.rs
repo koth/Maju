@@ -416,6 +416,34 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
     );
 }
 
+#[test]
+fn local_permission_selection_marks_tool_succeeded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "permission-1".into(),
+        name: "Bash".into(),
+        options: vec![],
+        details: Some("Path: D:/work/repo/src/app.ts".into()),
+    });
+
+    app.mark_tool_permission_selected("permission-1", "allow");
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "permission-1")
+        .expect("permission tool should exist");
+    assert_eq!(tool.status, ToolStatus::Succeeded);
+    assert!(tool.permission_options.is_empty());
+    assert_eq!(
+        tool.permission_decision.as_deref(),
+        Some("Permission selected: allow")
+    );
+}
+
 fn model_config_state(
     source: SessionConfigSource,
     current: &str,

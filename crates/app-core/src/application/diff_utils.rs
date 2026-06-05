@@ -166,7 +166,27 @@ pub(super) fn edit_input_after_text(input: &serde_json::Value) -> Option<&str> {
         .get("after")
         .or_else(|| input.get("new_string"))
         .or_else(|| input.get("newString"))
+        .or_else(|| input.get("new_text"))
+        .or_else(|| input.get("newText"))
         .and_then(|value| value.as_str())
+}
+
+pub(super) fn write_input_content_text(input: &serde_json::Value) -> Option<&str> {
+    input
+        .get("content")
+        .or_else(|| input.get("new_text"))
+        .or_else(|| input.get("newText"))
+        .and_then(|value| value.as_str())
+}
+
+pub(super) fn raw_input_has_write_payload(raw_input: Option<&str>) -> bool {
+    let Some(raw_input) = raw_input else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(raw_input)
+        .ok()
+        .and_then(|value| write_input_content_text(&value).map(|text| !text.is_empty()))
+        .unwrap_or(false)
 }
 
 pub(super) fn edit_input_unified_diff_for_path<'a>(
@@ -461,6 +481,7 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
     collect_shell_redirection_paths(&command, &mut paths);
     collect_python_pathlib_write_paths(&command, &mut paths);
+    collect_common_mutation_command_paths(&command, &mut paths);
     paths.retain(|path| is_usable_write_path(path));
     paths.sort();
     paths.dedup();
@@ -767,6 +788,81 @@ fn collect_python_pathlib_write_paths(command: &str, paths: &mut Vec<String>) {
     }
 }
 
+fn collect_common_mutation_command_paths(command: &str, paths: &mut Vec<String>) {
+    for segment in command.split([';', '\n', '|']) {
+        let tokens = tokenize_command_args(segment);
+        let Some(command) = tokens.first().map(|token| command_basename(token)) else {
+            continue;
+        };
+        let args = tokens
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        match command.as_str() {
+            "mkdir" | "touch" | "rm" | "rmdir" | "del" | "erase" | "remove-item" | "mv"
+            | "move" | "move-item" | "cp" | "copy" | "copy-item" => {
+                paths.extend(command_path_args(&args));
+            }
+            "git" => {
+                if let Some(subcommand) = args
+                    .iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .map(|arg| arg.to_ascii_lowercase())
+                    && matches!(
+                        subcommand.as_str(),
+                        "add" | "checkout" | "restore" | "reset" | "apply" | "commit"
+                    )
+                {
+                    paths.extend(command_path_args(&args));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn command_basename(command: &str) -> String {
+    let basename = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim_matches('`')
+        .to_ascii_lowercase();
+    basename
+        .strip_suffix(".exe")
+        .unwrap_or(&basename)
+        .to_string()
+}
+
+fn command_path_args(args: &[&str]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let arg = arg.trim();
+        if arg.is_empty() {
+            continue;
+        }
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            if powershell_param_takes_value(arg) {
+                skip_next = true;
+            }
+            continue;
+        }
+        if looks_like_standalone_path(arg) {
+            paths.push(arg.to_string());
+        }
+    }
+    paths
+}
+
 fn python_pathlib_assignments(command: &str) -> Vec<(String, String)> {
     let mut assignments = Vec::new();
     for line in command.lines() {
@@ -1058,7 +1154,18 @@ pub(super) fn is_file_write_tool_identity(kind: &str, name: &str) -> bool {
     kind_and_name_tokens(kind, name).any(|token| {
         matches!(
             token.as_str(),
-            "edit" | "write" | "patch" | "applypatch" | "apply_patch" | "apply-patch"
+            "edit"
+                | "write"
+                | "patch"
+                | "multiedit"
+                | "multi_edit"
+                | "multi-edit"
+                | "applypatch"
+                | "apply_patch"
+                | "apply-patch"
+                | "fswrite"
+                | "fs_write"
+                | "fs-write"
         )
     })
 }

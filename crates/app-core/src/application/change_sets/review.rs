@@ -49,18 +49,26 @@ impl Application {
     ) {
         self.begin_review_changes_if_needed();
         let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
-        let normalized_old_text = old_text
-            .as_deref()
-            .map(normalize_diff_text_for_session_change);
+        let normalized_old_text = if change_type == FileChangeType::Created {
+            None
+        } else {
+            old_text
+                .as_deref()
+                .map(normalize_diff_text_for_session_change)
+        };
         let normalized_new_text = normalize_diff_text_for_session_change(&new_text);
         let existing_index = self
             .ui
             .review_changes
             .iter()
             .position(|change| normalize_tracked_path(&change.path) == normalized_path);
-        let base_text = existing_index
-            .and_then(|index| self.ui.review_changes[index].old_text.clone())
-            .or(normalized_old_text);
+        let base_text = if change_type == FileChangeType::Created {
+            None
+        } else {
+            existing_index
+                .and_then(|index| self.ui.review_changes[index].old_text.clone())
+                .or(normalized_old_text)
+        };
 
         if !is_trustworthy_review_change_text(
             &change_type,
@@ -99,6 +107,7 @@ impl Application {
         let timestamp = current_timestamp();
         if let Some(index) = existing_index {
             let existing = &mut self.ui.review_changes[index];
+            existing.old_text = canonical.old_text;
             existing.new_text = canonical.new_text.unwrap_or(normalized_new_text);
             existing.change_type = change_type;
             existing.added_lines = added;
@@ -239,7 +248,7 @@ impl Application {
         normalized_path: &str,
         old_text: Option<&str>,
     ) -> FileChangeType {
-        if old_text.is_some() {
+        if old_text.is_some_and(|text| !text.is_empty()) {
             return FileChangeType::Modified;
         }
         if call_id.starts_with("fs_write:")

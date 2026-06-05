@@ -311,8 +311,36 @@ describe("ThinkingIndicator", () => {
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.querySelectorAll(".msg-user .md-paragraph")).toHaveLength(1);
-    expect(container.querySelectorAll(".msg-user .md-line-break")).toHaveLength(2);
+    expect(container.querySelectorAll(".msg-user .md-paragraph")).toHaveLength(0);
+    expect(container.querySelectorAll(".msg-user .md-line-break")).toHaveLength(0);
+    expect(container.querySelectorAll(".msg-user .msg-user-text")).toHaveLength(1);
+    expect(container.querySelector(".msg-user .msg-user-text")?.textContent).toBe(
+      "4: 00007FF711A48D46 v8::Function::Experimental_IsNopFunction+3302\n" +
+        "5: 00007FF7118A54A0 v8::internal::StrongRootAllocatorBase::StrongRootAllocatorBase+33904\n" +
+        "6: 00007FF7118A1B2A v8::internal::StrongRootAllocatorBase::StrongRootAllocatorBase+19194",
+    );
+  });
+
+  it("renders user CRLF line breaks as plain text without markdown paragraphs", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "User",
+          body: "LLM 原始返回片段（前 400 字）\r\n这个有点不太够用啊",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelectorAll(".msg-user .md-paragraph")).toHaveLength(0);
+    expect(container.querySelector(".msg-user .msg-user-text")?.textContent).toBe(
+      "LLM 原始返回片段（前 400 字）\n这个有点不太够用啊",
+    );
   });
 
   it("repairs compact headings without spaces across heading levels", () => {

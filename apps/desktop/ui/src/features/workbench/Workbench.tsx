@@ -5,7 +5,8 @@ import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
   AgentPlanPanel,
-  PlanApprovalModal,
+  PermissionRequestPanel,
+  type PendingPermissionRequest,
   findPlanAcceptOption,
   findPlanRejectOption,
   shouldShowAgentPlanNearComposer,
@@ -48,6 +49,7 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
   kind: "base",
   tab: "Review",
 };
+const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
 
 let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
 
@@ -153,6 +155,23 @@ export function Workbench() {
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [startupUpdateInfo, setStartupUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [startupUpdateDismissed, setStartupUpdateDismissed] = useState(false);
+  const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!snapshot) {
+      setResolvingPermissionIds((current) => (current.size === 0 ? current : new Set()));
+      return;
+    }
+    const pendingIds = new Set(
+      findPendingPermissionRequests(snapshot.tools).map((request) => request.requestId),
+    );
+    setResolvingPermissionIds((current) => {
+      const next = new Set([...current].filter((requestId) => pendingIds.has(requestId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [snapshot?.tools]);
 
   const handleOpenSettings = useCallback((options?: {
     startupNotice?: SettingsStartupNotice;
@@ -260,8 +279,23 @@ export function Workbench() {
   }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null) => {
-    await sessionResolvePermission(requestId, optionId);
-    await pollState();
+    setResolvingPermissionIds((current) => {
+      if (current.has(requestId)) return current;
+      const next = new Set(current);
+      next.add(requestId);
+      return next;
+    });
+    try {
+      await sessionResolvePermission(requestId, optionId);
+      await pollState();
+    } catch (error) {
+      setResolvingPermissionIds((current) => {
+        const next = new Set(current);
+        next.delete(requestId);
+        return next;
+      });
+      throw error;
+    }
   }, [pollState]);
 
   const handleSessionChanged = useCallback(() => {
@@ -359,16 +393,21 @@ export function Workbench() {
     />
   ), [appTheme, handleEditorDirtyChange, handleEditorSaved, snapshot?.workspace.name]);
 
-  const pendingPlanApproval = useMemo(
-    () => (snapshot ? findPendingPlanApproval(snapshot.tools) : null),
-    [snapshot?.tools],
+  const pendingPermissionRequests = useMemo(
+    () =>
+      snapshot
+        ? findPendingPermissionRequests(snapshot.tools).filter(
+            (request) => !resolvingPermissionIds.has(request.requestId),
+          )
+        : [],
+    [snapshot?.tools, resolvingPermissionIds],
   );
   const hiddenPermissionRequestIds = useMemo(
     () =>
-      pendingPlanApproval
-        ? new Set<string>([pendingPlanApproval.requestId])
-        : new Set<string>(),
-    [pendingPlanApproval],
+      pendingPermissionRequests.length > 0
+        ? new Set(pendingPermissionRequests.map((request) => request.requestId))
+        : EMPTY_HIDDEN_PERMISSION_REQUEST_IDS,
+    [pendingPermissionRequests],
   );
   const updateNotice = startupUpdateInfo && !startupUpdateDismissed ? (
     <div className="startup-update-notice" role="status" aria-live="polite">
@@ -437,6 +476,21 @@ export function Workbench() {
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentLabel = snapshot.session.agent_cli || "智能体";
   const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
+  const composerStatusSlot = pendingPermissionRequests.length > 0 || showComposerPlan ? (
+    <div className="composer-plan-slot">
+      {pendingPermissionRequests.map((request) => (
+        <PermissionRequestPanel
+          key={request.requestId}
+          request={request}
+          entries={snapshot.agent_plan ?? []}
+          onPermissionSelect={handlePermissionSelect}
+        />
+      ))}
+      {showComposerPlan && (
+        <AgentPlanPanel entries={snapshot.agent_plan} />
+      )}
+    </div>
+  ) : null;
   const workbenchBodyClassName = [
     "workbench-body",
     terminalDockActive ? "has-terminal-dock" : "",
@@ -545,11 +599,7 @@ export function Workbench() {
                   expandedReviewSideTreeVisible ? "has-review-side-tree" : ""
                 }`}
               >
-                {showComposerPlan && (
-                  <div className="composer-plan-slot">
-                    <AgentPlanPanel entries={snapshot.agent_plan} />
-                  </div>
-                )}
+                {composerStatusSlot}
                 <Composer
                   snapshot={snapshot}
                   onStateChange={pollState}
@@ -600,11 +650,7 @@ export function Workbench() {
                     )}
                   </section>
                 )}
-                {showComposerPlan && (
-                  <div className="composer-plan-slot">
-                    <AgentPlanPanel entries={snapshot.agent_plan} />
-                  </div>
-                )}
+                {composerStatusSlot}
                 <Composer
                   snapshot={snapshot}
                   onStateChange={pollState}
@@ -698,11 +744,6 @@ export function Workbench() {
             </div>
           </div>
         )}
-        <PlanApprovalModal
-          approval={pendingPlanApproval}
-          entries={snapshot.agent_plan ?? []}
-          onPermissionSelect={handlePermissionSelect}
-        />
         {updateNotice}
       </div>
       </div>
@@ -711,7 +752,7 @@ export function Workbench() {
 }
 
 export function findPendingPlanApproval(tools: ToolInvocation[]) {
-  const tool = tools.find(
+  const toolIndex = tools.findIndex(
     (tool) =>
       tool.kind === "permission" &&
       tool.status === "Running" &&
@@ -721,15 +762,319 @@ export function findPendingPlanApproval(tools: ToolInvocation[]) {
       !!findPlanRejectOption(tool.permission_options),
   );
 
+  const tool = toolIndex >= 0 ? tools[toolIndex] : null;
   if (!tool) {
     return null;
   }
 
   return {
     requestId: tool.call_id,
-    planText: tool.raw_input || tool.detail_text || null,
+    planText: planApprovalText(tool, tools, toolIndex),
     options: tool.permission_options,
   };
+}
+
+export function findPendingPermissionRequest(tools: ToolInvocation[]): PendingPermissionRequest | null {
+  return findPendingPermissionRequests(tools)[0] ?? null;
+}
+
+export function findPendingPermissionRequests(tools: ToolInvocation[]): PendingPermissionRequest[] {
+  return tools.flatMap((tool, index) => {
+    if (!isPendingPermissionTool(tool)) {
+      return [];
+    }
+    const planApproval = isPlanApprovalPermission(tool);
+    const planText = planApproval ? planApprovalText(tool, tools, index) : null;
+    const details = permissionRequestDetails(tool, planText);
+
+    return [{
+      requestId: tool.call_id,
+      title: permissionRequestTitle(tool, details),
+      details,
+      planText,
+      options: tool.permission_options,
+      isPlanApproval: planApproval,
+    }];
+  });
+}
+
+export function pendingPermissionRequestIds(tools: ToolInvocation[]) {
+  return tools.filter(isPendingPermissionTool).map((tool) => tool.call_id);
+}
+
+function isPendingPermissionTool(tool: ToolInvocation) {
+  return (
+    tool.kind === "permission" &&
+    tool.status === "Running" &&
+    !tool.permission_decision &&
+    tool.permission_options.length > 0
+  );
+}
+
+function permissionRequestTitle(tool: ToolInvocation, details: string | null) {
+  const name = tool.name.trim();
+  const baseTitle = !name || name.toLowerCase() === "permission request" ? "选择权限" : name;
+  const path = permissionRequestTitlePath(details);
+  if (path && !baseTitle.includes(path)) {
+    return `${baseTitle}: ${path}`;
+  }
+  return baseTitle;
+}
+
+function permissionRequestDetails(tool: ToolInvocation, planText: string | null) {
+  const detailText = tool.detail_text.trim();
+  if (detailText && detailText !== planText) {
+    return detailText;
+  }
+
+  const rawInput = tool.raw_input?.trim();
+  if (rawInput && rawInput !== planText && !looksLikeJsonPayload(rawInput)) {
+    return rawInput;
+  }
+
+  return null;
+}
+
+function permissionRequestTitlePath(details: string | null) {
+  if (!details) return null;
+  const lines = details.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    const inlinePath = line.match(/^Path:\s*(.+)$/i)?.[1]?.trim();
+    if (inlinePath) {
+      return inlinePath;
+    }
+    if (/^Paths:\s*$/i.test(line)) {
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const path = lines[next].trim().replace(/^-\s*/, "").trim();
+        if (path) {
+          return path;
+        }
+      }
+    }
+    const firstListPath = line.match(/^Paths:\s*-\s*(.+)$/i)?.[1]?.trim();
+    if (firstListPath) {
+      return firstListPath;
+    }
+  }
+  return null;
+}
+
+function planApprovalText(tool: ToolInvocation, tools: ToolInvocation[] = [], toolIndex = -1) {
+  const rawInputPlan = extractPlanText(tool.raw_input);
+  if (rawInputPlan) {
+    return rawInputPlan;
+  }
+
+  const detailPlan = extractStructuredPlanText(tool.detail_text);
+  if (detailPlan) {
+    return detailPlan;
+  }
+
+  const nearbyPlan = latestCodeBuddyPlanText(tools, toolIndex);
+  if (nearbyPlan) {
+    return nearbyPlan;
+  }
+
+  const detailText = tool.detail_text.trim();
+  if (detailText && looksLikePlanBody(detailText)) {
+    return detailText;
+  }
+
+  const rawInput = tool.raw_input?.trim();
+  if (rawInput && !looksLikeJsonPayload(rawInput) && looksLikePlanBody(rawInput)) {
+    return rawInput;
+  }
+
+  return null;
+}
+
+function latestCodeBuddyPlanText(tools: ToolInvocation[], toolIndex: number) {
+  const end = toolIndex >= 0 ? toolIndex : tools.length;
+  for (let index = end - 1; index >= 0; index -= 1) {
+    const tool = tools[index];
+    if (!looksLikeCodeBuddyPlanWriteTool(tool)) {
+      continue;
+    }
+    const planText = structuredPlanTextFromTool(tool);
+    if (planText) {
+      return planText;
+    }
+  }
+  return null;
+}
+
+function looksLikeCodeBuddyPlanWriteTool(tool: ToolInvocation) {
+  const haystack = [
+    tool.name,
+    tool.summary,
+    tool.detail_text,
+    tool.raw_input,
+    tool.raw_output,
+    ...tool.diff_paths,
+    ...tool.logs.flatMap((log) => [log.title, log.body]),
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+
+  return (
+    haystack.includes(".codebuddy/plans/") ||
+    haystack.includes(".codebuddy\\plans\\") ||
+    (haystack.includes("write") && haystack.includes("plan")) ||
+    haystack.includes("implementation plan")
+  );
+}
+
+function structuredPlanTextFromTool(tool: ToolInvocation) {
+  const payloads = [
+    tool.raw_input,
+    tool.raw_output,
+    tool.detail_text,
+    ...tool.logs.flatMap((log) => [log.body, log.title]),
+  ];
+
+  for (const payload of payloads) {
+    const planText = extractStructuredPlanText(payload);
+    if (planText) {
+      return planText;
+    }
+  }
+
+  return null;
+}
+
+function extractStructuredPlanText(payload: string | null | undefined) {
+  const trimmed = payload?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return structuredPlanTextFromParsedPayload(JSON.parse(trimmed));
+  } catch {
+    return looksLikePlanBody(trimmed) ? trimmed : null;
+  }
+}
+
+function extractPlanText(payload: string | null | undefined) {
+  const trimmed = payload?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return planTextFromParsedPayload(JSON.parse(trimmed));
+  } catch {
+    return trimmed;
+  }
+}
+
+function planTextFromParsedPayload(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed || null;
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const plan = stringValue(record.plan);
+  if (plan) {
+    return plan;
+  }
+
+  const rawResponse = record["codebuddy.ai/rawResponse"];
+  if (rawResponse && typeof rawResponse === "object" && !Array.isArray(rawResponse)) {
+    return stringValue((rawResponse as Record<string, unknown>).plan);
+  }
+
+  return null;
+}
+
+function structuredPlanTextFromParsedPayload(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return looksLikePlanBody(trimmed) ? trimmed : null;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if (Array.isArray(payload)) {
+    return payload.map(structuredPlanTextFromParsedPayload).find(Boolean) ?? null;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const explicitPlan = stringValue(record.plan);
+  if (explicitPlan) {
+    return explicitPlan;
+  }
+
+  for (const key of ["content", "newText", "new_text", "text", "markdown", "body"]) {
+    const value = stringValue(record[key]);
+    if (value && looksLikePlanBody(value)) {
+      return value;
+    }
+  }
+
+  for (const key of ["rawInput", "raw_input", "input", "rawOutput", "raw_output", "content"]) {
+    const nested = record[key];
+    if (nested && typeof nested === "object") {
+      const planText = structuredPlanTextFromParsedPayload(nested);
+      if (planText) {
+        return planText;
+      }
+    }
+  }
+
+  const rawResponse = record["codebuddy.ai/rawResponse"];
+  if (rawResponse && typeof rawResponse === "object") {
+    const planText = structuredPlanTextFromParsedPayload(rawResponse);
+    if (planText) {
+      return planText;
+    }
+  }
+
+  return null;
+}
+
+function looksLikePlanBody(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || looksLikeCodeBuddyPlanPath(trimmed)) {
+    return false;
+  }
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return false;
+  }
+  if (/^(python|node|bash|pwsh|powershell|cmd)\b/i.test(trimmed)) {
+    return false;
+  }
+  return (
+    trimmed.startsWith("#") ||
+    trimmed.includes("\n") ||
+    /计划|实施|步骤|目标|验证|plan|problem|implementation|approach/i.test(trimmed)
+  );
+}
+
+function looksLikeCodeBuddyPlanPath(value: string) {
+  const normalized = value.trim().replace(/\\/g, "/").toLowerCase();
+  return normalized.includes(".codebuddy/plans/") && /\.mdx?$/.test(normalized);
+}
+
+function stringValue(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function looksLikeJsonPayload(value: string) {
+  return value.startsWith("{") || value.startsWith("[");
 }
 
 function isPlanApprovalPermission(tool: ToolInvocation) {

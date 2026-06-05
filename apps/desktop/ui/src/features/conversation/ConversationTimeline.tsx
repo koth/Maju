@@ -180,7 +180,7 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
             <div className="msg-user-bubble">
               <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
               <div className="msg-content msg-content-user">
-                <MarkdownBody content={text} />
+                <UserMessageText text={text} />
               </div>
             </div>
           )}
@@ -192,7 +192,7 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
       <div key={id} className="msg msg-user">
         <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
         <div className="msg-content msg-content-user">
-          <MarkdownBody content={body} />
+          <UserMessageText text={body} />
         </div>
       </div>
     );
@@ -223,6 +223,14 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
 
 function shouldRenderMessage(role: MessageRole, body: string) {
   return role === "User" || body.trim().length > 0;
+}
+
+function UserMessageText({ text }: { text: string }) {
+  return <span className="msg-user-text">{normalizeUserMessageText(text)}</span>;
+}
+
+function normalizeUserMessageText(text: string) {
+  return text.replace(/\r\n?/g, "\n");
 }
 
 function splitUserMessageBody(body: string): { text: string; images: UserMessageImage[] } {

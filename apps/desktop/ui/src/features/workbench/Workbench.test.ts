@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { findPendingPlanApproval } from "./Workbench";
+import {
+  findPendingPermissionRequest,
+  findPendingPlanApproval,
+  pendingPermissionRequestIds,
+} from "./Workbench";
 import type { ToolInvocation } from "../../types";
 
 describe("findPendingPlanApproval", () => {
@@ -19,6 +23,129 @@ describe("findPendingPlanApproval", () => {
 
     expect(approval?.requestId).toBe("call-exit-plan");
     expect(approval?.planText).toContain("# Plan");
+  });
+
+  it("shows only the embedded plan text from structured raw input", () => {
+    const approval = findPendingPlanApproval([
+      tool({
+        name: "ExitPlanMode",
+        raw_input: JSON.stringify({
+          allowedPrompts: [
+            { prompt: "run frontend build validation", tool: "Bash" },
+            { prompt: "create new frontend refactor directories", tool: "Bash" },
+          ],
+          plan: "# GalleryPage.tsx 重构计划\n\n## 目标\n拆分页面模块。",
+        }),
+        permission_options: [
+          { id: "default", label: "Default", kind: "AllowOnce" },
+          { id: "plan", label: "Plan", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(approval?.planText).toContain("# GalleryPage.tsx 重构计划");
+    expect(approval?.planText).not.toContain("allowedPrompts");
+    expect(approval?.planText).not.toContain("run frontend build validation");
+  });
+
+  it("uses the latest CodeBuddy plan file write as plan approval fallback", () => {
+    const approval = findPendingPlanApproval([
+      tool({
+        call_id: "write-plan",
+        name: "Write negative terms implementation plan",
+        status: "Succeeded",
+        raw_input: JSON.stringify({
+          file_path: "C:/Users/yvonchen/.codebuddy/plans/toasty-forging-newton.md",
+          content: "# Negative Terms Plan\n\n## Goal\nTune negative term ranking.",
+        }),
+      }),
+      tool({
+        name: "ExitPlanMode",
+        detail_text: "Path: C:/Users/yvonchen/.codebuddy/plans/toasty-forging-newton.md",
+        raw_input: JSON.stringify({ allowedPrompts: [] }),
+        permission_options: [
+          { id: "allow_always", label: "Always Allow", kind: "AllowAlways" },
+          { id: "allow", label: "Allow", kind: "AllowOnce" },
+          { id: "reject", label: "Reject", kind: "RejectOnce" },
+          { id: "reject_and_exit_plan", label: "Exit plan mode", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(approval?.requestId).toBe("call-exit-plan");
+    expect(approval?.planText).toContain("# Negative Terms Plan");
+    expect(approval?.planText).not.toContain(".codebuddy/plans");
+  });
+});
+
+describe("findPendingPermissionRequest", () => {
+  it("extracts regular permission requests for composer-level display", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "permission-bash",
+        name: "`find /d/work/ArtAssets -type f | head -20`",
+        detail_text: "find /d/work/ArtAssets -type f | head -20",
+        permission_options: [
+          { id: "allow", label: "Allow", kind: "AllowOnce" },
+          { id: "reject", label: "Reject", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(request?.requestId).toBe("permission-bash");
+    expect(request?.title).toContain("find /d/work/ArtAssets");
+    expect(request?.details).toContain("head -20");
+    expect(request?.isPlanApproval).toBe(false);
+    expect(request?.options.map((option) => option.id)).toEqual(["allow", "reject"]);
+  });
+
+  it("promotes extracted permission paths into the request title", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "permission-bash",
+        name: "Bash",
+        detail_text:
+          "Command:\npython - << 'PY'\n...\nPY\n\nPath: D:/work/ArtAssets/packages/backend/src/app/index.ts",
+        permission_options: [
+          { id: "allow", label: "Allow", kind: "AllowOnce" },
+          { id: "reject", label: "Reject", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(request?.title).toBe("Bash: D:/work/ArtAssets/packages/backend/src/app/index.ts");
+  });
+
+  it("promotes terminal permission paths into the request title", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "permission-terminal",
+        name: "Bash",
+        detail_text:
+          "Command:\npython - << 'PY'\n...\nPY\n\nPaths:\n- D:/work/ArtAssets/packages/backend/src/app/index.ts",
+        permission_options: [
+          { id: "allow", label: "Allow", kind: "AllowOnce" },
+          { id: "reject", label: "Reject", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(request?.title).toBe("Bash: D:/work/ArtAssets/packages/backend/src/app/index.ts");
+  });
+
+  it("tracks all unresolved permission tools so timeline cards can be hidden", () => {
+    expect(
+      pendingPermissionRequestIds([
+        tool({ call_id: "pending-1", permission_options: [{ id: "allow", label: "Allow", kind: "AllowOnce" }] }),
+        tool({
+          call_id: "resolved",
+          permission_options: [{ id: "allow", label: "Allow", kind: "AllowOnce" }],
+          permission_decision: "Permission selected: Allow",
+          status: "Succeeded",
+        }),
+        tool({ call_id: "pending-2", permission_options: [{ id: "reject", label: "Reject", kind: "RejectOnce" }] }),
+      ]),
+    ).toEqual(["pending-1", "pending-2"]);
   });
 });
 

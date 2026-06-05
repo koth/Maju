@@ -1,4 +1,23 @@
 use super::*;
+use workspace_model::FileChangeType;
+
+pub(super) struct RuntimeEventApplyResult {
+    pub(super) ui_changed: bool,
+    pub(super) had_file_changes: bool,
+    pub(super) turn_stop_reason: Option<String>,
+}
+
+fn events_may_affect_review_changes(events: &[ClientEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            ClientEvent::ToolDiff { .. }
+                | ClientEvent::ToolDiffPreview { .. }
+                | ClientEvent::ToolCompleted { .. }
+                | ClientEvent::ToolFailed { .. }
+        )
+    })
+}
 
 impl Application {
     pub fn send_prompt(&mut self, prompt: impl Into<String>) -> anyhow::Result<()> {
@@ -164,14 +183,27 @@ impl Application {
             return;
         }
 
+        let pending_retry_changed =
+            self.retry_pending_tool_diff_previews() | self.retry_pending_tool_write_detections();
+
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
-            self.session.update_session_id(&events);
-            let has_events = !events.is_empty();
-            for event in events {
-                self.apply_event_and_restore_model(event);
+            if events.is_empty() {
+                if pending_retry_changed {
+                    self.bump_revision();
+                }
+                return;
             }
-            if has_events {
+            if self.skip_replay {
+                self.session.update_session_id(&events);
+                for event in events {
+                    self.apply_event_and_restore_model(event);
+                }
+                self.bump_revision();
+                return;
+            }
+            let result = self.apply_idle_runtime_events_with_file_tracking(events);
+            if pending_retry_changed || result.ui_changed || result.had_file_changes {
                 self.bump_revision();
             }
             return;
@@ -216,13 +248,48 @@ impl Application {
             return;
         }
 
+        let result = self.apply_runtime_events_with_file_tracking(events);
+        let mut ui_changed = result.ui_changed;
+        let had_file_changes = result.had_file_changes;
+
+        if is_finished {
+            if self.ui.session.status == SessionStatus::Streaming {
+                self.ui.session.status = SessionStatus::Idle;
+                ui_changed = true;
+            }
+
+            // Step 2: If ACP did not provide title metadata yet, refine the local fallback.
+            if self.refine_session_title_after_turn_if_needed() {
+                ui_changed = true;
+            }
+
+            ui_changed |= self.persist_current_turn_file_changes();
+            if let Some(stop_reason) = result.turn_stop_reason.as_deref()
+                && let Some(notice) =
+                    turn_finished_notice(stop_reason, self.ui.session.agent_cli.as_deref())
+            {
+                self.push_system_message(notice);
+                ui_changed = true;
+            }
+            self.current_turn_user_message_id = None;
+            self.in_flight_prompt = None;
+        }
+
+        if pending_retry_changed || ui_changed || had_file_changes {
+            self.bump_revision();
+        }
+    }
+
+    pub(super) fn apply_runtime_events_with_file_tracking(
+        &mut self,
+        mut events: Vec<ClientEvent>,
+    ) -> RuntimeEventApplyResult {
         // Preprocess ToolDiff events: fill in old_text from the correct baseline.
         // For the tool card diff, old_text should be "what was on disk when the tool started"
         // so the card shows what THIS tool changed.
         // For session-level changes, the reducer's upsert_session_change preserves the
         // first-ever baseline separately.
         let workspace_root = self.ui.workspace.root.clone();
-        let mut events = events;
         let mut had_file_changes = false;
         let mut batch_file_versions = HashMap::<String, String>::new();
         let turn_stop_reason = events.iter().rev().find_map(|event| match event {
@@ -253,7 +320,7 @@ impl Application {
                     had_file_changes = true;
                     // Normalize path to workspace-relative with forward slashes
                     let normalized = normalize_path_for_storage(path, &workspace_root);
-                    self.file_tracker.add_candidate(id, normalized.clone());
+                    self.file_tracker.add_diff_candidate(id, normalized.clone());
                     let abs_path = workspace_root.join(&normalized);
                     if let Some((expanded_old, expanded_new)) = expand_tool_diff_fragment_from_disk(
                         &abs_path,
@@ -288,6 +355,18 @@ impl Application {
                         *old_text = None;
                     }
 
+                    if old_text.is_none()
+                        && self
+                            .file_tracker
+                            .was_missing_at_start(id, &normalized)
+                            .unwrap_or(false)
+                    {
+                        *old_text = Some(String::new());
+                    }
+                    if old_text.is_none() && self.git_head_text_for_path(&normalized).is_none() {
+                        *old_text = Some(String::new());
+                    }
+
                     // Last resort requested by user: read the file directly only when
                     // the file on disk is different from the preview target. If it is
                     // already equal, treating an unknown baseline as "created" would
@@ -304,7 +383,7 @@ impl Application {
                 }
                 ClientEvent::ToolDiffPreview { id, path, .. } => {
                     let normalized = normalize_path_for_storage(path, &workspace_root);
-                    self.file_tracker.add_candidate(id, normalized.clone());
+                    self.file_tracker.add_diff_candidate(id, normalized.clone());
                     *path = normalized;
                 }
                 _ => {}
@@ -312,8 +391,10 @@ impl Application {
         }
 
         // Process events and track tool lifecycle for file change detection
-        let mut ui_changed = !events.is_empty();
+        let ui_changed = !events.is_empty();
         let mut completed_tool_ids = Vec::new();
+        let mut completed_tool_ids_with_tracker_changes = HashSet::new();
+        let mut late_write_hint_tool_ids = Vec::new();
         let mut failed_tool_ids_without_changes = HashSet::new();
         for event in &events {
             match event {
@@ -323,18 +404,29 @@ impl Application {
                 }
                 ClientEvent::ToolUpdated { id, raw_input, .. } => {
                     for path in tool_event_hint_paths(raw_input.as_deref()) {
-                        self.file_tracker.add_candidate(id, path);
+                        if raw_input_has_write_payload(raw_input.as_deref()) {
+                            self.file_tracker.add_diff_candidate(id, path);
+                        } else {
+                            self.file_tracker.add_candidate(id, path);
+                        }
                     }
                 }
                 ClientEvent::ToolCompleted { id, .. } => {
                     completed_tool_ids.push(id.clone());
                     let changes = self.file_tracker.finish_recording(id);
-                    had_file_changes |= self.apply_tracker_changes(id, changes);
+                    let tracker_changed = self.apply_tracker_changes(id, changes);
+                    if tracker_changed {
+                        completed_tool_ids_with_tracker_changes.insert(id.clone());
+                    }
+                    had_file_changes |= tracker_changed;
                 }
                 ClientEvent::ToolFailed { id, .. } => {
                     completed_tool_ids.push(id.clone());
                     let changes = self.file_tracker.finish_recording(id);
                     let tracker_changed = self.apply_tracker_changes(id, changes);
+                    if tracker_changed {
+                        completed_tool_ids_with_tracker_changes.insert(id.clone());
+                    }
                     if !tracker_changed {
                         failed_tool_ids_without_changes.insert(id.clone());
                     }
@@ -352,6 +444,11 @@ impl Application {
             {
                 had_file_changes |= self.discard_failed_tool_speculative_diffs(id);
             }
+            if let ClientEvent::ToolUpdated { id, .. } = event
+                && self.completed_tool_has_detectable_write_hint(id)
+            {
+                late_write_hint_tool_ids.push(id.clone());
+            }
             if let ClientEvent::ToolDiff {
                 id,
                 path,
@@ -362,26 +459,54 @@ impl Application {
             {
                 if self.should_apply_tool_diff_to_review(path, old_text.as_deref(), new_text) {
                     let change_type = self.tool_diff_change_type(id, path, old_text.as_deref());
+                    let review_old_text = if change_type == FileChangeType::Created {
+                        None
+                    } else {
+                        old_text.clone()
+                    };
                     self.upsert_review_file_change(
                         path,
                         change_type,
-                        old_text.clone(),
+                        review_old_text,
                         new_text.clone(),
                     );
                     had_file_changes = true;
                 }
             }
-            if let ClientEvent::ToolDiffPreview { id, path, hunks } = event
-                && self.tool_diff_preview_matches_recording_window(id, path, hunks)
-            {
-                had_file_changes |= self.apply_tool_diff_preview_to_review(path, path, hunks);
+            if let ClientEvent::ToolDiffPreview { id, path, hunks } = event {
+                if self.apply_tool_diff_preview_event_to_review(id, path, hunks) {
+                    had_file_changes = true;
+                } else if self.tool_diff_preview_needs_landing_retry(path, hunks) {
+                    self.enqueue_pending_tool_diff_preview(id, path, hunks);
+                }
             }
         }
         self.session.update_session_id(&events);
 
         // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
-        if !completed_tool_ids.is_empty() {
-            had_file_changes |= self.detect_file_writes_from_tools(&completed_tool_ids);
+        for id in &completed_tool_ids {
+            if completed_tool_ids_with_tracker_changes.contains(id) {
+                continue;
+            }
+            if self.detect_file_writes_from_tools(std::slice::from_ref(id)) {
+                had_file_changes = true;
+            } else if self.completed_tool_has_detectable_write_hint(id) {
+                self.enqueue_pending_tool_write_detection(id);
+            } else {
+                self.file_tracker.discard_recording(id);
+            }
+        }
+        if !late_write_hint_tool_ids.is_empty() {
+            late_write_hint_tool_ids.sort();
+            late_write_hint_tool_ids.dedup();
+            let late_write_changed = self.detect_file_writes_from_tools(&late_write_hint_tool_ids);
+            if late_write_changed {
+                had_file_changes = true;
+            } else {
+                for id in &late_write_hint_tool_ids {
+                    self.enqueue_pending_tool_write_detection(id);
+                }
+            }
         }
 
         // Persist session_changes to SQLite after all file-change sources have run.
@@ -390,32 +515,234 @@ impl Application {
             self.persist_review_file_changes();
         }
 
-        if is_finished {
-            if self.ui.session.status == SessionStatus::Streaming {
-                self.ui.session.status = SessionStatus::Idle;
-                ui_changed = true;
-            }
+        RuntimeEventApplyResult {
+            ui_changed,
+            had_file_changes,
+            turn_stop_reason,
+        }
+    }
 
-            // Step 2: If ACP did not provide title metadata yet, refine the local fallback.
-            if self.refine_session_title_after_turn_if_needed() {
-                ui_changed = true;
-            }
+    pub(super) fn apply_idle_runtime_events_with_file_tracking(
+        &mut self,
+        events: Vec<ClientEvent>,
+    ) -> RuntimeEventApplyResult {
+        let recovered_turn_user_id = if self.current_turn_user_message_id.is_none()
+            && events_may_affect_review_changes(&events)
+        {
+            self.latest_completed_turn_user_message_id()
+        } else {
+            None
+        };
+        let previous_turn_user_id = self.current_turn_user_message_id;
+        if let Some(user_id) = recovered_turn_user_id {
+            self.current_turn_user_message_id = Some(user_id);
+        }
 
-            ui_changed |= self.persist_current_turn_file_changes();
-            if let Some(stop_reason) = turn_stop_reason.as_deref()
-                && let Some(notice) =
-                    turn_finished_notice(stop_reason, self.ui.session.agent_cli.as_deref())
+        let mut result = self.apply_runtime_events_with_file_tracking(events);
+        if recovered_turn_user_id.is_some() && result.had_file_changes {
+            result.ui_changed |= self.persist_current_turn_file_changes();
+        }
+        self.current_turn_user_message_id = previous_turn_user_id;
+        result
+    }
+
+    fn apply_tool_diff_preview_event_to_review(
+        &mut self,
+        call_id: &str,
+        path: &str,
+        hunks: &[DiffHunk],
+    ) -> bool {
+        if self.tool_diff_preview_matches_recording_window(call_id, path, hunks) {
+            return self.apply_tool_diff_preview_to_review(path, path, hunks);
+        }
+        self.apply_landed_tool_diff_preview_to_review(call_id, path, hunks)
+    }
+
+    fn enqueue_pending_tool_diff_preview(&mut self, call_id: &str, path: &str, hunks: &[DiffHunk]) {
+        if hunks.is_empty() {
+            return;
+        }
+
+        let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let now = self.runtime_now();
+        let next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
+        let expires_at = now + PENDING_TOOL_DIFF_PREVIEW_TTL;
+        if let Some(pending) = self
+            .pending_tool_diff_previews
+            .iter_mut()
+            .find(|pending| pending.call_id == call_id && pending.path == normalized_path)
+        {
+            pending.hunks = hunks.to_vec();
+            pending.turn_user_message_id = self.current_turn_user_message_id;
+            pending.next_retry_at = next_retry_at;
+            pending.expires_at = expires_at;
+            return;
+        }
+
+        self.pending_tool_diff_previews
+            .push(PendingToolDiffPreview {
+                call_id: call_id.to_string(),
+                path: normalized_path,
+                hunks: hunks.to_vec(),
+                turn_user_message_id: self.current_turn_user_message_id,
+                next_retry_at,
+                expires_at,
+            });
+    }
+
+    pub(super) fn retry_pending_tool_diff_previews(&mut self) -> bool {
+        if self.pending_tool_diff_previews.is_empty() {
+            return false;
+        }
+
+        let now = self.runtime_now();
+        let previous_turn_user_id = self.current_turn_user_message_id;
+        let mut changed = false;
+        let pending = std::mem::take(&mut self.pending_tool_diff_previews);
+
+        for mut preview in pending {
+            let expired = now >= preview.expires_at;
+            let owner = preview.turn_user_message_id.or(previous_turn_user_id);
+            let due = now >= preview.next_retry_at;
+            if !expired && !due {
+                self.pending_tool_diff_previews.push(preview);
+                continue;
+            }
+            if previous_turn_user_id.is_some()
+                && preview.turn_user_message_id.is_some()
+                && previous_turn_user_id != preview.turn_user_message_id
             {
-                self.push_system_message(notice);
-                ui_changed = true;
+                if !expired {
+                    self.pending_tool_diff_previews.push(preview);
+                }
+                continue;
             }
-            self.current_turn_user_message_id = None;
-            self.in_flight_prompt = None;
+
+            self.current_turn_user_message_id = owner;
+            if self.apply_tool_diff_preview_event_to_review(
+                &preview.call_id,
+                &preview.path,
+                &preview.hunks,
+            ) {
+                changed = true;
+                if self.in_flight_prompt.is_none() && owner.is_some() {
+                    changed |= self.persist_current_turn_file_changes();
+                }
+            } else if !expired
+                && self.tool_diff_preview_needs_landing_retry(&preview.path, &preview.hunks)
+            {
+                preview.next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
+                self.pending_tool_diff_previews.push(preview);
+            }
+            self.current_turn_user_message_id = previous_turn_user_id;
         }
 
-        if ui_changed || had_file_changes {
-            self.bump_revision();
+        self.current_turn_user_message_id = previous_turn_user_id;
+        changed
+    }
+
+    fn enqueue_pending_tool_write_detection(&mut self, call_id: &str) {
+        let now = self.runtime_now();
+        let next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
+        let expires_at = now + PENDING_TOOL_WRITE_DETECTION_TTL;
+        if let Some(pending) = self
+            .pending_tool_write_detections
+            .iter_mut()
+            .find(|pending| pending.call_id == call_id)
+        {
+            pending.turn_user_message_id = self.current_turn_user_message_id;
+            pending.next_retry_at = next_retry_at;
+            pending.expires_at = expires_at;
+            return;
         }
+
+        self.pending_tool_write_detections
+            .push(PendingToolWriteDetection {
+                call_id: call_id.to_string(),
+                turn_user_message_id: self.current_turn_user_message_id,
+                next_retry_at,
+                expires_at,
+            });
+    }
+
+    pub(super) fn retry_pending_tool_write_detections(&mut self) -> bool {
+        if self.pending_tool_write_detections.is_empty() {
+            return false;
+        }
+
+        let now = self.runtime_now();
+        let previous_turn_user_id = self.current_turn_user_message_id;
+        let mut changed = false;
+        let pending = std::mem::take(&mut self.pending_tool_write_detections);
+
+        for mut detection in pending {
+            let expired = now >= detection.expires_at;
+            let owner = detection.turn_user_message_id.or(previous_turn_user_id);
+            let due = now >= detection.next_retry_at;
+            if !expired && !due {
+                self.pending_tool_write_detections.push(detection);
+                continue;
+            }
+            if previous_turn_user_id.is_some()
+                && detection.turn_user_message_id.is_some()
+                && previous_turn_user_id != detection.turn_user_message_id
+            {
+                if !expired {
+                    self.pending_tool_write_detections.push(detection);
+                }
+                continue;
+            }
+
+            self.current_turn_user_message_id = owner;
+            if self.detect_file_writes_from_tools(std::slice::from_ref(&detection.call_id)) {
+                self.persist_file_changes();
+                self.persist_review_file_changes();
+                changed = true;
+                if self.in_flight_prompt.is_none() && owner.is_some() {
+                    changed |= self.persist_current_turn_file_changes();
+                }
+            } else if !expired && self.completed_tool_has_detectable_write_hint(&detection.call_id)
+            {
+                detection.next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
+                self.pending_tool_write_detections.push(detection);
+            } else {
+                self.file_tracker.discard_recording(&detection.call_id);
+            }
+            self.current_turn_user_message_id = previous_turn_user_id;
+        }
+
+        self.current_turn_user_message_id = previous_turn_user_id;
+        changed
+    }
+
+    fn latest_completed_turn_user_message_id(&self) -> Option<uuid::Uuid> {
+        let mut last_user_id = None;
+        let mut latest_user_before_assistant = None;
+
+        for item in &self.ui.timeline {
+            let TimelineItem::Message(message_id) = item else {
+                continue;
+            };
+            let Some(message) = self
+                .ui
+                .messages
+                .iter()
+                .find(|message| message.id == *message_id)
+            else {
+                continue;
+            };
+            match message.role {
+                MessageRole::User => last_user_id = Some(message.id),
+                MessageRole::Assistant => {
+                    if last_user_id.is_some() {
+                        latest_user_before_assistant = last_user_id;
+                    }
+                }
+                MessageRole::System => {}
+            }
+        }
+
+        latest_user_before_assistant.or(last_user_id)
     }
 
     fn poll_background_runtimes(&mut self) {

@@ -1,3 +1,4 @@
+use super::diff_utils::{is_file_write_tool_identity, tool_command_write_hint_paths};
 use super::*;
 
 impl Application {
@@ -147,6 +148,8 @@ impl Application {
         request_id: &str,
         option_id: Option<String>,
     ) -> Result<(), String> {
+        self.start_permission_write_baseline_if_allowed(request_id, option_id.as_deref());
+
         let delivered_to_acp_request = self
             .session
             .resolve_permission(request_id, option_id.clone())
@@ -166,6 +169,35 @@ impl Application {
         Ok(())
     }
 
+    pub(super) fn start_permission_write_baseline_if_allowed(
+        &mut self,
+        request_id: &str,
+        option_id: Option<&str>,
+    ) -> bool {
+        let Some(tool) = self.ui.tools.iter().find(|tool| tool.call_id == request_id) else {
+            return false;
+        };
+        if !permission_selection_is_allow(&tool.permission_options, option_id) {
+            return false;
+        }
+
+        let mut paths = tool
+            .raw_input
+            .as_deref()
+            .map(permission_details_write_paths)
+            .unwrap_or_default();
+        paths.retain(|path| permission_path_is_trackable(path, &self.ui.workspace.root));
+        if paths.is_empty() {
+            return false;
+        }
+        if !permission_tool_should_start_write_baseline(tool) {
+            return false;
+        }
+
+        self.file_tracker.start_recording(request_id, paths);
+        true
+    }
+
     pub(super) fn mark_tool_permission_selected(&mut self, request_id: &str, decision: &str) {
         if let Some(tool) = self
             .ui
@@ -175,6 +207,7 @@ impl Application {
         {
             let outcome = format!("Permission selected: {decision}");
             tool.summary = outcome.clone();
+            tool.status = workspace_model::ToolStatus::Succeeded;
             tool.permission_options.clear();
             tool.permission_decision = Some(outcome);
             self.mark_tool_call_dirty(request_id);
@@ -252,4 +285,88 @@ impl Application {
             value_label: Some(value_label),
         });
     }
+}
+
+fn permission_selection_is_allow(
+    options: &[workspace_model::PermissionOption],
+    option_id: Option<&str>,
+) -> bool {
+    let Some(option_id) = option_id else {
+        return false;
+    };
+    options
+        .iter()
+        .find(|option| option.id == option_id)
+        .is_some_and(|option| {
+            let kind = option.kind.to_ascii_lowercase();
+            let label = option.label.to_ascii_lowercase();
+            let id = option.id.to_ascii_lowercase();
+            kind.contains("allow") || label.contains("allow") || id.contains("allow")
+        })
+}
+
+fn permission_tool_should_start_write_baseline(tool: &workspace_model::ToolInvocation) -> bool {
+    if is_file_write_tool_identity(&tool.kind, &tool.name) {
+        return true;
+    }
+
+    if permission_tool_is_shell_command(&tool.kind) || permission_tool_is_shell_command(&tool.name)
+    {
+        return true;
+    }
+
+    !tool_command_write_hint_paths(tool.raw_input.as_deref()).is_empty()
+}
+
+fn permission_tool_is_shell_command(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "bash" | "shell")
+}
+
+fn permission_path_is_trackable(path: &str, workspace_root: &std::path::Path) -> bool {
+    let normalized = normalize_path_for_storage(path, workspace_root)
+        .trim_start_matches("./")
+        .to_string();
+    if normalized.is_empty() || normalized.split('/').any(|part| part == "..") {
+        return false;
+    }
+
+    workspace_root.join(normalized).starts_with(workspace_root)
+}
+
+fn permission_details_write_paths(details: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut in_paths_section = false;
+
+    for line in details.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(path) = trimmed.strip_prefix("Path:") {
+            let path = path.trim();
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+            in_paths_section = false;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("Paths:") {
+            in_paths_section = true;
+            continue;
+        }
+        if trimmed.ends_with(':') {
+            in_paths_section = false;
+            continue;
+        }
+        if in_paths_section && let Some(path) = trimmed.strip_prefix("- ") {
+            let path = path.trim();
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
 }

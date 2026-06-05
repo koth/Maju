@@ -237,11 +237,17 @@
 }
 
 .msg-content-user {
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
   color: var(--text-strong);
   font-weight: 400;
-  line-height: 1.5;
+  line-height: 1.42;
+}
+
+.msg-user-text {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .msg-content-assistant {
@@ -318,14 +324,6 @@
 
 .md-paragraph:last-child {
   margin-bottom: 0;
-}
-
-.msg-content-user .md-paragraph {
-  margin: 0;
-}
-
-.msg-content-user .md-paragraph + .md-paragraph {
-  margin-top: 0.45em;
 }
 
 .msg-content-user .md-list {

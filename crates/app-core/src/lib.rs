@@ -995,6 +995,47 @@ mod tests {
     }
 
     #[test]
+    fn reducer_shows_created_tool_diff_when_old_text_is_explicitly_empty() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+        ui.tools.clear();
+        ui.timeline.clear();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolDiff {
+                id: "tool-write-created".into(),
+                path: "src/new.ts".into(),
+                old_text: Some(String::new()),
+                new_text: "export const value = 1;\n".into(),
+            },
+        );
+
+        let tool = ui.tools.first().expect("tool should exist");
+        assert_eq!(tool.call_id, "tool-write-created");
+        assert_eq!(tool.diff_paths.len(), 1);
+        assert_eq!(tool.diff_previews.len(), 1);
+        assert_eq!(
+            tool.diff_previews[0]
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| line.kind == DiffLineKind::Added)
+                .count(),
+            1
+        );
+        assert_eq!(
+            tool.diff_previews[0]
+                .hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| line.kind == DiffLineKind::Removed)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn reducer_does_not_replace_good_preview_with_fragment_old_text() {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
@@ -1502,6 +1543,31 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         assert_eq!(
             tool.permission_decision.as_deref(),
             Some("Permission selected: Allow")
+        );
+    }
+
+    #[test]
+    fn permission_resolution_without_visible_request_is_ignored() {
+        let dir = tempdir().unwrap();
+        let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
+
+        super::reducer::apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "auto-perm".into(),
+                outcome: "Permission selected: Allow".into(),
+            },
+        );
+
+        assert!(
+            ui.tools
+                .iter()
+                .all(|tool| tool.call_id.as_str() != "auto-perm")
+        );
+        assert!(
+            ui.timeline
+                .iter()
+                .all(|item| !matches!(item, workspace_model::TimelineItem::Tool(_)))
         );
     }
 

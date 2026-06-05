@@ -267,12 +267,14 @@ fn policy_mode_id(id: &str, label: &str) -> Option<&'static str> {
         || label.contains("build")
         || matches!(
             id.as_str(),
-            "default" | "acceptedits" | "auto" | "bypasspermissions"
+            "default" | "acceptedits" | "auto" | "bypasspermissions" | "dontask"
         )
         || label.contains("manual")
         || label.contains("accept")
         || label.contains("auto")
         || label.contains("bypass")
+        || label.contains("don't ask")
+        || label.contains("dont ask")
     {
         return Some(BUILD_MODE_ID);
     }
@@ -426,14 +428,6 @@ pub(crate) fn append_notification_log(
     payload: &Value,
 ) -> anyhow::Result<()> {
     append_notification_log_owned(config, method, payload.clone())
-}
-
-pub(crate) fn append_typed_notification_log(
-    config: &SessionConfig,
-    notification: &SessionNotification,
-) -> anyhow::Result<()> {
-    let payload = serde_json::to_value(notification).map_err(|err| anyhow!(err.to_string()))?;
-    append_notification_log_owned(config, "session/update", payload)
 }
 
 pub(crate) fn append_runtime_event_log(
@@ -621,6 +615,10 @@ fn emit_codebuddy_notification(
             emit_codebuddy_tool_call_update(tx, workspace_root, update)?;
             Ok(true)
         }
+        "current_mode_update" => {
+            emit_codebuddy_current_mode_update(tx, update)?;
+            Ok(true)
+        }
         "agent_message_chunk" => {
             emit_codebuddy_agent_chunk(tx, update)?;
             Ok(true)
@@ -702,6 +700,7 @@ fn emit_codebuddy_tool_call(
     emit_codebuddy_diff_content(tx, workspace_root, &id, update)?;
     emit_codebuddy_text_content(tx, &id, update)?;
     emit_tool_diff_previews_from_raw_output(tx, &id, raw_output)?;
+    emit_codebuddy_plan_from_raw_response(tx, update)?;
 
     match effective_status.as_deref() {
         Some("completed") => {
@@ -730,6 +729,10 @@ fn emit_codebuddy_tool_call(
             .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool failure"))?;
         }
         _ => {}
+    }
+
+    if let Some(mode_id) = codebuddy_tool_policy_mode(update, effective_status.as_deref(), false) {
+        emit_policy_mode_change(tx, mode_id)?;
     }
 
     Ok(())
@@ -842,7 +845,93 @@ fn emit_codebuddy_tool_call_update(
         }
         Some(_) => Ok(()),
         None => Ok(()),
+    }?;
+
+    if let Some(mode_id) = codebuddy_tool_policy_mode(update, effective_status.as_deref(), true) {
+        emit_policy_mode_change(tx, mode_id)?;
     }
+    emit_codebuddy_plan_from_raw_response(tx, update)?;
+
+    Ok(())
+}
+
+fn emit_codebuddy_plan_from_raw_response(
+    tx: &mpsc::Sender<ClientEvent>,
+    update: &Value,
+) -> anyhow::Result<()> {
+    let Some(entries) = codebuddy_plan_entries_from_raw_response(update) else {
+        return Ok(());
+    };
+
+    tx.send(ClientEvent::PlanUpdated { entries })
+        .map_err(|_| anyhow!("failed to emit CodeBuddy todo plan update"))
+}
+
+fn codebuddy_plan_entries_from_raw_response(update: &Value) -> Option<Vec<AgentPlanEntry>> {
+    let todos = update
+        .get("_meta")
+        .and_then(|meta| meta.get("codebuddy.ai/rawResponse"))
+        .and_then(|raw_response| raw_response.get("todos"))
+        .and_then(Value::as_array)?;
+
+    let entries = todos
+        .iter()
+        .filter_map(codebuddy_todo_plan_entry)
+        .collect::<Vec<_>>();
+    (!entries.is_empty()).then_some(entries)
+}
+
+fn codebuddy_todo_plan_entry(todo: &Value) -> Option<AgentPlanEntry> {
+    let content = string_field(
+        todo,
+        &["content", "activeForm", "subject", "title", "description"],
+    )?;
+    Some(AgentPlanEntry {
+        id: string_field(todo, &["id"]).map(|id| format!("codebuddy-todo-{id}")),
+        content,
+        priority: AgentPlanEntryPriority::Medium,
+        status: codebuddy_todo_status(todo),
+    })
+}
+
+fn codebuddy_todo_status(todo: &Value) -> AgentPlanEntryStatus {
+    let Some(status) = string_field(todo, &["status"]) else {
+        return AgentPlanEntryStatus::Pending;
+    };
+    match status.trim().to_ascii_lowercase().as_str() {
+        "completed" | "done" => AgentPlanEntryStatus::Completed,
+        "in_progress" | "running" | "active" => AgentPlanEntryStatus::InProgress,
+        "cancelled" | "canceled" => AgentPlanEntryStatus::Cancelled,
+        _ => AgentPlanEntryStatus::Pending,
+    }
+}
+
+fn emit_codebuddy_current_mode_update(
+    tx: &mpsc::Sender<ClientEvent>,
+    update: &Value,
+) -> anyhow::Result<()> {
+    let Some(mode) = string_field(
+        update,
+        &["currentModeId", "current_mode_id", "modeId", "mode"],
+    ) else {
+        return Ok(());
+    };
+    let Some(mode_id) = policy_mode_id(&mode, &mode) else {
+        return Ok(());
+    };
+    emit_policy_mode_change(tx, mode_id)
+}
+
+fn emit_policy_mode_change(
+    tx: &mpsc::Sender<ClientEvent>,
+    mode_id: &'static str,
+) -> anyhow::Result<()> {
+    tx.send(ClientEvent::SessionConfigValueChanged {
+        control_id: "mode".into(),
+        value_id: mode_id.into(),
+        value_label: Some(policy_mode_label(mode_id).into()),
+    })
+    .map_err(|_| anyhow!("failed to emit session mode update"))
 }
 
 fn emit_codebuddy_diff_content(
@@ -1440,6 +1529,74 @@ fn codebuddy_plan_content(update: &Value) -> Option<String> {
         })
         .filter(|plan| !plan.trim().is_empty())
         .map(str::to_string)
+}
+
+fn codebuddy_tool_policy_mode(
+    update: &Value,
+    status: Option<&str>,
+    allow_content_confirmation: bool,
+) -> Option<&'static str> {
+    let tool_name = codebuddy_mode_tool_name(update)?;
+    if tool_name.eq_ignore_ascii_case("EnterPlanMode")
+        && (status == Some("completed")
+            || (status != Some("failed")
+                && allow_content_confirmation
+                && codebuddy_update_mentions(update, "entered plan mode")))
+    {
+        return Some(PLAN_MODE_ID);
+    }
+    if tool_name.eq_ignore_ascii_case("ExitPlanMode")
+        && (status == Some("completed") || codebuddy_update_mentions(update, "exited plan mode"))
+    {
+        return Some(BUILD_MODE_ID);
+    }
+    None
+}
+
+fn codebuddy_mode_tool_name(update: &Value) -> Option<String> {
+    update
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("codebuddy.ai/toolName"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            update
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| {
+                    title.eq_ignore_ascii_case("EnterPlanMode")
+                        || title.eq_ignore_ascii_case("ExitPlanMode")
+                })
+                .map(str::to_string)
+        })
+}
+
+fn codebuddy_update_mentions(update: &Value, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    [
+        update.get("title").and_then(Value::as_str),
+        update.get("rawOutput").and_then(Value::as_str),
+        update
+            .get("rawOutput")
+            .and_then(|output| output.get("output"))
+            .and_then(Value::as_str),
+        update
+            .get("fields")
+            .and_then(|fields| fields.get("rawOutput"))
+            .and_then(Value::as_str),
+        update
+            .get("fields")
+            .and_then(|fields| fields.get("rawOutput"))
+            .and_then(|output| output.get("output"))
+            .and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_ascii_lowercase().contains(&needle))
+        || extract_text(update.get("content"))
+            .to_ascii_lowercase()
+            .contains(&needle)
 }
 
 fn insert_raw_input_string(raw_input: Option<Value>, key: &str, value: String) -> Value {
@@ -2561,6 +2718,89 @@ mod tests {
     }
 
     #[test]
+    fn codebuddy_raw_response_todos_emit_plan_update() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "codebuddy.ai/rawResponse": {
+                            "todos": [
+                                {
+                                    "id": "1",
+                                    "content": "Read the code",
+                                    "activeForm": "Reading the code",
+                                    "status": "completed"
+                                },
+                                {
+                                    "id": "2",
+                                    "content": "Apply the fix",
+                                    "activeForm": "Applying the fix",
+                                    "status": "in_progress"
+                                },
+                                {
+                                    "id": "3",
+                                    "activeForm": "Verify behavior",
+                                    "status": "pending"
+                                }
+                            ]
+                        }
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "status": "completed",
+                    "title": "TaskCreate",
+                    "toolCallId": "call-task"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolCompleted { id, .. } if id == "call-task"
+        )));
+        let plan = events
+            .iter()
+            .find_map(|event| {
+                if let ClientEvent::PlanUpdated { entries } = event {
+                    Some(entries)
+                } else {
+                    None
+                }
+            })
+            .expect("CodeBuddy todos should emit a plan update");
+
+        assert_eq!(
+            plan,
+            &vec![
+                AgentPlanEntry {
+                    id: Some("codebuddy-todo-1".into()),
+                    content: "Read the code".into(),
+                    priority: AgentPlanEntryPriority::Medium,
+                    status: AgentPlanEntryStatus::Completed,
+                },
+                AgentPlanEntry {
+                    id: Some("codebuddy-todo-2".into()),
+                    content: "Apply the fix".into(),
+                    priority: AgentPlanEntryPriority::Medium,
+                    status: AgentPlanEntryStatus::InProgress,
+                },
+                AgentPlanEntry {
+                    id: Some("codebuddy-todo-3".into()),
+                    content: "Verify behavior".into(),
+                    priority: AgentPlanEntryPriority::Medium,
+                    status: AgentPlanEntryStatus::Pending,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn codebuddy_exit_plan_mode_preserves_plan_content_in_raw_input() {
         let (tx, rx) = mpsc::channel();
 
@@ -2593,6 +2833,84 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn codebuddy_current_mode_update_sets_local_policy_mode() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "current_mode_update",
+                    "currentModeId": "plan"
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        match rx.try_recv().unwrap() {
+            ClientEvent::SessionConfigValueChanged {
+                control_id,
+                value_id,
+                value_label,
+            } => {
+                assert_eq!(control_id, "mode");
+                assert_eq!(value_id, "plan");
+                assert_eq!(value_label.as_deref(), Some("Plan"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn codebuddy_enter_plan_mode_tool_update_sets_local_policy_mode() {
+        let (tx, rx) = mpsc::channel();
+
+        let handled = emit_codebuddy_notification(
+            &tx,
+            "",
+            &serde_json::json!({
+                "update": {
+                    "_meta": {
+                        "codebuddy.ai/toolName": "EnterPlanMode"
+                    },
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-enter-plan",
+                    "status": "completed",
+                    "title": "EnterPlanMode",
+                    "content": [{
+                        "type": "content",
+                        "content": {
+                            "type": "text",
+                            "text": "Entered plan mode."
+                        }
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        assert!(handled);
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::ToolCompleted { id, .. } if id == "call-enter-plan"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::SessionConfigValueChanged {
+                control_id,
+                value_id,
+                value_label,
+            } if control_id == "mode"
+                && value_id == "plan"
+                && value_label.as_deref() == Some("Plan")
+        )));
     }
 
     #[test]

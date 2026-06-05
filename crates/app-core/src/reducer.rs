@@ -204,14 +204,23 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             ui.session.status = SessionStatus::WaitingForTool;
         }
         ClientEvent::ToolPermissionResolved { id, outcome } => {
-            let tool = ensure_tool(ui, &id, None, "Permission", "permission", false);
-            tool.summary = outcome.clone();
-            tool.status = ToolStatus::Succeeded;
-            tool.permission_options.clear();
-            tool.permission_decision = Some(outcome.clone());
-            tool.error = None;
-            push_tool_log(tool, "Decision", outcome);
-            refresh_session_status(ui);
+            if let Some(tool) = ui.tools.iter_mut().find(|tool| tool.call_id == id) {
+                if permission_resolution_should_preserve_local_reject(
+                    tool.permission_decision.as_deref(),
+                    &outcome,
+                ) {
+                    push_tool_log(tool, "Decision", outcome);
+                    refresh_session_status(ui);
+                    return;
+                }
+                tool.summary = outcome.clone();
+                tool.status = ToolStatus::Succeeded;
+                tool.permission_options.clear();
+                tool.permission_decision = Some(outcome.clone());
+                tool.error = None;
+                push_tool_log(tool, "Decision", outcome);
+                refresh_session_status(ui);
+            }
         }
         ClientEvent::SessionConfigUpdated { mut state } => {
             preserve_local_mode(&mut state, ui.session.mode.as_deref());
@@ -302,8 +311,8 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         } => {
             let is_synthetic_write = id.starts_with("fs_write:");
             let normalized_path = normalize_change_path(&path);
-            let has_trustworthy_old_text = old_text.as_deref().map_or(false, |text| {
-                !text.is_empty() && !looks_like_fragment_old_text(text, &new_text)
+            let has_trustworthy_old_text = old_text.as_deref().is_some_and(|text| {
+                text.is_empty() || !looks_like_fragment_old_text(text, &new_text)
             });
             let diff_hunks = if is_synthetic_write || has_trustworthy_old_text {
                 diff_to_hunks(old_text.as_deref(), &new_text)
@@ -1137,6 +1146,21 @@ fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn permission_resolution_should_preserve_local_reject(
+    current_decision: Option<&str>,
+    next_outcome: &str,
+) -> bool {
+    let Some(current_decision) = current_decision else {
+        return false;
+    };
+    let current = current_decision.to_ascii_lowercase();
+    if !current.contains("reject") && !current.contains("deny") {
+        return false;
+    }
+    let next = next_outcome.to_ascii_lowercase();
+    next.contains("permission resolved") && (next.contains("allow") || next.contains("default"))
+}
+
 fn looks_like_fragment_old_text(old_text: &str, new_text: &str) -> bool {
     let old_lines = old_text.lines().count();
     let new_lines = new_text.lines().count();
@@ -1480,6 +1504,51 @@ mod tests {
             ui.timeline.as_slice(),
             [TimelineItem::Message(_), TimelineItem::Message(_)]
         ));
+    }
+
+    #[test]
+    fn permission_resolved_allow_does_not_override_local_reject() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "call_bash".into(),
+                name: "Bash".into(),
+                options: Vec::new(),
+                details: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_bash".into(),
+                outcome: "Permission selected: Reject".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_bash".into(),
+                outcome: "Permission resolved: allow".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_bash")
+            .expect("permission tool should exist");
+        assert_eq!(tool.summary, "Permission selected: Reject");
+        assert_eq!(
+            tool.permission_decision.as_deref(),
+            Some("Permission selected: Reject")
+        );
+        assert!(
+            tool.logs
+                .iter()
+                .any(|entry| entry.body == "Permission resolved: allow")
+        );
     }
 
     #[test]
