@@ -7,11 +7,11 @@ import {
   getStreamingMessageBody,
 } from "../conversation/streaming-message-store";
 
-function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSnapshot {
+export function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSnapshot {
   const messages =
     patch.messages.length === 0
       ? snapshot.messages
-      : mergeById(snapshot.messages, patch.messages);
+      : mergeMessagesById(snapshot.messages, patch.messages);
   const tools =
     patch.tools.length === 0
       ? snapshot.tools
@@ -40,6 +40,37 @@ function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch): UiSna
     turn_changes: patch.turn_changes ?? snapshot.turn_changes ?? [],
     thinking_status: patch.thinking_status,
   };
+}
+
+function mergeMessagesById(
+  current: UiSnapshot["messages"],
+  updates: UiSnapshot["messages"],
+): UiSnapshot["messages"] {
+  if (updates.length === 0) return current;
+  const next = current.slice();
+  const appended: UiSnapshot["messages"] = [];
+
+  for (const update of updates) {
+    const index = next.findIndex((item) => item.id === update.id);
+    if (index >= 0) {
+      const currentMessage = next[index];
+      const shouldKeepLongerCurrentBody =
+        currentMessage.role === update.role &&
+        currentMessage.role === "Assistant" &&
+        currentMessage.body.length > update.body.length &&
+        currentMessage.body.startsWith(update.body);
+      const nextMessage = shouldKeepLongerCurrentBody
+        ? { ...update, body: currentMessage.body }
+        : update;
+      if (next[index] !== nextMessage) {
+        next[index] = nextMessage;
+      }
+    } else {
+      appended.push(update);
+    }
+  }
+
+  return appended.length === 0 ? next : [...next, ...appended];
 }
 
 function mergeById<T extends { id: string }>(current: T[], updates: T[]): T[] {
@@ -126,7 +157,7 @@ export function useWorkbenchSnapshot() {
       const state = await sessionGetState();
       if (state.revision !== prevSnapshotRevision.current) {
         prevSnapshotRevision.current = state.revision;
-        setSnapshot(state);
+        setSnapshot(materializeStreamingMessageBodies(state));
       }
     } catch {
       // No workspace open; the welcome screen remains the source of truth.
@@ -136,7 +167,7 @@ export function useWorkbenchSnapshot() {
   const acceptSnapshot = useCallback((nextSnapshot: UiSnapshot) => {
     prevSnapshotRevision.current = nextSnapshot.revision;
     setWorkspaceReady(true);
-    setSnapshot(nextSnapshot);
+    setSnapshot(materializeStreamingMessageBodies(nextSnapshot));
   }, []);
 
   const clearSnapshot = useCallback(() => {
@@ -161,7 +192,7 @@ export function useWorkbenchSnapshot() {
           `revision=${nextSnapshot.revision} messages=${nextSnapshot.messages.length} tools=${nextSnapshot.tools.length} timeline=${nextSnapshot.timeline.length}`,
         );
       }
-      setSnapshot(nextSnapshot);
+      setSnapshot(materializeStreamingMessageBodies(nextSnapshot));
     })
       .then((cleanup) => {
         if (disposed) {
@@ -192,9 +223,7 @@ export function useWorkbenchSnapshot() {
         if (patch.revision <= prev.revision) return prev;
         prevSnapshotRevision.current = patch.revision;
         const next = applySnapshotPatch(prev, patch);
-        return patch.session.status === "Streaming"
-          ? next
-          : materializeStreamingMessageBodies(next);
+        return materializeStreamingMessageBodies(next);
       });
     })
       .then((cleanup) => {
