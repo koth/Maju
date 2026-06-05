@@ -417,8 +417,15 @@ impl Application {
         } else {
             (FileChangeType::Modified, Some(old_text))
         };
-        self.upsert_review_file_change(&normalized_path, change_type, old_text, new_text);
-        true
+        let expected_old_text = old_text.as_deref();
+        self.upsert_review_file_change_from_landed_tool_hunks(
+            &normalized_path,
+            change_type,
+            expected_old_text,
+            &new_text,
+            hunks,
+        )
+        .unwrap_or(false)
     }
 
     pub(super) fn apply_landed_tool_diff_preview_to_review(
@@ -443,6 +450,18 @@ impl Application {
             let old_text = normalize_diff_text_for_session_change(baseline);
             let new_text = normalize_diff_text_for_session_change(&new_text);
             if old_text != new_text {
+                if self
+                    .upsert_review_file_change_from_landed_tool_hunks(
+                        &normalized_path,
+                        FileChangeType::Modified,
+                        Some(&old_text),
+                        &new_text,
+                        hunks,
+                    )
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
                 self.upsert_review_file_change(
                     &normalized_path,
                     FileChangeType::Modified,
@@ -576,9 +595,14 @@ impl Application {
             return None;
         }
 
+        let canonical_old_text = if change_type == FileChangeType::Created {
+            None
+        } else {
+            Some(old_text.as_str())
+        };
         let canonical = canonical_text_diff(
             &change_type,
-            Some(&old_text),
+            canonical_old_text,
             Some(&normalized_new_text),
             None,
         );

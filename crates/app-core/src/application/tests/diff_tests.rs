@@ -2075,6 +2075,99 @@ fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
 }
 
 #[test]
+fn raw_output_diff_preview_replaces_same_path_content_fragments_in_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "datas/scripts/eagle-export.py";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = [
+        "import json",
+        "import sys",
+        "",
+        "",
+        "def main():",
+        "    combined_tags = []",
+        "",
+        "    if combined_tags:",
+        "        print(combined_tags)",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "import json",
+        "import sys",
+        "from urllib.parse import urlparse",
+        "",
+        "",
+        "def detect_source_tag(url: str) -> str | None:",
+        "    if not url:",
+        "        return None",
+        "    return f\"source:{urlparse(url).netloc}\"",
+        "",
+        "",
+        "def main():",
+        "    combined_tags = []",
+        "",
+        "    source_tag = detect_source_tag('https://example.com/a.png')",
+        "    if source_tag:",
+        "        combined_tags.append(source_tag)",
+        "",
+        "    if combined_tags:",
+        "        print(combined_tags)",
+        "",
+    ]
+    .join("\n");
+
+    let mut app = test_app(&dir);
+    fs::write(&file_path, &before).unwrap();
+    app.file_tracker
+        .start_recording("edit-eagle", vec![relative_path.into()]);
+    fs::write(&file_path, &after).unwrap();
+
+    let full_hunks = diff_to_hunks(Some(&before), &after);
+    let full_added = full_hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Added)
+        .count();
+
+    app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolDiff {
+            id: "edit-eagle".into(),
+            path: relative_path.into(),
+            old_text: Some("import json\nimport sys\n\n".into()),
+            new_text: "import json\nimport sys\nfrom urllib.parse import urlparse\n\n".into(),
+        },
+        ClientEvent::ToolDiff {
+            id: "edit-eagle".into(),
+            path: relative_path.into(),
+            old_text: Some("\ndef main():\n".into()),
+            new_text: "\ndef detect_source_tag(url: str) -> str | None:\n    if not url:\n        return None\n    return f\"source:{urlparse(url).netloc}\"\n\n\ndef main():\n".into(),
+        },
+        ClientEvent::ToolDiff {
+            id: "edit-eagle".into(),
+            path: relative_path.into(),
+            old_text: Some("\n    if combined_tags:\n".into()),
+            new_text: "\n    source_tag = detect_source_tag('https://example.com/a.png')\n    if source_tag:\n        combined_tags.append(source_tag)\n\n    if combined_tags:\n".into(),
+        },
+        ClientEvent::ToolDiffPreview {
+            id: "edit-eagle".into(),
+            path: relative_path.into(),
+            hunks: full_hunks.clone(),
+        },
+    ]);
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    assert_eq!(change.added_lines, full_added);
+    assert!(change.added_lines > 1);
+}
+
+#[test]
 fn raw_output_diff_preview_without_tool_start_baseline_stays_out_of_review_changes() {
     let dir = tempfile::tempdir().unwrap();
     let unrelated_path = "frontend/src/components/layout/TopBar.tsx";
