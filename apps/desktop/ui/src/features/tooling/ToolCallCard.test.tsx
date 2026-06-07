@@ -538,12 +538,13 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       "console.log('probe');\n" +
       "JS_EOF\n" +
       "node probe3.mjs\n" +
-      "rm /Users/kothchen/code/hotnovel/probe3.mjs";
+      "rm probe3.mjs";
     const tool = makeTool({
       status: "Succeeded",
       kind: "execute",
       name: "tool",
       raw_input: JSON.stringify({ command }),
+      raw_output: JSON.stringify({ cwd: "/Users/kothchen/code/hotnovel" }),
       terminal_output: { exit_code: 0, output: "probe\n" },
     });
 

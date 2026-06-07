@@ -1664,6 +1664,7 @@ function filterCompletedCommandEditPaths(
 
   const cleanupPaths = commandCleanupPaths(command);
   if (cleanupPaths.length === 0) return paths;
+  const cwd = commandWorkingDirectory(tool);
 
   const diffPaths = uniqueStrings([
     ...tool.diff_paths,
@@ -1672,10 +1673,10 @@ function filterCompletedCommandEditPaths(
   ]);
 
   return paths.filter((path) => {
-    if (diffPaths.some((diffPath) => pathsReferToSameTarget(path, diffPath))) {
+    if (diffPaths.some((diffPath) => pathsReferToSameTarget(path, diffPath, cwd))) {
       return true;
     }
-    return !cleanupPaths.some((cleanupPath) => pathsReferToSameTarget(path, cleanupPath));
+    return !cleanupPaths.some((cleanupPath) => pathsReferToSameTarget(path, cleanupPath, cwd));
   });
 }
 
@@ -1718,6 +1719,16 @@ function shellRemoveCommandPaths(tokens: string[]): string[] {
     if (isUsableWritePath(token)) paths.push(token);
   }
   return paths;
+}
+
+function commandWorkingDirectory(tool: ToolInvocation): string | null {
+  for (const raw of [tool.raw_input, tool.raw_output]) {
+    if (!raw) continue;
+    const parsed = parseJsonValue(raw);
+    const cwd = stringField(parsed, "cwd", "working_directory", "workingDirectory");
+    if (cwd && looksLikePath(cwd)) return displayPath(cwd);
+  }
+  return null;
 }
 
 interface ShellHereDocMarker {
@@ -2015,18 +2026,50 @@ function sameOrNestedPath(pathspec: string, changedPath: string): boolean {
   return spec.endsWith("/") && (changed.startsWith(spec) || changed.endsWith(`/${spec}`));
 }
 
-function pathsReferToSameTarget(left: string, right: string): boolean {
-  const normalizedLeft = normalizePathForCompare(left);
-  const normalizedRight = normalizePathForCompare(right);
+function pathsReferToSameTarget(left: string, right: string, cwd: string | null = null): boolean {
+  const normalizedLeft = normalizePathForCompare(resolvePathAgainstCwd(left, cwd));
+  const normalizedRight = normalizePathForCompare(resolvePathAgainstCwd(right, cwd));
   return !!normalizedLeft && normalizedLeft === normalizedRight;
 }
 
 function normalizePathForCompare(path: string): string {
-  return displayPath(path)
+  return normalizePathSegments(displayPath(path))
     .replace(/^[a-zA-Z]:\//, "")
     .replace(/^\.\//, "")
     .replace(/\/+$/g, "")
     .toLowerCase();
+}
+
+function resolvePathAgainstCwd(path: string, cwd: string | null): string {
+  const displayed = displayPath(path);
+  if (!cwd || isAbsoluteDisplayPath(displayed)) return displayed;
+  return normalizePathSegments(`${displayPath(cwd).replace(/\/+$/g, "")}/${displayed}`);
+}
+
+function isAbsoluteDisplayPath(path: string): boolean {
+  return path.startsWith("/") || /^[a-zA-Z]:\//.test(path);
+}
+
+function normalizePathSegments(path: string): string {
+  const displayed = displayPath(path);
+  const drive = displayed.match(/^[a-zA-Z]:\//)?.[0] ?? "";
+  const absolute = displayed.startsWith("/");
+  const rest = drive ? displayed.slice(drive.length) : absolute ? displayed.slice(1) : displayed;
+  const segments: string[] = [];
+  for (const part of rest.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop();
+      } else if (!absolute && !drive) {
+        segments.push(part);
+      }
+      continue;
+    }
+    segments.push(part);
+  }
+  const prefix = drive || (absolute ? "/" : "");
+  return `${prefix}${segments.join("/")}`;
 }
 
 function looksLikeBogusWholeFilePreview(preview: ToolDiffPreview): boolean {
