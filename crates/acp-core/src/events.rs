@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use workspace_model::{
-    AgentPlanEntry, AvailableCommand, DiffHunk, MessageRole, PermissionOption,
-    PromptInputCapabilities, SessionConfigState, TerminalOutput,
+    AgentPlanEntry, AvailableCommand, DiffHunk, MessageRole, PermissionInputRequest,
+    PermissionOption, PromptInputCapabilities, SessionConfigState, TerminalOutput,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +48,9 @@ pub enum ClientEvent {
     MessageChunk {
         role: MessageRole,
         content: String,
+    },
+    ContextCompactionStarted {
+        message: String,
     },
     ContextCompacted {
         message: String,
@@ -111,6 +114,7 @@ pub enum ClientEvent {
         name: String,
         options: Vec<PermissionOption>,
         details: Option<String>,
+        input: Option<PermissionInputRequest>,
     },
     ToolPermissionResolved {
         id: String,

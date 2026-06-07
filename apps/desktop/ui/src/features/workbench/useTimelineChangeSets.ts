@@ -15,6 +15,7 @@ function timestampValue(value: string | null | undefined) {
 function buildTimelineTurnChangeSets(
   summaries: ChangeSetSummary[],
   filesByChangeSetId: Record<string, FileChangeSummary[]>,
+  messageOrder: Map<string, number>,
 ): Record<string, TimelineTurnChangeSet> {
   const byMessageId: Record<string, TimelineTurnChangeSet> = {};
   for (const summary of summaries) {
@@ -34,6 +35,7 @@ function buildTimelineTurnChangeSets(
       changeSetId: summary.id,
       files,
       updatedAt: summary.updated_at,
+      timelineIndex: messageOrder.get(summary.message_id) ?? -1,
     };
   }
   return byMessageId;
@@ -52,6 +54,7 @@ function buildTimelineTurnChangeSet(
     changeSetId: summary.id,
     files,
     updatedAt: summary.updated_at,
+    timelineIndex: Number.MAX_SAFE_INTEGER,
   };
 }
 
@@ -129,6 +132,17 @@ function activeTurnOwnerKey(snapshot: UiSnapshot | null) {
     }
   }
   return null;
+}
+
+function timelineMessageOrder(snapshot: UiSnapshot | null) {
+  const order = new Map<string, number>();
+  if (!snapshot) return order;
+  snapshot.timeline.forEach((item, index) => {
+    if (typeof item === "object" && "Message" in item) {
+      order.set(item.Message, index);
+    }
+  });
+  return order;
 }
 
 interface UseTimelineChangeSetsArgs {
@@ -222,7 +236,11 @@ export function useTimelineChangeSets({
         if (cancelled) return;
         const filesByChangeSetId = Object.fromEntries(fileEntries);
         setTimelineTurnChangeSets(
-          buildTimelineTurnChangeSets(turnSummaries, filesByChangeSetId),
+          buildTimelineTurnChangeSets(
+            turnSummaries,
+            filesByChangeSetId,
+            timelineMessageOrder(snapshotRef.current),
+          ),
         );
         setLiveTurnChangeSet(
           buildTimelineTurnChangeSet(pendingTurnSummary, filesByChangeSetId),

@@ -44,21 +44,19 @@ fn current_turn_without_file_changes_does_not_inherit_recent_review_changes() {
 
     assert_eq!(app.ui.review_changes.len(), 1);
     assert!(app.ui.turn_changes.is_empty());
-    assert!(
-        app.store
-            .load_turn_file_changes(&app.ui.session.id.to_string())
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        app.store
-            .list_change_sets(
-                Some(&app.ui.session.id.to_string()),
-                Some(ChangeSetSource::AgentTurn)
-            )
-            .unwrap()
-            .is_empty()
-    );
+    assert!(app
+        .store
+        .load_turn_file_changes(&app.ui.session.id.to_string())
+        .unwrap()
+        .is_empty());
+    assert!(app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn)
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -187,15 +185,14 @@ fn current_turn_revert_removes_pending_change_set() {
         "A\n".into(),
     );
 
-    assert!(
-        app.store
-            .list_change_sets(
-                Some(&app.ui.session.id.to_string()),
-                Some(ChangeSetSource::AgentTurn)
-            )
-            .unwrap()
-            .is_empty()
-    );
+    assert!(app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn)
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -235,15 +232,14 @@ fn manual_editor_revert_removes_manual_change_set() {
     app.record_manual_editor_save("src/main.rs", Some("A\n".into()), "B\n".into());
     app.record_manual_editor_save("src/main.rs", Some("B\n".into()), "A\n".into());
 
-    assert!(
-        app.store
-            .list_change_sets(
-                Some(&app.ui.session.id.to_string()),
-                Some(ChangeSetSource::ManualEdit)
-            )
-            .unwrap()
-            .is_empty()
-    );
+    assert!(app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::ManualEdit)
+        )
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

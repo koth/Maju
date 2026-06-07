@@ -4,7 +4,8 @@ use tauri::{AppHandle, State};
 use workspace_model::{
     AgentCliId, ChangeSetFilesResponse, ChangeSetSummary, FileChangeRecord,
     GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
-    SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent, WorkspaceSessionList,
+    PermissionInputResponse, SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent,
+    WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -48,8 +49,11 @@ pub fn session_resolve_permission(
     request_id: String,
     option_id: Option<String>,
     guidance: Option<String>,
+    input_response: Option<PermissionInputResponse>,
 ) -> Result<(), String> {
-    state.with_app(|app| app.resolve_tool_permission(&request_id, option_id, guidance))
+    state.with_app(|app| {
+        app.resolve_tool_permission(&request_id, option_id, guidance, input_response)
+    })
 }
 
 #[tauri::command]

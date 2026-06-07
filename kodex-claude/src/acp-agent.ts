@@ -91,11 +91,7 @@ import {
   toolUpdateFromToolResult,
 } from "./tools.js";
 import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
-import {
-  buildWoaEnv,
-  ensureWoaToken,
-  WoaConfig,
-} from "./woa/index.js";
+import { buildWoaEnv, ensureWoaToken, WoaConfig } from "./woa/index.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
@@ -103,6 +99,51 @@ export const CLAUDE_CONFIG_DIR =
 const MAX_TITLE_LENGTH = 256;
 const TITLE_SUMMARY_INPUT_LENGTH = 8_000;
 const SESSION_INFO_SYNC_RETRY_DELAYS_MS = [0, 250, 1_000, 2_500, 5_000, 10_000] as const;
+const KODEX_CONTEXT_COMPACTION_META_KEY = "kodex.ai/contextCompaction";
+const KODEX_PERMISSION_GUIDANCE_META_KEY = "kodex.ai/permissionGuidance";
+const KODEX_USER_INPUT_ANSWERS_META_KEY = "kodex.ai/userInputAnswers";
+const ASK_USER_QUESTION_OPTION_PREFIX = "ask_user_question";
+
+interface NormalizedAskUserQuestionOption {
+  label: string;
+  description: string;
+  preview?: string;
+}
+
+interface NormalizedAskUserQuestion {
+  question: string;
+  header: string;
+  options: NormalizedAskUserQuestionOption[];
+  multiSelect: boolean;
+}
+
+interface AskUserQuestionSelection {
+  question: NormalizedAskUserQuestion;
+  option: NormalizedAskUserQuestionOption;
+}
+
+function contextCompactionNotification(
+  sessionId: string,
+  phase: "started" | "completed",
+  fallbackText: string,
+): SessionNotification {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: fallbackText,
+      },
+      _meta: {
+        [KODEX_CONTEXT_COMPACTION_META_KEY]: {
+          phase,
+          message: phase === "started" ? "正在压缩上下文" : "上下文已自动压缩",
+        },
+      },
+    },
+  } as SessionNotification;
+}
 
 function sanitizeTitle(text: string): string {
   // Replace newlines and collapse whitespace
@@ -259,6 +300,19 @@ const ZERO_USAGE = Object.freeze({
 });
 
 const DEFAULT_CONTEXT_WINDOW = 200000;
+const KODEX_MODEL_PROVIDER_MAP_ENV = "KODEX_MODEL_PROVIDER_MAP";
+const KODEX_PROVIDER_VALUE_PREFIX = "kodex-provider:";
+
+type KodexModelProviderEntry = {
+  model: string;
+  displayName: string;
+  provider: string;
+};
+
+type KodexModelInfo = ModelInfo & {
+  kodexProvider?: string;
+  kodexRouteModel?: string;
+};
 
 type Session = {
   query: Query;
@@ -622,6 +676,204 @@ export function describeAlwaysAllow(
   }
 
   return `Always Allow ${parts.join(" and ")}`;
+}
+
+function normalizeAskUserQuestions(input: unknown): NormalizedAskUserQuestion[] | null {
+  if (!isRecord(input) || !Array.isArray(input.questions)) return null;
+
+  const questions: NormalizedAskUserQuestion[] = [];
+  for (const rawQuestion of input.questions) {
+    if (!isRecord(rawQuestion)) continue;
+    const question = stringValue(rawQuestion.question);
+    const header = stringValue(rawQuestion.header) || question.slice(0, 12) || "Question";
+    if (!question || !Array.isArray(rawQuestion.options)) continue;
+
+    const options: NormalizedAskUserQuestionOption[] = [];
+    for (const rawOption of rawQuestion.options) {
+      if (!isRecord(rawOption)) continue;
+      const label = stringValue(rawOption.label);
+      const description = stringValue(rawOption.description);
+      if (!label) continue;
+      const preview = stringValue(rawOption.preview);
+      options.push({
+        label,
+        description,
+        ...(preview ? { preview } : {}),
+      });
+    }
+
+    if (options.length === 0) continue;
+    questions.push({
+      question,
+      header,
+      options,
+      multiSelect: rawQuestion.multiSelect === true,
+    });
+  }
+
+  return questions.length > 0 ? questions : null;
+}
+
+function askUserQuestionPermissionOptions(questions: NormalizedAskUserQuestion[]): PermissionOption[] {
+  const includeQuestionPrefix = questions.length > 1;
+  const options: PermissionOption[] = [];
+
+  questions.forEach((question, questionIndex) => {
+    question.options.forEach((option, optionIndex) => {
+      options.push({
+        kind: "allow_once",
+        name: includeQuestionPrefix ? `${question.header}: ${option.label}` : option.label,
+        optionId: `${ASK_USER_QUESTION_OPTION_PREFIX}:${questionIndex}:${optionIndex}`,
+      });
+    });
+  });
+
+  return options;
+}
+
+function askUserQuestionSelection(
+  optionId: string | undefined,
+  questions: NormalizedAskUserQuestion[],
+): AskUserQuestionSelection | null {
+  if (!optionId) return null;
+  const [prefix, questionIndexText, optionIndexText] = optionId.split(":");
+  if (prefix !== ASK_USER_QUESTION_OPTION_PREFIX) return null;
+  const questionIndex = Number(questionIndexText);
+  const optionIndex = Number(optionIndexText);
+  if (!Number.isInteger(questionIndex) || !Number.isInteger(optionIndex)) return null;
+  const question = questions[questionIndex];
+  const option = question?.options[optionIndex];
+  return question && option ? { question, option } : null;
+}
+
+function withAskUserQuestionAnswer(
+  input: unknown,
+  selection: AskUserQuestionSelection,
+  guidance?: string,
+): Record<string, unknown> {
+  const base = isRecord(input) ? { ...input } : {};
+  const answers = stringRecord(base.answers);
+  answers[selection.question.question] = selection.option.label;
+  base.answers = answers;
+
+  const notes = guidance?.trim();
+  const preview = selection.option.preview?.trim();
+  if (preview || notes) {
+    const annotations = annotationRecord(base.annotations);
+    annotations[selection.question.question] = {
+      ...(preview ? { preview } : {}),
+      ...(notes ? { notes } : {}),
+    };
+    base.annotations = annotations;
+  }
+
+  return base;
+}
+
+function withAskUserQuestionAnswers(
+  input: unknown,
+  questions: NormalizedAskUserQuestion[],
+  answerMap: Record<string, string[]>,
+): Record<string, unknown> {
+  const base = isRecord(input) ? { ...input } : {};
+  const answers = stringRecord(base.answers);
+  const annotations = annotationRecord(base.annotations);
+  let hasAnnotations = Object.keys(annotations).length > 0;
+
+  for (const question of questions) {
+    const values = answerMap[question.question] ?? [];
+    if (values.length === 0) continue;
+    answers[question.question] = question.multiSelect ? values.join(", ") : values[0] ?? "";
+
+    const previews = values
+      .map((value) => question.options.find((option) => option.label === value)?.preview?.trim())
+      .filter((preview): preview is string => !!preview);
+    if (previews.length > 0) {
+      annotations[question.question] = {
+        ...(annotations[question.question] ?? {}),
+        preview: previews.join("\n\n"),
+      };
+      hasAnnotations = true;
+    }
+  }
+
+  base.answers = answers;
+  if (hasAnnotations) {
+    base.annotations = annotations;
+  }
+
+  return base;
+}
+
+function permissionGuidance(response: unknown): string | undefined {
+  if (!isRecord(response)) return undefined;
+  const topLevelMeta = isRecord(response._meta) ? response._meta : undefined;
+  const outcome = isRecord(response.outcome) ? response.outcome : undefined;
+  const outcomeMeta = outcome && isRecord(outcome._meta) ? outcome._meta : undefined;
+  return (
+    stringValue(topLevelMeta?.[KODEX_PERMISSION_GUIDANCE_META_KEY]) ||
+    stringValue(outcomeMeta?.[KODEX_PERMISSION_GUIDANCE_META_KEY]) ||
+    undefined
+  );
+}
+
+function permissionInputAnswers(response: unknown): Record<string, string[]> | undefined {
+  if (!isRecord(response)) return undefined;
+  const topLevelMeta = isRecord(response._meta) ? response._meta : undefined;
+  const outcome = isRecord(response.outcome) ? response.outcome : undefined;
+  const outcomeMeta = outcome && isRecord(outcome._meta) ? outcome._meta : undefined;
+  return (
+    inputAnswersFromMeta(topLevelMeta?.[KODEX_USER_INPUT_ANSWERS_META_KEY]) ??
+    inputAnswersFromMeta(outcomeMeta?.[KODEX_USER_INPUT_ANSWERS_META_KEY]) ??
+    undefined
+  );
+}
+
+function inputAnswersFromMeta(value: unknown): Record<string, string[]> | undefined {
+  if (!isRecord(value)) return undefined;
+  const rawAnswers = isRecord(value.answers) ? value.answers : value;
+  const answers: Record<string, string[]> = {};
+  for (const [key, entry] of Object.entries(rawAnswers)) {
+    if (!Array.isArray(entry)) continue;
+    const values = entry
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (values.length > 0) answers[key] = values;
+  }
+  return Object.keys(answers).length > 0 ? answers : undefined;
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === "string") result[key] = entry;
+  }
+  return result;
+}
+
+function annotationRecord(value: unknown): Record<string, Record<string, string>> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, Record<string, string>> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!isRecord(entry)) continue;
+    const annotation: Record<string, string> = {};
+    const preview = stringValue(entry.preview);
+    const notes = stringValue(entry.notes);
+    if (preview) annotation.preview = preview;
+    if (notes) annotation.notes = notes;
+    if (Object.keys(annotation).length > 0) result[key] = annotation;
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 // Implement the ACP Agent interface
@@ -989,13 +1241,9 @@ export class ClaudeAcpAgent implements Agent {
                 break;
               case "status": {
                 if (message.status === "compacting") {
-                  await this.client.sessionUpdate({
-                    sessionId: message.session_id,
-                    update: {
-                      sessionUpdate: "agent_message_chunk",
-                      content: { type: "text", text: "Compacting..." },
-                    },
-                  });
+                  await this.client.sessionUpdate(
+                    contextCompactionNotification(message.session_id, "started", "Compacting..."),
+                  );
                 }
                 break;
               }
@@ -1021,13 +1269,13 @@ export class ClaudeAcpAgent implements Agent {
                     size: session.contextWindowSize,
                   },
                 });
-                await this.client.sessionUpdate({
-                  sessionId: message.session_id,
-                  update: {
-                    sessionUpdate: "agent_message_chunk",
-                    content: { type: "text", text: "\n\nCompacting completed." },
-                  },
-                });
+                await this.client.sessionUpdate(
+                  contextCompactionNotification(
+                    message.session_id,
+                    "completed",
+                    "\n\nCompacting completed.",
+                  ),
+                );
                 break;
               }
               case "local_command_output": {
@@ -1520,11 +1768,16 @@ export class ClaudeAcpAgent implements Agent {
     if (!session) {
       throw new Error("Session not found");
     }
+    const requestedModel = decodeProviderValue(params.modelId);
     // Resolve aliases (e.g. "opus", "opus[1m]") to canonical model IDs so
     // downstream lookups in modelInfos succeed and the effort option isn't
     // silently dropped.
-    const resolved = resolveModelPreference(session.modelInfos, params.modelId);
-    const modelId = resolved?.value ?? params.modelId;
+    const resolved = resolveModelPreferenceForProvider(
+      session.modelInfos,
+      requestedModel.value,
+      requestedModel.provider,
+    );
+    const modelId = resolved?.value ?? requestedModel.value;
     await session.query.setModel(modelId);
     await this.updateConfigOption(params.sessionId, "model", modelId);
   }
@@ -1559,25 +1812,44 @@ export class ClaudeAcpAgent implements Agent {
       "options" in option && Array.isArray(option.options)
         ? option.options.flatMap((o) => ("options" in o ? o.options : [o]))
         : [];
-    let validValue = allValues.find((o) => o.value === params.value);
+    const requestedValue =
+      params.configId === "model" ? decodeProviderValue(params.value) : { value: params.value };
+    let validValue = allValues.find(
+      (o) =>
+        o.value === requestedValue.value &&
+        (!requestedValue.provider || optionProvider(o) === requestedValue.provider),
+    );
+    if (!validValue && !requestedValue.provider) {
+      validValue = allValues.find((o) => o.value === requestedValue.value);
+    }
 
     // For model options, fall back to resolveModelPreference when the exact
     // value doesn't match.  This lets callers use human-friendly aliases like
     // "opus" or "sonnet" instead of full model IDs like "claude-opus-4-6".
     if (!validValue && params.configId === "model") {
-      const modelInfos: ModelInfo[] = allValues.map((o) => ({
+      const modelInfos: KodexModelInfo[] = allValues.map((o) => ({
         value: o.value,
         displayName: o.name,
         description: o.description ?? "",
+        ...(optionProvider(o) && { kodexProvider: optionProvider(o) }),
+        ...(optionRouteModel(o) && { kodexRouteModel: optionRouteModel(o) }),
       }));
-      const resolved = resolveModelPreference(modelInfos, params.value);
+      const resolved = resolveModelPreferenceForProvider(
+        modelInfos,
+        requestedValue.value,
+        requestedValue.provider,
+      );
       if (resolved) {
-        validValue = allValues.find((o) => o.value === resolved.value);
+        validValue = allValues.find(
+          (o) =>
+            o.value === resolved.value &&
+            (!requestedValue.provider || optionProvider(o) === requestedValue.provider),
+        );
       }
     }
 
     if (!validValue) {
-      throw new Error(`Invalid value for config option ${params.configId}: ${params.value}`);
+      throw new Error(`Invalid value for config option ${params.configId}: ${requestedValue.value}`);
     }
 
     // Use the canonical option value so downstream code always receives the
@@ -1773,6 +2045,58 @@ export class ClaudeAcpAgent implements Agent {
             message: "User rejected request to exit plan mode.",
           };
         }
+      }
+
+      if (toolName === "AskUserQuestion") {
+        const questions = normalizeAskUserQuestions(toolInput);
+        if (!questions) {
+          return {
+            behavior: "deny",
+            message: "AskUserQuestion input was malformed.",
+          };
+        }
+
+        const options = askUserQuestionPermissionOptions(questions);
+        const response = await this.client.requestPermission({
+          options,
+          sessionId,
+          toolCall: {
+            toolCallId: toolUseID,
+            rawInput: toolInput,
+            ...toolInfoFromToolUse(
+              { name: toolName, input: toolInput, id: toolUseID },
+              supportsTerminalOutput,
+              session?.cwd,
+            ),
+          },
+        });
+
+        if (signal.aborted || response.outcome?.outcome === "cancelled") {
+          throw new Error("Tool use aborted");
+        }
+
+        const structuredAnswers = permissionInputAnswers(response);
+        if (structuredAnswers) {
+          return {
+            behavior: "allow",
+            updatedInput: withAskUserQuestionAnswers(toolInput, questions, structuredAnswers),
+          };
+        }
+
+        const selectedOptionId =
+          response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
+        const selection = askUserQuestionSelection(selectedOptionId, questions);
+        if (!selection) {
+          return {
+            behavior: "deny",
+            message: "User did not select a valid answer.",
+          };
+        }
+
+        return {
+          behavior: "allow",
+          updatedInput: withAskUserQuestionAnswer(toolInput, selection, permissionGuidance(response)),
+        };
       }
 
       if (session.modes.currentModeId === "bypassPermissions") {
@@ -2375,9 +2699,7 @@ export class ClaudeAcpAgent implements Agent {
 
     // Parse model configuration from environment (e.g. Bedrock model overrides)
     const modelConfig = parseModelConfig(process.env.CLAUDE_MODEL_CONFIG);
-
-    // Disable this for now, not a great way to expose this over ACP at the moment (in progress work so we can revisit)
-    const disallowedTools = ["AskUserQuestion"];
+    const modelProviderEntries = parseModelProviderMap(process.env[KODEX_MODEL_PROVIDER_MAP_ENV]);
 
     // Resolve which built-in tools to expose.
     // Explicit tools array from _meta.claudeCode.options takes precedence.
@@ -2442,7 +2764,6 @@ export class ClaudeAcpAgent implements Agent {
         ...userProvidedOptions?.extraArgs,
         "replay-user-messages": "",
       },
-      disallowedTools: [...(userProvidedOptions?.disallowedTools || []), ...disallowedTools],
       tools,
       hooks: {
         ...userProvidedOptions?.hooks,
@@ -2576,12 +2897,13 @@ export class ClaudeAcpAgent implements Agent {
           modelConfig?.preserveDefaultModel !== false,
         )
       : initializationResult.models;
+    const routedModels = applyModelProviderMap(allowedModels, modelProviderEntries);
 
-    const models = await getAvailableModels(q, allowedModels, settingsManager, this.logger);
+    const models = await getAvailableModels(q, routedModels, settingsManager, this.logger);
 
     // Gate `auto` (and future model-specific modes) on the resolved model's
     // `ModelInfo`. See `buildAvailableModes` for the canonical SDK signal.
-    const currentModelInfo = allowedModels.find((m) => m.value === models.currentModelId);
+    const currentModelInfo = routedModels.find((m) => m.value === models.currentModelId);
     const availableModes = buildAvailableModes(currentModelInfo);
 
     // Clamp `permissionMode` if the resolved session does not offer it. The
@@ -2622,7 +2944,7 @@ export class ClaudeAcpAgent implements Agent {
     const configOptions = buildConfigOptions(
       modes,
       models,
-      allowedModels,
+      routedModels,
       settingsManager.getSettings().effortLevel,
     );
 
@@ -2649,7 +2971,7 @@ export class ClaudeAcpAgent implements Agent {
       },
       modes,
       models,
-      modelInfos: allowedModels,
+      modelInfos: routedModels,
       configOptions,
       promptRunning: false,
       pendingMessages: new Map(),
@@ -2851,11 +3173,7 @@ function buildConfigOptions(
       category: "model",
       type: "select",
       currentValue: models.currentModelId,
-      options: models.availableModels.map((m) => ({
-        value: m.modelId,
-        name: m.name,
-        description: m.description ?? undefined,
-      })),
+      options: models.availableModels.map((m) => modelConfigOption(m)),
     },
   ];
 
@@ -3061,6 +3379,150 @@ function mergeAvailableModelLists(...sources: unknown[]): string[] | undefined {
   return hasList ? result : undefined;
 }
 
+function parseModelProviderMap(raw: string | undefined): KodexModelProviderEntry[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const entries: KodexModelProviderEntry[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const model = stringField(record.model);
+    const displayName = stringField(record.display_name) ?? stringField(record.displayName);
+    const provider = stringField(record.provider);
+    if (!model || !displayName || !provider) continue;
+    entries.push({ model, displayName, provider });
+  }
+  return entries;
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function applyModelProviderMap(
+  models: ModelInfo[],
+  providerEntries: KodexModelProviderEntry[],
+): ModelInfo[] {
+  if (providerEntries.length === 0) return models;
+
+  const allowed = new Set<string>();
+  for (const model of models) {
+    allowed.add(model.value);
+    allowed.add(model.displayName);
+  }
+
+  const routedModels: KodexModelInfo[] = [];
+  const seen = new Set<string>();
+  for (const entry of providerEntries) {
+    if (!allowed.has(entry.model) && !allowed.has(entry.displayName)) {
+      continue;
+    }
+    const key = `${entry.provider}:${entry.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const sdkMatch =
+      resolveModelPreference(models, entry.displayName) ?? resolveModelPreference(models, entry.model);
+    routedModels.push({
+      ...(sdkMatch ?? {
+        value: entry.model,
+        displayName: entry.displayName,
+        description: "",
+      }),
+      value: entry.model,
+      displayName: entry.displayName,
+      description: sdkMatch?.description ?? "",
+      kodexProvider: entry.provider,
+      kodexRouteModel: entry.model,
+    });
+  }
+
+  return routedModels.length > 0 ? routedModels : models;
+}
+
+function sessionModelOption(model: ModelInfo) {
+  const option: Record<string, unknown> = {
+    modelId: model.value,
+    name: model.displayName,
+    description: model.description,
+  };
+  const meta = modelProviderMeta(model);
+  if (meta) option._meta = meta;
+  return option as SessionModelState["availableModels"][number];
+}
+
+function modelConfigOption(model: SessionModelState["availableModels"][number]): any {
+  const option: Record<string, unknown> = {
+    value: model.modelId,
+    name: model.name,
+    description: model.description ?? undefined,
+  };
+  const meta = modelMeta(model);
+  if (meta) option._meta = meta;
+  return option;
+}
+
+function modelProviderMeta(model: ModelInfo): Record<string, string> | undefined {
+  const provider = (model as KodexModelInfo).kodexProvider;
+  if (!provider) return undefined;
+  const routeModel = (model as KodexModelInfo).kodexRouteModel ?? model.value;
+  return {
+    provider,
+    route_model: routeModel,
+  };
+}
+
+function modelMeta(model: unknown): Record<string, unknown> | undefined {
+  if (typeof model !== "object" || model === null) return undefined;
+  const meta = (model as { _meta?: unknown; meta?: unknown })._meta ?? (model as { meta?: unknown }).meta;
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) return undefined;
+  return meta as Record<string, unknown>;
+}
+
+function optionProvider(option: unknown): string | undefined {
+  const provider = modelMeta(option)?.provider;
+  return typeof provider === "string" && provider.trim() ? provider.trim() : undefined;
+}
+
+function optionRouteModel(option: unknown): string | undefined {
+  const routeModel = modelMeta(option)?.route_model;
+  return typeof routeModel === "string" && routeModel.trim() ? routeModel.trim() : undefined;
+}
+
+function decodeProviderValue(value: string): { value: string; provider?: string } {
+  if (!value.startsWith(KODEX_PROVIDER_VALUE_PREFIX)) {
+    return { value };
+  }
+  const rest = value.slice(KODEX_PROVIDER_VALUE_PREFIX.length);
+  const separator = rest.indexOf(":");
+  if (separator <= 0) {
+    return { value };
+  }
+  const provider = rest.slice(0, separator).trim();
+  const decodedValue = rest.slice(separator + 1);
+  if (!provider || !decodedValue) {
+    return { value };
+  }
+  return { value: decodedValue, provider };
+}
+
+function resolveModelPreferenceForProvider(
+  models: ModelInfo[],
+  preference: string,
+  provider?: string,
+): ModelInfo | null {
+  if (!provider) return resolveModelPreference(models, preference);
+  const providerModels = models.filter((model) => (model as KodexModelInfo).kodexProvider === provider);
+  return resolveModelPreference(providerModels.length > 0 ? providerModels : models, preference);
+}
+
 async function getAvailableModels(
   query: Query,
   models: ModelInfo[],
@@ -3090,11 +3552,7 @@ async function getAvailableModels(
   await query.setModel(currentModel.value);
 
   return {
-    availableModels: models.map((model) => ({
-      modelId: model.value,
-      name: model.displayName,
-      description: model.description,
-    })),
+    availableModels: models.map((model) => sessionModelOption(model)),
     currentModelId: currentModel.value,
   };
 }
@@ -3630,18 +4088,27 @@ function inferContextWindowFromModel(model: string): number | null {
   return null;
 }
 
-function parseModelConfig(
-  raw: string | undefined,
-): { modelOverrides?: Record<string, string>; availableModels?: string[]; preserveDefaultModel?: boolean } | undefined {
+function parseModelConfig(raw: string | undefined):
+  | {
+      modelOverrides?: Record<string, string>;
+      availableModels?: string[];
+      preserveDefaultModel?: boolean;
+    }
+  | undefined {
   if (!raw) return undefined;
   const parsed = JSON.parse(raw);
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("CLAUDE_MODEL_CONFIG must be a JSON object");
   }
-  const result: { modelOverrides?: Record<string, string>; availableModels?: string[]; preserveDefaultModel?: boolean } = {};
+  const result: {
+    modelOverrides?: Record<string, string>;
+    availableModels?: string[];
+    preserveDefaultModel?: boolean;
+  } = {};
   if (parsed.modelOverrides !== undefined) result.modelOverrides = parsed.modelOverrides;
   if (parsed.availableModels !== undefined) result.availableModels = parsed.availableModels;
-  if (parsed.preserveDefaultModel !== undefined) result.preserveDefaultModel = Boolean(parsed.preserveDefaultModel);
+  if (parsed.preserveDefaultModel !== undefined)
+    result.preserveDefaultModel = Boolean(parsed.preserveDefaultModel);
   return Object.keys(result).length > 0 ? result : undefined;
 }
 

@@ -356,6 +356,10 @@ export function ReviewPanel({
     () => lastReviewableAssistantMessageId(snapshot.messages, snapshot.timeline, inActiveTurn),
     [inActiveTurn, snapshot.messages, snapshot.timeline],
   );
+  const messageOrder = useMemo(
+    () => timelineMessageOrder(snapshot.messages, snapshot.timeline),
+    [snapshot.messages, snapshot.timeline],
+  );
 
   useEffect(() => {
     if (!focusRequestKey) return;
@@ -435,7 +439,7 @@ export function ReviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [snapshot.session.id, snapshot.workspace.root, snapshot.revision]);
+  }, [focusRequestKey, snapshot.session.id, snapshot.workspace.root, snapshot.revision]);
 
   return (
     <div ref={panelRef} className="review-panel">
@@ -541,6 +545,7 @@ export function ReviewPanel({
           appTheme={appTheme}
           preferredChangeSetId={focusRequest?.changeSetId ?? null}
           preferredChangeSetToken={focusRequest?.token ?? null}
+          messageOrder={messageOrder}
         />
       </div>
 
@@ -812,6 +817,7 @@ function ReviewChangesView({
   appTheme,
   preferredChangeSetId,
   preferredChangeSetToken,
+  messageOrder,
 }: {
   changeSetState: {
     summaries: ChangeSetSummary[];
@@ -822,6 +828,7 @@ function ReviewChangesView({
   appTheme: AppTheme;
   preferredChangeSetId: string | null;
   preferredChangeSetToken: number | null;
+  messageOrder: Map<string, number>;
 }) {
   const [scope, setScope] = useState<ReviewScope>("last");
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
@@ -856,6 +863,7 @@ function ReviewChangesView({
         lastAssistantMessageId,
         activeTurnOwnerKey,
         activePreferredChangeSet?.id ?? null,
+        messageOrder,
       ),
     [
       activePreferredChangeSet?.id,
@@ -863,6 +871,7 @@ function ReviewChangesView({
       changeSetState.summaries,
       activeTurnOwnerKey,
       lastAssistantMessageId,
+      messageOrder,
       scope,
     ],
   );
@@ -1083,16 +1092,17 @@ function selectReviewChangeSet(
   lastAssistantMessageId: string | null,
   activeTurnOwnerKey: string | null,
   preferredChangeSetId: string | null,
+  messageOrder: Map<string, number>,
 ) {
   if (scope === "manual") {
     return summaries
       .filter((summary) => summary.source === "ManualEdit" && changeSetHasFiles(summary, filesById))
-      .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at))[0];
+      .sort((a, b) => compareChangeSetSummaries(a, b, messageOrder))[0];
   }
 
   const agentTurns = summaries
     .filter((summary) => summary.source === "AgentTurn")
-    .sort((a, b) => timestampValue(b.updated_at) - timestampValue(a.updated_at));
+    .sort((a, b) => compareChangeSetSummaries(a, b, messageOrder));
   const pending = agentTurns.find(
     (summary) =>
       summary.status === "Pending" &&
@@ -1114,6 +1124,22 @@ function selectReviewChangeSet(
     if (latestReviewableTurn) return latestReviewableTurn;
   }
   return agentTurns.find((summary) => changeSetHasFiles(summary, filesById));
+}
+
+function compareChangeSetSummaries(
+  a: ChangeSetSummary,
+  b: ChangeSetSummary,
+  messageOrder: Map<string, number>,
+) {
+  const updatedDelta = timestampValue(b.updated_at) - timestampValue(a.updated_at);
+  if (updatedDelta !== 0) return updatedDelta;
+
+  const orderA = a.message_id ? messageOrder.get(a.message_id) ?? -1 : -1;
+  const orderB = b.message_id ? messageOrder.get(b.message_id) ?? -1 : -1;
+  const orderDelta = orderB - orderA;
+  if (orderDelta !== 0) return orderDelta;
+
+  return b.id.localeCompare(a.id);
 }
 
 function activeTurnOwnerKey(
@@ -1188,6 +1214,21 @@ function lastReviewableAssistantMessageId(
     }
   }
   return null;
+}
+
+function timelineMessageOrder(
+  messages: UiSnapshot["messages"],
+  timeline: UiSnapshot["timeline"],
+) {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const order = new Map<string, number>();
+  timeline.forEach((item, index) => {
+    if (typeof item === "string" || !("Message" in item)) return;
+    if (messageById.has(item.Message)) {
+      order.set(item.Message, index);
+    }
+  });
+  return order;
 }
 
 function findLatestTimelineMessageIndex(

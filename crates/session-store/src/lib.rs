@@ -815,6 +815,7 @@ impl SessionStore {
                         terminal_output: None,
                         error,
                         permission_options: Vec::new(),
+                        permission_input: None,
                         permission_decision: None,
                     });
                     timeline.push(TimelineItem::Tool(id));
@@ -2051,6 +2052,7 @@ mod tests {
             terminal_output: None,
             error: None,
             permission_options: Vec::new(),
+            permission_input: None,
             permission_decision: None,
         };
 

@@ -8,6 +8,7 @@ import {
 import { HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import {
   AgentInput,
+  AskUserQuestionInput,
   BashInput,
   FileEditInput,
   FileReadInput,
@@ -137,6 +138,52 @@ function normalizeDrivePrefixPath(filePath: string): string {
     return `${driveMatch[1].toLowerCase()}:${driveMatch[2]}`;
   }
   return normalized;
+}
+
+function askUserQuestionTitle(input: AskUserQuestionInput | undefined): string {
+  const questions = Array.isArray(input?.questions) ? input.questions : [];
+  const firstQuestion = questions[0] as { header?: unknown; question?: unknown } | undefined;
+  const header = typeof firstQuestion?.header === "string" ? firstQuestion.header.trim() : "";
+  const question = typeof firstQuestion?.question === "string" ? firstQuestion.question.trim() : "";
+  return header || question ? `Ask user: ${header || question}` : "Ask user";
+}
+
+function askUserQuestionContent(input: AskUserQuestionInput | undefined): string {
+  const questions = Array.isArray(input?.questions) ? input.questions : [];
+  return questions
+    .map((rawQuestion, questionIndex) => {
+      const question = rawQuestion as {
+        question?: unknown;
+        header?: unknown;
+        options?: unknown;
+        multiSelect?: unknown;
+      };
+      const header = typeof question.header === "string" ? question.header.trim() : "";
+      const text = typeof question.question === "string" ? question.question.trim() : "";
+      const lines = [`Question ${questionIndex + 1}${header ? ` (${header})` : ""}: ${text}`];
+
+      if (question.multiSelect === true) {
+        lines.push("Multi-select requested");
+      }
+
+      const options = Array.isArray(question.options) ? question.options : [];
+      for (const rawOption of options) {
+        const option = rawOption as { label?: unknown; description?: unknown; preview?: unknown };
+        const label = typeof option.label === "string" ? option.label.trim() : "";
+        if (!label) continue;
+        const description =
+          typeof option.description === "string" ? option.description.trim() : "";
+        const preview = typeof option.preview === "string" ? option.preview.trim() : "";
+        lines.push(`- ${label}${description ? `: ${description}` : ""}`);
+        if (preview) {
+          lines.push(`  Preview: ${preview}`);
+        }
+      }
+
+      return lines.join("\n");
+    })
+    .filter((item) => item.trim().length > 0)
+    .join("\n\n");
 }
 
 export function toolInfoFromToolUse(
@@ -385,6 +432,23 @@ export function toolInfoFromToolUse(
           : "Update TODOs",
         kind: "think",
         content: [],
+      };
+    }
+
+    case "AskUserQuestion": {
+      const input = toolUse.input as AskUserQuestionInput | undefined;
+      const content = askUserQuestionContent(input);
+      return {
+        title: askUserQuestionTitle(input),
+        kind: "think",
+        content: content
+          ? [
+              {
+                type: "content",
+                content: { type: "text", text: content },
+              },
+            ]
+          : [],
       };
     }
 

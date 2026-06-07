@@ -2870,7 +2870,7 @@ fn codex_acp_model_catalog_entry(
 }
 
 fn apply_patch_tool_type_for_provider(_provider: &str) -> &'static str {
-    "function"
+    "freeform"
 }
 
 /// Resolve a display model name with the default BYOK slug mapping.
@@ -4111,7 +4111,7 @@ model_provider = "timiai"
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("function") })
+                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("freeform") })
         );
         assert_eq!(
             catalog["models"][0]["input_modalities"].as_array().unwrap(),
@@ -4722,7 +4722,7 @@ model_reasoning_effort = "none"
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("function") })
+                .all(|model| { model["apply_patch_tool_type"].as_str() == Some("freeform") })
         );
     }
 

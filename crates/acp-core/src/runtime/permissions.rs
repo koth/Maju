@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::workspace_paths::paths_are_inside_workspace;
+use workspace_model::PermissionInputResponse;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PermissionBroker {
@@ -16,10 +17,15 @@ pub(crate) struct PermissionBroker {
 pub(crate) struct PermissionResolution {
     pub(crate) option_id: Option<String>,
     pub(crate) guidance: Option<String>,
+    pub(crate) input_response: Option<PermissionInputResponse>,
 }
 
 impl PermissionResolution {
-    pub(crate) fn new(option_id: Option<String>, guidance: Option<String>) -> Self {
+    pub(crate) fn new(
+        option_id: Option<String>,
+        guidance: Option<String>,
+        input_response: Option<PermissionInputResponse>,
+    ) -> Self {
         Self {
             option_id,
             guidance: guidance.and_then(|value| {
@@ -30,6 +36,7 @@ impl PermissionResolution {
                     Some(trimmed.to_string())
                 }
             }),
+            input_response: input_response.filter(|response| !response.answers.is_empty()),
         }
     }
 }
@@ -80,8 +87,9 @@ impl PermissionBroker {
         request_id: &str,
         option_id: Option<String>,
         guidance: Option<String>,
+        input_response: Option<PermissionInputResponse>,
     ) -> anyhow::Result<bool> {
-        let resolution = PermissionResolution::new(option_id, guidance);
+        let resolution = PermissionResolution::new(option_id, guidance, input_response);
         let sender = {
             let mut state = self
                 .state
@@ -156,6 +164,20 @@ pub(super) enum PermissionDecision {
     Ask,
 }
 
+pub(super) fn reject_permission_option_id(request: &RequestPermissionRequest) -> Option<String> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::RejectOnce)
+        .or_else(|| {
+            request
+                .options
+                .iter()
+                .find(|option| option.kind == PermissionOptionKind::RejectAlways)
+        })
+        .map(|option| option.option_id.0.to_string())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum CodeBuddyTerminalPermissionDecision {
     Allow,
@@ -168,6 +190,10 @@ pub(super) fn decide_permission(
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
+    if request_has_user_input_questions(request) {
+        return PermissionDecision::Ask;
+    }
+
     if is_codebuddy_bash_request(request) {
         return decide_codebuddy_bash_permission(workspace_root, request);
     }
@@ -176,6 +202,17 @@ pub(super) fn decide_permission(
         PermissionPolicyMode::Plan => decide_plan_permission(workspace_root, request),
         PermissionPolicyMode::Build => decide_build_permission(workspace_root, request),
     }
+}
+
+fn request_has_user_input_questions(request: &RequestPermissionRequest) -> bool {
+    request
+        .tool_call
+        .fields
+        .raw_input
+        .as_ref()
+        .and_then(|raw_input| raw_input.get("questions"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|questions| !questions.is_empty())
 }
 
 fn decide_codebuddy_bash_permission(
@@ -440,7 +477,7 @@ fn collect_path_like_values(value: &serde_json::Value, paths: &mut Vec<PathBuf>)
     }
 }
 
-fn request_has_direct_shell_file_mutation(request: &RequestPermissionRequest) -> bool {
+pub(super) fn request_has_direct_shell_file_mutation(request: &RequestPermissionRequest) -> bool {
     let mut commands = Vec::new();
     if let Some(raw_input) = &request.tool_call.fields.raw_input {
         collect_shell_commands(raw_input, &mut commands);
@@ -827,6 +864,7 @@ fn shell_command_directly_mutates_files(command: &str) -> bool {
         || (contains_command_token(&lower, "perl") && lower.contains(" -pi"))
         || lower.contains(".write_text(")
         || lower.contains(".write_bytes(")
+        || python_open_uses_write_mode(command)
         || lower.contains("writefile")
         || lower.contains("writefilesync")
 }
@@ -922,6 +960,7 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     collect_shell_redirection_paths(&command, &mut paths);
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
     collect_python_pathlib_write_paths(&command, &mut paths);
+    collect_python_open_write_paths(&command, &mut paths);
     collect_common_mutation_command_paths(&command, &mut paths);
     paths.retain(|path| is_usable_write_path(path));
     paths.sort();
@@ -1289,6 +1328,124 @@ fn collect_python_pathlib_write_paths(command: &str, paths: &mut Vec<String>) {
     }
 }
 
+fn collect_python_open_write_paths(command: &str, paths: &mut Vec<String>) {
+    let mut offset = 0;
+    while let Some(index) = find_next_python_open_call(command, offset) {
+        if let Some((path, end)) = parse_python_open_write_call_at(command, index) {
+            paths.push(path);
+            offset = end;
+        } else {
+            offset = index + 1;
+        }
+    }
+}
+
+fn python_open_uses_write_mode(command: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = find_next_python_open_call(command, offset) {
+        if let Some((_mode, _end)) = parse_python_open_write_mode_at(command, index) {
+            return true;
+        }
+        offset = index + 1;
+    }
+    false
+}
+
+fn find_next_python_open_call(command: &str, start: usize) -> Option<usize> {
+    let open = command[start..].find("open(").map(|index| start + index);
+    let io_open = command[start..].find("io.open(").map(|index| start + index);
+    [open, io_open]
+        .into_iter()
+        .flatten()
+        .filter(|index| {
+            let rest = &command[*index..];
+            if rest.starts_with("io.open(") {
+                return true;
+            }
+            command[..*index]
+                .chars()
+                .next_back()
+                .map_or(true, |ch| !is_python_identifier_char(ch) && ch != '.')
+        })
+        .min()
+}
+
+fn parse_python_open_write_call_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let rest = &text[start..];
+    let arg_start = if rest.starts_with("io.open(") {
+        start + "io.open(".len()
+    } else if rest.starts_with("open(") {
+        start + "open(".len()
+    } else {
+        return None;
+    };
+    let (path, path_end) = parse_python_string_literal_at(text, arg_start)?;
+    let comma = skip_ascii_whitespace(text, path_end);
+    if !text[comma..].starts_with(',') {
+        return None;
+    }
+    let (mode, mode_end) = parse_python_string_literal_at(text, comma + 1)?;
+    if python_file_mode_can_write(&mode) {
+        Some((path, mode_end))
+    } else {
+        None
+    }
+}
+
+fn parse_python_open_write_mode_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let rest = &text[start..];
+    let arg_start = if rest.starts_with("io.open(") {
+        start + "io.open(".len()
+    } else if rest.starts_with("open(") {
+        start + "open(".len()
+    } else {
+        return None;
+    };
+    let comma = find_top_level_python_comma(text, arg_start)?;
+    let (mode, mode_end) = parse_python_string_literal_at(text, comma + 1)?;
+    if python_file_mode_can_write(&mode) {
+        Some((mode, mode_end))
+    } else {
+        None
+    }
+}
+
+fn find_top_level_python_comma(text: &str, start: usize) -> Option<usize> {
+    let mut quote = None::<char>;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (relative, ch) in text[start..].char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' if depth == 0 => return None,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return Some(start + relative),
+            '\n' | '\r' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_file_mode_can_write(mode: &str) -> bool {
+    mode.chars().any(|ch| matches!(ch, 'w' | 'a' | 'x' | '+'))
+}
+
 fn python_pathlib_assignments(command: &str) -> Vec<(String, String)> {
     let mut assignments = Vec::new();
     for line in command.lines() {
@@ -1488,6 +1645,31 @@ mod tests {
         )
     }
 
+    fn user_input_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "ask-user",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Other)
+                    .title("Ask user".to_string())
+                    .raw_input(raw_input),
+            ),
+            vec![
+                PermissionOption::new(
+                    "ask_user_question:0:0",
+                    "Fast",
+                    PermissionOptionKind::AllowOnce,
+                ),
+                PermissionOption::new(
+                    "ask_user_question:0:1",
+                    "Robust",
+                    PermissionOptionKind::AllowOnce,
+                ),
+            ],
+        )
+    }
+
     fn codebuddy_bash_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
         let mut payload = serde_json::to_value(execute_request(raw_input)).unwrap();
         let tool_call_key = if payload.get("toolCall").is_some() {
@@ -1550,6 +1732,53 @@ mod tests {
     }
 
     #[test]
+    fn user_input_questions_are_always_interactive() {
+        let request = user_input_request(json!({
+            "questions": [
+                {
+                    "id": "approach",
+                    "header": "Approach",
+                    "question": "Which implementation approach should I use?",
+                    "options": [
+                        { "label": "Fast", "description": "Smallest viable change" },
+                        { "label": "Robust", "description": "Add tests and validation" }
+                    ]
+                }
+            ]
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Plan, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn reject_permission_option_prefers_once_over_always() {
+        let request = execute_request_with_permission_options(
+            json!({ "command": "python -c \"open('src/main.rs','w').write('x')\"" }),
+            vec![
+                PermissionOption::new(
+                    "reject_always",
+                    "No, always",
+                    PermissionOptionKind::RejectAlways,
+                ),
+                PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+                PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+            ],
+        );
+
+        assert_eq!(
+            reject_permission_option_id(&request).as_deref(),
+            Some("reject")
+        );
+    }
+
+    #[test]
     fn build_permission_asks_for_shell_redirection_file_writes() {
         let request = execute_request(json!({
             "command": "cat > AGENTS.md << 'ENDOFFILE'\n# Guidelines\nENDOFFILE"
@@ -1581,6 +1810,30 @@ mod tests {
     fn build_permission_asks_for_powershell_remove_item() {
         let request = execute_request(json!({
             "command": "Remove-Item README.md -Force"
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn build_permission_asks_for_python_open_file_writes() {
+        let request = execute_request(json!({
+            "command": "python3 -c \"open('packages/backend/src/service.ts', 'w', encoding='utf-8').write('ok')\""
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn build_permission_asks_for_python_open_dynamic_file_writes() {
+        let request = execute_request(json!({
+            "command": "python3 -c \"path='packages/backend/src/service.ts'; open(path, 'w', encoding='utf-8').write('ok')\""
         }));
 
         assert_eq!(
@@ -1740,6 +1993,22 @@ mod tests {
     }
 
     #[test]
+    fn codebuddy_bash_python_open_write_with_explicit_path_is_interactive() {
+        let request = codebuddy_bash_request(json!({
+            "command": "python3 -c \"open('packages/backend/src/service.ts', 'w', encoding='utf-8').write('ok')\""
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+        assert_eq!(
+            codebuddy_bash_write_hint_paths(&request),
+            vec![PathBuf::from("packages/backend/src/service.ts")]
+        );
+    }
+
+    #[test]
     fn codebuddy_bash_suspected_write_without_static_path_is_rejected() {
         let request = codebuddy_bash_request(json!({
             "command": "python - <<'PY'\nfrom pathlib import Path\np=Path.cwd() / 'generated.ts'\np.write_text('ok', encoding='utf-8')\nPY"
@@ -1749,6 +2018,19 @@ mod tests {
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
             PermissionDecision::Select("reject".to_string()),
         );
+    }
+
+    #[test]
+    fn codebuddy_bash_python_open_write_without_static_path_is_rejected() {
+        let request = codebuddy_bash_request(json!({
+            "command": "python3 -c \"path='packages/backend/src/service.ts'; open(path, 'w').write('ok')\""
+        }));
+
+        assert_eq!(
+            decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+            PermissionDecision::Select("reject".to_string()),
+        );
+        assert!(codebuddy_bash_write_hint_paths(&request).is_empty());
     }
 
     #[test]

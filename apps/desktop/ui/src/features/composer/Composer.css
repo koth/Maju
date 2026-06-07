@@ -135,7 +135,8 @@
 .permission-request-detail {
   margin: 0 12px 9px;
   padding: 8px 9px;
-  overflow: hidden;
+  max-height: min(46vh, 560px);
+  overflow: auto;
   border: 1px solid var(--border-subtle);
   border-radius: 9px;
   background: color-mix(in srgb, var(--app-bg) 42%, transparent);
@@ -143,7 +144,9 @@
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.45;
+  overscroll-behavior: contain;
   overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
   white-space: pre-wrap;
 }
 
@@ -240,6 +243,102 @@
 }
 
 .permission-request-guidance textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.permission-input-form {
+  display: grid;
+  gap: 10px;
+  max-height: min(46vh, 520px);
+  margin: 0 12px 10px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.permission-input-question {
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--app-bg) 40%, transparent);
+}
+
+.permission-input-question legend {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+}
+
+.permission-input-header {
+  color: var(--accent-hover);
+  font-size: var(--font-size-shell-label);
+  font-weight: 700;
+}
+
+.permission-input-prompt {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.permission-input-options {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.permission-input-option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.permission-input-option input {
+  margin: 2px 0 0;
+}
+
+.permission-input-option-label {
+  display: block;
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.permission-input-option-description {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-soft);
+}
+
+.permission-input-custom {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.permission-input-custom input {
+  min-height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: rgba(9, 12, 17, 0.36);
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.permission-input-custom input:focus {
   border-color: color-mix(in srgb, var(--accent) 58%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
 }

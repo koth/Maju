@@ -1512,6 +1512,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                 name: "Read".into(),
                 options: vec![],
                 details: None,
+                input: None,
             },
         );
         let tool = ui
@@ -1599,6 +1600,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             terminal_output: None,
             error: None,
             permission_options: Vec::new(),
+            permission_input: None,
             permission_decision: None,
         };
         store.insert_tool(&session_id, &tool, 1).unwrap();

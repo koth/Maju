@@ -1444,6 +1444,49 @@ describe("toolInfoFromToolUse - ExitPlanMode", () => {
   });
 });
 
+describe("toolInfoFromToolUse - AskUserQuestion", () => {
+  it("should include the question and choices in content", () => {
+    const toolUse = {
+      name: "AskUserQuestion",
+      id: "toolu_question_1",
+      input: {
+        questions: [
+          {
+            question: "Which implementation approach should I use?",
+            header: "Approach",
+            multiSelect: false,
+            options: [
+              { label: "Fast", description: "Smallest viable change" },
+              {
+                label: "Robust",
+                description: "Add tests and validation",
+                preview: "Touches more files",
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const info = toolInfoFromToolUse(toolUse, false);
+
+    expect(info.kind).toBe("think");
+    expect(info.title).toBe("Ask user: Approach");
+    expect(info.content).toHaveLength(1);
+    expect(info.content![0]).toEqual({
+      type: "content",
+      content: {
+        type: "text",
+        text:
+          "Question 1 (Approach): Which implementation approach should I use?\n" +
+          "- Fast: Smallest viable change\n" +
+          "- Robust: Add tests and validation\n" +
+          "  Preview: Touches more files",
+      },
+    });
+  });
+});
+
 describe("toolInfoFromToolUse - undefined input regression", () => {
   it("Read with undefined input should not throw", () => {
     const toolUse = { name: "Read", id: "toolu_read_undef", input: undefined };
@@ -1475,6 +1518,13 @@ describe("toolInfoFromToolUse - undefined input regression", () => {
     const toolUse = { name: "TodoWrite", id: "toolu_todo_undef", input: undefined };
     const info = toolInfoFromToolUse(toolUse, false);
     expect(info.title).toBe("Update TODOs");
+  });
+
+  it("AskUserQuestion with undefined input should not throw", () => {
+    const toolUse = { name: "AskUserQuestion", id: "toolu_question_undef", input: undefined };
+    const info = toolInfoFromToolUse(toolUse, false);
+    expect(info.title).toBe("Ask user");
+    expect(info.content).toEqual([]);
   });
 });
 

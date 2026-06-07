@@ -183,10 +183,13 @@ pub(super) fn raw_input_has_write_payload(raw_input: Option<&str>) -> bool {
     let Some(raw_input) = raw_input else {
         return false;
     };
-    serde_json::from_str::<serde_json::Value>(raw_input)
-        .ok()
-        .and_then(|value| write_input_content_text(&value).map(|text| !text.is_empty()))
-        .unwrap_or(false)
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) {
+        return write_input_content_text(&value)
+            .map(|text| !text.is_empty())
+            .unwrap_or(false)
+            || json_has_change_map(&value);
+    }
+    !extract_apply_patch_paths(raw_input).is_empty()
 }
 
 pub(super) fn edit_input_unified_diff_for_path<'a>(
@@ -222,7 +225,7 @@ pub(super) fn reverse_apply_unified_diff(new_text: &str, unified_diff: &str) -> 
     reverse_apply_parsed_unified_hunks(new_text, parse_unified_diff_hunks(unified_diff)?)
 }
 
-pub(super) fn reverse_apply_diff_hunks(new_text: &str, hunks: &[DiffHunk]) -> Option<String> {
+pub(crate) fn reverse_apply_diff_hunks(new_text: &str, hunks: &[DiffHunk]) -> Option<String> {
     let parsed = hunks
         .iter()
         .map(|hunk| {
@@ -375,16 +378,20 @@ pub(super) fn tool_event_hint_paths(raw_input: Option<&str>) -> Vec<String> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) {
         let mut paths = Vec::new();
         collect_path_like_values(&value, &mut paths);
+        collect_change_map_paths(&value, &mut paths);
         collect_command_write_hint_paths(&value, &mut paths);
+        paths.retain(|path| is_usable_write_path(path));
         paths.sort();
         paths.dedup();
         return paths;
     }
 
-    let mut paths = extract_write_paths_from_command_text(raw_input);
+    let mut paths = extract_apply_patch_paths(raw_input);
+    paths.extend(extract_write_paths_from_command_text(raw_input));
     if paths.is_empty() && looks_like_standalone_path(raw_input) {
         paths.push(raw_input.to_string());
     }
+    paths.retain(|path| is_usable_write_path(path));
     paths.sort();
     paths.dedup();
     paths
@@ -412,11 +419,9 @@ fn collect_path_like_values(value: &serde_json::Value, paths: &mut Vec<String>) 
         serde_json::Value::Object(object) => {
             for (key, value) in object {
                 let key = key.to_ascii_lowercase();
-                if (key.contains("path") || key == "file" || key == "cwd" || key.ends_with("file"))
-                    && let Some(path) = value.as_str()
+                if key.contains("path") || key == "file" || key == "cwd" || key.ends_with("file")
                 {
-                    paths.push(path.to_string());
-                    continue;
+                    collect_path_field_value(value, paths);
                 }
                 collect_path_like_values(value, paths);
             }
@@ -428,6 +433,96 @@ fn collect_path_like_values(value: &serde_json::Value, paths: &mut Vec<String>) 
         }
         _ => {}
     }
+}
+
+fn collect_path_field_value(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(path) => paths.push(path.to_string()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_path_field_value(item, paths);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for value in object.values() {
+                collect_path_field_value(value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_change_map_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(changes) = object.get("changes").and_then(serde_json::Value::as_object) {
+                for (path, change) in changes {
+                    if looks_like_file_change_entry(change) {
+                        paths.push(path.to_string());
+                        if let Some(move_path) = change
+                            .get("move_path")
+                            .or_else(|| change.get("movePath"))
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|path| !path.trim().is_empty())
+                        {
+                            paths.push(move_path.to_string());
+                        }
+                    }
+                }
+            }
+            for value in object.values() {
+                collect_change_map_paths(value, paths);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_change_map_paths(item, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_has_change_map(value: &serde_json::Value) -> bool {
+    let mut paths = Vec::new();
+    collect_change_map_paths(value, &mut paths);
+    paths.iter().any(|path| is_usable_write_path(path))
+}
+
+fn looks_like_file_change_entry(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "add" | "create" | "update" | "modify" | "delete"))
+        || object.contains_key("unified_diff")
+        || object.contains_key("unifiedDiff")
+        || object.contains_key("content")
+        || object.contains_key("move_path")
+        || object.contains_key("movePath")
+}
+
+fn extract_apply_patch_paths(input: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in input.lines() {
+        let line = line.trim();
+        for prefix in [
+            "*** Add File:",
+            "*** Update File:",
+            "*** Delete File:",
+            "*** Move to:",
+        ] {
+            if let Some(path) = line.strip_prefix(prefix) {
+                let path = path.trim();
+                if !path.is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    paths
 }
 
 fn collect_command_write_hint_paths(value: &serde_json::Value, paths: &mut Vec<String>) {
@@ -481,6 +576,7 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
     collect_shell_redirection_paths(&command, &mut paths);
     collect_python_pathlib_write_paths(&command, &mut paths);
+    collect_python_open_write_paths(&command, &mut paths);
     collect_common_mutation_command_paths(&command, &mut paths);
     paths.retain(|path| is_usable_write_path(path));
     paths.sort();
@@ -786,6 +882,63 @@ fn collect_python_pathlib_write_paths(command: &str, paths: &mut Vec<String>) {
             paths.push(path);
         }
     }
+}
+
+fn collect_python_open_write_paths(command: &str, paths: &mut Vec<String>) {
+    let mut offset = 0;
+    while let Some(index) = find_next_python_open_call(command, offset) {
+        if let Some((path, end)) = parse_python_open_write_call_at(command, index) {
+            paths.push(path);
+            offset = end;
+        } else {
+            offset = index + 1;
+        }
+    }
+}
+
+fn find_next_python_open_call(command: &str, start: usize) -> Option<usize> {
+    let open = command[start..].find("open(").map(|index| start + index);
+    let io_open = command[start..].find("io.open(").map(|index| start + index);
+    [open, io_open]
+        .into_iter()
+        .flatten()
+        .filter(|index| {
+            let rest = &command[*index..];
+            if rest.starts_with("io.open(") {
+                return true;
+            }
+            command[..*index]
+                .chars()
+                .next_back()
+                .map_or(true, |ch| !is_python_identifier_char(ch) && ch != '.')
+        })
+        .min()
+}
+
+fn parse_python_open_write_call_at(text: &str, start: usize) -> Option<(String, usize)> {
+    let rest = &text[start..];
+    let arg_start = if rest.starts_with("io.open(") {
+        start + "io.open(".len()
+    } else if rest.starts_with("open(") {
+        start + "open(".len()
+    } else {
+        return None;
+    };
+    let (path, path_end) = parse_python_string_literal_at(text, arg_start)?;
+    let comma = skip_ascii_whitespace(text, path_end);
+    if !text[comma..].starts_with(',') {
+        return None;
+    }
+    let (mode, mode_end) = parse_python_string_literal_at(text, comma + 1)?;
+    if python_file_mode_can_write(&mode) {
+        Some((path, mode_end))
+    } else {
+        None
+    }
+}
+
+fn python_file_mode_can_write(mode: &str) -> bool {
+    mode.chars().any(|ch| matches!(ch, 'w' | 'a' | 'x' | '+'))
 }
 
 fn collect_common_mutation_command_paths(command: &str, paths: &mut Vec<String>) {

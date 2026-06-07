@@ -148,12 +148,13 @@ impl Application {
         request_id: &str,
         option_id: Option<String>,
         guidance: Option<String>,
+        input_response: Option<workspace_model::PermissionInputResponse>,
     ) -> Result<(), String> {
         self.start_permission_write_baseline_if_allowed(request_id, option_id.as_deref());
 
         let delivered_to_acp_request = self
             .session
-            .resolve_permission(request_id, option_id.clone(), guidance)
+            .resolve_permission(request_id, option_id.clone(), guidance, input_response)
             .map_err(|error| error.to_string())?;
 
         if !delivered_to_acp_request {
@@ -210,6 +211,7 @@ impl Application {
             tool.summary = outcome.clone();
             tool.status = workspace_model::ToolStatus::Succeeded;
             tool.permission_options.clear();
+            tool.permission_input = None;
             tool.permission_decision = Some(outcome);
             self.mark_tool_call_dirty(request_id);
             self.bump_revision();

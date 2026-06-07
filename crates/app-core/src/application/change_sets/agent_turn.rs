@@ -212,19 +212,27 @@ impl Application {
     }
 
     pub(in crate::application) fn persist_current_turn_file_changes(&mut self) -> bool {
-        let Some(message_id) = self.current_turn_assistant_message_id() else {
+        let current_turn_assistant_ids = self.current_turn_assistant_message_ids();
+        let Some(message_id) = current_turn_assistant_ids.last().copied() else {
             return false;
         };
+        let stale_message_ids = current_turn_assistant_ids
+            .iter()
+            .copied()
+            .filter(|id| *id != message_id)
+            .collect::<Vec<_>>();
 
         if !self.review_changes_started {
             let session_id = self.ui.session.id.to_string();
             let before = self.ui.turn_changes.len();
             self.ui
                 .turn_changes
-                .retain(|entry| entry.message_id != message_id);
-            let _ = self
-                .store
-                .replace_turn_file_changes(&session_id, &message_id, &[]);
+                .retain(|entry| !current_turn_assistant_ids.contains(&entry.message_id));
+            for stale_id in current_turn_assistant_ids {
+                let _ = self
+                    .store
+                    .replace_turn_file_changes(&session_id, &stale_id, &[]);
+            }
             self.remove_current_agent_turn_change_set();
             self.persist_agent_conversation_change_set_from_turns();
             return self.ui.turn_changes.len() != before;
@@ -238,16 +246,31 @@ impl Application {
             let before = self.ui.turn_changes.len();
             self.ui
                 .turn_changes
-                .retain(|entry| entry.message_id != message_id);
-            let _ = self
-                .store
-                .replace_turn_file_changes(&session_id, &message_id, &[]);
+                .retain(|entry| !current_turn_assistant_ids.contains(&entry.message_id));
+            for stale_id in current_turn_assistant_ids {
+                let _ = self
+                    .store
+                    .replace_turn_file_changes(&session_id, &stale_id, &[]);
+            }
             self.remove_current_agent_turn_change_set();
             self.persist_agent_conversation_change_set_from_turns();
             return self.ui.turn_changes.len() != before;
         }
 
         let mut changed = false;
+        let before_stale = self.ui.turn_changes.len();
+        self.ui
+            .turn_changes
+            .retain(|entry| !stale_message_ids.contains(&entry.message_id));
+        if before_stale != self.ui.turn_changes.len() {
+            changed = true;
+        }
+        for stale_id in stale_message_ids {
+            let _ = self
+                .store
+                .replace_turn_file_changes(&session_id, &stale_id, &[]);
+        }
+
         if let Some(index) = self
             .ui
             .turn_changes
@@ -274,10 +297,12 @@ impl Application {
         changed
     }
 
-    pub(in crate::application) fn current_turn_assistant_message_id(&self) -> Option<uuid::Uuid> {
-        let start_id = self.current_turn_user_message_id?;
+    pub(in crate::application) fn current_turn_assistant_message_ids(&self) -> Vec<uuid::Uuid> {
+        let Some(start_id) = self.current_turn_user_message_id else {
+            return Vec::new();
+        };
         let mut after_start = false;
-        let mut assistant_id = None;
+        let mut assistant_ids = Vec::new();
 
         for item in &self.ui.timeline {
             let TimelineItem::Message(message_id) = item else {
@@ -296,10 +321,10 @@ impl Application {
                 .iter()
                 .any(|message| message.id == *message_id && message.role == MessageRole::Assistant)
             {
-                assistant_id = Some(*message_id);
+                assistant_ids.push(*message_id);
             }
         }
 
-        assistant_id
+        assistant_ids
     }
 }

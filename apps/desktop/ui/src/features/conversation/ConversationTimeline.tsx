@@ -33,6 +33,7 @@ export interface TimelineTurnChangeSet {
   changeSetId: string;
   files: FileChangeSummary[];
   updatedAt: string;
+  timelineIndex?: number;
 }
 
 interface MessageRowProps {
@@ -51,6 +52,19 @@ interface UserMessageImage {
   alt: string;
   src: string;
   previewSrc: string;
+}
+
+type ContextCompactionState = "pending" | "completed";
+
+function contextCompactionState(body: string): ContextCompactionState | null {
+  const normalized = body.trim();
+  if (normalized === "正在压缩上下文") {
+    return "pending";
+  }
+  if (normalized === "上下文已压缩" || normalized === "上下文已自动压缩") {
+    return "completed";
+  }
+  return null;
 }
 
 const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: StreamingMarkdownProps) {
@@ -214,6 +228,23 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
     );
   }
 
+  const compactionState = role === "System" ? contextCompactionState(body) : null;
+  if (compactionState) {
+    return (
+      <div
+        key={id}
+        className={`msg msg-system msg-context-compaction is-${compactionState}`}
+        role={compactionState === "pending" ? "status" : undefined}
+        aria-live={compactionState === "pending" ? "polite" : undefined}
+      >
+        <span className="msg-context-compaction-label">
+          <span className="msg-context-compaction-icon" aria-hidden="true" />
+          <span>{compactionState === "pending" ? "正在压缩上下文" : body.trim()}</span>
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div key={id} className="msg msg-system">
       <span className="msg-content msg-content-system">{body}</span>
@@ -287,6 +318,48 @@ function fileUrlToPath(src: string): string | null {
   } catch {
     return null;
   }
+}
+
+function placeTurnChangeSetsAfterFinalAssistant(
+  snapshot: UiSnapshot,
+  turnChangeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
+): Record<string, TimelineTurnChangeSet> {
+  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+  const result: Record<string, TimelineTurnChangeSet> = {};
+  let assistantIds: string[] = [];
+  let changeSets: TimelineTurnChangeSet[] = [];
+
+  const flushTurn = () => {
+    if (assistantIds.length === 0 || changeSets.length === 0) {
+      assistantIds = [];
+      changeSets = [];
+      return;
+    }
+    result[assistantIds[assistantIds.length - 1]] = changeSets[changeSets.length - 1];
+    assistantIds = [];
+    changeSets = [];
+  };
+
+  for (const item of snapshot.timeline) {
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (!message) continue;
+
+    if (message.role === "User") {
+      flushTurn();
+      continue;
+    }
+    if (message.role !== "Assistant") continue;
+
+    assistantIds.push(message.id);
+    const changeSet = turnChangeSetsByMessageId[message.id];
+    if (changeSet?.files.length) {
+      changeSets.push(changeSet);
+    }
+  }
+
+  flushTurn();
+  return result;
 }
 
 export function ConversationTimeline({
@@ -464,6 +537,11 @@ export function ConversationTimeline({
     return map;
   }, [snapshot.messages, visibleMessageIds]);
 
+  const displayTurnChangeSetsByMessageId = useMemo(
+    () => placeTurnChangeSetsAfterFinalAssistant(snapshot, turnChangeSetsByMessageId),
+    [snapshot, turnChangeSetsByMessageId],
+  );
+
   const { toolsById, childToolsByParent } = useMemo(() => {
     const toolsById = new Map<string, UiSnapshot["tools"][number]>();
     const visibleParentCallIds = new Set<string>();
@@ -533,7 +611,7 @@ export function ConversationTimeline({
               turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
             const changesForMessage =
               msg.role === "Assistant" && !isStreaming && !isCurrentTurnMessage
-                ? turnChangeSetsByMessageId[msg.id]
+                ? displayTurnChangeSetsByMessageId[msg.id]
                 : undefined;
             const renderMessage = shouldRenderMessage(msg.role, msg.body);
 

@@ -133,6 +133,31 @@ describe("findPendingPermissionRequest", () => {
     expect(request?.title).toBe("Bash: D:/work/ArtAssets/packages/backend/src/app/index.ts");
   });
 
+  it("passes structured user-input questions through pending permission requests", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "ask-user",
+        name: "Ask user",
+        permission_options: [{ id: "answer:0:0", label: "A", kind: "AllowOnce" }],
+        permission_input: {
+          questions: [
+            {
+              id: "approach",
+              header: "Approach",
+              question: "Pick an approach?",
+              is_other: false,
+              is_secret: false,
+              multi_select: false,
+              options: [{ label: "A", description: "Use A." }],
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(request?.input?.questions[0]?.id).toBe("approach");
+  });
+
   it("tracks all unresolved permission tools so timeline cards can be hidden", () => {
     expect(
       pendingPermissionRequestIds([
@@ -168,6 +193,7 @@ function tool(overrides: Partial<ToolInvocation>): ToolInvocation {
     terminal_output: null,
     error: null,
     permission_options: [],
+    permission_input: null,
     permission_decision: null,
     ...overrides,
   };

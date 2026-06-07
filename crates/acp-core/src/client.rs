@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use workspace_model::UserPromptContent;
+use workspace_model::{PermissionInputResponse, UserPromptContent};
 
 const MAX_READY_EVENTS_PER_COLLECT: usize = 32;
 
@@ -170,9 +170,10 @@ impl SessionHandle {
         request_id: &str,
         option_id: Option<String>,
         guidance: Option<String>,
+        input_response: Option<PermissionInputResponse>,
     ) -> anyhow::Result<bool> {
         self.permission_broker
-            .resolve(request_id, option_id, guidance)
+            .resolve(request_id, option_id, guidance, input_response)
     }
 
     pub fn resolve_codebuddy_interruption(

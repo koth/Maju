@@ -22,8 +22,9 @@ function turn(
   changeSetId: string,
   updatedAt: string,
   files: FileChangeSummary[] = [file("src/main.ts", updatedAt)],
+  timelineIndex?: number,
 ): TimelineTurnChangeSet {
-  return { changeSetId, updatedAt, files };
+  return { changeSetId, updatedAt, files, timelineIndex };
 }
 
 describe("latestReviewableTurnChangeSet", () => {
@@ -44,6 +45,22 @@ describe("latestReviewableTurnChangeSet", () => {
           a: older,
           b: turn("empty", "2026-05-30T03:00:00Z", []),
           c: newer,
+        },
+        null,
+      ),
+    ).toBe(newer);
+  });
+
+  it("uses timeline order when completed turns share the same timestamp", () => {
+    const sameTimestamp = "2026-05-30T02:00:00Z";
+    const older = turn("older", sameTimestamp, [file("src/old.ts", sameTimestamp)], 1);
+    const newer = turn("newer", sameTimestamp, [file("src/new.ts", sameTimestamp)], 2);
+
+    expect(
+      latestReviewableTurnChangeSet(
+        {
+          oldMessage: older,
+          newMessage: newer,
         },
         null,
       ),

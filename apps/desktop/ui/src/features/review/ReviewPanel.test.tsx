@@ -580,6 +580,63 @@ describe("ReviewPanel scoped change sets", () => {
     expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
   });
 
+  it("refreshes scoped change sets when focus moves to a new turn", async () => {
+    const oldTurn = makeChangeSet("old-turn", "AgentTurn", "2026-05-12T04:00:00Z");
+    const newTurn = makeChangeSet("new-turn", "AgentTurn", "2026-05-12T04:00:00Z");
+
+    vi.mocked(sessionListChangeSets)
+      .mockResolvedValueOnce([oldTurn])
+      .mockResolvedValueOnce([oldTurn, newTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files:
+        change_set_id === "old-turn"
+          ? [makeSummary("old-turn", "src/old.ts")]
+          : [makeSummary("new-turn", "src/new.ts")],
+    }));
+
+    const snapshot = makeSnapshot({
+      messages: [
+        { id: "old-turn-message", role: "Assistant", body: "old edit" },
+        { id: "new-turn-message", role: "Assistant", body: "new edit" },
+      ],
+      timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+    });
+
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={snapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        focusRequest={{ changeSetId: "old-turn", token: 1 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/old.ts").length).toBeGreaterThan(0),
+    );
+
+    rerender(
+      <ReviewPanel
+        snapshot={snapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        focusRequest={{ changeSetId: "new-turn", token: 2 }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/new.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+  });
+
   it("prioritizes pending agent changes over a focused historical change set", async () => {
     const oldTurn = makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z");
     const pendingTurn: ChangeSetSummary = {

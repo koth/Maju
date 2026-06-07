@@ -246,7 +246,6 @@ impl Application {
             dirty_tool_call_ids: HashSet::new(),
             review_changes_started: false,
             current_turn_user_message_id: None,
-            pending_tool_diff_previews: Vec::new(),
             pending_tool_write_detections: Vec::new(),
             inline_think_filter: InlineThinkFilter::default(),
         })
@@ -428,7 +427,6 @@ impl Application {
             dirty_tool_call_ids: HashSet::new(),
             review_changes_started: false,
             current_turn_user_message_id: None,
-            pending_tool_diff_previews: Vec::new(),
             pending_tool_write_detections: Vec::new(),
             inline_think_filter: InlineThinkFilter::default(),
         })

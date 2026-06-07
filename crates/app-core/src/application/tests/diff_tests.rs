@@ -78,6 +78,99 @@ fn tracker_tool_diff_preserves_existing_acp_preview() {
 }
 
 #[test]
+fn tool_event_hint_paths_extracts_apply_patch_change_keys() {
+    let raw_input = serde_json::json!({
+        "call_id": "call-apply",
+        "changes": {
+            "D:\\work\\ArtAssets\\datas\\scripts\\eagle-export.py": {
+                "move_path": null,
+                "type": "update",
+                "unified_diff": "@@ -1,1 +1,1 @@\n-old\n+new\n"
+            },
+            "packages/backend/src/app/index.ts": {
+                "type": "add",
+                "content": "export {}\n"
+            }
+        }
+    })
+    .to_string();
+
+    let mut paths = tool_event_hint_paths(Some(&raw_input));
+    paths.sort();
+
+    assert_eq!(
+        paths,
+        vec![
+            "D:\\work\\ArtAssets\\datas\\scripts\\eagle-export.py".to_string(),
+            "packages/backend/src/app/index.ts".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn freeform_apply_patch_begin_paths_anchor_base_for_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "datas/scripts/eagle-export.py";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "sample_per_l3 = args.sample_per_l3\ninclude_all_l3 = set(n.strip() for n in args.include_all_l3.split(\",\")) if args.include_all_l3 else set()\n";
+    let after = "sample_per_l3 = args.sample_per_l3\ninclude_all_l3 = set(n.strip() for n in args.include_all_l3.split(\",\") if n.strip()) if args.include_all_l3 else set()\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    let raw_input = serde_json::json!({
+        "call_id": "call-apply",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "update",
+                "unified_diff": "@@ -1,2 +1,2 @@\n sample_per_l3 = args.sample_per_l3\n-include_all_l3 = set(n.strip() for n in args.include_all_l3.split(\",\")) if args.include_all_l3 else set()\n+include_all_l3 = set(n.strip() for n in args.include_all_l3.split(\",\") if n.strip()) if args.include_all_l3 else set()\n"
+            }
+        }
+    })
+    .to_string();
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "call-apply".into(),
+        parent_id: None,
+        name: format!("Edit {}", file_path.display()),
+        kind: "Edit".into(),
+        summary: format!("Edit {}", file_path.display()),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-apply", relative_path)
+            .map(str::to_string)
+            .as_deref(),
+        Some(before)
+    );
+
+    fs::write(&file_path, after).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "call-apply".into(),
+        name: Some("Edit".into()),
+        outcome: "Completed".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+    assert!(!result.had_file_changes);
+
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before));
+    assert_eq!(change.new_text, after);
+    assert_eq!((change.added_lines, change.removed_lines), (1, 1));
+}
+
+#[test]
 fn tracker_tool_diff_prefers_verified_narrower_diff_over_raw_preview() {
     let raw_preview = vec![
         DiffHunk {
@@ -540,6 +633,18 @@ fn codebuddy_python_pathlib_command_yields_written_file_hint() {
 }
 
 #[test]
+fn python_open_write_command_yields_written_file_hint() {
+    let raw_input = serde_json::json!({
+        "command": "python3 -c \"open('packages/backend/src/service.ts', 'w', encoding='utf-8').write('ok')\"",
+    })
+    .to_string();
+
+    let paths = tool_command_write_hint_paths(Some(&raw_input));
+
+    assert_eq!(paths, vec!["packages/backend/src/service.ts"]);
+}
+
+#[test]
 fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -567,6 +672,7 @@ fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -632,6 +738,7 @@ fn completed_shell_write_hint_without_tool_baseline_does_not_use_git_fallback() 
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -685,6 +792,7 @@ fn completed_codebuddy_python_write_without_tool_baseline_does_not_use_git_fallb
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -815,7 +923,9 @@ fn completed_shell_write_with_dirty_file_uses_tool_start_baseline_for_tool_previ
             terminal_output: None,
         },
     ]);
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(
         app.ui.session_changes[0].old_text.as_deref(),
@@ -843,9 +953,7 @@ fn completed_shell_write_with_dirty_file_uses_tool_start_baseline_for_tool_previ
         .collect::<Vec<_>>();
     assert!(removed.contains(&"const footer = '负向抑制';"));
     assert!(!removed.contains(&"import { Link, useSearchParams } from 'react-router-dom';"));
-    assert!(
-        !removed.contains(&"import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';")
-    );
+    assert!(!removed.contains(&"import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';"));
     assert_eq!(app.ui.review_changes.len(), 1);
     assert_eq!(
         app.ui.review_changes[0].old_text.as_deref(),
@@ -906,6 +1014,7 @@ fn codebuddy_bash_permission_allow_records_baseline_before_terminal_write() {
             },
         ],
         details: Some(format!("Command:\n{command}\n\nPath: {relative_path}")),
+        input: None,
     }]);
 
     assert!(app.start_permission_write_baseline_if_allowed("call-python", Some("allow")));
@@ -935,7 +1044,9 @@ fn codebuddy_bash_permission_allow_records_baseline_before_terminal_write() {
         },
     ]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(
         app.ui.session_changes[0].old_text.as_deref(),
@@ -1008,6 +1119,7 @@ fn codebuddy_bash_permission_paths_merge_into_existing_empty_recording_window() 
         details: Some(format!(
             "Command:\npython - <<'PY'\n...\nPY\n\nPath: {relative_path}"
         )),
+        input: None,
     }]);
 
     assert!(app.start_permission_write_baseline_if_allowed("call-bash", Some("allow")));
@@ -1026,7 +1138,9 @@ fn codebuddy_bash_permission_paths_merge_into_existing_empty_recording_window() 
         terminal_output: None,
     }]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(
         app.ui.session_changes[0].old_text.as_deref(),
@@ -1078,6 +1192,7 @@ fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
         details: Some(format!(
             "Command:\npython - <<'PY'\n...\nPY\n\nPaths:\n- {boost_path}\n- {exclusion_path}"
         )),
+        input: None,
     }]);
 
     assert!(app.start_permission_write_baseline_if_allowed("call-bash", Some("allow")));
@@ -1101,7 +1216,9 @@ fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
         terminal_output: None,
     }]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 2);
     assert_eq!(app.ui.review_changes.len(), 2);
 
@@ -1138,16 +1255,14 @@ fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
         .iter()
         .find(|tool| tool.call_id == "call-bash")
         .unwrap();
-    assert!(
-        tool.diff_previews
-            .iter()
-            .any(|preview| preview.path == std::path::PathBuf::from(boost_path))
-    );
-    assert!(
-        tool.diff_previews
-            .iter()
-            .any(|preview| preview.path == std::path::PathBuf::from(exclusion_path))
-    );
+    assert!(tool
+        .diff_previews
+        .iter()
+        .any(|preview| preview.path == std::path::PathBuf::from(boost_path)));
+    assert!(tool
+        .diff_previews
+        .iter()
+        .any(|preview| preview.path == std::path::PathBuf::from(exclusion_path)));
 }
 
 #[test]
@@ -1175,6 +1290,7 @@ fn write_like_permission_allow_records_baseline_before_tool_write() {
             },
         ],
         details: Some(format!("Path: {relative_path}")),
+        input: None,
     }]);
 
     assert!(app.start_permission_write_baseline_if_allowed("call-multiedit", Some("allow")));
@@ -1204,7 +1320,9 @@ fn write_like_permission_allow_records_baseline_before_tool_write() {
         },
     ]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(app.ui.review_changes.len(), 1);
     assert_eq!(
@@ -1242,6 +1360,7 @@ fn read_permission_with_path_does_not_record_write_baseline() {
             },
         ],
         details: Some(format!("Path: {relative_path}")),
+        input: None,
     }]);
 
     assert!(!app.start_permission_write_baseline_if_allowed("call-read", Some("allow")));
@@ -1303,7 +1422,9 @@ fn codebuddy_bash_write_updates_existing_session_change() {
         terminal_output: None,
     }]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(
         app.ui.session_changes[0].old_text.as_deref(),
@@ -1341,6 +1462,141 @@ fn codebuddy_bash_write_updates_existing_session_change() {
         .collect::<Vec<_>>();
     assert_eq!(removed, vec!["export const label = 'middle';"]);
     assert_eq!(added, vec!["export const label = 'new';"]);
+}
+
+#[test]
+fn same_file_second_tool_hunks_merge_into_cumulative_review_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "export const boostLabel = 'old';\nexport const count = 1;\n";
+    let middle = "export const boostLabel = 'middle';\nexport const count = 1;\n";
+    let after = "export const boostLabel = 'middle';\nexport const count = 2;\nexport const enabled = true;\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    assert!(app.apply_tracker_changes(
+        "first-edit",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(before.into()),
+            new_text: middle.into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].old_text.as_deref(), Some(before));
+    assert_eq!(app.ui.review_changes[0].new_text, middle);
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "second-edit".into(),
+        parent_id: None,
+        name: "Edit".into(),
+        kind: "tool".into(),
+        summary: format!("Edit {relative_path}"),
+        is_subagent: false,
+        raw_input: Some(serde_json::json!({ "path": relative_path }).to_string()),
+    }]);
+    fs::write(&file_path, after).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolDiff {
+            id: "second-edit".into(),
+            path: relative_path.into(),
+            old_text: Some(middle.into()),
+            new_text: after.into(),
+        },
+        ClientEvent::ToolCompleted {
+            id: "second-edit".into(),
+            name: Some("Edit".into()),
+            outcome: format!("Edit {relative_path}"),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.session_changes[0].old_text.as_deref(), Some(before));
+    assert_eq!(app.ui.session_changes[0].new_text, after);
+    let review_change = &app.ui.review_changes[0];
+    assert_eq!(review_change.path, relative_path);
+    assert_eq!(review_change.old_text.as_deref(), Some(before));
+    assert_eq!(review_change.new_text, after);
+    assert_eq!(review_change.change_type, FileChangeType::Modified);
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "second-edit")
+        .unwrap();
+    let preview = tool
+        .diff_previews
+        .iter()
+        .find(|preview| preview.path == std::path::PathBuf::from(relative_path))
+        .unwrap();
+    let removed = preview
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.content.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(removed, vec!["export const count = 1;"]);
+}
+
+#[test]
+fn created_file_second_edit_remains_created_in_review_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/NewChip.tsx";
+    let first = "export const label = 'draft';\n";
+    let second = "export const label = 'final';\n";
+
+    let mut app = test_app(&dir);
+    assert!(app.apply_tracker_changes(
+        "create-file",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Created,
+            old_text: None,
+            new_text: first.into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(
+        app.ui.review_changes[0].change_type,
+        FileChangeType::Created
+    );
+    assert_eq!(app.ui.review_changes[0].old_text, None);
+    assert_eq!(app.ui.review_changes[0].new_text, first);
+
+    assert!(app.apply_tracker_changes(
+        "edit-created-file",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(first.into()),
+            new_text: second.into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let review_change = &app.ui.review_changes[0];
+    assert_eq!(review_change.path, relative_path);
+    assert_eq!(review_change.change_type, FileChangeType::Created);
+    assert_eq!(review_change.old_text, None);
+    assert_eq!(review_change.new_text, second);
 }
 
 #[test]
@@ -1397,7 +1653,7 @@ fn late_completed_command_raw_input_retries_until_file_lands() {
     assert!(!late_update.had_file_changes);
 
     fs::write(&file_path, "export const keepAnchorTerm = true;\n").unwrap();
-    app.advance_runtime_clock(Duration::from_millis(250));
+    app.advance_runtime_clock(Duration::from_secs(1));
     assert!(app.retry_pending_tool_write_detections());
 
     assert_eq!(app.ui.review_changes.len(), 1);
@@ -1417,11 +1673,10 @@ fn late_completed_command_raw_input_retries_until_file_lands() {
         .iter()
         .find(|tool| tool.call_id == "write-sanitize")
         .unwrap();
-    assert!(
-        tool.diff_previews
-            .iter()
-            .any(|preview| !preview.hunks.is_empty())
-    );
+    assert!(tool
+        .diff_previews
+        .iter()
+        .any(|preview| !preview.hunks.is_empty()));
 }
 
 #[test]
@@ -1465,7 +1720,7 @@ fn completed_command_with_known_path_retries_with_tool_start_baseline() {
     assert!(!completed.had_file_changes);
 
     fs::write(&file_path, "export const keepAnchorTerm = 'after';\n").unwrap();
-    app.advance_runtime_clock(Duration::from_millis(250));
+    app.advance_runtime_clock(Duration::from_secs(1));
     assert!(app.retry_pending_tool_write_detections());
 
     assert_eq!(app.ui.review_changes.len(), 1);
@@ -1477,6 +1732,68 @@ fn completed_command_with_known_path_retries_with_tool_start_baseline() {
     assert_eq!(
         app.ui.review_changes[0].new_text,
         "export const keepAnchorTerm = 'after';\n"
+    );
+}
+
+#[test]
+fn completed_command_waits_for_settled_disk_snapshot_before_review_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    app.set_runtime_clock_now(std::time::Instant::now());
+
+    let repo = init_test_git_repo(dir.path());
+    let relative_path = "packages/backend/src/services/query-understanding/sanitize.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "export const keepAnchorTerm = 'old';\n").unwrap();
+    commit_paths(&repo, &[".gitignore", relative_path]);
+
+    let raw_input = serde_json::json!({
+        "command": format!(
+            "python - <<'PY'\nfrom pathlib import Path\np=Path('{}')\ntext=p.read_text(encoding='utf-8')\np.write_text(text.replace('old', 'final'), encoding='utf-8')\nPY",
+            file_path.display().to_string().replace('\\', "/"),
+        ),
+    })
+    .to_string();
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "write-sanitize".into(),
+        parent_id: None,
+        name: "Bash".into(),
+        kind: "Bash".into(),
+        summary: "Filter non-anchor expansions before dedupe".into(),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+    fs::write(&file_path, "export const keepAnchorTerm = 'partial';\n").unwrap();
+
+    let completed = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "write-sanitize".into(),
+        name: Some("Bash".into()),
+        outcome: "Filter non-anchor expansions before dedupe".into(),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+    assert!(!completed.had_file_changes);
+    assert!(app.ui.review_changes.is_empty());
+
+    fs::write(&file_path, "export const keepAnchorTerm = 'final';\n").unwrap();
+    app.advance_runtime_clock(Duration::from_millis(999));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.review_changes.is_empty());
+
+    app.advance_runtime_clock(Duration::from_millis(1));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some("export const keepAnchorTerm = 'old';\n")
+    );
+    assert_eq!(
+        app.ui.review_changes[0].new_text,
+        "export const keepAnchorTerm = 'final';\n"
     );
 }
 
@@ -1515,6 +1832,7 @@ fn completed_read_tool_does_not_claim_preexisting_git_change() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -1560,6 +1878,7 @@ fn completed_tool_preview_does_not_claim_preexisting_git_change() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -1598,33 +1917,13 @@ fn completed_chinese_edit_summary_without_tool_baseline_does_not_use_git_fallbac
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["edit-proposal".into()]));
     assert!(app.ui.review_changes.is_empty());
     assert!(app.ui.session_changes.is_empty());
-}
-
-#[test]
-fn write_create_without_old_text_enters_review_as_created() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut app = test_app(&dir);
-    let normalized_path = "packages/backend/scripts/migrate-vision-tags-to-structured.ts";
-    let new_text = "export const migrated = true;\n";
-
-    let change_type = app.tool_diff_change_type("write-create", normalized_path, None);
-    app.upsert_review_file_change(normalized_path, change_type.clone(), None, new_text.into());
-
-    assert_eq!(change_type, FileChangeType::Created);
-    assert_eq!(app.ui.review_changes.len(), 1);
-    assert_eq!(app.ui.review_changes[0].path, normalized_path);
-    assert_eq!(
-        app.ui.review_changes[0].change_type,
-        FileChangeType::Created
-    );
-    assert_eq!(app.ui.review_changes[0].old_text, None);
-    assert_eq!(app.ui.review_changes[0].new_text, new_text);
 }
 
 #[test]
@@ -1681,6 +1980,7 @@ fn failed_tool_without_recorded_file_change_discards_speculative_diff() {
         terminal_output: None,
         error: Some("User refused permission to run tool".into()),
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: Some("Reject".into()),
     });
 
@@ -1695,6 +1995,109 @@ fn failed_tool_without_recorded_file_change_discards_speculative_diff() {
         .unwrap();
     assert!(tool.diff_paths.is_empty());
     assert!(tool.diff_previews.is_empty());
+}
+
+#[test]
+fn failed_tool_does_not_discard_previous_successful_change_for_same_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let successful_change = SessionFileChange {
+        path: "docs/tags.md".into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some("before\n".into()),
+        new_text: "after\n".into(),
+        added_lines: 1,
+        removed_lines: 1,
+        timestamp: "2026-05-21T00:00:00Z".into(),
+    };
+
+    app.ui.session_changes = vec![successful_change.clone()];
+    app.ui.review_changes = vec![successful_change.clone()];
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "successful-write-tags".into(),
+        parent_call_id: None,
+        name: "Write".into(),
+        kind: "Write".into(),
+        summary: "Write docs/tags.md".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![PathBuf::from("docs/tags.md")],
+        diff_previews: vec![ToolDiffPreview {
+            path: PathBuf::from("docs/tags.md"),
+            hunks: vec![DiffHunk {
+                heading: "@@ -1 +1 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        content: "before".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        content: "after".into(),
+                    },
+                ],
+            }],
+        }],
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+    });
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "failed-write-tags".into(),
+        parent_call_id: None,
+        name: "Write".into(),
+        kind: "Write".into(),
+        summary: "Write docs/tags.md".into(),
+        status: ToolStatus::Failed,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![PathBuf::from("docs/tags.md")],
+        diff_previews: vec![ToolDiffPreview {
+            path: PathBuf::from("docs/tags.md"),
+            hunks: vec![DiffHunk {
+                heading: "@@ -1 +1 @@".into(),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Removed,
+                        content: "after".into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Added,
+                        content: "failed".into(),
+                    },
+                ],
+            }],
+        }],
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: Some("tool failed".into()),
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+    });
+
+    assert!(app.discard_failed_tool_speculative_diffs("failed-write-tags"));
+
+    assert_eq!(app.ui.session_changes, vec![successful_change.clone()]);
+    assert_eq!(app.ui.review_changes, vec![successful_change]);
+    let failed_tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "failed-write-tags")
+        .unwrap();
+    assert!(failed_tool.diff_paths.is_empty());
+    assert!(failed_tool.diff_previews.is_empty());
 }
 
 #[test]
@@ -1796,6 +2199,7 @@ fn late_codebuddy_edit_prefers_exact_turn_diff_over_git_cumulative_diff() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -1874,6 +2278,7 @@ fn late_codebuddy_unified_diff_recovers_turn_base_when_git_diff_is_smaller() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -1960,6 +2365,7 @@ fn review_uses_landed_tool_preview_instead_of_narrow_exact_edit() {
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     });
 
@@ -2002,7 +2408,7 @@ fn review_uses_landed_tool_preview_instead_of_narrow_exact_edit() {
 }
 
 #[test]
-fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
+fn tracker_landed_change_populates_review_with_all_hunks() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "frontend/src/components/layout/TopBar.tsx";
     let file_path = dir.path().join(relative_path);
@@ -2055,16 +2461,21 @@ fn raw_output_diff_preview_populates_turn_change_set_with_all_hunks() {
     ]
     .join("\n");
     let mut app = test_app(&dir);
-    let hunks = diff_to_hunks(Some(&before), &after);
     fs::write(&file_path, &before).unwrap();
     app.file_tracker
         .start_recording("edit-topbar", vec![relative_path.into()]);
     fs::write(&file_path, &after).unwrap();
-    app.file_tracker
-        .add_candidate("edit-topbar", relative_path.into());
-
-    assert!(app.tool_diff_preview_matches_recording_window("edit-topbar", relative_path, &hunks));
-    assert!(app.apply_tool_diff_preview_to_review(relative_path, relative_path, &hunks));
+    assert!(app.apply_tracker_changes(
+        "edit-topbar",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(before.clone()),
+            new_text: after.clone(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
     assert_eq!(app.ui.review_changes.len(), 1);
     let change = &app.ui.review_changes[0];
     assert_eq!(change.path, relative_path);
@@ -2132,7 +2543,7 @@ fn raw_output_diff_preview_replaces_same_path_content_fragments_in_review() {
         .filter(|line| line.kind == DiffLineKind::Added)
         .count();
 
-    app.apply_runtime_events_with_file_tracking(vec![
+    let result = app.apply_runtime_events_with_file_tracking(vec![
         ClientEvent::ToolDiff {
             id: "edit-eagle".into(),
             path: relative_path.into(),
@@ -2156,7 +2567,17 @@ fn raw_output_diff_preview_replaces_same_path_content_fragments_in_review() {
             path: relative_path.into(),
             hunks: full_hunks.clone(),
         },
+        ClientEvent::ToolCompleted {
+            id: "edit-eagle".into(),
+            name: Some("Edit".into()),
+            outcome: "Edited eagle-export".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
     ]);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
 
     assert_eq!(app.ui.review_changes.len(), 1);
     let change = &app.ui.review_changes[0];
@@ -2165,6 +2586,166 @@ fn raw_output_diff_preview_replaces_same_path_content_fragments_in_review() {
     assert_eq!(change.new_text, after);
     assert_eq!(change.added_lines, full_added);
     assert!(change.added_lines > 1);
+}
+
+#[test]
+fn raw_output_diff_preview_replaces_larger_single_fragment_with_multi_hunk_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "datas/scripts/eagle-export.py";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before_lines = (1..=80)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>();
+    let mut after_lines = before_lines.clone();
+    after_lines[7] = "line 8 updated".into();
+    after_lines[42] = "line 43 updated".into();
+    after_lines[70] = "line 71 updated".into();
+
+    let before = format!("{}\n", before_lines.join("\n"));
+    let after = format!("{}\n", after_lines.join("\n"));
+    let full_hunks = vec![
+        DiffHunk {
+            heading: "@@ -7,3 +7,3 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 7".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    content: "line 8".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    content: "line 8 updated".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 9".into(),
+                },
+            ],
+        },
+        DiffHunk {
+            heading: "@@ -42,3 +42,3 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 42".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    content: "line 43".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    content: "line 43 updated".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 44".into(),
+                },
+            ],
+        },
+        DiffHunk {
+            heading: "@@ -70,3 +70,3 @@".into(),
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 70".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    content: "line 71".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    content: "line 71 updated".into(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Context,
+                    content: "line 72".into(),
+                },
+            ],
+        },
+    ];
+    assert!(full_hunks.len() > 1);
+
+    let mut app = test_app(&dir);
+    fs::write(&file_path, &after).unwrap();
+
+    app.ui.review_changes.push(SessionFileChange {
+        path: relative_path.into(),
+        change_type: FileChangeType::Modified,
+        old_text: Some(
+            [
+                "fragment old 1",
+                "fragment old 2",
+                "fragment old 3",
+                "fragment old 4",
+                "fragment old 5",
+                "",
+            ]
+            .join("\n"),
+        ),
+        new_text: [
+            "fragment new 1",
+            "fragment new 2",
+            "fragment new 3",
+            "fragment new 4",
+            "fragment new 5",
+            "",
+        ]
+        .join("\n"),
+        added_lines: 5,
+        removed_lines: 5,
+        timestamp: current_timestamp(),
+    });
+
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "edit-eagle".into(),
+        parent_call_id: None,
+        name: "Edit".into(),
+        kind: "Edit".into(),
+        summary: "Edited eagle-export".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![relative_path.into()],
+        diff_previews: vec![ToolDiffPreview {
+            path: relative_path.into(),
+            hunks: full_hunks.clone(),
+        }],
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+    });
+
+    assert!(app.apply_tracker_changes(
+        "edit-eagle",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(before.clone()),
+            new_text: after.clone(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    assert_eq!(change.added_lines, 3);
+    assert_eq!(change.removed_lines, 3);
 }
 
 #[test]
@@ -2195,19 +2776,16 @@ fn raw_output_diff_preview_without_tool_start_baseline_stays_out_of_review_chang
     app.file_tracker
         .add_candidate("edit-sidebar", unrelated_path.into());
 
-    assert!(!app.tool_diff_preview_matches_recording_window(
-        "edit-sidebar",
-        unrelated_path,
-        &hunks
-    ));
-    if app.tool_diff_preview_matches_recording_window("edit-sidebar", unrelated_path, &hunks) {
-        app.apply_tool_diff_preview_to_review(unrelated_path, unrelated_path, &hunks);
-    }
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiffPreview {
+        id: "edit-sidebar".into(),
+        path: unrelated_path.into(),
+        hunks,
+    }]);
     assert!(app.ui.review_changes.is_empty());
 }
 
 #[test]
-fn late_tool_diff_preview_for_landed_session_change_populates_review_changes() {
+fn late_tool_diff_preview_for_landed_session_change_stays_preview_only() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "frontend/src/components/layout/TopBar.tsx";
     let file_path = dir.path().join(relative_path);
@@ -2244,18 +2822,11 @@ fn late_tool_diff_preview_for_landed_session_change_populates_review_changes() {
     assert_eq!(tool.diff_previews.len(), 1);
     assert_eq!(tool.diff_previews[0].hunks, hunks);
 
-    assert_eq!(app.ui.review_changes.len(), 1);
-    let change = &app.ui.review_changes[0];
-    assert_eq!(change.path, relative_path);
-    assert_eq!(change.change_type, FileChangeType::Modified);
-    assert_eq!(change.old_text.as_deref(), Some(before));
-    assert_eq!(change.new_text, after);
-    assert_eq!(change.added_lines, 1);
-    assert_eq!(change.removed_lines, 1);
+    assert!(app.ui.review_changes.is_empty());
 }
 
 #[test]
-fn idle_late_created_file_preview_persists_completed_turn_change_set() {
+fn idle_late_created_file_preview_does_not_persist_completed_turn_change_set() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
     let file_path = dir.path().join(relative_path);
@@ -2321,9 +2892,9 @@ fn idle_late_created_file_preview_persists_completed_turn_change_set() {
             hunks,
         }]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
     assert_eq!(app.current_turn_user_message_id, None);
-    assert_eq!(app.ui.review_changes.len(), 1);
+    assert!(app.ui.review_changes.is_empty());
 
     let turns = app
         .store
@@ -2332,30 +2903,11 @@ fn idle_late_created_file_preview_persists_completed_turn_change_set() {
             Some(ChangeSetSource::AgentTurn),
         )
         .unwrap();
-    let turn = turns
-        .iter()
-        .find(|summary| summary.message_id == Some(assistant_id))
-        .expect("late preview should be attached to the completed assistant turn");
-    assert_eq!(turn.status, ChangeSetStatus::Complete);
-    assert_eq!(turn.file_count, 1);
-    assert_eq!(turn.added_lines, 4);
-    assert_eq!(turn.removed_lines, 0);
-
-    let diff = app
-        .store
-        .load_change_set_file_diff(&turn.id, relative_path)
-        .unwrap()
-        .unwrap();
-    assert_eq!(diff.path, relative_path);
-    assert_eq!(diff.change_type, FileChangeType::Created);
-    assert_eq!(diff.old_text, None);
-    assert_eq!(diff.new_text.as_deref(), Some(new_text.as_str()));
-    assert_eq!(diff.added_lines, 4);
-    assert_eq!(diff.removed_lines, 0);
+    assert!(turns.is_empty());
 }
 
 #[test]
-fn preview_before_file_create_retries_and_enters_review_after_landing() {
+fn preview_before_file_create_does_not_retry_into_review_after_landing() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/backend/src/services/query-understanding/prompt.ts";
     let file_path = dir.path().join(relative_path);
@@ -2417,20 +2969,20 @@ fn preview_before_file_create_retries_and_enters_review_after_landing() {
         }]);
     assert!(!result.had_file_changes);
     assert!(app.ui.review_changes.is_empty());
-    assert!(
-        app.store
-            .list_change_sets(
-                Some(&app.ui.session.id.to_string()),
-                Some(ChangeSetSource::AgentTurn),
-            )
-            .unwrap()
-            .is_empty()
-    );
+    assert!(app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap()
+        .is_empty());
 
     fs::write(&file_path, &new_text).unwrap();
     app.advance_runtime_clock(Duration::from_secs(1));
 
-    assert!(app.retry_pending_tool_diff_previews());
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.review_changes.is_empty());
 
     let turns = app
         .store
@@ -2439,27 +2991,11 @@ fn preview_before_file_create_retries_and_enters_review_after_landing() {
             Some(ChangeSetSource::AgentTurn),
         )
         .unwrap();
-    let turn = turns
-        .iter()
-        .find(|summary| summary.message_id == Some(assistant_id))
-        .expect("landed preview should be attached to the completed assistant turn");
-    assert_eq!(turn.status, ChangeSetStatus::Complete);
-    assert_eq!(turn.file_count, 1);
-    assert_eq!(turn.added_lines, 3);
-    assert_eq!(turn.removed_lines, 0);
-
-    let diff = app
-        .store
-        .load_change_set_file_diff(&turn.id, relative_path)
-        .unwrap()
-        .unwrap();
-    assert_eq!(diff.change_type, FileChangeType::Created);
-    assert_eq!(diff.old_text, None);
-    assert_eq!(diff.new_text.as_deref(), Some(new_text.as_str()));
+    assert!(turns.is_empty());
 }
 
 #[test]
-fn raw_output_created_file_preview_with_late_baseline_enters_review_changes() {
+fn created_file_enters_review_from_tracker_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "frontend/src/components/gallery/NewCard.tsx";
     let file_path = dir.path().join(relative_path);
@@ -2472,35 +3008,13 @@ fn raw_output_created_file_preview_with_late_baseline_enters_review_changes() {
         "",
     ]
     .join("\n");
-    fs::write(&file_path, &new_text).unwrap();
-
     let mut app = test_app(&dir);
     app.file_tracker
         .start_recording("write-new-card", vec![relative_path.into()]);
-    let hunks = vec![DiffHunk {
-        heading: "@@ -0,0 +1,3 @@".into(),
-        lines: vec![
-            DiffLine {
-                kind: DiffLineKind::Added,
-                content: "export function NewCard() {".into(),
-            },
-            DiffLine {
-                kind: DiffLineKind::Added,
-                content: "  return <article>new</article>".into(),
-            },
-            DiffLine {
-                kind: DiffLineKind::Added,
-                content: "}".into(),
-            },
-        ],
-    }];
+    fs::write(&file_path, &new_text).unwrap();
 
-    assert!(app.tool_diff_preview_matches_recording_window(
-        "write-new-card",
-        relative_path,
-        &hunks
-    ));
-    assert!(app.apply_tool_diff_preview_to_review(relative_path, relative_path, &hunks));
+    let changes = app.file_tracker.finish_recording("write-new-card");
+    assert!(app.apply_tracker_changes("write-new-card", changes));
 
     assert_eq!(app.ui.review_changes.len(), 1);
     let change = &app.ui.review_changes[0];
@@ -2510,6 +3024,61 @@ fn raw_output_created_file_preview_with_late_baseline_enters_review_changes() {
     assert_eq!(change.new_text, new_text);
     assert_eq!(change.added_lines, 3);
     assert_eq!(change.removed_lines, 0);
+}
+
+#[test]
+fn fs_write_tool_diff_enters_review_after_disk_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const schema = 'old';\n";
+    let after = "export const schema = 'new';\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    fs::write(&file_path, after).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiff {
+        id: format!("fs_write:{}", file_path.display()),
+        path: file_path.display().to_string(),
+        old_text: Some(before.into()),
+        new_text: after.into(),
+    }]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Modified);
+    assert_eq!(change.old_text.as_deref(), Some(before));
+    assert_eq!(change.new_text, after);
+    assert_eq!((change.added_lines, change.removed_lines), (1, 1));
+}
+
+#[test]
+fn fs_write_tool_diff_stays_out_of_review_when_disk_does_not_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const schema = 'old';\n";
+    let after = "export const schema = 'new';\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiff {
+        id: format!("fs_write:{}", file_path.display()),
+        path: file_path.display().to_string(),
+        old_text: Some(before.into()),
+        new_text: after.into(),
+    }]);
+
+    assert!(!result.had_file_changes);
+    assert!(app.ui.session_changes.is_empty());
+    assert!(app.ui.review_changes.is_empty());
 }
 
 #[test]
@@ -2562,7 +3131,7 @@ fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() 
         },
     ]);
 
-    assert!(result.had_file_changes);
+    assert!(!result.had_file_changes);
     let tool = app
         .ui
         .tools
@@ -2578,17 +3147,13 @@ fn late_write_tool_diff_without_recoverable_baseline_still_shows_tool_preview() 
         .count();
     assert_eq!(added, 4);
 
-    assert_eq!(app.ui.review_changes.len(), 1);
-    let change = &app.ui.review_changes[0];
-    assert_eq!(change.path, relative_path);
-    assert_eq!(change.change_type, FileChangeType::Created);
-    assert_eq!(change.old_text, None);
-    assert_eq!(change.new_text, new_text);
-    assert_eq!(change.added_lines, 4);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.review_changes.is_empty());
 }
 
 #[test]
-fn completed_write_raw_input_content_without_acp_diff_enters_review_changes() {
+fn completed_write_raw_input_content_without_baseline_stays_out_of_review_changes() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
     let file_path = dir.path().join(relative_path);
@@ -2629,15 +3194,11 @@ fn completed_write_raw_input_content_without_acp_diff_enters_review_changes() {
         },
     ]);
 
-    assert!(result.had_file_changes);
-    assert_eq!(app.ui.session_changes.len(), 1);
-    assert_eq!(app.ui.review_changes.len(), 1);
-    let change = &app.ui.review_changes[0];
-    assert_eq!(change.path, relative_path);
-    assert_eq!(change.change_type, FileChangeType::Created);
-    assert_eq!(change.old_text, None);
-    assert_eq!(change.new_text, new_text);
-    assert_eq!(change.added_lines, 4);
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert!(app.ui.session_changes.is_empty());
+    assert!(app.ui.review_changes.is_empty());
 
     let tool = app
         .ui
@@ -2645,5 +3206,5 @@ fn completed_write_raw_input_content_without_acp_diff_enters_review_changes() {
         .iter()
         .find(|tool| tool.call_id == "write-schema")
         .unwrap();
-    assert_eq!(tool.diff_previews.len(), 1);
+    assert!(tool.diff_previews.is_empty());
 }

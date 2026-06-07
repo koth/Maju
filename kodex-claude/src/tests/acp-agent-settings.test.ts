@@ -21,6 +21,7 @@ describe("ClaudeAcpAgent settings", () => {
   let tempDir: string;
   let originalClaudeConfigDir: string | undefined;
   let originalClaudeModelConfig: string | undefined;
+  let originalKodexModelProviderMap: string | undefined;
 
   function createMockClient(): AgentSideConnection {
     return {
@@ -57,8 +58,10 @@ describe("ClaudeAcpAgent settings", () => {
     tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "acp-agent-settings-"));
     originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
     originalClaudeModelConfig = process.env.CLAUDE_MODEL_CONFIG;
+    originalKodexModelProviderMap = process.env.KODEX_MODEL_PROVIDER_MAP;
     process.env.CLAUDE_CONFIG_DIR = tempDir;
     delete process.env.CLAUDE_MODEL_CONFIG;
+    delete process.env.KODEX_MODEL_PROVIDER_MAP;
     querySpy.mockReset();
     vi.resetModules();
   });
@@ -73,6 +76,11 @@ describe("ClaudeAcpAgent settings", () => {
       process.env.CLAUDE_MODEL_CONFIG = originalClaudeModelConfig;
     } else {
       delete process.env.CLAUDE_MODEL_CONFIG;
+    }
+    if (originalKodexModelProviderMap) {
+      process.env.KODEX_MODEL_PROVIDER_MAP = originalKodexModelProviderMap;
+    } else {
+      delete process.env.KODEX_MODEL_PROVIDER_MAP;
     }
     await fs.promises.rm(tempDir, { recursive: true, force: true });
   });
@@ -656,6 +664,113 @@ describe("ClaudeAcpAgent settings", () => {
         "MiMo-V2.5-Pro",
         "MiMo-V2.5",
       ]);
+    });
+
+    it("adds provider metadata for externally routed BYOK model pools", async () => {
+      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
+        availableModels: ["gpt-5.5", "deepseek-v4-pro", "kimi-for-coding"],
+        preserveDefaultModel: false,
+      });
+      process.env.KODEX_MODEL_PROVIDER_MAP = JSON.stringify([
+        {
+          model: "kodex-provider/timiai/gpt-5.5",
+          display_name: "gpt-5.5",
+          provider: "timiai",
+        },
+        {
+          model: "kodex-provider/deepseek/deepseek-v4-pro",
+          display_name: "deepseek-v4-pro",
+          provider: "deepseek",
+        },
+        {
+          model: "kodex-provider/kimi_code/kimi-for-coding",
+          display_name: "kimi-for-coding",
+          provider: "kimi_code",
+        },
+      ]);
+
+      const projectDir = path.join(tempDir, "project");
+      await fs.promises.mkdir(projectDir, { recursive: true });
+
+      mockQueryWithModels([
+        { value: "default", displayName: "Default", description: "Default model" },
+        { value: "gpt-5.5", displayName: "gpt-5.5", description: "" },
+        { value: "deepseek-v4-pro", displayName: "deepseek-v4-pro", description: "" },
+        { value: "kimi-for-coding", displayName: "kimi-for-coding", description: "" },
+      ]);
+
+      const { ClaudeAcpAgent } = await import("../acp-agent.js");
+      const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
+
+      const response = await (agent as any).createSession({
+        cwd: projectDir,
+        mcpServers: [],
+        _meta: { disableBuiltInTools: true },
+      });
+
+      const modelOption = response.configOptions.find((o: any) => o.id === "model");
+      expect(modelOption.options.map((o: any) => o.value)).toEqual([
+        "kodex-provider/timiai/gpt-5.5",
+        "kodex-provider/deepseek/deepseek-v4-pro",
+        "kodex-provider/kimi_code/kimi-for-coding",
+      ]);
+      expect(modelOption.options.map((o: any) => o._meta?.provider)).toEqual([
+        "timiai",
+        "deepseek",
+        "kimi_code",
+      ]);
+      expect(response.models.availableModels.map((m: any) => m._meta?.provider)).toEqual([
+        "timiai",
+        "deepseek",
+        "kimi_code",
+      ]);
+    });
+
+    it("accepts provider-prefixed model config changes", async () => {
+      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
+        availableModels: ["gpt-5.5", "deepseek-v4-pro"],
+        preserveDefaultModel: false,
+      });
+      process.env.KODEX_MODEL_PROVIDER_MAP = JSON.stringify([
+        {
+          model: "kodex-provider/timiai/gpt-5.5",
+          display_name: "gpt-5.5",
+          provider: "timiai",
+        },
+        {
+          model: "kodex-provider/deepseek/deepseek-v4-pro",
+          display_name: "deepseek-v4-pro",
+          provider: "deepseek",
+        },
+      ]);
+
+      const projectDir = path.join(tempDir, "project");
+      await fs.promises.mkdir(projectDir, { recursive: true });
+
+      const { setModelSpy } = mockQueryWithModels([
+        { value: "default", displayName: "Default", description: "Default model" },
+        { value: "gpt-5.5", displayName: "gpt-5.5", description: "" },
+        { value: "deepseek-v4-pro", displayName: "deepseek-v4-pro", description: "" },
+      ]);
+
+      const { ClaudeAcpAgent } = await import("../acp-agent.js");
+      const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
+
+      const response = await (agent as any).createSession({
+        cwd: projectDir,
+        mcpServers: [],
+        _meta: { disableBuiltInTools: true },
+      });
+
+      await agent.setSessionConfigOption({
+        sessionId: response.sessionId,
+        configId: "model",
+        value: "kodex-provider:deepseek:kodex-provider/deepseek/deepseek-v4-pro",
+      });
+
+      expect(setModelSpy).toHaveBeenLastCalledWith(
+        "kodex-provider/deepseek/deepseek-v4-pro",
+      );
     });
 
     it("passes the user's exact ID to setModel when it matches an SDK alias", async () => {

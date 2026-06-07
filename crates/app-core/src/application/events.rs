@@ -16,7 +16,7 @@ impl Application {
                 self.persist_current_codex_provider_if_needed();
             }
             ClientEvent::MessageChunk { .. } => {}
-            ClientEvent::ContextCompacted { .. } => {
+            ClientEvent::ContextCompactionStarted { .. } | ClientEvent::ContextCompacted { .. } => {
                 let msg_data = self
                     .ui
                     .timeline
@@ -35,9 +35,13 @@ impl Application {
 
                 if let Some((id_str, body)) = msg_data {
                     let seq = self.next_seq();
-                    let _ = self
+                    if self
                         .store
-                        .insert_message(&session_id, &id_str, "System", &body, seq);
+                        .insert_message(&session_id, &id_str, "System", &body, seq)
+                        .is_err()
+                    {
+                        let _ = self.store.update_message_body(&id_str, &body);
+                    }
                 }
             }
             ClientEvent::TurnFinished { .. } => {
@@ -163,6 +167,7 @@ impl Application {
             }
             ClientEvent::SessionStarted { .. }
             | ClientEvent::ThinkingActivity { .. }
+            | ClientEvent::ContextCompactionStarted { .. }
             | ClientEvent::ContextCompacted { .. }
             | ClientEvent::MessageChunk { .. }
             | ClientEvent::SessionConfigUpdated { .. }

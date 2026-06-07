@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import type { UiSnapshot, AppTheme, ToolInvocation } from "../../types";
+import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse } from "../../types";
 import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
@@ -278,7 +278,12 @@ export function Workbench() {
     setReviewPanelExpanded(false);
   }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
-  const handlePermissionSelect = useCallback(async (requestId: string, optionId: string | null, guidance?: string | null) => {
+  const handlePermissionSelect = useCallback(async (
+    requestId: string,
+    optionId: string | null,
+    guidance?: string | null,
+    inputResponse?: PermissionInputResponse | null,
+  ) => {
     setResolvingPermissionIds((current) => {
       if (current.has(requestId)) return current;
       const next = new Set(current);
@@ -286,7 +291,7 @@ export function Workbench() {
       return next;
     });
     try {
-      await sessionResolvePermission(requestId, optionId, guidance);
+      await sessionResolvePermission(requestId, optionId, guidance, inputResponse);
       await pollState();
     } catch (error) {
       setResolvingPermissionIds((current) => {
@@ -793,6 +798,7 @@ export function findPendingPermissionRequests(tools: ToolInvocation[]): PendingP
       details,
       planText,
       options: tool.permission_options,
+      input: tool.permission_input,
       isPlanApproval: planApproval,
     }];
   });
@@ -807,7 +813,7 @@ function isPendingPermissionTool(tool: ToolInvocation) {
     tool.kind === "permission" &&
     tool.status === "Running" &&
     !tool.permission_decision &&
-    tool.permission_options.length > 0
+    (tool.permission_options.length > 0 || (tool.permission_input?.questions.length ?? 0) > 0)
   );
 }
 

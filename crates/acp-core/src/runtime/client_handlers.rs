@@ -2,7 +2,8 @@ use super::agent_process::AgentTransport;
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
     PermissionPolicyMode, PermissionResolution, codebuddy_bash_write_hint_paths,
-    decide_codebuddy_terminal_permission, decide_permission,
+    decide_codebuddy_terminal_permission, decide_permission, reject_permission_option_id,
+    request_has_direct_shell_file_mutation,
 };
 use super::terminal::TerminalManager;
 use super::workspace_paths::{
@@ -27,9 +28,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
-use workspace_model::PermissionOption;
+use workspace_model::{
+    PermissionInputOption, PermissionInputQuestion, PermissionInputRequest, PermissionOption,
+};
 
 const KODEX_PERMISSION_GUIDANCE_META_KEY: &str = "kodex.ai/permissionGuidance";
+const KODEX_USER_INPUT_ANSWERS_META_KEY: &str = "kodex.ai/userInputAnswers";
+const CODEX_APPLY_PATCH_GUIDANCE: &str = "Use the apply_patch tool/function for file edits instead of shell, Python, redirection, tee, Set-Content, rm/mv/cp, or other filesystem-mutating shell commands. If you need to inspect or validate, run a read-only command.";
 
 #[derive(Clone, Default)]
 struct CodeBuddyTerminalDenials {
@@ -122,6 +127,7 @@ pub(super) async fn connect_agent_client(
 ) -> anyhow::Result<()> {
     let tx_permissions = tx_events.clone();
     let permission_log_config = config.clone();
+    let permission_agent_command = config.agent_command.clone();
     let permission_workspace_root = config.workspace_root.clone();
     let permission_request_broker = permission_broker.clone();
     let fs_log_config = config.clone();
@@ -181,8 +187,26 @@ pub(super) async fn connect_agent_client(
                     .iter()
                     .map(|option| option.label.clone())
                     .collect::<Vec<_>>();
+                let mut auto_guidance = None::<String>;
                 let decision = if is_codebuddy_exit_plan_permission(&request_payload) {
                     PermissionDecision::Ask
+                } else if agent_command_is_codex(&permission_agent_command)
+                    && request_has_direct_shell_file_mutation(&request)
+                {
+                    if let Some(reject_option_id) = reject_permission_option_id(&request) {
+                        auto_guidance = Some(CODEX_APPLY_PATCH_GUIDANCE.to_string());
+                        append_runtime_event_log(
+                            &permission_log_config,
+                            "client/codex_shell_write_rejected_for_apply_patch",
+                            &json!({
+                                "toolCallId": request_id.clone(),
+                                "guidance": CODEX_APPLY_PATCH_GUIDANCE,
+                            }),
+                        )?;
+                        PermissionDecision::Select(reject_option_id)
+                    } else {
+                        PermissionDecision::Cancel
+                    }
                 } else {
                     decide_permission(
                         permission_request_broker.mode(),
@@ -192,7 +216,7 @@ pub(super) async fn connect_agent_client(
                 };
                 let permission_resolution = match decision {
                     PermissionDecision::Select(option_id) => {
-                        PermissionResolution::new(Some(option_id), None)
+                        PermissionResolution::new(Some(option_id), auto_guidance, None)
                     }
                     PermissionDecision::Cancel => PermissionResolution::default(),
                     PermissionDecision::Ask => {
@@ -203,6 +227,7 @@ pub(super) async fn connect_agent_client(
                             name: permission_request_name(&request, &request_payload),
                             options: options.clone(),
                             details: permission_request_details(&request),
+                            input: permission_input_request(&request),
                         });
                         let _ = tx_permissions.send(ClientEvent::ToolProgress {
                             id: request_id.clone(),
@@ -243,8 +268,7 @@ pub(super) async fn connect_agent_client(
                     }
                     None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
                 };
-                let response =
-                    attach_permission_guidance(response, permission_resolution.guidance.as_deref());
+                let response = attach_permission_meta(response, &permission_resolution);
 
                 let outcome = match selected_option_id {
                     Some(option_id) => {
@@ -638,6 +662,95 @@ fn codebuddy_plan_root() -> Option<std::path::PathBuf> {
     )
 }
 
+fn permission_input_request(request: &RequestPermissionRequest) -> Option<PermissionInputRequest> {
+    let raw_input = request.tool_call.fields.raw_input.as_ref()?;
+    permission_input_request_from_value(raw_input)
+}
+
+fn permission_input_request_from_value(value: &Value) -> Option<PermissionInputRequest> {
+    let questions = value.get("questions")?.as_array()?;
+    let questions = questions
+        .iter()
+        .enumerate()
+        .filter_map(permission_input_question_from_value)
+        .collect::<Vec<_>>();
+    (!questions.is_empty()).then_some(PermissionInputRequest { questions })
+}
+
+fn permission_input_question_from_value(
+    (index, value): (usize, &Value),
+) -> Option<PermissionInputQuestion> {
+    let question = value.get("question").and_then(Value::as_str)?.trim();
+    if question.is_empty() {
+        return None;
+    }
+
+    let raw_id = value.get("id").and_then(Value::as_str).map(str::trim);
+    let id = raw_id
+        .filter(|id| !id.is_empty())
+        .unwrap_or(question)
+        .to_string();
+    let header = value
+        .get("header")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Question {}", index + 1));
+    let is_other = value
+        .get("is_other")
+        .or_else(|| value.get("isOther"))
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| value.get("is_other").is_none() && value.get("isOther").is_none());
+    let is_secret = value
+        .get("is_secret")
+        .or_else(|| value.get("isSecret"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let multi_select = value
+        .get("multi_select")
+        .or_else(|| value.get("multiSelect"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let options = value
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(permission_input_option_from_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(PermissionInputQuestion {
+        id,
+        header,
+        question: question.to_string(),
+        is_other,
+        is_secret,
+        multi_select,
+        options,
+    })
+}
+
+fn permission_input_option_from_value(value: &Value) -> Option<PermissionInputOption> {
+    let label = value.get("label").and_then(Value::as_str)?.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let description = value
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    Some(PermissionInputOption {
+        label: label.to_string(),
+        description,
+    })
+}
+
 fn raw_input_permission_details(value: &Value) -> Vec<String> {
     let mut details = Vec::new();
     collect_raw_input_permission_details(value, &mut details);
@@ -792,6 +905,7 @@ fn ensure_codebuddy_terminal_create_permission(
                 name: "Bash".into(),
                 options: options.clone(),
                 details: Some(codebuddy_terminal_permission_details(&command, &paths)),
+                input: None,
             });
             let _ = tx_events.send(ClientEvent::ToolProgress {
                 id: request_id.clone(),
@@ -841,6 +955,11 @@ fn ensure_codebuddy_terminal_create_permission(
 
 fn agent_command_is_codebuddy(agent_command: &str) -> bool {
     agent_command.to_ascii_lowercase().contains("codebuddy")
+}
+
+fn agent_command_is_codex(agent_command: &str) -> bool {
+    let normalized = agent_command.to_ascii_lowercase();
+    normalized.contains("codex-acp") || normalized.contains("codex")
 }
 
 fn terminal_request_command_text(request: &CreateTerminalRequest) -> String {
@@ -1019,17 +1138,31 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn attach_permission_guidance(
+fn attach_permission_meta(
     response: RequestPermissionResponse,
-    guidance: Option<&str>,
+    resolution: &PermissionResolution,
 ) -> RequestPermissionResponse {
-    let Some(guidance) = guidance.map(str::trim).filter(|value| !value.is_empty()) else {
+    let mut meta = Meta::new();
+    if let Some(guidance) = resolution
+        .guidance
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        meta.insert(
+            KODEX_PERMISSION_GUIDANCE_META_KEY.to_string(),
+            Value::String(guidance.to_string()),
+        );
+    }
+    if let Some(input_response) = resolution.input_response.as_ref()
+        && let Ok(value) = serde_json::to_value(input_response)
+    {
+        meta.insert(KODEX_USER_INPUT_ANSWERS_META_KEY.to_string(), value);
+    }
+    if meta.is_empty() {
         return response;
-    };
-    response.meta(Meta::from_iter([(
-        KODEX_PERMISSION_GUIDANCE_META_KEY.to_string(),
-        Value::String(guidance.to_string()),
-    )]))
+    }
+    response.meta(meta)
 }
 
 fn ensure_fs_write_permission(
@@ -1077,6 +1210,7 @@ fn ensure_fs_write_permission(
         name: "Write".into(),
         options: options.clone(),
         details: Some(format!("Write file\n{}", path.display())),
+        input: None,
     });
     let _ = tx_events.send(ClientEvent::ToolProgress {
         id: request_id.clone(),
@@ -1199,6 +1333,16 @@ mod tests {
     }
 
     #[test]
+    fn agent_command_codex_detection_does_not_match_codebuddy() {
+        assert!(agent_command_is_codex(
+            "C:/Users/yvonchen/.kodex/bin/codex-acp.exe"
+        ));
+        assert!(agent_command_is_codex("codex"));
+        assert!(!agent_command_is_codex("codebuddy"));
+        assert!(!agent_command_is_codex("kodex-desktop"));
+    }
+
+    #[test]
     fn codebuddy_terminal_permission_details_include_command_and_paths() {
         let details = codebuddy_terminal_permission_details(
             "python - <<'PY'\nfrom pathlib import Path\np=Path('src/main.ts')\np.write_text('ok')\nPY",
@@ -1248,6 +1392,32 @@ mod tests {
         let details = permission_request_details(&request).unwrap();
 
         assert!(details.contains("Command: find /d/work/ArtAssets -type f | head -20"));
+    }
+
+    #[test]
+    fn permission_input_request_parses_raw_input_questions() {
+        let request = permission_request_with_raw_input(json!({
+            "questions": [
+                {
+                    "id": "approach",
+                    "header": "Approach",
+                    "question": "Which implementation approach should I use?",
+                    "multiSelect": true,
+                    "options": [
+                        { "label": "Fast", "description": "Smallest viable change" },
+                        { "label": "Robust", "description": "Add tests and validation" }
+                    ]
+                }
+            ]
+        }));
+
+        let input = permission_input_request(&request).expect("questions should parse");
+
+        assert_eq!(input.questions.len(), 1);
+        assert_eq!(input.questions[0].id, "approach");
+        assert_eq!(input.questions[0].header, "Approach");
+        assert!(input.questions[0].multi_select);
+        assert_eq!(input.questions[0].options[1].label, "Robust");
     }
 
     #[test]

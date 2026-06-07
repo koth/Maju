@@ -280,6 +280,29 @@ export interface PermissionOption {
   kind: string;
 }
 
+export interface PermissionInputRequest {
+  questions: PermissionInputQuestion[];
+}
+
+export interface PermissionInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  is_other: boolean;
+  is_secret: boolean;
+  multi_select: boolean;
+  options: PermissionInputOption[];
+}
+
+export interface PermissionInputOption {
+  label: string;
+  description: string;
+}
+
+export interface PermissionInputResponse {
+  answers: Record<string, string[]>;
+}
+
 export interface ToolDiffPreview {
   path: string;
   hunks: DiffHunk[];
@@ -303,6 +326,7 @@ export interface ToolInvocation {
   terminal_output: TerminalOutput | null;
   error: string | null;
   permission_options: PermissionOption[];
+  permission_input: PermissionInputRequest | null;
   permission_decision: string | null;
 }
 

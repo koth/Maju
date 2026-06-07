@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest, PermissionInputResponse } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
   await shellOpen(url);
@@ -34,8 +34,14 @@ export async function sessionResolvePermission(
   requestId: string,
   optionId: string | null,
   guidance?: string | null,
+  inputResponse?: PermissionInputResponse | null,
 ): Promise<void> {
-  return invoke("session_resolve_permission", { requestId, optionId, guidance: guidance ?? null });
+  return invoke("session_resolve_permission", {
+    requestId,
+    optionId,
+    guidance: guidance ?? null,
+    inputResponse: inputResponse ?? null,
+  });
 }
 
 export async function sessionCancel(): Promise<void> {

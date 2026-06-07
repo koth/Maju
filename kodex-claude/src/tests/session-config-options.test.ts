@@ -1198,4 +1198,134 @@ describe("session config options", () => {
       expect(optionIds).toContain("auto");
     });
   });
+
+  describe("AskUserQuestion permission bridge", () => {
+    let capturedPermissionRequest: any;
+    let permissionResponse: any;
+
+    beforeEach(() => {
+      capturedPermissionRequest = null;
+      permissionResponse = { outcome: { outcome: "cancelled" } };
+      (agent as any).client = {
+        sessionUpdate: async (notification: SessionNotification) => {
+          sessionUpdates.push(notification);
+        },
+        requestPermission: async (params: any) => {
+          capturedPermissionRequest = params;
+          return permissionResponse;
+        },
+        readTextFile: async () => ({ content: "" }),
+        writeTextFile: async () => ({}),
+      };
+      populateSession();
+    });
+
+    it("routes question options through ACP permission and returns the selected answer", async () => {
+      permissionResponse = {
+        outcome: { outcome: "selected", optionId: "ask_user_question:0:1" },
+        _meta: { "kodex.ai/permissionGuidance": "Use the simpler path." },
+      };
+
+      const canUseTool = (agent as any).canUseTool(SESSION_ID);
+      const result = await canUseTool(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Which implementation approach should I use?",
+              header: "Approach",
+              multiSelect: false,
+              options: [
+                { label: "Fast", description: "Smallest viable change" },
+                {
+                  label: "Robust",
+                  description: "Add tests and validation",
+                  preview: "More files touched",
+                },
+              ],
+            },
+          ],
+        },
+        { signal: new AbortController().signal, suggestions: undefined, toolUseID: "toolu_ask" },
+      );
+
+      expect(capturedPermissionRequest).not.toBeNull();
+      expect(capturedPermissionRequest.options).toEqual([
+        { kind: "allow_once", name: "Fast", optionId: "ask_user_question:0:0" },
+        { kind: "allow_once", name: "Robust", optionId: "ask_user_question:0:1" },
+      ]);
+      expect(capturedPermissionRequest.toolCall.title).toBe("Ask user: Approach");
+      expect(result.behavior).toBe("allow");
+      expect(result.updatedInput.answers).toEqual({
+        "Which implementation approach should I use?": "Robust",
+      });
+      expect(result.updatedInput.annotations).toEqual({
+        "Which implementation approach should I use?": {
+          preview: "More files touched",
+          notes: "Use the simpler path.",
+        },
+      });
+    });
+
+    it("uses structured multi-question answers from ACP permission metadata", async () => {
+      permissionResponse = {
+        outcome: { outcome: "selected", optionId: "ask_user_question:0:0" },
+        _meta: {
+          "kodex.ai/userInputAnswers": {
+            answers: {
+              "Which implementation approach should I use?": ["Robust"],
+              "Which checks should run?": ["Unit", "Build"],
+            },
+          },
+        },
+      };
+
+      const canUseTool = (agent as any).canUseTool(SESSION_ID);
+      const result = await canUseTool(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              question: "Which implementation approach should I use?",
+              header: "Approach",
+              multiSelect: false,
+              options: [
+                { label: "Fast", description: "Smallest viable change" },
+                { label: "Robust", description: "Add tests and validation" },
+              ],
+            },
+            {
+              question: "Which checks should run?",
+              header: "Checks",
+              multiSelect: true,
+              options: [
+                { label: "Unit", description: "Run unit tests" },
+                { label: "Build", description: "Run build" },
+              ],
+            },
+          ],
+        },
+        { signal: new AbortController().signal, suggestions: undefined, toolUseID: "toolu_ask" },
+      );
+
+      expect(result.behavior).toBe("allow");
+      expect(result.updatedInput.answers).toEqual({
+        "Which implementation approach should I use?": "Robust",
+        "Which checks should run?": "Unit, Build",
+      });
+    });
+
+    it("denies malformed AskUserQuestion input without requesting permission", async () => {
+      const canUseTool = (agent as any).canUseTool(SESSION_ID);
+      const result = await canUseTool(
+        "AskUserQuestion",
+        { questions: [] },
+        { signal: new AbortController().signal, suggestions: undefined, toolUseID: "toolu_bad" },
+      );
+
+      expect(capturedPermissionRequest).toBeNull();
+      expect(result.behavior).toBe("deny");
+      expect(result.message).toBe("AskUserQuestion input was malformed.");
+    });
+  });
 });

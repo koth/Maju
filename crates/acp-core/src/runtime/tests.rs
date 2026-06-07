@@ -410,7 +410,7 @@ fn permission_broker_delivers_pending_resolution() {
     let rx = broker.register("call-1".into()).unwrap();
 
     let delivered = broker
-        .resolve("call-1", Some("allow".into()), None)
+        .resolve("call-1", Some("allow".into()), None, None)
         .unwrap();
 
     assert!(delivered);
@@ -428,6 +428,7 @@ fn permission_broker_replays_early_resolution() {
             "call-1",
             Some("allowAll".into()),
             Some("  try a read-only command instead  ".into()),
+            None,
         )
         .unwrap();
     let rx = broker.register("call-1".into()).unwrap();
@@ -446,7 +447,7 @@ fn permission_broker_cancel_clears_early_resolutions() {
     let broker = PermissionBroker::default();
 
     let delivered = broker
-        .resolve("call-1", Some("allow".into()), None)
+        .resolve("call-1", Some("allow".into()), None, None)
         .unwrap();
     broker.cancel_all().unwrap();
     let rx = broker.register("call-1".into()).unwrap();

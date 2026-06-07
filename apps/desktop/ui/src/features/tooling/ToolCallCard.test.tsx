@@ -22,6 +22,7 @@ function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
     terminal_output: null,
     error: null,
     permission_options: [],
+    permission_input: null,
     permission_decision: null,
     ...overrides,
   };

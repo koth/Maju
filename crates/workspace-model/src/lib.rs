@@ -506,6 +506,8 @@ pub struct ToolInvocation {
     #[serde(default)]
     pub permission_options: Vec<PermissionOption>,
     #[serde(default)]
+    pub permission_input: Option<PermissionInputRequest>,
+    #[serde(default)]
     pub permission_decision: Option<String>,
 }
 
@@ -520,6 +522,39 @@ pub struct PermissionOption {
     pub id: String,
     pub label: String,
     pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PermissionInputRequest {
+    #[serde(default)]
+    pub questions: Vec<PermissionInputQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub is_other: bool,
+    #[serde(default)]
+    pub is_secret: bool,
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub options: Vec<PermissionInputOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionInputOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PermissionInputResponse {
+    #[serde(default)]
+    pub answers: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -7,7 +7,9 @@ use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
@@ -19,6 +21,8 @@ type ProxyBody = BoxBody<Bytes, Infallible>;
 const TIMIAI_RESPONSES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses";
 const TIMIAI_RESPONSES_COMPACT_URL: &str =
     "https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact";
+const TIMIAI_CHAT_COMPLETIONS_URL: &str =
+    "http://api.timiai.woa.com/ai_api_manage/llmproxy/chat/completions";
 const TIMIAI_MESSAGES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/v1/messages";
 const COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
     "https://api.commandcode.ai/provider/v1/chat/completions";
@@ -368,11 +372,6 @@ async fn proxy_codex_api_request(
             "application/json",
         ));
     }
-    if normalize_proxy_provider(&provider) == "timiai" {
-        let session_id = session_id_for_proxy_provider(&config, &provider);
-        return proxy_native_codex_responses_request(payload, &api_key, &provider, &session_id)
-            .await;
-    }
     let chat_payload = match responses_payload_to_chat_payload(payload, &provider) {
         Ok(payload) => payload,
         Err(error) => {
@@ -385,6 +384,19 @@ async fn proxy_codex_api_request(
         }
     };
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, &provider);
+    if normalize_proxy_provider(&provider) == "timiai" {
+        log_chat_payload_summary("timiai_chat_completions_request", &chat_payload);
+        let session_id = session_id_for_proxy_provider(&config, &provider);
+        return proxy_chat_completions_codex_responses_request(
+            chat_payload,
+            &api_key,
+            &provider,
+            TIMIAI_CHAT_COMPLETIONS_URL,
+            requested_stream,
+            Some(&session_id),
+        )
+        .await;
+    }
     match normalize_proxy_provider(&provider) {
         "commandcode" => log_chat_payload_summary("commandcode_request", &chat_payload),
         "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
@@ -396,11 +408,34 @@ async fn proxy_codex_api_request(
     }
     let upstream_url = upstream_chat_completions_url(&provider);
 
+    proxy_chat_completions_codex_responses_request(
+        chat_payload,
+        &api_key,
+        &provider,
+        upstream_url,
+        requested_stream,
+        None,
+    )
+    .await
+}
+
+async fn proxy_chat_completions_codex_responses_request(
+    chat_payload: Value,
+    api_key: &str,
+    provider: &str,
+    upstream_url: &str,
+    requested_stream: bool,
+    session_id: Option<&str>,
+) -> anyhow::Result<Response<ProxyBody>> {
     let client = reqwest::Client::new();
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
-    let request = request.bearer_auth(api_key);
+    let request = if normalize_proxy_provider(provider) == "timiai" {
+        with_timiai_headers(request, api_key, session_id.unwrap_or_default())
+    } else {
+        request.bearer_auth(api_key)
+    };
     let request_body = serde_json::to_vec(&chat_payload)?;
     let upstream = match request.body(request_body).send().await {
         Ok(upstream) => upstream,
@@ -457,113 +492,6 @@ async fn proxy_codex_api_request(
     let mut response = Response::new(full_body(Bytes::from(body)));
     *response.status_mut() = status;
     if let Ok(value) = response_content_type.parse() {
-        response.headers_mut().insert(CONTENT_TYPE, value);
-    }
-    Ok(response)
-}
-
-async fn proxy_native_codex_responses_request(
-    payload: Value,
-    api_key: &str,
-    provider: &str,
-    session_id: &str,
-) -> anyhow::Result<Response<ProxyBody>> {
-    let normalized_provider = normalize_proxy_provider(provider);
-    let payload = if normalized_provider == "timiai" {
-        sanitize_timiai_responses_payload(payload)
-    } else {
-        payload
-    };
-    let (auth_header_name, auth_log_state, x_api_key_log_state, session_log_state) =
-        if normalized_provider == "timiai" {
-            (
-                "Authorization",
-                timiai_authorization_log_state(api_key),
-                if api_key.trim().is_empty() {
-                    "empty"
-                } else {
-                    "present"
-                },
-                "present",
-            )
-        } else {
-            (
-                "x-api-key",
-                if api_key.trim().is_empty() {
-                    "empty"
-                } else {
-                    "present"
-                },
-                if api_key.trim().is_empty() {
-                    "empty"
-                } else {
-                    "present"
-                },
-                "not_sent",
-            )
-        };
-    append_codex_api_proxy_log(&format!(
-        "native_responses_upstream_request provider={} method=POST url={} model={} stream={} input_present={} tools={} auth_header={}:{} x_api_key={} x_session_id={}",
-        normalized_provider,
-        upstream_responses_url(provider),
-        payload
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        payload
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        payload.get("input").is_some(),
-        payload
-            .get("tools")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0),
-        auth_header_name,
-        auth_log_state,
-        x_api_key_log_state,
-        session_log_state,
-    ));
-    let client = reqwest::Client::new();
-    let request = client
-        .post(upstream_responses_url(provider))
-        .header(CONTENT_TYPE, "application/json");
-    let upstream = with_native_responses_headers(request, api_key, session_id)
-        .body(serde_json::to_vec(&payload)?)
-        .send()
-        .await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())?;
-    let content_type = upstream
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-    if is_event_stream(&content_type) {
-        if normalized_provider == "timiai" {
-            return Ok(streaming_timiai_responses_response(
-                upstream,
-                status,
-                &content_type,
-            ));
-        }
-        return Ok(streaming_passthrough_response(
-            upstream,
-            status,
-            &content_type,
-        ));
-    }
-
-    let body = upstream.bytes().await?;
-    let body = if normalized_provider == "timiai" && status.is_success() {
-        sanitize_timiai_responses_response_body(body.as_ref()).unwrap_or_else(|| body.to_vec())
-    } else {
-        body.to_vec()
-    };
-    let mut response = Response::new(full_body(Bytes::from(body)));
-    *response.status_mut() = status;
-    if let Ok(value) = content_type.parse() {
         response.headers_mut().insert(CONTENT_TYPE, value);
     }
     Ok(response)
@@ -1080,27 +1008,13 @@ fn session_id_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -
 
 fn upstream_chat_completions_url(provider: &str) -> &'static str {
     match normalize_proxy_provider(provider) {
+        "timiai" => TIMIAI_CHAT_COMPLETIONS_URL,
         "commandcode" => COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL,
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
         "kimi_code" => KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_CHAT_COMPLETIONS_URL,
         _ => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
     }
-}
-
-fn upstream_responses_url(provider: &str) -> &'static str {
-    match normalize_proxy_provider(provider) {
-        "timiai" => TIMIAI_RESPONSES_URL,
-        _ => TIMIAI_RESPONSES_URL,
-    }
-}
-
-fn with_native_responses_headers(
-    request: reqwest::RequestBuilder,
-    api_key: &str,
-    session_id: &str,
-) -> reqwest::RequestBuilder {
-    with_timiai_headers(request, api_key, session_id)
 }
 
 fn with_timiai_headers(
@@ -1416,7 +1330,7 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
 
 fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Value {
     payload = normalize_chat_completion_model(payload, provider);
-    if normalize_proxy_provider(provider) != "deepseek" {
+    if !chat_payload_needs_deepseek_reasoning_compat(&payload, provider) {
         return payload;
     }
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -1443,6 +1357,16 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
         message["reasoning_content"] = Value::String(reasoning_content);
     }
     payload
+}
+
+fn chat_payload_needs_deepseek_reasoning_compat(payload: &Value, provider: &str) -> bool {
+    let normalized_provider = normalize_proxy_provider(provider);
+    normalized_provider == "deepseek"
+        || (normalized_provider == "timiai"
+            && payload
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| normalized_model_key(model).contains("deepseek")))
 }
 
 fn normalize_chat_completion_model(mut payload: Value, provider: &str) -> Value {
@@ -2657,10 +2581,23 @@ fn usage_nested_i64_field(usage: &Value, object_field: &str, field: &str) -> Opt
 }
 
 fn usage_cached_input_tokens(usage: &Value) -> Option<i64> {
-    usage_nested_i64_field(usage, "input_tokens_details", "cached_tokens")
-        .or_else(|| usage_nested_i64_field(usage, "prompt_tokens_details", "cached_tokens"))
-        .or_else(|| usage_i64_field(usage, "cache_read_input_tokens"))
-        .or_else(|| usage_i64_field(usage, "cached_input_tokens"))
+    let candidates = [
+        usage_nested_i64_field(usage, "input_tokens_details", "cached_tokens"),
+        usage_nested_i64_field(usage, "prompt_tokens_details", "cached_tokens"),
+        usage_i64_field(usage, "cache_read_input_tokens"),
+        usage_i64_field(usage, "cached_input_tokens"),
+        usage_i64_field(usage, "prompt_cache_hit_tokens"),
+        usage_i64_field(usage, "cache_hit_input_tokens"),
+        usage_i64_field(usage, "cache_read_tokens"),
+        usage_i64_field(usage, "cache_hit_tokens"),
+        usage_i64_field(usage, "cached_tokens"),
+    ];
+    candidates
+        .iter()
+        .copied()
+        .flatten()
+        .find(|value| *value > 0)
+        .or_else(|| candidates.iter().copied().flatten().next())
 }
 
 fn usage_reasoning_output_tokens(usage: &Value) -> Option<i64> {
@@ -3122,75 +3059,14 @@ fn streaming_passthrough_response(
     response
 }
 
-fn streaming_timiai_responses_response(
-    upstream: reqwest::Response,
-    status: StatusCode,
-    content_type: &str,
-) -> Response<ProxyBody> {
-    let upstream_stream = upstream.bytes_stream();
-    let stream = futures::stream::unfold(
-        (
-            upstream_stream,
-            TimiaiResponsesSseSanitizer::default(),
-            false,
-        ),
-        |(mut upstream_stream, mut sanitizer, done)| async move {
-            if done {
-                return None;
-            }
-            loop {
-                match upstream_stream.next().await {
-                    Some(Ok(chunk)) => {
-                        let bytes = sanitizer.push_chunk(&chunk);
-                        if bytes.is_empty() {
-                            continue;
-                        }
-                        return Some((
-                            Ok(Frame::data(Bytes::from(bytes))),
-                            (upstream_stream, sanitizer, false),
-                        ));
-                    }
-                    Some(Err(error)) => {
-                        append_codex_api_proxy_log(&format!(
-                            "timiai_responses_sse_read_error error={error}"
-                        ));
-                        let bytes = sanitizer.finish();
-                        if bytes.is_empty() {
-                            return None;
-                        }
-                        return Some((
-                            Ok(Frame::data(Bytes::from(bytes))),
-                            (upstream_stream, sanitizer, true),
-                        ));
-                    }
-                    None => {
-                        let bytes = sanitizer.finish();
-                        if bytes.is_empty() {
-                            return None;
-                        }
-                        return Some((
-                            Ok(Frame::data(Bytes::from(bytes))),
-                            (upstream_stream, sanitizer, true),
-                        ));
-                    }
-                }
-            }
-        },
-    );
-    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
-    *response.status_mut() = status;
-    if let Ok(value) = content_type.parse() {
-        response.headers_mut().insert(CONTENT_TYPE, value);
-    }
-    response
-}
-
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct TimiaiResponsesSseSanitizer {
     buffer: String,
     removed_reasoning_events: usize,
 }
 
+#[cfg(test)]
 impl TimiaiResponsesSseSanitizer {
     fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
         self.buffer.push_str(&String::from_utf8_lossy(chunk));
@@ -3228,6 +3104,7 @@ impl TimiaiResponsesSseSanitizer {
     }
 }
 
+#[cfg(test)]
 fn sanitize_timiai_responses_sse_event(event: &str) -> Option<String> {
     let event_name = sse_event_name(event);
     let data = sse_data_line(event);
@@ -3259,12 +3136,14 @@ fn sanitize_timiai_responses_sse_event(event: &str) -> Option<String> {
     Some(output.trim_end().to_string())
 }
 
+#[cfg(test)]
 fn sse_event_name(event: &str) -> Option<&str> {
     event
         .lines()
         .find_map(|line| line.strip_prefix("event:").map(str::trim))
 }
 
+#[cfg(test)]
 fn responses_event_is_reasoning(value: &Value) -> bool {
     if value
         .get("type")
@@ -3281,12 +3160,7 @@ fn responses_event_is_reasoning(value: &Value) -> bool {
         == Some("reasoning")
 }
 
-fn sanitize_timiai_responses_response_body(body: &[u8]) -> Option<Vec<u8>> {
-    let mut value = serde_json::from_slice::<Value>(body).ok()?;
-    sanitize_responses_value(&mut value);
-    serde_json::to_vec(&value).ok()
-}
-
+#[cfg(test)]
 fn sanitize_responses_value(value: &mut Value) {
     remove_reasoning_output_items(value);
     normalize_responses_usage_fields(value);
@@ -3296,6 +3170,7 @@ fn sanitize_responses_value(value: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn normalize_responses_usage_fields(value: &mut Value) {
     let Some(usage) = value.get_mut("usage") else {
         return;
@@ -3337,6 +3212,7 @@ fn normalize_responses_usage_fields(value: &mut Value) {
     );
 }
 
+#[cfg(test)]
 fn upsert_usage_detail_i64(
     usage: &mut Map<String, Value>,
     object_field: &str,
@@ -3354,6 +3230,7 @@ fn upsert_usage_detail_i64(
     }
 }
 
+#[cfg(test)]
 fn remove_reasoning_output_items(value: &mut Value) {
     let Some(output) = value.get_mut("output").and_then(Value::as_array_mut) else {
         return;
@@ -4432,9 +4309,12 @@ mod tests {
     }
 
     #[test]
-    fn timiai_provider_uses_native_responses_and_messages() {
+    fn timiai_provider_uses_chat_completions_for_codex_and_native_messages() {
         assert_eq!(normalize_proxy_provider("timi-ai"), "timiai");
-        assert_eq!(upstream_responses_url("timiai"), TIMIAI_RESPONSES_URL);
+        assert_eq!(
+            upstream_chat_completions_url("timiai"),
+            TIMIAI_CHAT_COMPLETIONS_URL
+        );
         assert_eq!(upstream_messages_url("timiai"), TIMIAI_MESSAGES_URL);
         assert!(is_claude_family_model("claude-sonnet-4.6"));
         assert!(is_claude_family_model("anthropic/claude-sonnet-4.6"));
@@ -4727,7 +4607,7 @@ mod tests {
     fn normalizes_timiai_responses_sse_usage_cache_fields() {
         let body = concat!(
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":80},\"completion_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":130}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":0},\"prompt_cache_hit_tokens\":80,\"completion_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":130}}}\n\n",
         );
 
         let mut sanitizer = TimiaiResponsesSseSanitizer::default();
@@ -4740,6 +4620,41 @@ mod tests {
         assert!(text.contains("\"total_tokens\":130"));
         assert!(text.contains("\"input_tokens_details\":{\"cached_tokens\":80}"));
         assert!(text.contains("\"output_tokens_details\":{\"reasoning_tokens\":3}"));
+    }
+
+    #[test]
+    fn converts_chat_usage_prompt_cache_hit_tokens_to_cached_input_tokens() {
+        let chat = json!({
+            "id": "chatcmpl_1",
+            "created": 123,
+            "model": "deepseek-v4-pro-r1",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "done"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 120,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "prompt_cache_hit_tokens": 96,
+                "completion_tokens": 10,
+                "total_tokens": 130
+            }
+        });
+
+        let response = chat_response_to_responses_response(chat).unwrap();
+
+        assert_eq!(response["usage"]["input_tokens"], 120);
+        assert_eq!(
+            response["usage"]["input_tokens_details"]["cached_tokens"],
+            96
+        );
+        assert_eq!(response["usage"]["output_tokens"], 10);
+        assert_eq!(response["usage"]["total_tokens"], 130);
     }
 
     #[test]
@@ -5345,6 +5260,25 @@ mod tests {
         assert_eq!(
             normalized["messages"][2]["reasoning_content"],
             "already present"
+        );
+    }
+
+    #[test]
+    fn normalizes_timiai_deepseek_assistant_messages_before_chat_upstream_request() {
+        let payload = json!({
+            "model": "deepseek-v4-pro-r1",
+            "messages": [
+                { "role": "system", "content": "base" },
+                { "role": "assistant", "content": "older answer" }
+            ],
+            "stream": true
+        });
+
+        let normalized = normalize_chat_payload_for_provider(payload, "timiai");
+
+        assert_eq!(
+            normalized["messages"][1]["reasoning_content"],
+            DEEPSEEK_REASONING_PLACEHOLDER
         );
     }
 

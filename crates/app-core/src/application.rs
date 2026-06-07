@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, DiffHunk, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
+    AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
     ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
 };
@@ -17,7 +17,7 @@ use workspace_model::{
 mod bootstrap;
 mod change_sets;
 mod config;
-mod diff_utils;
+pub(crate) mod diff_utils;
 mod events;
 mod inline_think;
 mod path_utils;
@@ -46,8 +46,8 @@ pub use ui_snapshot::{UiPatchCursor, UiSnapshotUpdate};
 const AGENT_DEFAULT_MODEL_LABEL: &str = "Agent default";
 const RESTORED_INCOMPLETE_TOOL_REASON: &str = "上次会话结束前未完成";
 const BACKGROUND_RUNTIME_IDLE_GRACE: Duration = Duration::from_secs(10 * 60);
-const PENDING_TOOL_DIFF_PREVIEW_TTL: Duration = Duration::from_secs(5);
 const PENDING_TOOL_WRITE_DETECTION_TTL: Duration = Duration::from_secs(5);
+const PENDING_TOOL_WRITE_SETTLE_DELAY: Duration = Duration::from_secs(1);
 const PENDING_TOOL_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 fn make_log_id() -> String {
@@ -61,15 +61,6 @@ fn make_log_id() -> String {
 
 struct InFlightPrompt {
     task: PromptTask,
-}
-
-struct PendingToolDiffPreview {
-    call_id: String,
-    path: String,
-    hunks: Vec<DiffHunk>,
-    turn_user_message_id: Option<uuid::Uuid>,
-    next_retry_at: Instant,
-    expires_at: Instant,
 }
 
 struct PendingToolWriteDetection {
@@ -96,7 +87,6 @@ struct SessionRuntime {
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
     current_turn_user_message_id: Option<uuid::Uuid>,
-    pending_tool_diff_previews: Vec<PendingToolDiffPreview>,
     pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
     last_viewed: Instant,
@@ -217,18 +207,17 @@ pub struct Application {
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
     current_turn_user_message_id: Option<uuid::Uuid>,
-    pending_tool_diff_previews: Vec<PendingToolDiffPreview>,
     pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
 }
 
 fn current_timestamp() -> String {
     use std::time::SystemTime;
-    let secs = SystemTime::now()
+    let millis = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+        .as_millis();
+    format!("{millis}")
 }
 
 fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<String> {
@@ -391,10 +380,6 @@ impl Application {
         std::mem::swap(
             &mut self.current_turn_user_message_id,
             &mut runtime.current_turn_user_message_id,
-        );
-        std::mem::swap(
-            &mut self.pending_tool_diff_previews,
-            &mut runtime.pending_tool_diff_previews,
         );
         std::mem::swap(
             &mut self.pending_tool_write_detections,

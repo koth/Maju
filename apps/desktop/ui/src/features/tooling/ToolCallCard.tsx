@@ -480,6 +480,7 @@ function sameToolForRender(prev: ToolInvocation, next: ToolInvocation) {
     sameStringArray(prev.diff_paths, next.diff_paths) &&
     sameLogs(prev.logs, next.logs) &&
     samePermissionOptions(prev.permission_options, next.permission_options) &&
+    samePermissionInput(prev.permission_input, next.permission_input) &&
     sameTerminalOutput(prev.terminal_output, next.terminal_output) &&
     sameDiffPreviews(prev.diff_previews, next.diff_previews)
   );
@@ -518,6 +519,15 @@ function samePermissionOptions(
     }
   }
   return true;
+}
+
+function samePermissionInput(
+  prev: ToolInvocation["permission_input"],
+  next: ToolInvocation["permission_input"],
+) {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return JSON.stringify(prev) === JSON.stringify(next);
 }
 
 function sameTerminalOutput(

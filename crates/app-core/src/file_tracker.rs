@@ -250,6 +250,12 @@ impl FileChangeTracker {
             .is_some_and(|window| window.candidates.contains(&normalized))
     }
 
+    pub(crate) fn has_active_candidates(&self, call_id: &str) -> bool {
+        self.active_windows
+            .get(call_id)
+            .is_some_and(|window| !window.candidates.is_empty())
+    }
+
     fn normalize_candidate_path(&self, path: &str) -> String {
         normalize_path_for_storage(path, &self.workspace_root)
             .trim_start_matches("./")

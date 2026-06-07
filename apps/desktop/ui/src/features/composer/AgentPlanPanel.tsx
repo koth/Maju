@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import type { AgentPlanEntry, PermissionOption, UiSnapshot } from "../../types";
+import type {
+  AgentPlanEntry,
+  PermissionInputQuestion,
+  PermissionInputRequest,
+  PermissionInputResponse,
+  PermissionOption,
+  UiSnapshot,
+} from "../../types";
 import MarkdownBody from "../conversation/MarkdownBody";
 import "./Composer.css";
 
@@ -19,13 +26,19 @@ export interface PendingPermissionRequest {
   details?: string | null;
   planText?: string | null;
   options: PermissionOption[];
+  input?: PermissionInputRequest | null;
   isPlanApproval?: boolean;
 }
 
 interface PermissionRequestPanelProps {
   request: PendingPermissionRequest | null;
   entries: AgentPlanEntry[];
-  onPermissionSelect?: (requestId: string, optionId: string | null, guidance?: string | null) => void;
+  onPermissionSelect?: (
+    requestId: string,
+    optionId: string | null,
+    guidance?: string | null,
+    inputResponse?: PermissionInputResponse | null,
+  ) => void;
 }
 
 interface PlanApprovalModalProps {
@@ -90,9 +103,13 @@ export function PermissionRequestPanel({
   onPermissionSelect,
 }: PermissionRequestPanelProps) {
   const [guidance, setGuidance] = useState("");
+  const [inputAnswers, setInputAnswers] = useState<Record<string, string[]>>({});
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setGuidance("");
+    setInputAnswers({});
+    setCustomAnswers({});
   }, [request?.requestId]);
 
   if (!request) return null;
@@ -108,8 +125,17 @@ export function PermissionRequestPanel({
       )
     : null;
   const actionOptions = planApprovalActions ?? request.options;
-  const showGuidance = !request.isPlanApproval && actionOptions.some(requiresPermissionGuidance);
+  const hasInputQuestions = !request.isPlanApproval && (request.input?.questions.length ?? 0) > 0;
+  const showGuidance = !hasInputQuestions && !request.isPlanApproval && actionOptions.some(requiresPermissionGuidance);
   const guidanceText = guidance.trim();
+  const submitOption = findInputSubmitOption(request.options);
+  const cancelOption = findInputCancelOption(request.options);
+  const inputResponse = hasInputQuestions
+    ? buildPermissionInputResponse(request.input!.questions, inputAnswers, customAnswers)
+    : null;
+  const inputComplete = hasInputQuestions
+    ? request.input!.questions.every((question) => (inputResponse?.answers[question.id] ?? []).length > 0)
+    : false;
 
   return (
     <section
@@ -128,7 +154,7 @@ export function PermissionRequestPanel({
         {showEntries && <span className="permission-request-count">{completed}/{entries.length}</span>}
       </div>
 
-      {!request.isPlanApproval && details && (
+      {!request.isPlanApproval && !hasInputQuestions && details && (
         <div className="permission-request-detail">{details}</div>
       )}
 
@@ -164,25 +190,71 @@ export function PermissionRequestPanel({
         </label>
       )}
 
-      <div className="permission-request-actions">
-        {actionOptions.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            className={`permission-request-action ${permissionOptionTone(option, request.isPlanApproval)}`}
-            disabled={!canAct || (requiresPermissionGuidance(option) && !guidanceText)}
-            onClick={() => {
-              if (requiresPermissionGuidance(option)) {
-                onPermissionSelect?.(request.requestId, option.id, guidanceText);
-              } else {
-                onPermissionSelect?.(request.requestId, option.id);
-              }
-            }}
-          >
-            {permissionOptionLabel(option, request.isPlanApproval)}
-          </button>
-        ))}
-      </div>
+      {hasInputQuestions ? (
+        <>
+          <div className="permission-input-form">
+            {request.input!.questions.map((question) => (
+              <PermissionInputQuestionField
+                key={question.id}
+                question={question}
+                selectedAnswers={inputAnswers[question.id] ?? []}
+                customAnswer={customAnswers[question.id] ?? ""}
+                disabled={!canAct}
+                onAnswersChange={(answers) =>
+                  setInputAnswers((current) => ({ ...current, [question.id]: answers }))
+                }
+                onCustomAnswerChange={(answer) =>
+                  setCustomAnswers((current) => ({ ...current, [question.id]: answer }))
+                }
+              />
+            ))}
+          </div>
+          <div className="permission-request-actions">
+            {cancelOption && (
+              <button
+                type="button"
+                className="permission-request-action is-danger"
+                disabled={!canAct}
+                onClick={() => onPermissionSelect?.(request.requestId, cancelOption.id)}
+              >
+                取消
+              </button>
+            )}
+            <button
+              type="button"
+              className="permission-request-action is-primary"
+              disabled={!canAct || !submitOption || !inputComplete || !inputResponse}
+              onClick={() => {
+                if (submitOption && inputResponse) {
+                  onPermissionSelect?.(request.requestId, submitOption.id, null, inputResponse);
+                }
+              }}
+            >
+              提交回答
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="permission-request-actions">
+          {actionOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`permission-request-action ${permissionOptionTone(option, request.isPlanApproval)}`}
+              disabled={!canAct || (requiresPermissionGuidance(option) && !guidanceText)}
+              onClick={() => {
+                if (requiresPermissionGuidance(option)) {
+                  onPermissionSelect?.(request.requestId, option.id, guidanceText);
+                } else {
+                  onPermissionSelect?.(request.requestId, option.id);
+                }
+              }}
+            >
+              {permissionOptionLabel(option, request.isPlanApproval)}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -262,6 +334,124 @@ export function PlanApprovalModal({
         </div>
       </section>
     </div>
+  );
+}
+
+interface PermissionInputQuestionFieldProps {
+  question: PermissionInputQuestion;
+  selectedAnswers: string[];
+  customAnswer: string;
+  disabled: boolean;
+  onAnswersChange: (answers: string[]) => void;
+  onCustomAnswerChange: (answer: string) => void;
+}
+
+function PermissionInputQuestionField({
+  question,
+  selectedAnswers,
+  customAnswer,
+  disabled,
+  onAnswersChange,
+  onCustomAnswerChange,
+}: PermissionInputQuestionFieldProps) {
+  const showCustomAnswer = question.is_other || question.options.length === 0;
+
+  return (
+    <fieldset className="permission-input-question">
+      <legend>
+        <span className="permission-input-header">{question.header || "Question"}</span>
+        <span className="permission-input-prompt">{question.question}</span>
+      </legend>
+
+      {question.options.length > 0 && (
+        <div className="permission-input-options">
+          {question.options.map((option) => {
+            const selected = selectedAnswers.includes(option.label);
+            return (
+              <label className="permission-input-option" key={option.label}>
+                <input
+                  type={question.multi_select ? "checkbox" : "radio"}
+                  name={`permission-input-${question.id}`}
+                  checked={selected}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    if (question.multi_select) {
+                      const nextAnswers = event.currentTarget.checked
+                        ? [...selectedAnswers, option.label]
+                        : selectedAnswers.filter((answer) => answer !== option.label);
+                      onAnswersChange([...new Set(nextAnswers)]);
+                      return;
+                    }
+                    onAnswersChange([option.label]);
+                  }}
+                />
+                <span>
+                  <span className="permission-input-option-label">{option.label}</span>
+                  {option.description && (
+                    <span className="permission-input-option-description">{option.description}</span>
+                  )}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+
+      {showCustomAnswer && (
+        <label className="permission-input-custom">
+          <span>{question.options.length > 0 ? "其他" : "回答"}</span>
+          <input
+            type={question.is_secret ? "password" : "text"}
+            value={customAnswer}
+            disabled={disabled}
+            onChange={(event) => onCustomAnswerChange(event.currentTarget.value)}
+            placeholder="输入回答"
+          />
+        </label>
+      )}
+    </fieldset>
+  );
+}
+
+function buildPermissionInputResponse(
+  questions: PermissionInputQuestion[],
+  selectedAnswers: Record<string, string[]>,
+  customAnswers: Record<string, string>,
+): PermissionInputResponse {
+  const answers: Record<string, string[]> = {};
+  for (const question of questions) {
+    const values = [...(selectedAnswers[question.id] ?? [])];
+    const custom = (customAnswers[question.id] ?? "").trim();
+    if (custom) {
+      if (question.multi_select) {
+        values.push(custom);
+      } else {
+        values.splice(0, values.length, custom);
+      }
+    }
+    const uniqueValues = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+    if (uniqueValues.length > 0) {
+      answers[question.id] = uniqueValues;
+    }
+  }
+  return { answers };
+}
+
+function findInputSubmitOption(options: PermissionOption[]) {
+  return (
+    options.find((option) => option.id === "submit") ??
+    options.find((option) => option.id === "approved") ??
+    options.find((option) => option.id === "allow") ??
+    options.find((option) => option.kind.toLowerCase().includes("allow"))
+  );
+}
+
+function findInputCancelOption(options: PermissionOption[]) {
+  return (
+    options.find((option) => option.id === "cancel") ??
+    options.find((option) => option.id === "abort") ??
+    options.find((option) => option.id === "reject") ??
+    options.find((option) => option.kind.toLowerCase().includes("reject"))
   );
 }
 

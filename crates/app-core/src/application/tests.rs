@@ -9,10 +9,10 @@ use super::diff_utils::{
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
 use super::{
-    Application, current_timestamp, humanize_acp_disconnect_reason, normalize_tracked_path,
-    turn_finished_notice,
+    current_timestamp, humanize_acp_disconnect_reason, normalize_tracked_path,
+    turn_finished_notice, Application,
 };
-use acp_core::{ClientEvent, diff_to_hunks};
+use acp_core::{diff_to_hunks, ClientEvent};
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 use workspace_model::{
     ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind, DiffQuality,
@@ -263,23 +263,17 @@ fn switched_away_in_flight_prompt_completes_under_original_session() {
 
     assert_eq!(app.ui.session.id.to_string(), visible_session_id);
     let (messages, tools, _) = app.store.load_session(&background_session_id).unwrap();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == MessageRole::User
-                && message.body.contains("finish while hidden"))
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.role == MessageRole::Assistant
-                && message.body.contains("Real ACP session connected"))
-    );
-    assert!(
-        tools
-            .iter()
-            .any(|tool| tool.status == ToolStatus::Succeeded)
-    );
+    assert!(messages
+        .iter()
+        .any(|message| message.role == MessageRole::User
+            && message.body.contains("finish while hidden")));
+    assert!(messages
+        .iter()
+        .any(|message| message.role == MessageRole::Assistant
+            && message.body.contains("Real ACP session connected")));
+    assert!(tools
+        .iter()
+        .any(|tool| tool.status == ToolStatus::Succeeded));
 }
 
 #[test]
@@ -386,6 +380,7 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
         name: "Read".into(),
         options: vec![],
         details: None,
+        input: None,
     });
     let needs_attention = app.runtime_needs_attention();
     app.swap_visible_state_with_runtime(&mut runtime);
@@ -398,12 +393,11 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
     app.runtime_registry.insert(runtime);
 
     assert_eq!(app.ui.session.id.to_string(), visible_session_id);
-    assert!(
-        app.ui
-            .tools
-            .iter()
-            .all(|tool| tool.call_id != "permission-1")
-    );
+    assert!(app
+        .ui
+        .tools
+        .iter()
+        .all(|tool| tool.call_id != "permission-1"));
     let background = app
         .session_list()
         .unwrap()
@@ -426,6 +420,7 @@ fn local_permission_selection_marks_tool_succeeded() {
         name: "Bash".into(),
         options: vec![],
         details: Some("Path: D:/work/repo/src/app.ts".into()),
+        input: None,
     });
 
     app.mark_tool_permission_selected("permission-1", "allow");

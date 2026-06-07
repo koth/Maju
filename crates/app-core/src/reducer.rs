@@ -1,10 +1,10 @@
 use acp_core::{ClientEvent, diff_to_hunks};
 use serde_json::{Map, Value};
+use crate::application::diff_utils::reverse_apply_diff_hunks;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
-    DiffLineKind, FileChangeType, SessionFileChange, SessionStatus, SidebarSection, TerminalOutput,
-    ThinkingStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus,
-    UiSnapshot,
+    DiffLineKind, SessionStatus, SidebarSection, TerminalOutput, ThinkingStatus, TimelineItem,
+    ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
 };
 
 const MAX_TOOL_DETAIL_CHARS: usize = 32 * 1024;
@@ -54,12 +54,11 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             }
             push_message(ui, role, content);
         }
+        ClientEvent::ContextCompactionStarted { message } => {
+            push_context_compaction_notice(ui, context_compaction_started_notice(&message));
+        }
         ClientEvent::ContextCompacted { message } => {
-            push_standalone_message(
-                ui,
-                workspace_model::MessageRole::System,
-                context_compacted_notice(&message),
-            );
+            push_or_replace_context_compaction_notice(ui, context_compacted_notice(&message));
         }
         ClientEvent::ToolMessageChunk { id, content } => {
             finalize_running_children(ui, &id, None);
@@ -176,6 +175,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             name,
             options,
             details,
+            input,
         } => {
             let tool = ensure_tool(ui, &id, None, &name, "permission", false);
             let summary = if options.is_empty() {
@@ -194,6 +194,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.status = ToolStatus::Running;
             tool.error = None;
             tool.permission_options = options;
+            tool.permission_input = input;
             tool.permission_decision = None;
             if let Some(details) = details.filter(|details| !details.trim().is_empty()) {
                 tool.detail_text = details.clone();
@@ -216,6 +217,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.summary = outcome.clone();
                 tool.status = ToolStatus::Succeeded;
                 tool.permission_options.clear();
+                tool.permission_input = None;
                 tool.permission_decision = Some(outcome.clone());
                 tool.error = None;
                 push_tool_log(tool, "Decision", outcome);
@@ -319,14 +321,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             } else {
                 Vec::new()
             };
-            let has_existing_preview_for_path = ui_has_tool_preview_for_path(ui, &normalized_path);
             let is_bogus_whole_file_diff = looks_like_full_file_or_fragment_expansion(&diff_hunks);
-            let is_synthetic_full_file_fallback = is_synthetic_write
-                && old_text.as_deref().map_or(true, |text| {
-                    text.is_empty() || looks_like_fragment_old_text(text, &new_text)
-                })
-                && has_existing_preview_for_path
-                && is_bogus_whole_file_diff;
 
             if let Some(tool) = if is_synthetic_write {
                 find_recent_tool_for_path(ui, &normalized_path)
@@ -347,9 +342,16 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                         normalize_change_path(&preview.path.display().to_string())
                             == normalized_path
                     }) {
-                        preview.path = path_buf;
-                        preview.hunks = diff_hunks.clone();
-                    } else {
+                       preview.path = path_buf;
+                        let cumulative_hunks = if let Some(baseline) =
+                            reverse_apply_diff_hunks(&new_text, &preview.hunks)
+                        {
+                            diff_to_hunks(Some(&baseline), &new_text)
+                        } else {
+                            diff_hunks.clone()
+                        };
+                        preview.hunks = cumulative_hunks;
+                   } else {
                         tool.diff_previews.push(ToolDiffPreview {
                             path: path_buf,
                             hunks: diff_hunks.clone(),
@@ -373,12 +375,16 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 .iter_mut()
                 .find(|file| file.path.display().to_string() == path)
             {
-                changed_file.hunks = diff_hunks.clone();
+                let cumulative_hunks = if let Some(baseline) =
+                    reverse_apply_diff_hunks(&new_text, &changed_file.hunks)
+                {
+                    diff_to_hunks(Some(&baseline), &new_text)
+                } else {
+                    diff_hunks.clone()
+                };
+                changed_file.hunks = cumulative_hunks;
             }
 
-            if is_synthetic_write && !is_synthetic_full_file_fallback {
-                upsert_session_change(ui, path, old_text, new_text);
-            }
         }
         ClientEvent::ToolDiffPreview { id, path, hunks } => {
             let normalized_path = normalize_change_path(&path);
@@ -496,10 +502,52 @@ fn new_message_content(role: workspace_model::MessageRole, content: String) -> O
 fn context_compacted_notice(message: &str) -> String {
     let message = message.trim();
     if message.is_empty() {
-        "上下文已压缩".into()
+        "上下文已自动压缩".into()
     } else {
         message.to_string()
     }
+}
+
+fn context_compaction_started_notice(message: &str) -> String {
+    let message = message.trim();
+    if message.is_empty() {
+        "正在压缩上下文".into()
+    } else {
+        message.to_string()
+    }
+}
+
+fn is_context_compaction_started_notice(body: &str) -> bool {
+    body.trim() == "正在压缩上下文"
+}
+
+fn push_context_compaction_notice(ui: &mut UiSnapshot, content: String) {
+    if ui.messages.last().is_some_and(|message| {
+        message.role == workspace_model::MessageRole::System
+            && is_context_compaction_started_notice(&message.body)
+    }) {
+        return;
+    }
+    push_standalone_message(ui, workspace_model::MessageRole::System, content);
+}
+
+fn push_or_replace_context_compaction_notice(ui: &mut UiSnapshot, content: String) {
+    let last_message_id = ui.timeline.last().and_then(|item| match item {
+        TimelineItem::Message(id) => Some(*id),
+        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+    });
+    if let Some(message_id) = last_message_id
+        && let Some(message) = ui.messages.iter_mut().find(|message| {
+            message.id == message_id
+                && message.role == workspace_model::MessageRole::System
+                && is_context_compaction_started_notice(&message.body)
+        })
+    {
+        message.body = content;
+        return;
+    }
+
+    push_standalone_message(ui, workspace_model::MessageRole::System, content);
 }
 
 fn is_internal_session_metadata(content: &str) -> bool {
@@ -525,23 +573,6 @@ fn find_recent_tool_for_path<'a>(
     })
 }
 
-fn tool_has_preview_for_path(tool: &ToolInvocation, normalized_path: &str) -> bool {
-    tool.diff_previews.iter().any(|preview| {
-        normalize_change_path(&preview.path.display().to_string()) == normalized_path
-            && preview.hunks.iter().any(|hunk| {
-                hunk.lines
-                    .iter()
-                    .any(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
-            })
-    })
-}
-
-fn ui_has_tool_preview_for_path(ui: &UiSnapshot, normalized_path: &str) -> bool {
-    ui.tools
-        .iter()
-        .any(|tool| tool_has_preview_for_path(tool, normalized_path))
-}
-
 fn looks_like_full_file_or_fragment_expansion(hunks: &[DiffHunk]) -> bool {
     let mut added = 0;
     let mut removed = 0;
@@ -553,91 +584,6 @@ fn looks_like_full_file_or_fragment_expansion(hunks: &[DiffHunk]) -> bool {
         }
     }
     added >= 20 && (removed == 0 || added > removed * 4)
-}
-
-fn upsert_session_change(
-    ui: &mut UiSnapshot,
-    path: String,
-    old_text: Option<String>,
-    new_text: String,
-) {
-    let normalized_path = normalize_change_path(&path);
-    let normalized_old_text = old_text
-        .as_deref()
-        .map(normalize_diff_text_for_session_change);
-    let normalized_new_text = normalize_diff_text_for_session_change(&new_text);
-    let incoming_change_type = if old_text.is_none() {
-        FileChangeType::Created
-    } else {
-        FileChangeType::Modified
-    };
-
-    if let Some(index) = ui
-        .session_changes
-        .iter()
-        .position(|change| normalize_change_path(&change.path) == normalized_path)
-    {
-        let baseline = ui.session_changes[index]
-            .old_text
-            .as_deref()
-            .map(normalize_diff_text_for_session_change)
-            .or_else(|| normalized_old_text.clone())
-            .unwrap_or_default();
-        if baseline == normalized_new_text {
-            ui.session_changes.remove(index);
-            return;
-        }
-
-        let existing = &mut ui.session_changes[index];
-        if existing.old_text.is_none() && normalized_old_text.is_some() {
-            existing.old_text = normalized_old_text;
-            existing.change_type = incoming_change_type;
-        }
-        existing.new_text = normalized_new_text;
-        existing.path = normalized_path;
-        existing.timestamp = chrono_now_iso();
-        refresh_change_stats(existing);
-        if existing.added_lines == 0 && existing.removed_lines == 0 {
-            ui.session_changes.remove(index);
-        }
-        return;
-    }
-
-    if normalized_old_text.as_deref().unwrap_or_default() == normalized_new_text {
-        return;
-    }
-
-    let mut change = SessionFileChange {
-        path: normalized_path,
-        change_type: incoming_change_type,
-        old_text: normalized_old_text,
-        new_text: normalized_new_text,
-        added_lines: 0,
-        removed_lines: 0,
-        timestamp: chrono_now_iso(),
-    };
-    refresh_change_stats(&mut change);
-    if change.added_lines > 0 || change.removed_lines > 0 {
-        ui.session_changes.push(change);
-    }
-}
-
-fn refresh_change_stats(change: &mut SessionFileChange) {
-    let hunks = diff_to_hunks(change.old_text.as_deref(), &change.new_text);
-    change.added_lines = hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .filter(|line| line.kind == DiffLineKind::Added)
-        .count();
-    change.removed_lines = hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .filter(|line| line.kind == DiffLineKind::Removed)
-        .count();
-}
-
-fn normalize_diff_text_for_session_change(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn normalize_change_path(path: &str) -> String {
@@ -1049,6 +995,7 @@ fn ensure_tool<'a>(
         terminal_output: None,
         error: None,
         permission_options: Vec::new(),
+        permission_input: None,
         permission_decision: None,
     };
     let id = tool.id;
@@ -1106,7 +1053,10 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
         } else {
             ToolStatus::Interrupted
         };
-        if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
+        if tool.summary.trim().is_empty()
+            || tool.summary == "等待活动"
+            || tool.summary.starts_with("等待权限")
+        {
             tool.summary = if cancelled {
                 "已取消".into()
             } else if normal_finish {
@@ -1114,6 +1064,19 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
             } else {
                 format!("异常结束：{stop_reason}")
             };
+        }
+        if tool.kind == "permission" {
+            tool.permission_options.clear();
+            if tool.permission_decision.is_none() {
+                let decision = if cancelled {
+                    "已取消"
+                } else if normal_finish {
+                    "已完成"
+                } else {
+                    "已中断"
+                };
+                tool.permission_decision = Some(decision.into());
+            }
         }
         if !normal_finish {
             tool.error
@@ -1363,8 +1326,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use workspace_model::{
-        InspectorTab, MessageRole, RepositorySnapshot, SessionStatus, SessionSummary,
-        WorkspaceDescriptor, WorkspaceLocation,
+        InspectorTab, MessageRole, PermissionOption, RepositorySnapshot, SessionStatus,
+        SessionSummary, WorkspaceDescriptor, WorkspaceLocation,
     };
 
     fn empty_ui() -> UiSnapshot {
@@ -1507,6 +1470,79 @@ mod tests {
     }
 
     #[test]
+    fn context_compaction_started_message_is_replaced_when_completed() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ContextCompactionStarted {
+                message: "正在压缩上下文".into(),
+            },
+        );
+        assert_eq!(ui.messages.len(), 1);
+        assert_eq!(ui.messages[0].body, "正在压缩上下文");
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ContextCompacted {
+                message: "上下文已自动压缩".into(),
+            },
+        );
+
+        assert_eq!(ui.messages.len(), 1);
+        assert_eq!(ui.messages[0].role, MessageRole::System);
+        assert_eq!(ui.messages[0].body, "上下文已自动压缩");
+        assert!(matches!(ui.timeline.as_slice(), [TimelineItem::Message(_)]));
+    }
+
+    #[test]
+    fn cancelled_turn_resolves_pending_permission_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "call_bash".into(),
+                name: "Bash".into(),
+                options: vec![
+                    PermissionOption {
+                        id: "approved".into(),
+                        label: "Approved".into(),
+                        kind: "AllowOnce".into(),
+                    },
+                    PermissionOption {
+                        id: "abort".into(),
+                        label: "Abort".into(),
+                        kind: "RejectOnce".into(),
+                    },
+                ],
+                details: Some("Command: python3 -c ...".into()),
+                input: None,
+            },
+        );
+        assert_eq!(ui.session.status, SessionStatus::WaitingForTool);
+
+        apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "cancelled".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_bash")
+            .expect("permission tool should exist");
+        assert_eq!(ui.session.status, SessionStatus::Idle);
+        assert_eq!(tool.status, ToolStatus::Interrupted);
+        assert_eq!(tool.summary, "已取消");
+        assert!(tool.permission_options.is_empty());
+        assert_eq!(tool.permission_decision.as_deref(), Some("已取消"));
+        assert_eq!(tool.error.as_deref(), Some("轮次异常结束：cancelled"));
+    }
+
+    #[test]
     fn permission_resolved_allow_does_not_override_local_reject() {
         let mut ui = empty_ui();
 
@@ -1517,6 +1553,7 @@ mod tests {
                 name: "Bash".into(),
                 options: Vec::new(),
                 details: None,
+                input: None,
             },
         );
         apply_event(

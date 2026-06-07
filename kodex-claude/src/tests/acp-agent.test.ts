@@ -96,6 +96,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     agent: Agent;
     files: Map<string, string> = new Map();
     receivedText: string = "";
+    receivedSessionUpdates: SessionNotification[] = [];
     resolveAvailableCommands: (commands: AvailableCommand[]) => void;
     availableCommandsPromise: Promise<AvailableCommand[]>;
 
@@ -121,6 +122,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
 
     async sessionUpdate(params: SessionNotification): Promise<void> {
       console.error("RECEIVED", JSON.stringify(params, null, 4));
+      this.receivedSessionUpdates.push(params);
 
       switch (params.update.sessionUpdate) {
         case "agent_message_chunk": {
@@ -271,6 +273,11 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("ACP subprocess integration"
     });
 
     expect(client.takeReceivedText()).toContain("Compacting...\n\nCompacting completed.");
+    const compactionPhases = client.receivedSessionUpdates
+      .map((update) => (update.update as any)._meta?.["kodex.ai/contextCompaction"]?.phase)
+      .filter(Boolean);
+    expect(compactionPhases).toContain("started");
+    expect(compactionPhases).toContain("completed");
   }, 30000);
 });
 
@@ -3544,6 +3551,42 @@ describe("emitRawSDKMessages", () => {
       session_id: "test-session",
     };
   }
+
+  it("emits Kodex context compaction meta for SDK compaction messages", async () => {
+    const { agent, updates } = createMockAgentWithExtNotification();
+    injectSession(
+      agent,
+      [
+        { type: "system", subtype: "status", status: "compacting", session_id: "test-session" },
+        { type: "system", subtype: "compact_boundary", session_id: "test-session" },
+        createResultMessage(),
+        { type: "system", subtype: "session_state_changed", state: "idle" },
+      ],
+      false,
+    );
+
+    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "test" }] });
+
+    const compactionUpdates = updates.filter(
+      (update) => update.update?._meta?.["kodex.ai/contextCompaction"],
+    );
+    expect(
+      compactionUpdates.map((update) => update.update._meta["kodex.ai/contextCompaction"].phase),
+    ).toEqual(["started", "completed"]);
+    expect(
+      compactionUpdates.map((update) => update.update._meta["kodex.ai/contextCompaction"].message),
+    ).toEqual(["正在压缩上下文", "上下文已自动压缩"]);
+    expect(
+      compactionUpdates
+        .map((update) =>
+          update.update.sessionUpdate === "agent_message_chunk" &&
+          update.update.content.type === "text"
+            ? update.update.content.text
+            : "",
+        )
+        .join(""),
+    ).toBe("Compacting...\n\nCompacting completed.");
+  });
 
   it("emits all raw messages when set to true", async () => {
     const { agent, extNotifications } = createMockAgentWithExtNotification();

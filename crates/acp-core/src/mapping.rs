@@ -22,6 +22,7 @@ use workspace_model::{
 
 const PLAN_MODE_ID: &str = "plan";
 const BUILD_MODE_ID: &str = "build";
+const KODEX_CONTEXT_COMPACTION_META_KEY: &str = "kodex.ai/contextCompaction";
 const KODEX_CONTEXT_COMPACTED_META_KEY: &str = "kodex.ai/contextCompacted";
 const NOTIFICATION_LOG_CHANNEL_SIZE: usize = 1024;
 
@@ -639,6 +640,43 @@ fn emit_kodex_notification(
     tx: &mpsc::Sender<ClientEvent>,
     payload: &Value,
 ) -> anyhow::Result<bool> {
+    if let Some(context_compaction) = payload
+        .get("_meta")
+        .and_then(|meta| meta.get(KODEX_CONTEXT_COMPACTION_META_KEY))
+        .or_else(|| {
+            payload
+                .get("update")
+                .and_then(|update| update.get("_meta"))
+                .and_then(|meta| meta.get(KODEX_CONTEXT_COMPACTION_META_KEY))
+        })
+    {
+        let phase = context_compaction
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or("completed");
+        let default_message = if phase == "started" {
+            "正在压缩上下文"
+        } else {
+            "上下文已自动压缩"
+        };
+        let message = context_compaction
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| context_compaction.as_str())
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or(default_message)
+            .to_string();
+
+        if phase == "started" {
+            tx.send(ClientEvent::ContextCompactionStarted { message })
+                .map_err(|_| anyhow!("failed to emit context compaction start notice"))?;
+        } else {
+            tx.send(ClientEvent::ContextCompacted { message })
+                .map_err(|_| anyhow!("failed to emit context compaction notice"))?;
+        }
+        return Ok(true);
+    }
+
     let Some(context_compacted) = payload
         .get("_meta")
         .and_then(|meta| meta.get(KODEX_CONTEXT_COMPACTED_META_KEY))
@@ -1314,6 +1352,7 @@ fn emit_codebuddy_session_info(
             name: tool_name.clone(),
             options,
             details: None,
+            input: None,
         })
         .map_err(|_| anyhow!("failed to emit CodeBuddy interruption request"))?;
 
@@ -2076,6 +2115,50 @@ mod tests {
     use agent_client_protocol::schema::{PlanEntry, SessionNotification};
     use std::path::PathBuf;
 
+    #[test]
+    fn session_config_options_preserve_model_provider_meta() {
+        let option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "kodex-provider/timiai/claude-opus-4.8",
+            "options": [
+                {
+                    "value": "kodex-provider/timiai/claude-opus-4.8",
+                    "name": "claude-opus-4.8",
+                    "_meta": {
+                        "provider": "timiai"
+                    }
+                },
+                {
+                    "value": "kodex-provider/commandcode/claude-opus-4.8",
+                    "name": "claude-opus-4.8",
+                    "_meta": {
+                        "provider": "commandcode"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let state = session_config_from_options(vec![option]);
+        let model = state
+            .controls
+            .iter()
+            .find(|control| control.id == "model")
+            .unwrap();
+
+        assert_eq!(
+            model
+                .choices
+                .iter()
+                .map(|choice| choice.provider.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("timiai"), Some("commandcode")]
+        );
+    }
+
     struct TestWorkspace {
         root: PathBuf,
     }
@@ -2156,6 +2239,32 @@ mod tests {
         match rx.try_recv().unwrap() {
             ClientEvent::ContextCompacted { message } => {
                 assert_eq!(message, "上下文已压缩");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn kodex_context_compaction_started_meta_emits_structured_event() {
+        let (tx, rx) = mpsc::channel();
+        let notification = SessionNotification::new(
+            "session-1",
+            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new()),
+        )
+        .meta(serde_json::Map::from_iter([(
+            KODEX_CONTEXT_COMPACTION_META_KEY.to_string(),
+            serde_json::json!({
+                "phase": "started",
+                "message": "正在压缩上下文"
+            }),
+        )]));
+
+        emit_notification(&tx, "", notification).unwrap();
+
+        match rx.try_recv().unwrap() {
+            ClientEvent::ContextCompactionStarted { message } => {
+                assert_eq!(message, "正在压缩上下文");
             }
             other => panic!("unexpected event: {other:?}"),
         }

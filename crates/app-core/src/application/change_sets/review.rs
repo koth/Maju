@@ -35,9 +35,10 @@ impl Application {
             return;
         }
         self.review_changes_started = true;
-        self.ui.review_changes.clear();
-        self.persist_review_file_changes();
-        self.remove_current_agent_turn_change_set();
+        if self.ui.review_changes.is_empty() {
+            self.persist_review_file_changes();
+            self.remove_current_agent_turn_change_set();
+        }
     }
 
     pub(in crate::application) fn upsert_review_file_change(
@@ -62,16 +63,28 @@ impl Application {
             .review_changes
             .iter()
             .position(|change| normalize_tracked_path(&change.path) == normalized_path);
-        let base_text = if change_type == FileChangeType::Created {
+        let existing_change = existing_index.map(|index| self.ui.review_changes[index].clone());
+        let merged_change_type = if let Some(existing) = &existing_change {
+            if existing.change_type == FileChangeType::Created {
+                FileChangeType::Created
+            } else if change_type == FileChangeType::Deleted {
+                FileChangeType::Deleted
+            } else {
+                FileChangeType::Modified
+            }
+        } else {
+            change_type
+        };
+        let base_text = if let Some(existing) = &existing_change {
+            existing.old_text.clone()
+        } else if merged_change_type == FileChangeType::Created {
             None
         } else {
-            existing_index
-                .and_then(|index| self.ui.review_changes[index].old_text.clone())
-                .or(normalized_old_text)
+            normalized_old_text
         };
 
         if !is_trustworthy_review_change_text(
-            &change_type,
+            &merged_change_type,
             base_text.as_deref(),
             &normalized_new_text,
         ) {
@@ -88,7 +101,7 @@ impl Application {
         }
 
         let canonical = canonical_text_diff(
-            &change_type,
+            &merged_change_type,
             base_text.as_deref(),
             Some(&normalized_new_text),
             None,
@@ -109,14 +122,14 @@ impl Application {
             let existing = &mut self.ui.review_changes[index];
             existing.old_text = canonical.old_text;
             existing.new_text = canonical.new_text.unwrap_or(normalized_new_text);
-            existing.change_type = change_type;
+            existing.change_type = merged_change_type;
             existing.added_lines = added;
             existing.removed_lines = removed;
             existing.timestamp = timestamp;
         } else {
             self.ui.review_changes.push(SessionFileChange {
                 path: normalized_path,
-                change_type,
+                change_type: merged_change_type,
                 old_text: base_text,
                 new_text: canonical.new_text.unwrap_or(normalized_new_text),
                 added_lines: added,
@@ -190,32 +203,6 @@ impl Application {
         }
     }
 
-    pub(in crate::application) fn should_apply_tool_diff_to_review(
-        &self,
-        path: &str,
-        old_text: Option<&str>,
-        new_text: &str,
-    ) -> bool {
-        let new_text = normalize_diff_text_for_session_change(new_text);
-        let old_text = old_text.map(normalize_diff_text_for_session_change);
-        let old_lines = old_text.as_deref().map(str::lines).map(Iterator::count);
-        let new_lines = new_text.lines().count();
-
-        if old_lines.unwrap_or(0) > 20 || new_lines > 20 {
-            return true;
-        }
-
-        let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
-        let current_text = std::fs::read_to_string(self.ui.workspace.root.join(normalized_path))
-            .ok()
-            .map(|text| normalize_diff_text_for_session_change(&text));
-        if current_text.as_deref() == Some(new_text.as_str()) {
-            return true;
-        }
-
-        false
-    }
-
     pub(in crate::application) fn tool_diff_baseline_text(
         &self,
         call_id: &str,
@@ -240,28 +227,6 @@ impl Application {
             .or_else(|| candidate(self.review_new_text_for_path(normalized_path)))
             .or_else(|| candidate(self.session_new_text_for_path(normalized_path)))
             .or_else(|| candidate(self.git_head_text_for_path(normalized_path)))
-    }
-
-    pub(in crate::application) fn tool_diff_change_type(
-        &self,
-        call_id: &str,
-        normalized_path: &str,
-        old_text: Option<&str>,
-    ) -> FileChangeType {
-        if old_text.is_some_and(|text| !text.is_empty()) {
-            return FileChangeType::Modified;
-        }
-        if call_id.starts_with("fs_write:")
-            || self
-                .file_tracker
-                .was_missing_at_start(call_id, normalized_path)
-                .unwrap_or(false)
-            || self.git_head_text_for_path(normalized_path).is_none()
-        {
-            FileChangeType::Created
-        } else {
-            FileChangeType::Modified
-        }
     }
 
     pub(in crate::application) fn review_new_text_for_path(

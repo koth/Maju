@@ -1,5 +1,4 @@
 use super::*;
-use workspace_model::FileChangeType;
 
 pub(super) struct RuntimeEventApplyResult {
     pub(super) ui_changed: bool,
@@ -183,8 +182,7 @@ impl Application {
             return;
         }
 
-        let pending_retry_changed =
-            self.retry_pending_tool_diff_previews() | self.retry_pending_tool_write_detections();
+            let pending_retry_changed = self.retry_pending_tool_write_detections();
 
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
@@ -317,7 +315,6 @@ impl Application {
                     new_text,
                     ..
                 } => {
-                    had_file_changes = true;
                     // Normalize path to workspace-relative with forward slashes
                     let normalized = normalize_path_for_storage(path, &workspace_root);
                     self.file_tracker.add_diff_candidate(id, normalized.clone());
@@ -413,15 +410,8 @@ impl Application {
                 }
                 ClientEvent::ToolCompleted { id, .. } => {
                     completed_tool_ids.push(id.clone());
-                    let changes = self.file_tracker.finish_recording(id);
-                    let tracker_changed = self.apply_tracker_changes(id, changes);
-                    if tracker_changed {
-                        completed_tool_ids_with_tracker_changes.insert(id.clone());
-                    }
-                    had_file_changes |= tracker_changed;
                 }
                 ClientEvent::ToolFailed { id, .. } => {
-                    completed_tool_ids.push(id.clone());
                     let changes = self.file_tracker.finish_recording(id);
                     let tracker_changed = self.apply_tracker_changes(id, changes);
                     if tracker_changed {
@@ -454,31 +444,10 @@ impl Application {
                 path,
                 old_text,
                 new_text,
-                ..
             } = event
+                && self.apply_verified_fs_write_tool_diff(id, path, old_text.as_deref(), new_text)
             {
-                if self.should_apply_tool_diff_to_review(path, old_text.as_deref(), new_text) {
-                    let change_type = self.tool_diff_change_type(id, path, old_text.as_deref());
-                    let review_old_text = if change_type == FileChangeType::Created {
-                        None
-                    } else {
-                        old_text.clone()
-                    };
-                    self.upsert_review_file_change(
-                        path,
-                        change_type,
-                        review_old_text,
-                        new_text.clone(),
-                    );
-                    had_file_changes = true;
-                }
-            }
-            if let ClientEvent::ToolDiffPreview { id, path, hunks } = event {
-                if self.apply_tool_diff_preview_event_to_review(id, path, hunks) {
-                    had_file_changes = true;
-                } else if self.tool_diff_preview_needs_landing_retry(path, hunks) {
-                    self.enqueue_pending_tool_diff_preview(id, path, hunks);
-                }
+                had_file_changes = true;
             }
         }
         self.session.update_session_id(&events);
@@ -486,6 +455,18 @@ impl Application {
         // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
         for id in &completed_tool_ids {
             if completed_tool_ids_with_tracker_changes.contains(id) {
+                continue;
+            }
+            if self.file_tracker.has_active_candidates(id)
+                || self.completed_tool_has_detectable_write_hint(id)
+            {
+                self.enqueue_pending_tool_write_detection(id);
+                continue;
+            }
+            let changes = self.file_tracker.finish_recording(id);
+            let tracker_changed = self.apply_tracker_changes(id, changes);
+            if tracker_changed {
+                had_file_changes = true;
                 continue;
             }
             if self.detect_file_writes_from_tools(std::slice::from_ref(id)) {
@@ -546,104 +527,9 @@ impl Application {
         result
     }
 
-    fn apply_tool_diff_preview_event_to_review(
-        &mut self,
-        call_id: &str,
-        path: &str,
-        hunks: &[DiffHunk],
-    ) -> bool {
-        if self.tool_diff_preview_matches_recording_window(call_id, path, hunks) {
-            return self.apply_tool_diff_preview_to_review(path, path, hunks);
-        }
-        self.apply_landed_tool_diff_preview_to_review(call_id, path, hunks)
-    }
-
-    fn enqueue_pending_tool_diff_preview(&mut self, call_id: &str, path: &str, hunks: &[DiffHunk]) {
-        if hunks.is_empty() {
-            return;
-        }
-
-        let normalized_path = normalize_path_for_storage(path, &self.ui.workspace.root);
-        let now = self.runtime_now();
-        let next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
-        let expires_at = now + PENDING_TOOL_DIFF_PREVIEW_TTL;
-        if let Some(pending) = self
-            .pending_tool_diff_previews
-            .iter_mut()
-            .find(|pending| pending.call_id == call_id && pending.path == normalized_path)
-        {
-            pending.hunks = hunks.to_vec();
-            pending.turn_user_message_id = self.current_turn_user_message_id;
-            pending.next_retry_at = next_retry_at;
-            pending.expires_at = expires_at;
-            return;
-        }
-
-        self.pending_tool_diff_previews
-            .push(PendingToolDiffPreview {
-                call_id: call_id.to_string(),
-                path: normalized_path,
-                hunks: hunks.to_vec(),
-                turn_user_message_id: self.current_turn_user_message_id,
-                next_retry_at,
-                expires_at,
-            });
-    }
-
-    pub(super) fn retry_pending_tool_diff_previews(&mut self) -> bool {
-        if self.pending_tool_diff_previews.is_empty() {
-            return false;
-        }
-
-        let now = self.runtime_now();
-        let previous_turn_user_id = self.current_turn_user_message_id;
-        let mut changed = false;
-        let pending = std::mem::take(&mut self.pending_tool_diff_previews);
-
-        for mut preview in pending {
-            let expired = now >= preview.expires_at;
-            let owner = preview.turn_user_message_id.or(previous_turn_user_id);
-            let due = now >= preview.next_retry_at;
-            if !expired && !due {
-                self.pending_tool_diff_previews.push(preview);
-                continue;
-            }
-            if previous_turn_user_id.is_some()
-                && preview.turn_user_message_id.is_some()
-                && previous_turn_user_id != preview.turn_user_message_id
-            {
-                if !expired {
-                    self.pending_tool_diff_previews.push(preview);
-                }
-                continue;
-            }
-
-            self.current_turn_user_message_id = owner;
-            if self.apply_tool_diff_preview_event_to_review(
-                &preview.call_id,
-                &preview.path,
-                &preview.hunks,
-            ) {
-                changed = true;
-                if self.in_flight_prompt.is_none() && owner.is_some() {
-                    changed |= self.persist_current_turn_file_changes();
-                }
-            } else if !expired
-                && self.tool_diff_preview_needs_landing_retry(&preview.path, &preview.hunks)
-            {
-                preview.next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
-                self.pending_tool_diff_previews.push(preview);
-            }
-            self.current_turn_user_message_id = previous_turn_user_id;
-        }
-
-        self.current_turn_user_message_id = previous_turn_user_id;
-        changed
-    }
-
     fn enqueue_pending_tool_write_detection(&mut self, call_id: &str) {
         let now = self.runtime_now();
-        let next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
+        let next_retry_at = now + PENDING_TOOL_WRITE_SETTLE_DELAY;
         let expires_at = now + PENDING_TOOL_WRITE_DETECTION_TTL;
         if let Some(pending) = self
             .pending_tool_write_detections
@@ -694,14 +580,26 @@ impl Application {
             }
 
             self.current_turn_user_message_id = owner;
-            if self.detect_file_writes_from_tools(std::slice::from_ref(&detection.call_id)) {
+            let tracker_changes = self.file_tracker.finish_recording(&detection.call_id);
+            let tracker_changed = self.apply_tracker_changes(&detection.call_id, tracker_changes);
+            if tracker_changed {
                 self.persist_file_changes();
                 self.persist_review_file_changes();
                 changed = true;
                 if self.in_flight_prompt.is_none() && owner.is_some() {
                     changed |= self.persist_current_turn_file_changes();
                 }
-            } else if !expired && self.completed_tool_has_detectable_write_hint(&detection.call_id)
+            } else if self.detect_file_writes_from_tools(std::slice::from_ref(&detection.call_id)) {
+                self.file_tracker.discard_recording(&detection.call_id);
+                self.persist_file_changes();
+                self.persist_review_file_changes();
+                changed = true;
+                if self.in_flight_prompt.is_none() && owner.is_some() {
+                    changed |= self.persist_current_turn_file_changes();
+                }
+            } else if !expired
+                && (self.completed_tool_has_detectable_write_hint(&detection.call_id)
+                    || self.file_tracker.has_active_candidates(&detection.call_id))
             {
                 detection.next_retry_at = now + PENDING_TOOL_RETRY_INTERVAL;
                 self.pending_tool_write_detections.push(detection);

@@ -100,6 +100,7 @@ function makePermissionTool(overrides: Partial<ToolInvocation> = {}): ToolInvoca
       { id: "default", label: "Allow", kind: "AllowOnce" },
       { id: "plan", label: "Reject", kind: "RejectOnce" },
     ],
+    permission_input: null,
     permission_decision: null,
     ...overrides,
   };
@@ -183,6 +184,31 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".msg")).toHaveLength(1);
     expect(container.querySelector(".msg-assistant")?.textContent).toContain("done");
+  });
+
+  it("renders context compaction notices as divider rows", () => {
+    const pending = makeSnapshot({
+      timeline: [{ Message: "compact-start" }],
+      messages: [{ id: "compact-start", role: "System", body: "正在压缩上下文" }],
+    });
+
+    const { container, getByRole, rerender } = render(
+      <ConversationTimeline snapshot={pending} onPermissionSelect={() => {}} />,
+    );
+
+    expect(getByRole("status")).toHaveTextContent("正在压缩上下文");
+    expect(container.querySelector(".msg-context-compaction.is-pending")).not.toBeNull();
+
+    const completed = makeSnapshot({
+      timeline: [{ Message: "compact-start" }],
+      messages: [{ id: "compact-start", role: "System", body: "上下文已自动压缩" }],
+    });
+
+    rerender(<ConversationTimeline snapshot={completed} onPermissionSelect={() => {}} />);
+
+    expect(container.querySelector(".msg-context-compaction.is-completed")).not.toBeNull();
+    expect(container.textContent).toContain("上下文已自动压缩");
+    expect(container.querySelector(".msg-content-system")).toBeNull();
   });
 
   it("hides permission requests that are handled by the plan approval modal", () => {
@@ -901,9 +927,16 @@ describe("ThinkingIndicator", () => {
         agent_cli: null,
         status: "Idle",
       },
-      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      timeline: [
+        { Message: "user-1" },
+        { Message: "msg-1" },
+        { Message: "user-2" },
+        { Message: "msg-2" },
+      ],
       messages: [
+        { id: "user-1", role: "User", body: "first prompt" },
         { id: "msg-1", role: "Assistant", body: "first turn" },
+        { id: "user-2", role: "User", body: "second prompt" },
         { id: "msg-2", role: "Assistant", body: "second turn" },
       ],
     });
@@ -930,7 +963,7 @@ describe("ThinkingIndicator", () => {
     expect(text.indexOf("second turn")).toBeLessThan(text.indexOf("second.ts"));
   });
 
-  it("does not repeat a previous turn change set under a later assistant message", () => {
+  it("moves a stale same-turn change set after the later assistant message", () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -962,7 +995,7 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
     const text = container.textContent ?? "";
-    expect(text.indexOf("changed.ts")).toBeLessThan(text.indexOf("answered only"));
+    expect(text.indexOf("answered only")).toBeLessThan(text.indexOf("changed.ts"));
     expect(text.lastIndexOf("changed.ts")).toBe(text.indexOf("changed.ts"));
   });
 

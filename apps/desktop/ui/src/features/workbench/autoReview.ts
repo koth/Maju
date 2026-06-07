@@ -10,7 +10,7 @@ export function latestReviewableTurnChangeSet(
 
   return Object.values(turnChangeSetsByMessageId)
     .filter((changeSet) => changeSet.files.length > 0)
-    .sort((a, b) => timestampValue(b.updatedAt) - timestampValue(a.updatedAt))[0] ?? null;
+    .sort(compareTimelineTurnChangeSets)[0] ?? null;
 }
 
 export function reviewableTurnChangeSetSignature(
@@ -21,6 +21,7 @@ export function reviewableTurnChangeSetSignature(
     sessionId,
     changeSet.changeSetId,
     changeSet.updatedAt,
+    changeSet.timelineIndex ?? -1,
     ...changeSet.files.map((file) =>
       [
         file.path,
@@ -32,6 +33,19 @@ export function reviewableTurnChangeSetSignature(
       ].join(":"),
     ),
   ].join("|");
+}
+
+function compareTimelineTurnChangeSets(
+  a: TimelineTurnChangeSet,
+  b: TimelineTurnChangeSet,
+) {
+  const updatedDelta = timestampValue(b.updatedAt) - timestampValue(a.updatedAt);
+  if (updatedDelta !== 0) return updatedDelta;
+
+  const timelineDelta = (b.timelineIndex ?? -1) - (a.timelineIndex ?? -1);
+  if (timelineDelta !== 0) return timelineDelta;
+
+  return b.changeSetId.localeCompare(a.changeSetId);
 }
 
 function timestampValue(value: string | null | undefined) {

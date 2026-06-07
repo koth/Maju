@@ -242,6 +242,72 @@ describe("PermissionRequestPanel", () => {
     );
   });
 
+  it("submits multiple user-input questions in one permission resolution", () => {
+    const onPermissionSelect = vi.fn();
+
+    render(
+      <PermissionRequestPanel
+        entries={[]}
+        request={{
+          requestId: "ask-user",
+          title: "Ask user",
+          options: [
+            { id: "answer:0:0", label: "Fast", kind: "AllowOnce" },
+            { id: "cancel", label: "Cancel", kind: "RejectOnce" },
+          ],
+          input: {
+            questions: [
+              {
+                id: "approach",
+                header: "Approach",
+                question: "Which approach should Codex take?",
+                is_other: false,
+                is_secret: false,
+                multi_select: false,
+                options: [
+                  { label: "Fast", description: "Make the narrow fix." },
+                  { label: "Careful", description: "Audit the whole path." },
+                ],
+              },
+              {
+                id: "verify",
+                header: "Verify",
+                question: "Which checks should run?",
+                is_other: true,
+                is_secret: false,
+                multi_select: true,
+                options: [
+                  { label: "Unit", description: "Run unit tests." },
+                  { label: "Build", description: "Run build." },
+                ],
+              },
+            ],
+          },
+        }}
+        onPermissionSelect={onPermissionSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText(/Careful/));
+    fireEvent.click(screen.getByLabelText(/Unit/));
+    fireEvent.change(screen.getByPlaceholderText("输入回答"), {
+      target: { value: "also run cargo check" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交回答" }));
+
+    expect(onPermissionSelect).toHaveBeenLastCalledWith(
+      "ask-user",
+      "answer:0:0",
+      null,
+      {
+        answers: {
+          approach: ["Careful"],
+          verify: ["Unit", "also run cargo check"],
+        },
+      },
+    );
+  });
+
   it("renders plan approval as an inline composer panel", () => {
     render(
       <PermissionRequestPanel
