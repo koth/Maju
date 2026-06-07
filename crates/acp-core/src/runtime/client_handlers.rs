@@ -2,13 +2,11 @@ use super::agent_process::AgentTransport;
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
     PermissionPolicyMode, PermissionResolution, codebuddy_bash_write_hint_paths,
-    decide_codebuddy_terminal_permission, decide_permission, reject_permission_option_id,
-    request_has_direct_shell_file_mutation,
+    decide_codebuddy_terminal_permission, decide_permission,
 };
 use super::terminal::TerminalManager;
 use super::workspace_paths::{
-    paths_are_inside_workspace, read_workspace_text_file, validate_client_file_path,
-    write_workspace_text_file,
+    read_workspace_text_file, validate_client_file_path, write_workspace_text_file,
 };
 use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
@@ -34,8 +32,6 @@ use workspace_model::{
 
 const KODEX_PERMISSION_GUIDANCE_META_KEY: &str = "kodex.ai/permissionGuidance";
 const KODEX_USER_INPUT_ANSWERS_META_KEY: &str = "kodex.ai/userInputAnswers";
-const CODEX_APPLY_PATCH_GUIDANCE: &str = "Use the apply_patch tool/function for file edits instead of shell, Python, redirection, tee, Set-Content, rm/mv/cp, or other filesystem-mutating shell commands. If you need to inspect or validate, run a read-only command.";
-
 #[derive(Clone, Default)]
 struct CodeBuddyTerminalDenials {
     inner: Arc<Mutex<Vec<CodeBuddyTerminalDenial>>>,
@@ -127,7 +123,6 @@ pub(super) async fn connect_agent_client(
 ) -> anyhow::Result<()> {
     let tx_permissions = tx_events.clone();
     let permission_log_config = config.clone();
-    let permission_agent_command = config.agent_command.clone();
     let permission_workspace_root = config.workspace_root.clone();
     let permission_request_broker = permission_broker.clone();
     let fs_log_config = config.clone();
@@ -187,26 +182,8 @@ pub(super) async fn connect_agent_client(
                     .iter()
                     .map(|option| option.label.clone())
                     .collect::<Vec<_>>();
-                let mut auto_guidance = None::<String>;
                 let decision = if is_codebuddy_exit_plan_permission(&request_payload) {
                     PermissionDecision::Ask
-                } else if agent_command_is_codex(&permission_agent_command)
-                    && request_has_direct_shell_file_mutation(&request)
-                {
-                    if let Some(reject_option_id) = reject_permission_option_id(&request) {
-                        auto_guidance = Some(CODEX_APPLY_PATCH_GUIDANCE.to_string());
-                        append_runtime_event_log(
-                            &permission_log_config,
-                            "client/codex_shell_write_rejected_for_apply_patch",
-                            &json!({
-                                "toolCallId": request_id.clone(),
-                                "guidance": CODEX_APPLY_PATCH_GUIDANCE,
-                            }),
-                        )?;
-                        PermissionDecision::Select(reject_option_id)
-                    } else {
-                        PermissionDecision::Cancel
-                    }
                 } else {
                     decide_permission(
                         permission_request_broker.mode(),
@@ -216,7 +193,7 @@ pub(super) async fn connect_agent_client(
                 };
                 let permission_resolution = match decision {
                     PermissionDecision::Select(option_id) => {
-                        PermissionResolution::new(Some(option_id), auto_guidance, None)
+                        PermissionResolution::new(Some(option_id), None, None)
                     }
                     PermissionDecision::Cancel => PermissionResolution::default(),
                     PermissionDecision::Ask => {
@@ -826,7 +803,7 @@ fn ensure_codebuddy_terminal_create_permission(
     terminal_approvals: &CodeBuddyTerminalApprovals,
     request: &CreateTerminalRequest,
 ) -> anyhow::Result<CodeBuddyTerminalCreateGate> {
-    if !agent_command_is_codebuddy(agent_command) {
+    if !agent_command_uses_terminal_permission_gate(agent_command) {
         return Ok(CodeBuddyTerminalCreateGate::Allow);
     }
 
@@ -858,7 +835,7 @@ fn ensure_codebuddy_terminal_create_permission(
     match decide_codebuddy_terminal_permission(workspace_root, &command) {
         CodeBuddyTerminalPermissionDecision::Allow => Ok(CodeBuddyTerminalCreateGate::Allow),
         CodeBuddyTerminalPermissionDecision::Reject => {
-            let reason = "CodeBuddy Bash command blocked: command is not clearly read-only and no static write path could be extracted. Command was not executed.".to_string();
+            let reason = "Terminal command blocked: command is not clearly read-only and no static write path could be extracted. Command was not executed.".to_string();
             append_runtime_event_log(
                 log_config,
                 "client/terminal_create_permission_rejected",
@@ -953,6 +930,12 @@ fn ensure_codebuddy_terminal_create_permission(
     }
 }
 
+fn agent_command_uses_terminal_permission_gate(agent_command: &str) -> bool {
+    agent_command_is_codebuddy(agent_command)
+        || agent_command_is_codex(agent_command)
+        || agent_command_is_claude(agent_command)
+}
+
 fn agent_command_is_codebuddy(agent_command: &str) -> bool {
     agent_command.to_ascii_lowercase().contains("codebuddy")
 }
@@ -962,7 +945,19 @@ fn agent_command_is_codex(agent_command: &str) -> bool {
     normalized.contains("codex-acp") || normalized.contains("codex")
 }
 
+fn agent_command_is_claude(agent_command: &str) -> bool {
+    let normalized = agent_command.to_ascii_lowercase();
+    normalized.contains("claude-agent-acp")
+        || normalized.contains("claude-acp")
+        || normalized.contains("claude-code")
+        || command_basename_lower(agent_command).starts_with("claude")
+}
+
 fn terminal_request_command_text(request: &CreateTerminalRequest) -> String {
+    if let Some(script) = terminal_request_shell_script(request) {
+        return script;
+    }
+
     if request.args.is_empty() {
         return request.command.clone();
     }
@@ -973,6 +968,61 @@ fn terminal_request_command_text(request: &CreateTerminalRequest) -> String {
         command.push_str(arg);
     }
     command
+}
+
+fn terminal_request_shell_script(request: &CreateTerminalRequest) -> Option<String> {
+    if !terminal_command_is_shell(&request.command) {
+        return None;
+    }
+
+    request.args.iter().enumerate().find_map(|(index, arg)| {
+        if shell_arg_runs_command(arg) {
+            request
+                .args
+                .get(index + 1)
+                .map(|script| script.trim())
+                .filter(|script| !script.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+fn terminal_command_is_shell(command: &str) -> bool {
+    matches!(
+        command_basename_lower(command).as_str(),
+        "bash" | "dash" | "fish" | "sh" | "zsh" | "pwsh" | "powershell"
+    )
+}
+
+fn shell_arg_runs_command(arg: &str) -> bool {
+    let arg = arg.trim();
+    if matches!(arg, "-c" | "-lc" | "-ic" | "-ilc" | "-Command" | "-command") {
+        return true;
+    }
+
+    let Some(flags) = arg.strip_prefix('-') else {
+        return false;
+    };
+    !flags.starts_with('-')
+        && flags
+            .chars()
+            .all(|ch| matches!(ch, 'c' | 'e' | 'i' | 'l' | 'u' | 'x'))
+        && flags.chars().any(|ch| ch == 'c')
+}
+
+fn command_basename_lower(command: &str) -> String {
+    let basename = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim_matches(['"', '\'', '`'])
+        .to_ascii_lowercase();
+    basename
+        .strip_suffix(".exe")
+        .unwrap_or(&basename)
+        .to_string()
 }
 
 fn codebuddy_bash_soft_reject_response_option(
@@ -1257,8 +1307,8 @@ fn ensure_fs_write_permission(
 }
 
 fn fs_write_is_auto_allowed(mode: PermissionPolicyMode, workspace_root: &str, path: &Path) -> bool {
-    mode == PermissionPolicyMode::Build
-        && paths_are_inside_workspace(workspace_root, &[path.to_path_buf()])
+    let _ = (mode, workspace_root, path);
+    false
 }
 
 fn permission_request_name(request: &RequestPermissionRequest, payload: &Value) -> String {
@@ -1299,7 +1349,8 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn codebuddy_exit_plan_permission_is_detected_from_meta() {
@@ -1340,6 +1391,34 @@ mod tests {
         assert!(agent_command_is_codex("codex"));
         assert!(!agent_command_is_codex("codebuddy"));
         assert!(!agent_command_is_codex("kodex-desktop"));
+    }
+
+    #[test]
+    fn agent_command_terminal_gate_detection_covers_supported_agents() {
+        assert!(agent_command_uses_terminal_permission_gate(
+            "C:/Users/yvonchen/.kodex/bin/codebuddy.exe"
+        ));
+        assert!(agent_command_uses_terminal_permission_gate(
+            "C:/Users/yvonchen/.kodex/bin/codex-acp.exe"
+        ));
+        assert!(agent_command_uses_terminal_permission_gate(
+            "C:/Users/yvonchen/.kodex/bin/claude-agent-acp.exe"
+        ));
+        assert!(agent_command_uses_terminal_permission_gate("claude"));
+        assert!(!agent_command_uses_terminal_permission_gate("test-agent"));
+    }
+
+    #[test]
+    fn terminal_request_command_text_extracts_shell_script_for_login_shell() {
+        let request = CreateTerminalRequest::new("session-1", "/bin/zsh".to_string()).args(vec![
+            "-lc".into(),
+            "mkdir -p src/server/routes && echo ok".into(),
+        ]);
+
+        assert_eq!(
+            terminal_request_command_text(&request),
+            "mkdir -p src/server/routes && echo ok"
+        );
     }
 
     #[test]
@@ -1587,6 +1666,18 @@ mod tests {
     }
 
     #[test]
+    fn codex_terminal_mkdir_requests_permission_with_paths() {
+        assert_terminal_mkdir_requests_permission("C:/Users/yvonchen/.kodex/bin/codex-acp.exe");
+    }
+
+    #[test]
+    fn claude_terminal_mkdir_requests_permission_with_paths() {
+        assert_terminal_mkdir_requests_permission(
+            "C:/Users/yvonchen/.kodex/bin/claude-agent-acp.exe",
+        );
+    }
+
+    #[test]
     fn codebuddy_registered_terminal_denial_blocks_matching_create_request() {
         let denials = CodeBuddyTerminalDenials::default();
         denials
@@ -1617,6 +1708,61 @@ mod tests {
         .expect("permission gate should not fail");
 
         assert!(matches!(gate, CodeBuddyTerminalCreateGate::Deny { .. }));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    fn assert_terminal_mkdir_requests_permission(agent_command: &str) {
+        let broker = PermissionBroker::default();
+        let broker_for_gate = broker.clone();
+        let denials = CodeBuddyTerminalDenials::default();
+        let approvals = CodeBuddyTerminalApprovals::default();
+        let (tx, rx) = mpsc::channel();
+        let root = temp_workspace("terminal-mkdir-request");
+        let mut config = test_session_config(&root);
+        config.agent_command = agent_command.into();
+        let request = CreateTerminalRequest::new("session-1", "/bin/zsh".to_string()).args(vec![
+            "-lc".into(),
+            "mkdir -p src/server/routes && echo ok".into(),
+        ]);
+        let config_for_gate = config.clone();
+
+        let handle = thread::spawn(move || {
+            ensure_codebuddy_terminal_create_permission(
+                &broker_for_gate,
+                &tx,
+                &config_for_gate,
+                &config_for_gate.agent_command,
+                &config_for_gate.workspace_root,
+                &denials,
+                &approvals,
+                &request,
+            )
+        });
+
+        let request_id = match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal gate should emit a permission request")
+        {
+            ClientEvent::ToolPermissionRequest {
+                id, name, details, ..
+            } => {
+                assert_eq!(name, "Bash");
+                let details = details.expect("permission request should include details");
+                assert!(details.contains("Command:\nmkdir -p src/server/routes && echo ok"));
+                assert!(details.contains("Paths:\n- src/server/routes"));
+                id
+            }
+            event => panic!("unexpected event: {event:?}"),
+        };
+
+        broker
+            .resolve(&request_id, Some("allow".into()), None, None)
+            .expect("permission response should be delivered");
+        let gate = handle
+            .join()
+            .expect("permission gate thread should not panic")
+            .expect("permission gate should not fail");
+        assert!(matches!(gate, CodeBuddyTerminalCreateGate::Allow));
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
@@ -1657,12 +1803,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_fs_write_requires_user_permission_even_inside_workspace() {
+    fn read_only_fs_write_requires_user_permission_even_inside_workspace() {
         let root = temp_workspace("plan-write");
         let path = root.join("notes.md");
 
         assert!(!fs_write_is_auto_allowed(
-            PermissionPolicyMode::Plan,
+            PermissionPolicyMode::ReadOnly,
             root.to_str().unwrap(),
             &path,
         ));
@@ -1671,11 +1817,11 @@ mod tests {
     }
 
     #[test]
-    fn build_fs_write_inside_workspace_is_auto_allowed() {
+    fn build_fs_write_inside_workspace_requires_user_permission() {
         let root = temp_workspace("build-write");
         let path = root.join("src").join("lib.rs");
 
-        assert!(fs_write_is_auto_allowed(
+        assert!(!fs_write_is_auto_allowed(
             PermissionPolicyMode::Build,
             root.to_str().unwrap(),
             &path,

@@ -70,6 +70,21 @@ struct PendingToolWriteDetection {
     expires_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModelSelection {
+    value: String,
+    provider: Option<String>,
+}
+
+impl ModelSelection {
+    fn new(value: impl Into<String>, provider: Option<String>) -> Self {
+        Self {
+            value: value.into(),
+            provider,
+        }
+    }
+}
+
 struct SessionRuntime {
     local_session_id: uuid::Uuid,
     ui: workspace_model::UiSnapshot,
@@ -81,8 +96,8 @@ struct SessionRuntime {
     agent_title_received: bool,
     provisional_prompt_title: Option<String>,
     skip_replay: bool,
-    pending_model_restore: Option<String>,
-    authoritative_model_selection: Option<String>,
+    pending_model_restore: Option<ModelSelection>,
+    authoritative_model_selection: Option<ModelSelection>,
     file_tracker: FileChangeTracker,
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,
@@ -201,8 +216,8 @@ pub struct Application {
     provisional_prompt_title: Option<String>,
     /// When true, discard replay events from session/load until user sends first prompt
     skip_replay: bool,
-    pending_model_restore: Option<String>,
-    authoritative_model_selection: Option<String>,
+    pending_model_restore: Option<ModelSelection>,
+    authoritative_model_selection: Option<ModelSelection>,
     file_tracker: FileChangeTracker,
     dirty_tool_call_ids: HashSet<String>,
     review_changes_started: bool,

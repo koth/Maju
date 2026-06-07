@@ -5,7 +5,7 @@ use agent_client_protocol::schema::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionInfoUpdate, SessionModeState, SessionModelState,
     SessionNotification, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use anyhow::{Context, anyhow};
 use serde_json::Value;
@@ -22,6 +22,7 @@ use workspace_model::{
 
 const PLAN_MODE_ID: &str = "plan";
 const BUILD_MODE_ID: &str = "build";
+const FULL_ACCESS_MODE_ID: &str = "full-access";
 const KODEX_CONTEXT_COMPACTION_META_KEY: &str = "kodex.ai/contextCompaction";
 const KODEX_CONTEXT_COMPACTED_META_KEY: &str = "kodex.ai/contextCompacted";
 const NOTIFICATION_LOG_CHANNEL_SIZE: usize = 1024;
@@ -211,10 +212,10 @@ fn with_policy_mode_control(
 }
 
 fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
-    let current_value_id = if current_mode == BUILD_MODE_ID {
-        BUILD_MODE_ID
-    } else {
-        PLAN_MODE_ID
+    let current_value_id = match current_mode {
+        BUILD_MODE_ID => BUILD_MODE_ID,
+        FULL_ACCESS_MODE_ID => FULL_ACCESS_MODE_ID,
+        _ => PLAN_MODE_ID,
     };
     SessionConfigControl {
         id: "mode".into(),
@@ -237,8 +238,15 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                 id: BUILD_MODE_ID.into(),
                 label: "Build".into(),
                 description: Some(
-                    "Allow workspace work; ask before reading or writing outside the workspace"
-                        .into(),
+                    "Allow read-only work automatically; ask before write operations".into(),
+                ),
+                provider: None,
+            },
+            SessionConfigChoice {
+                id: FULL_ACCESS_MODE_ID.into(),
+                label: "完全访问".into(),
+                description: Some(
+                    "Ask through the same write gate, then approve automatically".into(),
                 ),
                 provider: None,
             },
@@ -263,17 +271,26 @@ fn policy_mode_id(id: &str, label: &str) -> Option<&'static str> {
     if id == PLAN_MODE_ID || label == PLAN_MODE_ID || label.contains("plan") {
         return Some(PLAN_MODE_ID);
     }
+    if id == FULL_ACCESS_MODE_ID
+        || label == FULL_ACCESS_MODE_ID
+        || id == "fullaccess"
+        || id == "full_access"
+        || id == "danger-full-access"
+        || id == "bypasspermissions"
+        || id == "bypass"
+        || label.contains("full access")
+        || label.contains("bypass")
+        || label.contains("完全访问")
+    {
+        return Some(FULL_ACCESS_MODE_ID);
+    }
     if id == BUILD_MODE_ID
         || label == BUILD_MODE_ID
         || label.contains("build")
-        || matches!(
-            id.as_str(),
-            "default" | "acceptedits" | "auto" | "bypasspermissions" | "dontask"
-        )
+        || matches!(id.as_str(), "default" | "acceptedits" | "auto" | "dontask")
         || label.contains("manual")
         || label.contains("accept")
         || label.contains("auto")
-        || label.contains("bypass")
         || label.contains("don't ask")
         || label.contains("dont ask")
     {
@@ -283,7 +300,11 @@ fn policy_mode_id(id: &str, label: &str) -> Option<&'static str> {
 }
 
 fn policy_mode_label(id: &str) -> &'static str {
-    if id == BUILD_MODE_ID { "Build" } else { "Plan" }
+    match id {
+        BUILD_MODE_ID => "Build",
+        FULL_ACCESS_MODE_ID => "完全访问",
+        _ => "Plan",
+    }
 }
 
 fn session_config_control_from_models(models: &SessionModelState) -> SessionConfigControl {
@@ -1841,7 +1862,7 @@ fn emit_tool_update(tx: &mpsc::Sender<ClientEvent>, update: ToolCallUpdate) -> a
     let id = update.tool_call_id.0.to_string();
     let title = update.fields.title.clone().unwrap_or_else(|| "tool".into());
 
-    if let Some(content) = update.fields.content {
+    if let Some(content) = update.fields.content.clone() {
         for item in content {
             emit_tool_content(tx, &id, item)?;
         }
@@ -1876,22 +1897,56 @@ fn emit_tool_update(tx: &mpsc::Sender<ClientEvent>, update: ToolCallUpdate) -> a
                         .and_then(parse_terminal_output),
                 })
                 .map_err(|_| anyhow!("failed to emit failed tool update"))?,
-            ToolCallStatus::InProgress | ToolCallStatus::Pending => tx
-                .send(ClientEvent::ToolProgress {
-                    id,
-                    content: format_tool_update_summary(status, update.fields.raw_output.as_ref()),
-                })
-                .map_err(|_| anyhow!("failed to emit tool progress"))?,
-            _ => tx
-                .send(ClientEvent::ToolProgress {
-                    id,
-                    content: format_tool_update_summary(status, update.fields.raw_output.as_ref()),
-                })
-                .map_err(|_| anyhow!("failed to emit tool status"))?,
+            ToolCallStatus::InProgress | ToolCallStatus::Pending => {
+                emit_non_terminal_tool_update(tx, id, update.fields, Some(status))?
+            }
+            _ => emit_non_terminal_tool_update(tx, id, update.fields, Some(status))?,
         }
+    } else {
+        emit_non_terminal_tool_update(tx, id, update.fields, None)?;
     }
 
     Ok(())
+}
+
+fn emit_non_terminal_tool_update(
+    tx: &mpsc::Sender<ClientEvent>,
+    id: String,
+    fields: ToolCallUpdateFields,
+    status: Option<ToolCallStatus>,
+) -> anyhow::Result<()> {
+    let summary = status
+        .map(|status| format_tool_update_summary(status, fields.raw_output.as_ref()))
+        .or_else(|| fields.raw_output.as_ref().map(format_value_for_summary));
+    if fields.raw_output.is_none()
+        && fields.raw_input.is_none()
+        && fields.title.is_none()
+        && fields.kind.is_none()
+    {
+        if let Some(summary) = summary {
+            tx.send(ClientEvent::ToolProgress {
+                id,
+                content: summary,
+            })
+            .map_err(|_| anyhow!("failed to emit tool status"))?;
+        }
+        return Ok(());
+    }
+
+    let terminal_output = fields.raw_output.as_ref().and_then(parse_terminal_output);
+    tx.send(ClientEvent::ToolUpdated {
+        id,
+        parent_id: None,
+        name: fields.title,
+        kind: fields.kind.map(|kind| format!("{kind:?}")),
+        summary,
+        is_subagent: false,
+        raw_input: fields.raw_input.as_ref().map(format_json),
+        raw_output: fields.raw_output.as_ref().map(format_value_for_ui),
+        terminal_output,
+        is_partial: false,
+    })
+    .map_err(|_| anyhow!("failed to emit tool update"))
 }
 
 pub(crate) fn format_permission_options(options: &[String]) -> String {
@@ -2112,7 +2167,9 @@ fn emit_tool_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::{PlanEntry, SessionNotification};
+    use agent_client_protocol::schema::{
+        PlanEntry, SessionMode, SessionModeId, SessionModeState, SessionNotification,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -2157,6 +2214,208 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("timiai"), Some("commandcode")]
         );
+    }
+
+    #[test]
+    fn session_config_options_normalize_agent_mode_control_to_policy_modes() {
+        let option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "mode",
+            "name": "Approval Preset",
+            "description": "Choose an approval and sandboxing preset",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "auto",
+            "options": [
+                {
+                    "value": "read-only",
+                    "name": "Read Only",
+                    "description": "Read files only"
+                },
+                {
+                    "value": "auto",
+                    "name": "Default",
+                    "description": "Workspace write with approvals"
+                },
+                {
+                    "value": "full-access",
+                    "name": "Full Access",
+                    "description": "No sandbox"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let state = session_config_from_options(vec![option]);
+        let mode = state
+            .controls
+            .iter()
+            .find(|control| control.id == "mode")
+            .unwrap();
+
+        assert_eq!(mode.source, SessionConfigSource::LocalMode);
+        assert_eq!(mode.current_value_id, "build");
+        assert_eq!(mode.current_value_label, "Build");
+        assert_eq!(
+            mode.choices
+                .iter()
+                .map(|choice| (choice.id.as_str(), choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("plan", "Plan"),
+                ("build", "Build"),
+                ("full-access", "完全访问")
+            ]
+        );
+    }
+
+    #[test]
+    fn session_modes_normalize_agent_mode_ids_to_policy_modes() {
+        let modes = SessionModeState::new(
+            SessionModeId::new("full-access"),
+            vec![
+                SessionMode::new("read-only", "Read Only"),
+                SessionMode::new("auto", "Default"),
+                SessionMode::new("full-access", "Full Access"),
+            ],
+        );
+
+        let state = session_config_from_parts(None, Some(&modes), None);
+        let mode = state
+            .controls
+            .iter()
+            .find(|control| control.id == "mode")
+            .unwrap();
+
+        assert_eq!(mode.source, SessionConfigSource::LocalMode);
+        assert_eq!(mode.current_value_id, "full-access");
+        assert_eq!(mode.current_value_label, "完全访问");
+        assert_eq!(
+            mode.choices
+                .iter()
+                .map(|choice| (choice.id.as_str(), choice.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("plan", "Plan"),
+                ("build", "Build"),
+                ("full-access", "完全访问")
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_in_progress_tool_update_preserves_raw_output() {
+        let (tx, rx) = mpsc::channel();
+
+        emit_tool_update(
+            &tx,
+            ToolCallUpdate::new(
+                "call-run",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::InProgress)
+                    .title("Run tests".to_string())
+                    .raw_output(serde_json::json!(
+                        "Exited with code 0. Final output:\nhello\nworld\n"
+                    )),
+            ),
+        )
+        .unwrap();
+
+        match rx.try_recv().unwrap() {
+            ClientEvent::ToolUpdated {
+                id,
+                name,
+                summary,
+                raw_output,
+                terminal_output,
+                is_partial,
+                ..
+            } => {
+                assert_eq!(id, "call-run");
+                assert_eq!(name.as_deref(), Some("Run tests"));
+                assert!(
+                    summary
+                        .as_deref()
+                        .is_some_and(|text| text.contains("hello"))
+                );
+                assert!(
+                    raw_output
+                        .as_deref()
+                        .is_some_and(|text| text.contains("hello"))
+                );
+                assert_eq!(
+                    terminal_output,
+                    Some(TerminalOutput {
+                        exit_code: Some(0),
+                        output: "hello\nworld".to_string(),
+                    })
+                );
+                assert!(!is_partial);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn generic_pending_tool_update_without_payload_stays_progress() {
+        let (tx, rx) = mpsc::channel();
+
+        emit_tool_update(
+            &tx,
+            ToolCallUpdate::new(
+                "call-pending",
+                ToolCallUpdateFields::new().status(ToolCallStatus::Pending),
+            ),
+        )
+        .unwrap();
+
+        match rx.try_recv().unwrap() {
+            ClientEvent::ToolProgress { id, content } => {
+                assert_eq!(id, "call-pending");
+                assert_eq!(content, "Awaiting approval");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn generic_statusless_tool_update_preserves_raw_output() {
+        let (tx, rx) = mpsc::channel();
+
+        emit_tool_update(
+            &tx,
+            ToolCallUpdate::new(
+                "call-stream",
+                ToolCallUpdateFields::new().raw_output(serde_json::json!({
+                    "stdout": "chunk one\n"
+                })),
+            ),
+        )
+        .unwrap();
+
+        match rx.try_recv().unwrap() {
+            ClientEvent::ToolUpdated {
+                id,
+                summary,
+                raw_output,
+                ..
+            } => {
+                assert_eq!(id, "call-stream");
+                assert!(
+                    summary
+                        .as_deref()
+                        .is_some_and(|text| text.contains("chunk"))
+                );
+                assert!(
+                    raw_output
+                        .as_deref()
+                        .is_some_and(|text| text.contains("chunk"))
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     struct TestWorkspace {

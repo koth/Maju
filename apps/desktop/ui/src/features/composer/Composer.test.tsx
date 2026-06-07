@@ -197,4 +197,120 @@ describe("Composer", () => {
       expect(sessionSetConfigControl).toHaveBeenCalledWith("model", "kimi-for-coding", "kimi_code"),
     );
   });
+
+  it("selects the provider encoded in the current model value", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kodex-provider/kimi_code/kimi-for-coding",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kodex-provider/kimi_code/kimi-for-coding",
+            current_value_label: "kodex-provider/kimi_code/kimi-for-coding",
+            enabled: true,
+            choices: [
+              { id: "agent-default", label: "Agent default", description: null, provider: null },
+              { id: "gpt-5.5", label: "gpt-5.5", description: null, provider: "commandcode" },
+              { id: "kimi-for-coding", label: "kimi-for-coding", description: null, provider: "kimi_code" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Provider.*CommandCode/ })).toBeNull();
+  });
+
+  it("infers Kimi Code for a bare current Kimi model shared by multiple providers", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kimi-for-coding",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kimi-for-coding",
+            current_value_label: "kimi-for-coding",
+            enabled: true,
+            choices: [
+              { id: "kimi-for-coding", label: "kimi-for-coding", description: null, provider: "commandcode" },
+              { id: "kimi-for-coding", label: "kimi-for-coding", description: null, provider: "kimi_code" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Provider.*CommandCode/ })).toBeNull();
+  });
+
+  it("splits encoded provider model ids without duplicating the provider request", async () => {
+    vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kodex-provider/commandcode/gpt-5.5",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kodex-provider/commandcode/gpt-5.5",
+            current_value_label: "kodex-provider/commandcode/gpt-5.5",
+            enabled: true,
+            choices: [
+              { id: "agent-default", label: "Agent default", description: null, provider: null },
+              { id: "kodex-provider/commandcode/gpt-5.5", label: "kodex-provider/commandcode/gpt-5.5", description: null, provider: null },
+              { id: "kodex-provider/kimi_code/kimi-for-coding", label: "kodex-provider/kimi_code/kimi-for-coding", description: null, provider: null },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /Provider.*CommandCode/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^gpt-5\.5/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /kodex-provider\/commandcode/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider.*CommandCode/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "Kimi Code" }));
+
+    await waitFor(() =>
+      expect(sessionSetConfigControl).toHaveBeenCalledWith(
+        "model",
+        "kodex-provider/kimi_code/kimi-for-coding",
+        null,
+      ),
+    );
+  });
 });

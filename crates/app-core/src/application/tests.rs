@@ -4,15 +4,16 @@ use super::diff_utils::{
     is_trustworthy_review_change_text, looks_like_fragment_to_full_file_text,
     looks_like_whole_file_addition_hunks, reverse_apply_unified_diff,
     sanitize_session_file_changes, tool_command_write_hint_paths, tool_diff_hunks,
-    tool_diff_hunks_for_tracker_change, tool_event_hint_paths, tool_hunks_for_tracker_update,
+    tool_diff_hunks_for_tracker_change, tool_event_change_paths, tool_event_hint_paths,
+    tool_hunks_for_tracker_update,
 };
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
 use super::{
-    current_timestamp, humanize_acp_disconnect_reason, normalize_tracked_path,
-    turn_finished_notice, Application,
+    Application, ModelSelection, current_timestamp, humanize_acp_disconnect_reason,
+    normalize_tracked_path, turn_finished_notice,
 };
-use acp_core::{diff_to_hunks, ClientEvent};
+use acp_core::{ClientEvent, diff_to_hunks};
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 use workspace_model::{
     ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind, DiffQuality,
@@ -138,9 +139,20 @@ fn local_workspace_smoke_preserves_file_git_shell_and_restore_paths() {
         assert_eq!(diff.new_text, "hello\nlocal workspace smoke\n");
 
         let resolved = app.resolve_workspace_entry_for_shell("README.md").unwrap();
+        let expected = dir.path().join("README.md");
         assert_eq!(
-            normalize_tracked_path(&resolved.display().to_string()),
-            normalize_tracked_path(&dir.path().join("README.md").display().to_string())
+            normalize_tracked_path(
+                &std::fs::canonicalize(&resolved)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ),
+            normalize_tracked_path(
+                &std::fs::canonicalize(&expected)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )
         );
 
         app.stage_files(&["README.md".into()]).unwrap();
@@ -181,7 +193,7 @@ fn stale_model_config_refresh_preserves_user_selected_model() {
         &["gpt-5.4", "gpt-5.5"],
     );
     app.ui.session.model = "gpt-5.4".into();
-    app.authoritative_model_selection = Some("gpt-5.4".into());
+    app.authoritative_model_selection = Some(ModelSelection::new("gpt-5.4", None));
 
     app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
         state: model_config_state(
@@ -200,6 +212,83 @@ fn stale_model_config_refresh_preserves_user_selected_model() {
         .find(|control| control.category == SessionConfigCategory::Model)
         .expect("model control should exist");
     assert_eq!(model_control.current_value_id, "gpt-5.4");
+}
+
+#[test]
+fn provider_model_config_refresh_preserves_selected_provider_for_duplicate_model_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.ui.session_config = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "kimi-for-coding",
+        &[
+            ("command_code", "kimi-for-coding"),
+            ("kimi_code", "kimi-for-coding"),
+        ],
+    );
+    app.ui.session.model = "kimi-for-coding".into();
+    app.authoritative_model_selection = Some(ModelSelection::new(
+        "kimi-for-coding",
+        Some("kimi_code".into()),
+    ));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: provider_model_config_state(
+            SessionConfigSource::ConfigOption,
+            "kimi-for-coding",
+            &[
+                ("command_code", "kimi-for-coding"),
+                ("kimi_code", "kimi-for-coding"),
+            ],
+        ),
+    });
+
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/kimi_code/kimi-for-coding"
+    );
+    assert_eq!(model_control.current_value_label, "kimi-for-coding");
+}
+
+#[test]
+fn new_session_model_config_hydrate_infers_provider_for_duplicate_kimi_model_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: provider_model_config_state(
+            SessionConfigSource::ConfigOption,
+            "kimi-for-coding",
+            &[
+                ("commandcode", "kimi-for-coding"),
+                ("kimi_code", "kimi-for-coding"),
+            ],
+        ),
+    });
+
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/kimi_code/kimi-for-coding"
+    );
+    assert_eq!(
+        app.current_model_provider_for_persistence().as_deref(),
+        Some("kimi_code")
+    );
 }
 
 #[test]
@@ -263,17 +352,23 @@ fn switched_away_in_flight_prompt_completes_under_original_session() {
 
     assert_eq!(app.ui.session.id.to_string(), visible_session_id);
     let (messages, tools, _) = app.store.load_session(&background_session_id).unwrap();
-    assert!(messages
-        .iter()
-        .any(|message| message.role == MessageRole::User
-            && message.body.contains("finish while hidden")));
-    assert!(messages
-        .iter()
-        .any(|message| message.role == MessageRole::Assistant
-            && message.body.contains("Real ACP session connected")));
-    assert!(tools
-        .iter()
-        .any(|tool| tool.status == ToolStatus::Succeeded));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.role == MessageRole::User
+                && message.body.contains("finish while hidden"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.role == MessageRole::Assistant
+                && message.body.contains("Real ACP session connected"))
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.status == ToolStatus::Succeeded)
+    );
 }
 
 #[test]
@@ -393,11 +488,12 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
     app.runtime_registry.insert(runtime);
 
     assert_eq!(app.ui.session.id.to_string(), visible_session_id);
-    assert!(app
-        .ui
-        .tools
-        .iter()
-        .all(|tool| tool.call_id != "permission-1"));
+    assert!(
+        app.ui
+            .tools
+            .iter()
+            .all(|tool| tool.call_id != "permission-1")
+    );
     let background = app
         .session_list()
         .unwrap()
@@ -461,6 +557,35 @@ fn model_config_state(
                     label: (*choice).into(),
                     description: None,
                     provider: None,
+                })
+                .collect(),
+            enabled: true,
+        }],
+    }
+}
+
+fn provider_model_config_state(
+    source: SessionConfigSource,
+    current: &str,
+    choices: &[(&str, &str)],
+) -> SessionConfigState {
+    SessionConfigState {
+        hydrated: true,
+        controls: vec![SessionConfigControl {
+            id: "model".into(),
+            label: "Model".into(),
+            description: None,
+            category: SessionConfigCategory::Model,
+            source,
+            current_value_id: current.into(),
+            current_value_label: current.into(),
+            choices: choices
+                .iter()
+                .map(|(provider, choice)| SessionConfigChoice {
+                    id: (*choice).into(),
+                    label: (*choice).into(),
+                    description: None,
+                    provider: Some((*provider).into()),
                 })
                 .collect(),
             enabled: true,

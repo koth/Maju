@@ -108,6 +108,42 @@ fn tool_event_hint_paths_extracts_apply_patch_change_keys() {
 }
 
 #[test]
+fn tool_event_change_paths_ignores_terminal_output_paths() {
+    let raw_output = serde_json::json!({
+        "aggregated_output": "file:///Users/kothchen/code/hotnovel/probe3.mjs:6\nconsole.log(\"../..\")\n",
+        "cwd": "/Users/kothchen/code/hotnovel",
+        "stdout": "here: /Users/kothchen/code/hotnovel/probe2.mjs\ncwd: /Users/kothchen/code/hotnovel\n",
+        "command": [
+            "/bin/zsh",
+            "-lc",
+            "cat > /Users/kothchen/code/hotnovel/probe2.mjs << 'JS'\nconsole.log('probe')\nJS\nrm /Users/kothchen/code/hotnovel/probe2.mjs"
+        ]
+    })
+    .to_string();
+
+    assert!(tool_event_change_paths(Some(&raw_output)).is_empty());
+}
+
+#[test]
+fn tool_event_change_paths_keeps_structured_changes() {
+    let raw_output = serde_json::json!({
+        "changes": {
+            "src/server/index.ts": {
+                "type": "update",
+                "unified_diff": "@@ -1,1 +1,1 @@\n-old\n+new\n"
+            }
+        },
+        "stdout": "src/server/index.ts\n"
+    })
+    .to_string();
+
+    assert_eq!(
+        tool_event_change_paths(Some(&raw_output)),
+        vec!["src/server/index.ts".to_string()]
+    );
+}
+
+#[test]
 fn freeform_apply_patch_begin_paths_anchor_base_for_review_changes() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "datas/scripts/eagle-export.py";
@@ -156,10 +192,10 @@ fn freeform_apply_patch_begin_paths_anchor_base_for_review_changes() {
         raw_output: None,
         terminal_output: None,
     }]);
-    assert!(!result.had_file_changes);
+    assert!(result.had_file_changes);
 
     app.advance_runtime_clock(Duration::from_secs(1));
-    assert!(app.retry_pending_tool_write_detections());
+    assert!(!app.retry_pending_tool_write_detections());
 
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(app.ui.review_changes.len(), 1);
@@ -618,6 +654,30 @@ fn powershell_positional_set_content_yields_written_file_hint() {
 }
 
 #[test]
+fn shell_heredoc_write_hint_ignores_body_markup_paths() {
+    let raw_input = serde_json::json!({
+        "command": "cat >> /Users/kothchen/code/hotnovel/web/app.js << 'JS_EOF'\nrender(`\n  <main class=\"space-y-4\">\n    <h2>查看某日报告</h2>\n    <label class=\"block\">日期</label>\n  </main>\n`);\nJS_EOF",
+    })
+    .to_string();
+
+    let paths = tool_command_write_hint_paths(Some(&raw_input));
+
+    assert_eq!(paths, vec!["/Users/kothchen/code/hotnovel/web/app.js"]);
+}
+
+#[test]
+fn shell_heredoc_without_file_redirection_does_not_yield_markup_paths() {
+    let raw_input = serde_json::json!({
+        "command": "node <<'JS'\nconsole.log('<main>preview</main>')\nJS",
+    })
+    .to_string();
+
+    let paths = tool_command_write_hint_paths(Some(&raw_input));
+
+    assert!(paths.is_empty());
+}
+
+#[test]
 fn codebuddy_python_pathlib_command_yields_written_file_hint() {
     let raw_input = serde_json::json!({
         "\"command": "python - <<'PY'\nfrom pathlib import Path\np=Path('D:/work/ArtAssets/packages/frontend/src/pages/GalleryPage.tsx')\ntext=p.read_text(encoding='utf-8')\nold='''before'''\nnew='''after'''\np.write_text(text.replace(old, new), encoding='utf-8')\nPY",
@@ -953,7 +1013,9 @@ fn completed_shell_write_with_dirty_file_uses_tool_start_baseline_for_tool_previ
         .collect::<Vec<_>>();
     assert!(removed.contains(&"const footer = '负向抑制';"));
     assert!(!removed.contains(&"import { Link, useSearchParams } from 'react-router-dom';"));
-    assert!(!removed.contains(&"import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';"));
+    assert!(
+        !removed.contains(&"import { SEARCH_CLASSIFICATION_OPTIONS } from '../api/client.js';")
+    );
     assert_eq!(app.ui.review_changes.len(), 1);
     assert_eq!(
         app.ui.review_changes[0].old_text.as_deref(),
@@ -1074,6 +1136,81 @@ fn codebuddy_bash_permission_allow_records_baseline_before_terminal_write() {
         .collect::<Vec<_>>();
     assert!(removed.contains(&"const footer = '负向抑制';"));
     assert!(!removed.contains(&"import { Link, useSearchParams } from 'react-router-dom';"));
+}
+
+#[test]
+fn full_access_auto_permission_records_baseline_before_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/config.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before_tool = "export const flag = false;\n";
+    let after_tool = "export const flag = true;\n";
+    fs::write(&file_path, before_tool).unwrap();
+
+    let mut app = test_app(&dir);
+    app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::SessionConfigValueChanged {
+            control_id: "mode".into(),
+            value_id: "full-access".into(),
+            value_label: Some("完全访问".into()),
+        },
+        ClientEvent::ToolPermissionRequest {
+            id: "call-write".into(),
+            name: "Bash".into(),
+            options: vec![
+                workspace_model::PermissionOption {
+                    id: "allow".into(),
+                    label: "Allow".into(),
+                    kind: "AllowOnce".into(),
+                },
+                workspace_model::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: "RejectOnce".into(),
+                },
+            ],
+            details: Some(format!("Command:\npython -c ...\n\nPath: {relative_path}")),
+            input: None,
+        },
+    ]);
+
+    assert_eq!(
+        app.file_tracker
+            .get_baseline_text("call-write", relative_path),
+        Some(before_tool)
+    );
+
+    fs::write(&file_path, after_tool).unwrap();
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-write".into(),
+            parent_id: None,
+            name: "Bash".into(),
+            kind: "Bash".into(),
+            summary: "updated".into(),
+            is_subagent: false,
+            raw_input: None,
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-write".into(),
+            name: Some("Bash".into()),
+            outcome: "updated".into(),
+            raw_output: None,
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(!result.had_file_changes);
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(
+        app.ui.review_changes[0].old_text.as_deref(),
+        Some(before_tool)
+    );
+    assert_eq!(app.ui.review_changes[0].new_text, after_tool);
 }
 
 #[test]
@@ -1255,14 +1392,16 @@ fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
         .iter()
         .find(|tool| tool.call_id == "call-bash")
         .unwrap();
-    assert!(tool
-        .diff_previews
-        .iter()
-        .any(|preview| preview.path == std::path::PathBuf::from(boost_path)));
-    assert!(tool
-        .diff_previews
-        .iter()
-        .any(|preview| preview.path == std::path::PathBuf::from(exclusion_path)));
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| preview.path == std::path::PathBuf::from(boost_path))
+    );
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| preview.path == std::path::PathBuf::from(exclusion_path))
+    );
 }
 
 #[test]
@@ -1673,10 +1812,11 @@ fn late_completed_command_raw_input_retries_until_file_lands() {
         .iter()
         .find(|tool| tool.call_id == "write-sanitize")
         .unwrap();
-    assert!(tool
-        .diff_previews
-        .iter()
-        .any(|preview| !preview.hunks.is_empty()));
+    assert!(
+        tool.diff_previews
+            .iter()
+            .any(|preview| !preview.hunks.is_empty())
+    );
 }
 
 #[test]
@@ -2826,6 +2966,269 @@ fn late_tool_diff_preview_for_landed_session_change_stays_preview_only() {
 }
 
 #[test]
+fn completed_acp_edit_diff_enters_review_when_tracker_starts_after_file_landed() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/config/env.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = [
+        "const EnvSchema = z.object({",
+        "  reportsDir: z.string().min(1)",
+        "});",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "const EnvSchema = z.object({",
+        "  reportsDir: z.string().min(1),",
+        "  webHost: z.string().min(1),",
+        "  webPort: z.number().int().min(1).max(65535)",
+        "});",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &before).unwrap();
+
+    let raw_payload = serde_json::json!({
+        "call_id": "call-edit-env",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "update",
+                "unified_diff": "@@ -1,4 +1,6 @@\n const EnvSchema = z.object({\n-  reportsDir: z.string().min(1)\n+  reportsDir: z.string().min(1),\n+  webHost: z.string().min(1),\n+  webPort: z.number().int().min(1).max(65535)\n });\n"
+            }
+        },
+        "success": true
+    })
+    .to_string();
+
+    let mut app = test_app(&dir);
+    fs::write(&file_path, &after).unwrap();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-edit-env".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(raw_payload.clone()),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-edit-env".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Updated the following files".into(),
+            raw_output: Some(raw_payload),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    assert_eq!((change.added_lines, change.removed_lines), (3, 1));
+
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(!app.retry_pending_tool_write_detections());
+    assert_eq!(app.ui.review_changes.len(), 1);
+}
+
+#[test]
+fn completed_acp_edit_diff_waits_for_late_file_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/config/env.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = [
+        "return EnvSchema.parse({",
+        "  reportsDir: process.env.REPORTS_DIR ?? \"./reports\"",
+        "});",
+        "",
+    ]
+    .join("\n");
+    let after = [
+        "return EnvSchema.parse({",
+        "  reportsDir: process.env.REPORTS_DIR ?? \"./reports\",",
+        "  webHost: process.env.WEB_HOST ?? \"127.0.0.1\",",
+        "  webPort: readInteger(process.env.WEB_PORT, 8787)",
+        "});",
+        "",
+    ]
+    .join("\n");
+    fs::write(&file_path, &before).unwrap();
+
+    let raw_payload = serde_json::json!({
+        "call_id": "call-edit-env-late",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "update",
+                "unified_diff": "@@ -1,4 +1,6 @@\n return EnvSchema.parse({\n-  reportsDir: process.env.REPORTS_DIR ?? \"./reports\"\n+  reportsDir: process.env.REPORTS_DIR ?? \"./reports\",\n+  webHost: process.env.WEB_HOST ?? \"127.0.0.1\",\n+  webPort: readInteger(process.env.WEB_PORT, 8787)\n });\n"
+            }
+        },
+        "success": true
+    })
+    .to_string();
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-edit-env-late".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(raw_payload.clone()),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-edit-env-late".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Updated the following files".into(),
+            raw_output: Some(raw_payload),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(!result.had_file_changes);
+    assert!(app.ui.review_changes.is_empty());
+
+    fs::write(&file_path, &after).unwrap();
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.old_text.as_deref(), Some(before.as_str()));
+    assert_eq!(change.new_text, after);
+    assert_eq!((change.added_lines, change.removed_lines), (3, 1));
+}
+
+#[test]
+fn completed_acp_delete_diff_enters_review_when_tracker_starts_after_file_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/config/legacy.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const schema = 'old';\nexport const enabled = true;";
+    fs::write(&file_path, before).unwrap();
+    let mut app = test_app(&dir);
+    fs::remove_file(&file_path).unwrap();
+
+    let raw_payload = serde_json::json!({
+        "call_id": "call-delete-legacy",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "delete",
+                "unified_diff": "@@ -1,2 +1,0 @@\n-export const schema = 'old';\n-export const enabled = true;\n"
+            }
+        },
+        "success": true
+    })
+    .to_string();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-delete-legacy".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(raw_payload.clone()),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-delete-legacy".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Deleted file".into(),
+            raw_output: Some(raw_payload),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Deleted);
+    assert_eq!(change.old_text.as_deref(), Some(before));
+    assert_eq!(change.new_text, "");
+    assert_eq!((change.added_lines, change.removed_lines), (0, 2));
+}
+
+#[test]
+fn completed_acp_delete_diff_waits_for_late_file_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "src/config/legacy.ts";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const schema = 'old';\nexport const enabled = true;";
+    fs::write(&file_path, before).unwrap();
+
+    let raw_payload = serde_json::json!({
+        "call_id": "call-delete-legacy-late",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "delete",
+                "unified_diff": "@@ -1,2 +1,0 @@\n-export const schema = 'old';\n-export const enabled = true;\n"
+            }
+        },
+        "success": true
+    })
+    .to_string();
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-delete-legacy-late".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(raw_payload.clone()),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-delete-legacy-late".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Deleted file".into(),
+            raw_output: Some(raw_payload),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(!result.had_file_changes);
+    assert!(app.ui.review_changes.is_empty());
+
+    fs::remove_file(&file_path).unwrap();
+    app.advance_runtime_clock(Duration::from_secs(1));
+    assert!(app.retry_pending_tool_write_detections());
+
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Deleted);
+    assert_eq!(change.old_text.as_deref(), Some(before));
+    assert_eq!(change.new_text, "");
+    assert_eq!((change.added_lines, change.removed_lines), (0, 2));
+}
+
+#[test]
 fn idle_late_created_file_preview_does_not_persist_completed_turn_change_set() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/backend/src/services/query-understanding/schema.ts";
@@ -2969,14 +3372,15 @@ fn preview_before_file_create_does_not_retry_into_review_after_landing() {
         }]);
     assert!(!result.had_file_changes);
     assert!(app.ui.review_changes.is_empty());
-    assert!(app
-        .store
-        .list_change_sets(
-            Some(&app.ui.session.id.to_string()),
-            Some(ChangeSetSource::AgentTurn),
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        app.store
+            .list_change_sets(
+                Some(&app.ui.session.id.to_string()),
+                Some(ChangeSetSource::AgentTurn),
+            )
+            .unwrap()
+            .is_empty()
+    );
 
     fs::write(&file_path, &new_text).unwrap();
     app.advance_runtime_clock(Duration::from_secs(1));

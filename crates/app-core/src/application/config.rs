@@ -95,6 +95,7 @@ impl Application {
         let selected_provider = provider
             .map(str::to_string)
             .or_else(|| selected_choice.provider.clone());
+        let selected_provider_for_state = selected_provider.clone();
 
         let events = match control.source.clone() {
             SessionConfigSource::ConfigOption => self
@@ -130,10 +131,15 @@ impl Application {
         }
         if is_model_control {
             self.pending_model_restore = None;
-            self.authoritative_model_selection = Some(value_id.to_string());
+            self.authoritative_model_selection =
+                Some(ModelSelection::new(value_id, selected_provider_for_state));
+            let ui_value_id = provider_qualified_model_value(
+                value_id,
+                self.current_model_provider_for_persistence().as_deref(),
+            );
             self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
                 control_id: selected_control_id,
-                value_id: value_id.to_string(),
+                value_id: ui_value_id,
                 value_label: selected_label,
             });
         }
@@ -169,6 +175,34 @@ impl Application {
         }
 
         Ok(())
+    }
+
+    pub(super) fn auto_resolve_full_access_permission_if_applicable(
+        &mut self,
+        request_id: &str,
+    ) -> bool {
+        if !session_mode_is_full_access(self.ui.session.mode.as_deref()) {
+            return false;
+        }
+
+        let Some(tool) = self.ui.tools.iter().find(|tool| tool.call_id == request_id) else {
+            return false;
+        };
+        if tool.permission_input.is_some() || !permission_tool_should_start_write_baseline(tool) {
+            return false;
+        }
+
+        let Some(option_id) = allow_permission_option_id(&tool.permission_options) else {
+            return false;
+        };
+
+        self.start_permission_write_baseline_if_allowed(request_id, Some(&option_id));
+        let delivered = self
+            .session
+            .resolve_permission(request_id, Some(option_id.clone()), None, None)
+            .unwrap_or(false);
+        self.mark_tool_permission_selected(request_id, &option_id);
+        delivered
     }
 
     pub(super) fn start_permission_write_baseline_if_allowed(
@@ -219,9 +253,10 @@ impl Application {
     }
 
     pub(super) fn persist_session_model_mode(&self) {
-        let _ = self.store.update_session_model_mode(
+        let _ = self.store.update_session_model_mode_provider(
             &self.ui.session.id.to_string(),
             &self.ui.session.model,
+            self.current_model_provider_for_persistence().as_deref(),
             self.ui.session.mode.as_deref(),
         );
     }
@@ -241,9 +276,7 @@ impl Application {
             return;
         };
 
-        if model_control.current_value_id == saved_model
-            || model_control.current_value_label == saved_model
-        {
+        if control_current_matches_model_selection(&model_control, &saved_model) {
             self.pending_model_restore = None;
             return;
         }
@@ -251,7 +284,7 @@ impl Application {
         let Some(choice) = model_control
             .choices
             .iter()
-            .find(|choice| choice.id == saved_model || choice.label == saved_model)
+            .find(|choice| choice_matches_model_selection(choice, &saved_model))
             .cloned()
         else {
             self.pending_model_restore = None;
@@ -261,18 +294,19 @@ impl Application {
         let control_id = model_control.id.clone();
         let value_id = choice.id.clone();
         let value_label = choice.label.clone();
+        let value_provider = choice_provider(&choice);
         let result = match model_control.source {
             SessionConfigSource::ConfigOption => self.session.set_config_option(
                 control_id.clone(),
                 value_id.clone(),
-                choice.provider.clone(),
+                value_provider.clone(),
             ),
             SessionConfigSource::SessionModel => self
                 .session
-                .set_model(value_id.clone(), choice.provider.clone()),
+                .set_model(value_id.clone(), value_provider.clone()),
             SessionConfigSource::LegacyMode | SessionConfigSource::LocalMode => self
                 .session
-                .set_model(value_id.clone(), choice.provider.clone()),
+                .set_model(value_id.clone(), value_provider.clone()),
         };
         let Ok(events) = result else {
             return;
@@ -281,13 +315,191 @@ impl Application {
         for event in events {
             self.apply_event_with_dirty_tracking(&event);
         }
-        self.authoritative_model_selection = Some(value_id.clone());
+        self.authoritative_model_selection = Some(ModelSelection::new(
+            value_id.clone(),
+            value_provider.clone(),
+        ));
         self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
             control_id,
-            value_id,
+            value_id: provider_qualified_model_value(&value_id, value_provider.as_deref()),
             value_label: Some(value_label),
         });
     }
+
+    pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
+        if let Some(provider) = self
+            .authoritative_model_selection
+            .as_ref()
+            .and_then(|selection| selection.provider.clone())
+        {
+            return Some(provider);
+        }
+
+        let model_control =
+            self.ui.session_config.controls.iter().find(|control| {
+                control.category == workspace_model::SessionConfigCategory::Model
+            })?;
+
+        infer_current_model_provider(model_control)
+    }
+}
+
+pub(super) fn choice_matches_model_selection(
+    choice: &workspace_model::SessionConfigChoice,
+    selection: &ModelSelection,
+) -> bool {
+    let choice_id = model_from_provider_value(&choice.id).unwrap_or(&choice.id);
+    let choice_label = model_from_provider_value(&choice.label).unwrap_or(&choice.label);
+    if choice.id != selection.value
+        && choice.label != selection.value
+        && choice_id != selection.value
+        && choice_label != selection.value
+    {
+        return false;
+    }
+
+    let Some(provider) = selection.provider.as_deref() else {
+        return true;
+    };
+
+    choice_provider(choice).is_some_and(|candidate| candidate == provider)
+}
+
+pub(super) fn choice_provider(choice: &workspace_model::SessionConfigChoice) -> Option<String> {
+    choice
+        .provider
+        .clone()
+        .or_else(|| provider_from_model_value(&choice.id).map(str::to_string))
+        .or_else(|| provider_from_model_value(&choice.label).map(str::to_string))
+}
+
+pub(super) fn provider_qualified_model_value(value: &str, provider: Option<&str>) -> String {
+    if let Some(provider) = provider {
+        if provider_from_model_value(value).is_none() {
+            return format!("kodex-provider/{provider}/{value}");
+        }
+    }
+    value.to_string()
+}
+
+pub(super) fn qualify_current_model_control_provider(
+    control: &mut workspace_model::SessionConfigControl,
+) {
+    if provider_from_model_value(&control.current_value_id).is_some() {
+        return;
+    }
+
+    let Some(provider) = infer_current_model_provider(control) else {
+        return;
+    };
+    control.current_value_id =
+        provider_qualified_model_value(current_model_value(control), Some(&provider));
+}
+
+fn infer_current_model_provider(control: &workspace_model::SessionConfigControl) -> Option<String> {
+    provider_from_model_value(&control.current_value_id)
+        .or_else(|| provider_from_model_value(&control.current_value_label))
+        .map(str::to_string)
+        .or_else(|| {
+            let current = current_model_value(control);
+            let mut providers = control
+                .choices
+                .iter()
+                .filter(|choice| choice_matches_model_value(choice, current))
+                .filter_map(choice_provider)
+                .collect::<Vec<_>>();
+            providers.sort();
+            providers.dedup();
+            if providers.len() == 1 {
+                return providers.pop();
+            }
+
+            inferred_provider_for_model_name(current)
+                .filter(|provider| providers.iter().any(|candidate| candidate == provider))
+                .map(str::to_string)
+        })
+}
+
+fn choice_matches_model_value(choice: &workspace_model::SessionConfigChoice, model: &str) -> bool {
+    let choice_id = model_from_provider_value(&choice.id).unwrap_or(&choice.id);
+    let choice_label = model_from_provider_value(&choice.label).unwrap_or(&choice.label);
+    choice.id == model || choice.label == model || choice_id == model || choice_label == model
+}
+
+fn current_model_value(control: &workspace_model::SessionConfigControl) -> &str {
+    model_from_provider_value(&control.current_value_id)
+        .or_else(|| model_from_provider_value(&control.current_value_label))
+        .unwrap_or_else(|| {
+            if control.current_value_label.trim().is_empty() {
+                control.current_value_id.as_str()
+            } else {
+                control.current_value_label.as_str()
+            }
+        })
+}
+
+fn inferred_provider_for_model_name(model: &str) -> Option<&'static str> {
+    let normalized = model.trim().to_ascii_lowercase();
+    if normalized.starts_with("qwen/")
+        || normalized.starts_with("minimaxai/")
+        || normalized.starts_with("moonshotai/")
+        || normalized.starts_with("zai-org/")
+        || normalized.starts_with("stepfun/")
+        || normalized.starts_with("google/")
+    {
+        Some("commandcode")
+    } else if normalized.contains("deepseek") {
+        Some("deepseek")
+    } else if normalized.contains("kimi") {
+        Some("kimi_code")
+    } else if normalized.contains("mimo") || normalized.contains("xiaomi") {
+        Some("xiaomi_mimo")
+    } else {
+        None
+    }
+}
+
+fn control_current_matches_model_selection(
+    control: &workspace_model::SessionConfigControl,
+    selection: &ModelSelection,
+) -> bool {
+    let current_id =
+        model_from_provider_value(&control.current_value_id).unwrap_or(&control.current_value_id);
+    let current_label = model_from_provider_value(&control.current_value_label)
+        .unwrap_or(&control.current_value_label);
+    if current_id != selection.value && current_label != selection.value {
+        return false;
+    }
+
+    let Some(expected_provider) = selection.provider.as_deref() else {
+        return true;
+    };
+
+    provider_from_model_value(&control.current_value_id)
+        .or_else(|| provider_from_model_value(&control.current_value_label))
+        .is_some_and(|provider| provider == expected_provider)
+}
+
+pub(super) fn provider_from_model_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("kodex-provider/") {
+        return rest.split_once('/').map(|(provider, _)| provider);
+    }
+    if let Some(rest) = trimmed.strip_prefix("kodex-provider:") {
+        return rest.split_once(':').map(|(provider, _)| provider);
+    }
+    None
+}
+
+fn model_from_provider_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("kodex-provider/") {
+        return rest.split_once('/').map(|(_, model)| model);
+    }
+    if let Some(rest) = trimmed.strip_prefix("kodex-provider:") {
+        return rest.split_once(':').map(|(_, model)| model);
+    }
+    None
 }
 
 fn permission_selection_is_allow(
@@ -306,6 +518,34 @@ fn permission_selection_is_allow(
             let id = option.id.to_ascii_lowercase();
             kind.contains("allow") || label.contains("allow") || id.contains("allow")
         })
+}
+
+fn allow_permission_option_id(options: &[workspace_model::PermissionOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| {
+            let kind = option.kind.to_ascii_lowercase();
+            let label = option.label.to_ascii_lowercase();
+            let id = option.id.to_ascii_lowercase();
+            kind.contains("allow") || label.contains("allow") || id.contains("allow")
+        })
+        .map(|option| option.id.clone())
+}
+
+fn session_mode_is_full_access(mode: Option<&str>) -> bool {
+    let Some(mode) = mode else {
+        return false;
+    };
+    matches!(
+        mode.trim().to_ascii_lowercase().as_str(),
+        "full-access"
+            | "fullaccess"
+            | "full_access"
+            | "danger-full-access"
+            | "bypasspermissions"
+            | "bypass"
+            | "完全访问"
+    )
 }
 
 fn permission_tool_should_start_write_baseline(tool: &workspace_model::ToolInvocation) -> bool {

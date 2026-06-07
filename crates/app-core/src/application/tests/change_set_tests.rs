@@ -44,19 +44,105 @@ fn current_turn_without_file_changes_does_not_inherit_recent_review_changes() {
 
     assert_eq!(app.ui.review_changes.len(), 1);
     assert!(app.ui.turn_changes.is_empty());
-    assert!(app
-        .store
-        .load_turn_file_changes(&app.ui.session.id.to_string())
-        .unwrap()
-        .is_empty());
-    assert!(app
+    assert!(
+        app.store
+            .load_turn_file_changes(&app.ui.session.id.to_string())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        app.store
+            .list_change_sets(
+                Some(&app.ui.session.id.to_string()),
+                Some(ChangeSetSource::AgentTurn)
+            )
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn new_prompt_first_change_does_not_inherit_previous_review_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let first_user = uuid::Uuid::new_v4();
+    let first_assistant = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: first_user,
+        role: MessageRole::User,
+        body: "first turn".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: first_assistant,
+        role: MessageRole::Assistant,
+        body: "first done".into(),
+        created_at: "2026-05-13T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(first_user));
+    app.ui.timeline.push(TimelineItem::Message(first_assistant));
+    app.current_turn_user_message_id = Some(first_user);
+
+    app.upsert_review_file_change(
+        "src/previous.rs",
+        FileChangeType::Modified,
+        Some("previous before\n".into()),
+        "previous after\n".into(),
+    );
+    assert!(app.persist_current_turn_file_changes());
+    assert_eq!(app.ui.review_changes.len(), 1);
+    app.current_turn_user_message_id = None;
+
+    app.send_prompt_background("second turn").unwrap();
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, "src/previous.rs");
+    assert_eq!(
+        app.store
+            .load_review_file_changes(&app.ui.session.id.to_string())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    app.upsert_review_file_change(
+        "src/current.rs",
+        FileChangeType::Modified,
+        Some("current before\n".into()),
+        "current after\n".into(),
+    );
+    assert_eq!(app.ui.review_changes.len(), 1);
+    assert_eq!(app.ui.review_changes[0].path, "src/current.rs");
+    assert!(
+        app.store
+            .load_review_file_changes(&app.ui.session.id.to_string())
+            .unwrap()
+            .iter()
+            .all(|change| change.path != "src/previous.rs")
+    );
+
+    let turn_sets = app
         .store
         .list_change_sets(
             Some(&app.ui.session.id.to_string()),
-            Some(ChangeSetSource::AgentTurn)
+            Some(ChangeSetSource::AgentTurn),
         )
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    let pending = turn_sets
+        .iter()
+        .find(|summary| summary.status == ChangeSetStatus::Pending)
+        .expect("current turn should have a pending change set");
+    let pending_files = app.store.list_change_set_files(&pending.id).unwrap();
+
+    assert_eq!(pending_files.len(), 1);
+    assert_eq!(pending_files[0].path, "src/current.rs");
+    assert!(
+        pending_files
+            .iter()
+            .all(|file| file.path != "src/previous.rs")
+    );
 }
 
 #[test]
@@ -185,14 +271,15 @@ fn current_turn_revert_removes_pending_change_set() {
         "A\n".into(),
     );
 
-    assert!(app
-        .store
-        .list_change_sets(
-            Some(&app.ui.session.id.to_string()),
-            Some(ChangeSetSource::AgentTurn)
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        app.store
+            .list_change_sets(
+                Some(&app.ui.session.id.to_string()),
+                Some(ChangeSetSource::AgentTurn)
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -232,14 +319,15 @@ fn manual_editor_revert_removes_manual_change_set() {
     app.record_manual_editor_save("src/main.rs", Some("A\n".into()), "B\n".into());
     app.record_manual_editor_save("src/main.rs", Some("B\n".into()), "A\n".into());
 
-    assert!(app
-        .store
-        .list_change_sets(
-            Some(&app.ui.session.id.to_string()),
-            Some(ChangeSetSource::ManualEdit)
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        app.store
+            .list_change_sets(
+                Some(&app.ui.session.id.to_string()),
+                Some(ChangeSetSource::ManualEdit)
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

@@ -227,7 +227,14 @@ impl Application {
             return state;
         }
 
-        let Some(selected_model) = self.authoritative_model_selection.as_deref() else {
+        let Some(selected_model) = self.authoritative_model_selection.as_ref() else {
+            for control in &mut state.controls {
+                if control.category != workspace_model::SessionConfigCategory::Model {
+                    continue;
+                }
+
+                super::config::qualify_current_model_control_provider(control);
+            }
             return state;
         };
 
@@ -236,12 +243,16 @@ impl Application {
                 continue;
             }
 
-            if let Some(choice) = control
-                .choices
-                .iter()
-                .find(|choice| choice.id == selected_model || choice.label == selected_model)
-            {
-                control.current_value_id = choice.id.clone();
+            if let Some(choice) = control.choices.iter().find(|choice| {
+                super::config::choice_matches_model_selection(choice, selected_model)
+            }) {
+                control.current_value_id = super::config::provider_qualified_model_value(
+                    &choice.id,
+                    selected_model
+                        .provider
+                        .as_deref()
+                        .or_else(|| choice.provider.as_deref()),
+                );
                 control.current_value_label = choice.label.clone();
             }
         }

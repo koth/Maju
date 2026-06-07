@@ -182,7 +182,7 @@ impl Application {
             return;
         }
 
-            let pending_retry_changed = self.retry_pending_tool_write_detections();
+        let pending_retry_changed = self.retry_pending_tool_write_detections();
 
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
@@ -429,6 +429,9 @@ impl Application {
             } else {
                 self.apply_event_with_dirty_tracking(event);
             }
+            if let ClientEvent::ToolPermissionRequest { id, .. } = event {
+                self.auto_resolve_full_access_permission_if_applicable(id);
+            }
             if let ClientEvent::ToolFailed { id, .. } = event
                 && failed_tool_ids_without_changes.contains(id)
             {
@@ -455,6 +458,11 @@ impl Application {
         // Detect file writes from completed tool calls (CodeBuddy uses terminal commands)
         for id in &completed_tool_ids {
             if completed_tool_ids_with_tracker_changes.contains(id) {
+                continue;
+            }
+            if self.apply_completed_tool_landed_edit_payload(id) {
+                self.file_tracker.discard_recording(id);
+                had_file_changes = true;
                 continue;
             }
             if self.file_tracker.has_active_candidates(id)

@@ -48,6 +48,7 @@ impl SessionStore {
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT 'New Session',
                 model TEXT NOT NULL,
+                model_provider TEXT,
                 status TEXT NOT NULL DEFAULT 'Idle',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -178,6 +179,17 @@ impl SessionStore {
         if !has_mode_col {
             self.conn
                 .execute_batch("ALTER TABLE sessions ADD COLUMN mode TEXT;")?;
+        }
+
+        let has_model_provider_col: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'model_provider'",
+            )?
+            .query_row([], |row| row.get(0))?;
+        if !has_model_provider_col {
+            self.conn
+                .execute_batch("ALTER TABLE sessions ADD COLUMN model_provider TEXT;")?;
         }
 
         let has_workspace_col: bool = self
@@ -429,9 +441,19 @@ impl SessionStore {
         model: &str,
         mode: Option<&str>,
     ) -> Result<()> {
+        self.update_session_model_mode_provider(id, model, None, mode)
+    }
+
+    pub fn update_session_model_mode_provider(
+        &self,
+        id: &str,
+        model: &str,
+        model_provider: Option<&str>,
+        mode: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET model = ?1, mode = ?2, updated_at = ?3 WHERE id = ?4",
-            params![model, mode, now_iso(), id],
+            "UPDATE sessions SET model = ?1, model_provider = ?2, mode = ?3, updated_at = ?4 WHERE id = ?5",
+            params![model, model_provider, mode, now_iso(), id],
         )?;
         Ok(())
     }
@@ -443,6 +465,21 @@ impl SessionStore {
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
             Ok(Some((row.get(0)?, row.get(1)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_session_model_provider_mode(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, Option<String>, Option<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model, model_provider, mode FROM sessions WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?)))
         } else {
             Ok(None)
         }

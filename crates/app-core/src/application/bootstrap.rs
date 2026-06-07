@@ -128,8 +128,10 @@ impl Application {
                         }
                     }
                     let mut pending_model_restore = None;
-                    if let Ok(Some((model, mode))) = store.get_session_model_mode(session_id) {
-                        pending_model_restore = Some(model.clone());
+                    if let Ok(Some((model, provider, mode))) =
+                        store.get_session_model_provider_mode(session_id)
+                    {
+                        pending_model_restore = Some(ModelSelection::new(model.clone(), provider));
                         ui.session.model = model;
                         ui.session.mode = mode;
                     }
@@ -210,9 +212,12 @@ impl Application {
             session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"))
         });
         let _ = crate::startup_perf::measure("app/bootstrap/update_session_model_mode", "", || {
-            store.update_session_model_mode(
+            store.update_session_model_mode_provider(
                 &ui.session.id.to_string(),
                 &ui.session.model,
+                pending_model_restore
+                    .as_ref()
+                    .and_then(|selection| selection.provider.as_deref()),
                 ui.session.mode.as_deref(),
             )
         });
@@ -345,8 +350,10 @@ impl Application {
                         }
                     }
                     let mut pending_model_restore = None;
-                    if let Ok(Some((model, mode))) = store.get_session_model_mode(session_id) {
-                        pending_model_restore = Some(model.clone());
+                    if let Ok(Some((model, provider, mode))) =
+                        store.get_session_model_provider_mode(session_id)
+                    {
+                        pending_model_restore = Some(ModelSelection::new(model.clone(), provider));
                         ui.session.model = model;
                         ui.session.mode = mode;
                     }
@@ -396,9 +403,12 @@ impl Application {
             }
         }
         let _ = session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"));
-        let _ = store.update_session_model_mode(
+        let _ = store.update_session_model_mode_provider(
             &ui.session.id.to_string(),
             &ui.session.model,
+            pending_model_restore
+                .as_ref()
+                .and_then(|selection| selection.provider.as_deref()),
             ui.session.mode.as_deref(),
         );
 

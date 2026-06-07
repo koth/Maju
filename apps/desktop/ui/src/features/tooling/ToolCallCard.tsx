@@ -50,12 +50,16 @@ function ToolCallCardImpl({
     presentation.presentationKind === "command"
       ? diffPreviewsFromApplyPatchCommand(presentation.command)
       : [];
-  const commandEditPaths =
+  const rawCommandEditPaths =
     presentation.presentationKind === "command"
       ? uniqueStrings([
           ...getCommandMutationDiffPaths(tool, presentation.command),
           ...commandApplyPatchPreviews.map((preview) => preview.path),
         ])
+      : [];
+  const commandEditPaths =
+    presentation.presentationKind === "command"
+      ? filterCompletedCommandEditPaths(tool, presentation.command, rawCommandEditPaths)
       : [];
   const trackedDiffPaths = getTrackedDiffPaths(tool, commandEditPaths);
   const trackedDiffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
@@ -868,6 +872,7 @@ function extractInputTitle(tool: ToolInvocation): string | null {
     }
     if (
       tool.raw_input &&
+      !looksLikeJsonPayload(tool.raw_input) &&
       isUsefulTitle(tool.raw_input) &&
       !looksLikeCommand(tool.raw_input) &&
       !looksLikePath(tool.raw_input)
@@ -913,7 +918,14 @@ function isUsefulTitle(text: string): boolean {
 
 /** Check if a string looks like a file path (contains slashes or backslashes) */
 function looksLikePath(text: string): boolean {
-  return /[/\\]/.test(text.trim());
+  const trimmed = text.trim();
+  if (!trimmed || looksLikeMarkupFragment(trimmed) || !isUsableWritePath(trimmed)) return false;
+  return /[/\\]/.test(trimmed);
+}
+
+function looksLikeMarkupFragment(text: string): boolean {
+  const trimmed = text.trim();
+  return /[<>]/.test(trimmed) || /<\/?[a-z][^>]*>?/i.test(trimmed);
 }
 
 function looksLikeCommand(text: string): boolean {
@@ -1088,7 +1100,7 @@ function pathFromToolLogs(tool: ToolInvocation): string | null {
 }
 
 function pathFromLogText(text: string): string | null {
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of splitLogPathLines(text)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
@@ -1096,9 +1108,9 @@ function pathFromLogText(text: string): string | null {
       /^(?:Requested\s+)?(?:Write|Read|Edit|Update|编辑|已编辑)\s+(.+)$/i,
     );
     if (labeled) {
-      const value = displayPath(labeled[1]);
+      const value = cleanPathCandidate(labeled[1]);
       if (looksLikePath(value) && !looksLikeJsonPayload(value)) {
-        return value;
+        return displayPath(value);
       }
     }
 
@@ -1106,10 +1118,26 @@ function pathFromLogText(text: string): string | null {
       /(?:[a-zA-Z]:[\\/][^\s`'"]+|\/[a-zA-Z](?:\/[^\s`'"]+)+|(?:[\w.-]+[\\/])+(?:[\w .@()[\]-]+))/,
     );
     if (pathMatch) {
-      return displayPath(pathMatch[0]);
+      const value = cleanPathCandidate(pathMatch[0]);
+      if (looksLikePath(value)) {
+        return displayPath(value);
+      }
     }
   }
   return null;
+}
+
+function splitLogPathLines(text: string): string[] {
+  return text.split(/\r?\n/);
+}
+
+function cleanPathCandidate(candidate: string): string {
+  let cleaned = candidate.trim().replace(/^[`'"]+|[`'".,;:)]+$/g, "");
+  if (!/^[a-zA-Z]:[\\/]/.test(cleaned)) {
+    cleaned = cleaned.split(/\\r\\n|\\n|\\r/)[0] ?? cleaned;
+  }
+  cleaned = cleaned.replace(/:\d+(?::\d+)?$/, "");
+  return cleaned;
 }
 
 function parseJsonValue(raw: string): unknown | null {
@@ -1174,6 +1202,9 @@ function classifyCommandPresentation(command: string | null): ToolCategory {
 }
 
 function isExplorationCommand(command: string): boolean {
+  if (commandWritePaths(command).length > 0 || commandCleanupPaths(command).length > 0) {
+    return false;
+  }
   const commandName = firstCommandName(command);
   return (
     commandName === "get-content" ||
@@ -1394,6 +1425,19 @@ function getTrackedDiffPaths(tool: ToolInvocation, commandEditPaths: string[] = 
   ) {
     return [];
   }
+  if (commandEditPaths.length > 0) {
+    const diffPaths = uniqueStrings([
+      ...tool.diff_paths,
+      ...tool.diff_previews.map((preview) => preview.path),
+      ...diffPreviewsFromRawOutput(tool.raw_output).map((preview) => preview.path),
+    ]);
+    return uniqueStrings([
+      ...commandEditPaths,
+      ...diffPaths.filter((path) =>
+        commandEditPaths.some((editPath) => sameOrNestedPath(editPath, path)),
+      ),
+    ]);
+  }
   return uniqueStrings([
     ...commandEditPaths,
     ...tool.diff_paths,
@@ -1414,7 +1458,7 @@ function getTrackedDiffPreviews(tool: ToolInvocation, commandEditPaths: string[]
     const matched = previews.filter((preview) =>
       commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
     );
-    if (matched.length > 0) return matched;
+    return matched;
   }
   if (previews.length > 0) return previews;
   const inputPreview = diffPreviewFromRawInput(tool);
@@ -1590,7 +1634,7 @@ function diffPreviewFromUnifiedDiff(path: string, unifiedDiff: string): ToolDiff
 }
 
 function commandWritePaths(command: string): string[] {
-  const stripped = stripPowerShellHereStrings(command);
+  const stripped = stripShellHereDocuments(stripPowerShellHereStrings(command));
   const paths: string[] = [];
   for (const segment of stripped.split(/[;\n]/)) {
     const lower = segment.toLowerCase();
@@ -1607,6 +1651,148 @@ function commandWritePaths(command: string): string[] {
   }
   collectShellRedirectionPaths(stripped, paths);
   return uniqueStrings(paths.filter(isUsableWritePath));
+}
+
+function filterCompletedCommandEditPaths(
+  tool: ToolInvocation,
+  command: string | null,
+  paths: string[],
+): string[] {
+  if (!command || paths.length === 0 || !isTerminalToolStatus(tool.status)) {
+    return paths;
+  }
+
+  const cleanupPaths = commandCleanupPaths(command);
+  if (cleanupPaths.length === 0) return paths;
+
+  const diffPaths = uniqueStrings([
+    ...tool.diff_paths,
+    ...tool.diff_previews.map((preview) => preview.path),
+    ...diffPreviewsFromRawOutput(tool.raw_output).map((preview) => preview.path),
+  ]);
+
+  return paths.filter((path) => {
+    if (diffPaths.some((diffPath) => pathsReferToSameTarget(path, diffPath))) {
+      return true;
+    }
+    return !cleanupPaths.some((cleanupPath) => pathsReferToSameTarget(path, cleanupPath));
+  });
+}
+
+function isTerminalToolStatus(status: ToolStatus): boolean {
+  return status === "Succeeded" || status === "Failed" || status === "Interrupted";
+}
+
+function commandCleanupPaths(command: string): string[] {
+  const stripped = stripShellHereDocuments(stripPowerShellHereStrings(command));
+  const paths: string[] = [];
+  for (const segment of stripped.split(/[;\n]/)) {
+    const tokens = tokenizeCommandLine(segment);
+    if (tokens.length === 0) continue;
+    const commandName = tokens[0].toLowerCase();
+    if (commandName === "rm" || commandName === "unlink" || commandName === "del" || commandName === "erase") {
+      paths.push(...shellRemoveCommandPaths(tokens.slice(1)));
+      continue;
+    }
+    const lower = segment.toLowerCase();
+    if (containsCommandToken(lower, "remove-item") || containsCommandToken(lower, "ri")) {
+      paths.push(...extractParamValues(segment, ["-literalpath", "-path"]));
+      const positional = tokens
+        .slice(1)
+        .filter((token) => !token.startsWith("-") && token !== "|" && token !== "&&" && token !== "||");
+      if (positional.length > 0) {
+        paths.push(positional[0]);
+      }
+    }
+  }
+  return uniqueStrings(paths.map(displayPath).filter(isUsableWritePath));
+}
+
+function shellRemoveCommandPaths(tokens: string[]): string[] {
+  const paths: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === "--") continue;
+    if (token === "|" || token === "&&" || token === "||") break;
+    if (token.startsWith("-")) continue;
+    if (isUsableWritePath(token)) paths.push(token);
+  }
+  return paths;
+}
+
+interface ShellHereDocMarker {
+  delimiter: string;
+  stripTabs: boolean;
+}
+
+function stripShellHereDocuments(command: string): string {
+  const lines = command.replace(/\r\n/g, "\n").split("\n");
+  const output: string[] = [];
+  const pending: ShellHereDocMarker[] = [];
+
+  for (const line of lines) {
+    if (pending.length === 0) {
+      output.push(line);
+      pending.push(...extractShellHereDocMarkers(line));
+      continue;
+    }
+
+    const active = pending[0];
+    const comparable = active.stripTabs ? line.replace(/^\t+/, "") : line;
+    if (comparable === active.delimiter) {
+      pending.shift();
+    }
+  }
+
+  return output.join("\n");
+}
+
+function extractShellHereDocMarkers(line: string): ShellHereDocMarker[] {
+  const markers: ShellHereDocMarker[] = [];
+  let index = 0;
+  while (index < line.length) {
+    const markerIndex = line.indexOf("<<", index);
+    if (markerIndex < 0) break;
+    if (line[markerIndex + 2] === "<") {
+      index = markerIndex + 3;
+      continue;
+    }
+
+    let cursor = markerIndex + 2;
+    const stripTabs = line[cursor] === "-";
+    if (stripTabs) cursor += 1;
+    while (cursor < line.length && /\s/.test(line[cursor])) cursor += 1;
+
+    const parsed = parseShellHereDocDelimiter(line, cursor);
+    if (parsed) {
+      markers.push({ delimiter: parsed.delimiter, stripTabs });
+      index = parsed.end;
+    } else {
+      index = cursor + 1;
+    }
+  }
+  return markers;
+}
+
+function parseShellHereDocDelimiter(
+  line: string,
+  start: number,
+): { delimiter: string; end: number } | null {
+  if (start >= line.length) return null;
+  const quote = line[start];
+  if (quote === "'" || quote === '"') {
+    const end = line.indexOf(quote, start + 1);
+    if (end < 0) return null;
+    const delimiter = line.slice(start + 1, end).trim();
+    return delimiter ? { delimiter, end: end + 1 } : null;
+  }
+
+  let end = start;
+  while (end < line.length && !/[\s;|&<>]/.test(line[end])) {
+    end += 1;
+  }
+  const delimiter = line.slice(start, end).replace(/\\/g, "").trim();
+  return delimiter ? { delimiter, end } : null;
 }
 
 function stripPowerShellHereStrings(command: string): string {
@@ -1729,8 +1915,17 @@ function collectShellRedirectionPaths(command: string, paths: string[]) {
 function isUsableWritePath(path: string): boolean {
   const trimmed = path.trim();
   if (!trimmed || /[\r\n]/.test(trimmed)) return false;
+  if (/[<>]/.test(trimmed)) return false;
+  if (/^file:\/\//i.test(trimmed)) return false;
+  if (/^[a-zA-Z]:[\\/]{2,}/.test(trimmed)) return false;
   if (/^[$({]/.test(trimmed)) return false;
+  if (trimmed === "/" || looksLikePureTraversalPath(trimmed)) return false;
   return !["$null", "null", "nul", "/dev/null"].includes(trimmed.toLowerCase());
+}
+
+function looksLikePureTraversalPath(path: string): boolean {
+  const normalized = displayPath(path).replace(/[)"']+$/g, "");
+  return /^\.{1,2}(?:\/\.{1,2})*$/.test(normalized);
 }
 
 function gitWorkingTreeMutationPathspecs(command: string): string[] {
@@ -1818,6 +2013,12 @@ function sameOrNestedPath(pathspec: string, changedPath: string): boolean {
   if (changed === spec) return true;
   if (changed.endsWith(`/${spec}`)) return true;
   return spec.endsWith("/") && (changed.startsWith(spec) || changed.endsWith(`/${spec}`));
+}
+
+function pathsReferToSameTarget(left: string, right: string): boolean {
+  const normalizedLeft = normalizePathForCompare(left);
+  const normalizedRight = normalizePathForCompare(right);
+  return !!normalizedLeft && normalizedLeft === normalizedRight;
 }
 
 function normalizePathForCompare(path: string): string {

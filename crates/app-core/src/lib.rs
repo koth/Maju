@@ -328,6 +328,29 @@ mod tests {
     }
 
     #[test]
+    fn session_store_persists_current_model_provider_and_mode() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::open(dir.path().join("home").as_path(), dir.path()).unwrap();
+        store.create_session("session-a", "gpt-5.4").unwrap();
+        store
+            .update_session_model_mode_provider(
+                "session-a",
+                "kimi-for-coding",
+                Some("kimi_code"),
+                Some("build"),
+            )
+            .unwrap();
+
+        let (model, provider, mode) = store
+            .get_session_model_provider_mode("session-a")
+            .unwrap()
+            .expect("session metadata should exist");
+        assert_eq!(model, "kimi-for-coding");
+        assert_eq!(provider.as_deref(), Some("kimi_code"));
+        assert_eq!(mode.as_deref(), Some("build"));
+    }
+
+    #[test]
     fn app_paths_create_standard_home_data_dirs() {
         let dir = tempdir().unwrap();
         let paths = AppPaths::from_root(dir.path().join(".kodex"));
@@ -749,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn reducer_uses_fs_write_diff_for_session_changes_without_duplicate_tools() {
+    fn reducer_attaches_fs_write_diff_without_duplicate_tools() {
         let dir = tempdir().unwrap();
         let mut ui = super::bootstrap::build_initial_ui(dir.path()).unwrap();
         ui.tools.clear();
@@ -779,15 +802,7 @@ mod tests {
         );
 
         assert_eq!(ui.tools.len(), 1);
-        assert_eq!(ui.session_changes.len(), 1);
-        assert_eq!(
-            ui.session_changes[0].old_text.as_deref(),
-            Some("before\nold section\nafter\n")
-        );
-        assert_eq!(
-            ui.session_changes[0].new_text,
-            "before\nnew section\nafter\n"
-        );
+        assert!(ui.session_changes.is_empty());
         assert_eq!(ui.tools[0].diff_previews.len(), 1);
 
         super::reducer::apply_event(
@@ -810,15 +825,7 @@ mod tests {
         );
 
         assert_eq!(ui.tools.len(), 2);
-        assert_eq!(ui.session_changes.len(), 1);
-        assert_eq!(
-            ui.session_changes[0].old_text.as_deref(),
-            Some("before\nold section\nafter\n")
-        );
-        assert_eq!(
-            ui.session_changes[0].new_text,
-            "before\nnew section\ndone\n"
-        );
+        assert!(ui.session_changes.is_empty());
         let first_tool_added = ui.tools[0].diff_previews[0].hunks[0]
             .lines
             .iter()
@@ -844,11 +851,14 @@ mod tests {
             },
         );
 
-        assert_eq!(ui.session_changes.len(), 1);
-        assert_eq!(
-            ui.session_changes[0].new_text,
-            "before\nnew section\nfinal\n"
-        );
+        assert!(ui.session_changes.is_empty());
+        let final_tool_added = ui.tools[1].diff_previews[0].hunks[0]
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(final_tool_added, vec!["final"]);
     }
 
     #[test]

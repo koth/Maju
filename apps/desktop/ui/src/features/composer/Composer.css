@@ -4,48 +4,47 @@
   min-width: min(var(--conversation-column-min), 100%);
   max-width: min(var(--conversation-column-max), 920px);
   margin: 0 auto;
-  padding: 14px 0 16px;
+  padding: 10px 0 12px;
 }
 
 .composer.is-compact {
-  padding: 5px 0 8px;
+  padding: 4px 0 6px;
 }
 
 .composer-inner {
   position: relative;
   overflow: visible;
-  padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--surface-bg) 74%, var(--app-bg));
+  padding: 16px 18px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 52%, transparent);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--text-strong) 8%, var(--surface-bg));
   box-shadow:
-    0 18px 48px rgba(0, 0, 0, 0.24),
+    0 14px 42px rgba(0, 0, 0, 0.22),
     inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
 }
 
 .composer.is-compact .composer-inner {
   position: relative;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto 34px;
-  align-items: center;
-  gap: 8px;
-  min-height: 48px;
-  padding: 6px 8px;
-  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  padding: 10px 12px;
+  border-radius: 18px;
 }
 
 .composer.is-compact.has-attachments .composer-inner {
-  display: block;
+  display: flex;
   min-height: 0;
-  padding: 7px 8px;
-  border-radius: 14px;
+  padding: 10px 12px;
+  border-radius: 18px;
 }
 
 .composer-inner:focus-within {
   border-color: var(--border-focus);
   box-shadow:
-    0 18px 52px rgba(0, 0, 0, 0.28),
-    0 0 0 2px color-mix(in srgb, var(--border-focus) 28%, transparent);
+    0 16px 44px rgba(0, 0, 0, 0.26),
+    0 0 0 1px color-mix(in srgb, var(--border-focus) 32%, transparent);
 }
 
 .composer-plan-slot {
@@ -790,34 +789,31 @@
 .composer-inner.is-turn-active {
   border-color: color-mix(in srgb, var(--danger) 46%, var(--border-strong));
   box-shadow:
-    0 18px 52px rgba(0, 0, 0, 0.28),
-    0 0 0 2px color-mix(in srgb, var(--danger) 18%, transparent);
+    0 16px 44px rgba(0, 0, 0, 0.26),
+    0 0 0 1px color-mix(in srgb, var(--danger) 24%, transparent);
 }
 
-/* Input area — relative container for the send button */
 .composer-input-wrap {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 108px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--app-bg) 36%, transparent);
+  min-height: 50px;
+  border-radius: 18px;
+  background: transparent;
 }
 
 .composer.is-compact .composer-input-wrap {
   position: static;
-  grid-column: 2;
-  grid-row: 1;
   min-width: 0;
-  min-height: 0;
+  min-height: 34px;
   background: transparent;
 }
 
 .composer.is-compact.has-attachments .composer-input-wrap {
   position: relative;
   display: flex;
-  min-height: 72px;
-  background: color-mix(in srgb, var(--app-bg) 30%, transparent);
+  min-height: 58px;
+  background: transparent;
 }
 
 /* Slash command menu */
@@ -892,26 +888,26 @@
   outline: none;
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 15.5px;
+  line-height: 1.4;
   resize: none;
-  min-height: 96px;
-  padding: 18px 60px 14px 18px;
+  min-height: 50px;
+  padding: 0 6px 4px;
   scrollbar-gutter: stable;
 }
 
 .composer.is-compact .composer-textarea {
-  height: 32px;
-  min-height: 32px;
-  max-height: 32px;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
   overflow-y: hidden;
-  padding: 6px 0;
-  line-height: 20px;
+  padding: 4px 2px;
+  line-height: 24px;
 }
 
 .composer-textarea.has-attachments {
-  min-height: 66px;
-  padding-top: 10px;
+  min-height: 56px;
+  padding-top: 4px;
 }
 
 .composer.is-compact .composer-textarea.has-attachments {
@@ -919,9 +915,7 @@
   max-height: none;
   height: auto;
   overflow-y: auto;
-  padding-top: 6px;
-  padding-right: 52px;
-  padding-left: 12px;
+  padding: 4px 2px;
 }
 
 .composer-textarea::placeholder {
@@ -933,7 +927,7 @@
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 8px;
-  padding: 10px 60px 0 10px;
+  padding: 0 2px 10px;
 }
 
 .composer-attachment-chip {
@@ -1107,28 +1101,25 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-height: 40px;
   margin-top: 2px;
-  padding: 8px 4px 0;
-  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 78%, transparent);
+  padding: 0;
+  border-top: 0;
   color: var(--text-soft);
   font-size: var(--font-size-shell-meta);
 }
 
 .composer.is-compact .composer-control-rail {
   position: static;
-  grid-column: 3;
-  grid-row: 1;
   min-width: 0;
-  min-height: 30px;
+  min-height: 38px;
   margin-top: 0;
   padding: 0;
   border-top: 0;
   gap: 6px;
 }
 
-.composer.is-compact:not(.has-attachments) .composer-rail-spacer,
 .composer.is-compact:not(.has-attachments) .composer-session-state {
   display: none;
 }
@@ -1150,13 +1141,13 @@
 .composer-control-select {
   display: inline-flex;
   align-items: center;
-  min-height: 32px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-bg) 44%, transparent);
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  background: transparent;
   color: var(--text-muted);
-  font-size: var(--font-size-shell-meta);
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 520;
 }
 
 .composer.is-compact .composer-utility-btn,
@@ -1177,11 +1168,11 @@
 
 .composer-attachment-btn {
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   padding: 0;
-  color: var(--accent);
+  color: var(--text-soft);
   cursor: pointer;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
 }
@@ -1191,20 +1182,17 @@
 }
 
 .composer.is-compact:not(.has-attachments) .composer-attachment-btn {
-  position: absolute;
-  top: 50%;
-  left: 8px;
-  z-index: 1;
-  width: 32px;
-  min-height: 32px;
-  transform: translateY(-50%);
+  position: static;
+  width: 34px;
+  min-height: 34px;
+  transform: none;
 }
 
 .composer-utility-btn:hover,
 .composer-attachment-btn:hover:not(:disabled),
 .composer-control-select:hover {
   background: color-mix(in srgb, var(--text-strong) 7%, transparent);
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--border-strong) 44%, transparent);
   color: var(--accent-hover);
 }
 
@@ -1285,13 +1273,13 @@
 .composer-control-select {
   position: relative;
   padding: 0;
-  background: color-mix(in srgb, var(--app-bg) 44%, transparent);
+  background: transparent;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
 .composer-control-select.is-open {
   background: color-mix(in srgb, var(--text-strong) 8%, transparent);
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--border-strong) 48%, transparent);
   color: var(--text-strong);
 }
 
@@ -1299,10 +1287,10 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-height: 32px;
+  min-height: 36px;
   max-width: 240px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 12px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -1342,7 +1330,7 @@
   max-width: 150px;
   overflow: hidden;
   color: var(--text-strong);
-  font-weight: 600;
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1432,12 +1420,31 @@
   color: var(--text-strong);
 }
 
+.composer-static-control[data-control-id="model"],
+.composer-control-select[data-control-id="model"] .composer-control-trigger .composer-control-value,
+.composer-control-select[data-control-id$=":provider"] .composer-control-trigger .composer-control-value {
+  font-size: 11.5px;
+  font-weight: 610;
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-trigger .composer-control-label,
+.composer-control-select[data-control-id$=":provider"] .composer-control-trigger .composer-control-label {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.composer.is-compact .composer-static-control[data-control-id="model"],
+.composer.is-compact .composer-control-select[data-control-id="model"] .composer-control-trigger .composer-control-value,
+.composer.is-compact .composer-control-select[data-control-id$=":provider"] .composer-control-trigger .composer-control-value {
+  font-size: 11px;
+}
+
 .composer-rail-spacer {
   flex: 1;
 }
 
 .composer-session-state {
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
@@ -1477,17 +1484,15 @@
   padding: 4px 8px 0;
 }
 
-/* Send button — inside textarea, bottom-right corner */
 .composer-send-btn {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  border: 1px solid var(--border-strong);
-  background: color-mix(in srgb, var(--text-strong) 7%, transparent);
-  color: var(--text-muted);
+  position: static;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text-strong) 72%, transparent);
+  background: color-mix(in srgb, var(--text-strong) 92%, white 8%);
+  color: #101214;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1502,35 +1507,30 @@
 }
 
 .composer.is-compact .composer-send-btn {
-  right: 7px;
-  bottom: 7px;
-  width: 34px;
-  height: 32px;
-  border-radius: 8px;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
 }
 
 .composer.is-compact:not(.has-attachments) .composer-send-btn {
-  top: 50%;
-  right: 8px;
-  bottom: auto;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  transform: translateY(-50%);
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  transform: none;
 }
 
 .composer-send-btn-active {
-  background: var(--accent-hover);
-  border-color: color-mix(in srgb, var(--accent-hover) 76%, white 24%);
-  color: #08110f;
+  background: color-mix(in srgb, var(--text-strong) 96%, white 4%);
+  border-color: color-mix(in srgb, var(--text-strong) 82%, transparent);
+  color: #0b0d0f;
   box-shadow:
-    0 12px 24px color-mix(in srgb, var(--accent-hover) 18%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
 .composer-send-btn-active:hover:not(:disabled) {
   transform: translateY(-1px);
-  background: color-mix(in srgb, var(--accent-hover) 88%, white 12%);
+  background: #ffffff;
 }
 
 .composer-stop-btn {
@@ -1606,12 +1606,13 @@
   }
 
   .composer-inner {
-    padding: 7px;
+    padding: 14px 14px 12px;
+    border-radius: 20px;
   }
 
   .composer-textarea {
-    min-height: 88px;
-    padding: 15px 56px 12px 14px;
+    min-height: 58px;
+    padding: 2px 2px 8px;
     font-size: 14px;
   }
 
@@ -1626,7 +1627,7 @@
   }
 
   .composer-control-trigger {
-    max-width: 190px;
+    max-width: 170px;
   }
 
   .composer-control-value {
@@ -1639,14 +1640,14 @@
 }
 
 :root[data-theme="light"] .composer {
-  padding: 10px 0 14px;
+  padding: 10px 0 12px;
 }
 
 :root[data-theme="light"] .composer-inner {
   border-color: rgba(32, 33, 36, 0.13);
   background: #ffffff;
   box-shadow:
-    0 14px 34px rgba(32, 33, 36, 0.09),
+    0 14px 34px rgba(32, 33, 36, 0.08),
     inset 0 1px 0 rgba(255, 255, 255, 0.86);
 }
 
@@ -1665,7 +1666,7 @@
 }
 
 :root[data-theme="light"] .composer-input-wrap {
-  background: #f7f7f5;
+  background: transparent;
 }
 
 :root[data-theme="light"] .composer-textarea {
@@ -1710,8 +1711,8 @@
 :root[data-theme="light"] .composer-attachment-btn,
 :root[data-theme="light"] .composer-control-select,
 :root[data-theme="light"] .composer-session-state {
-  border-color: rgba(32, 33, 36, 0.12);
-  background: #ffffff;
+  border-color: transparent;
+  background: transparent;
   color: var(--text-muted);
 }
 
@@ -1734,10 +1735,10 @@
 }
 
 :root[data-theme="light"] .composer-send-btn {
-  border-color: rgba(32, 33, 36, 0.12);
-  background: #ededeb;
-  color: var(--text-soft);
-  box-shadow: none;
+  border-color: #111111;
+  background: #111111;
+  color: #ffffff;
+  box-shadow: 0 10px 22px rgba(32, 33, 36, 0.12);
 }
 
 :root[data-theme="light"] .composer-send-btn-active {

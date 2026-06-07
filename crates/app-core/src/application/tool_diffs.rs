@@ -1,10 +1,11 @@
 use super::diff_utils::{
     CanonicalTextDiff, ExactEditText, canonical_text_diff, edit_input_after_text,
-    edit_input_before_text, edit_input_unified_diff_for_path, is_file_write_tool_identity,
-    looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
-    normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
-    tool_command_write_hint_paths, tool_diff_hunks_for_detected_write,
-    tool_event_hint_paths, tool_hunks_for_tracker_update,
+    edit_input_before_text, edit_input_change_type_for_path, edit_input_unified_diff_for_path,
+    is_file_write_tool_identity, looks_like_fragment_to_full_file_text,
+    looks_like_whole_file_addition_hunks, normalize_diff_text_for_session_change,
+    reverse_apply_diff_hunks, reverse_apply_unified_diff, tool_command_write_hint_paths,
+    tool_diff_hunks_for_detected_write, tool_event_change_paths, tool_event_hint_paths,
+    tool_hunks_for_tracker_update,
 };
 use super::{
     Application, current_timestamp, is_codebuddy_agent_label, normalize_path_for_storage,
@@ -211,8 +212,30 @@ impl Application {
         normalized_path: &str,
     ) -> Option<ExactEditText> {
         let tool = self.ui.tools.iter().find(|tool| tool.call_id == call_id)?;
-        let input = tool.raw_input.as_deref()?;
-        let json = serde_json::from_str::<serde_json::Value>(input).ok()?;
+        self.exact_edit_text_from_tool_payloads(tool, normalized_path)
+    }
+
+    fn exact_edit_text_from_tool_payloads(
+        &self,
+        tool: &ToolInvocation,
+        normalized_path: &str,
+    ) -> Option<ExactEditText> {
+        tool.raw_input
+            .as_deref()
+            .and_then(|payload| self.exact_edit_text_from_tool_payload(payload, normalized_path))
+            .or_else(|| {
+                tool.raw_output.as_deref().and_then(|payload| {
+                    self.exact_edit_text_from_tool_payload(payload, normalized_path)
+                })
+            })
+    }
+
+    fn exact_edit_text_from_tool_payload(
+        &self,
+        payload: &str,
+        normalized_path: &str,
+    ) -> Option<ExactEditText> {
+        let json = serde_json::from_str::<serde_json::Value>(payload).ok()?;
         if let Some(unified_diff) =
             edit_input_unified_diff_for_path(&json, normalized_path, &self.ui.workspace.root)
             && let Some(exact_edit) =
@@ -255,6 +278,157 @@ impl Application {
             new_text: after,
             hunks,
         })
+    }
+
+    pub(super) fn apply_completed_tool_landed_edit_payload(&mut self, call_id: &str) -> bool {
+        let Some(tool) = self
+            .ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == call_id && tool.status == ToolStatus::Succeeded)
+            .cloned()
+        else {
+            return false;
+        };
+
+        if !is_file_write_tool_identity(&tool.kind, &tool.name) {
+            return false;
+        }
+
+        let mut changes = Vec::new();
+        for normalized_path in completed_tool_edit_candidate_paths(&tool, &self.ui.workspace.root) {
+            let change_type = self
+                .tool_payload_change_type_for_path(&tool, &normalized_path)
+                .unwrap_or(FileChangeType::Modified);
+            if change_type == FileChangeType::Deleted {
+                let abs_path = self.ui.workspace.root.join(&normalized_path);
+                if abs_path.exists() {
+                    continue;
+                }
+                let Some(exact_edit) =
+                    self.deleted_edit_text_from_tool_payloads(&tool, &normalized_path)
+                else {
+                    continue;
+                };
+                changes.push(crate::file_tracker::VerifiedFileChange {
+                    path: normalized_path,
+                    change_type,
+                    old_text: Some(exact_edit.old_text),
+                    new_text: String::new(),
+                    skipped_diff: false,
+                    quality: DiffQuality::Exact,
+                });
+                continue;
+            }
+            let Some(exact_edit) = self.exact_edit_text_from_tool_payloads(&tool, &normalized_path)
+            else {
+                continue;
+            };
+            let Ok(disk_text) =
+                std::fs::read_to_string(self.ui.workspace.root.join(&normalized_path))
+            else {
+                continue;
+            };
+            if normalize_diff_text_for_session_change(&disk_text) != exact_edit.new_text {
+                continue;
+            }
+            let old_text = if change_type == FileChangeType::Created {
+                None
+            } else {
+                Some(exact_edit.old_text)
+            };
+            changes.push(crate::file_tracker::VerifiedFileChange {
+                path: normalized_path,
+                change_type,
+                old_text,
+                new_text: exact_edit.new_text,
+                skipped_diff: false,
+                quality: DiffQuality::Exact,
+            });
+        }
+
+        if changes.is_empty() {
+            return false;
+        }
+        self.apply_tracker_changes(call_id, changes)
+    }
+
+    fn deleted_edit_text_from_tool_payloads(
+        &self,
+        tool: &ToolInvocation,
+        normalized_path: &str,
+    ) -> Option<ExactEditText> {
+        tool.raw_input
+            .as_deref()
+            .and_then(|payload| self.deleted_edit_text_from_tool_payload(payload, normalized_path))
+            .or_else(|| {
+                tool.raw_output.as_deref().and_then(|payload| {
+                    self.deleted_edit_text_from_tool_payload(payload, normalized_path)
+                })
+            })
+    }
+
+    fn deleted_edit_text_from_tool_payload(
+        &self,
+        payload: &str,
+        normalized_path: &str,
+    ) -> Option<ExactEditText> {
+        let json = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+        if let Some(unified_diff) =
+            edit_input_unified_diff_for_path(&json, normalized_path, &self.ui.workspace.root)
+        {
+            let old_text = normalize_diff_text_for_session_change(&reverse_apply_unified_diff(
+                "",
+                unified_diff,
+            )?);
+            if old_text.is_empty() {
+                return None;
+            }
+            let hunks = diff_to_hunks(Some(&old_text), "");
+            return (!hunks.is_empty()).then_some(ExactEditText {
+                old_text,
+                new_text: String::new(),
+                hunks,
+            });
+        }
+
+        let old_text = edit_input_before_text(&json).map(normalize_diff_text_for_session_change)?;
+        let new_text = edit_input_after_text(&json)
+            .map(normalize_diff_text_for_session_change)
+            .unwrap_or_default();
+        if old_text.is_empty() || !new_text.is_empty() {
+            return None;
+        }
+        let hunks = diff_to_hunks(Some(&old_text), "");
+        (!hunks.is_empty()).then_some(ExactEditText {
+            old_text,
+            new_text,
+            hunks,
+        })
+    }
+
+    fn tool_payload_change_type_for_path(
+        &self,
+        tool: &ToolInvocation,
+        normalized_path: &str,
+    ) -> Option<FileChangeType> {
+        tool.raw_input
+            .as_deref()
+            .and_then(|payload| self.tool_payload_change_type(payload, normalized_path))
+            .or_else(|| {
+                tool.raw_output
+                    .as_deref()
+                    .and_then(|payload| self.tool_payload_change_type(payload, normalized_path))
+            })
+    }
+
+    fn tool_payload_change_type(
+        &self,
+        payload: &str,
+        normalized_path: &str,
+    ) -> Option<FileChangeType> {
+        let json = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+        edit_input_change_type_for_path(&json, normalized_path, &self.ui.workspace.root)
     }
 
     pub(super) fn exact_edit_text_from_unified_diff(
@@ -584,11 +758,9 @@ impl Application {
             let mut add_path = |path: String| {
                 let normalized_storage = normalize_path_for_storage(&path, &workspace_root);
                 let normalized = normalize_path(&normalized_storage);
-                if let Some(existing) =
-                    write_paths.iter_mut().find(|(call_id, existing_path)| {
-                        call_id == &tool.call_id && normalize_path(existing_path) == normalized
-                    })
-                {
+                if let Some(existing) = write_paths.iter_mut().find(|(call_id, existing_path)| {
+                    call_id == &tool.call_id && normalize_path(existing_path) == normalized
+                }) {
                     existing.1 = path;
                 } else {
                     write_paths.push((tool.call_id.clone(), path));
@@ -848,7 +1020,6 @@ impl Application {
 
         None
     }
-
 }
 
 fn is_shell_command_tool_label(value: &str) -> bool {
@@ -866,6 +1037,33 @@ fn tool_has_diff_source_for_path(tool: &ToolInvocation, path: &str, workspace_ro
                     .any(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed))
             })
     })
+}
+
+fn completed_tool_edit_candidate_paths(
+    tool: &ToolInvocation,
+    workspace_root: &Path,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    paths.extend(tool_event_hint_paths(tool.raw_input.as_deref()));
+    paths.extend(tool_event_change_paths(tool.raw_output.as_deref()));
+    paths.extend(
+        tool.diff_paths
+            .iter()
+            .map(|path| path.display().to_string()),
+    );
+    paths.extend(
+        tool.diff_previews
+            .iter()
+            .map(|preview| preview.path.display().to_string()),
+    );
+    paths = paths
+        .into_iter()
+        .map(|path| normalize_path_for_storage(&path, workspace_root))
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn compatible_landed_tool_hunks(

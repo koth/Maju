@@ -171,14 +171,16 @@ mod tests {
 
         update_initial_agent_notice(&mut ui, "Claude");
 
-        assert!(ui
-            .messages
-            .iter()
-            .any(|message| message.role == MessageRole::System
-                && message.body == "Claude 将保持空闲，直到您从下方编辑器提交提示。"));
-        assert!(ui
-            .messages
-            .iter()
-            .all(|message| !message.body.contains("CodeBuddy 将保持空闲")));
+        assert!(
+            ui.messages
+                .iter()
+                .any(|message| message.role == MessageRole::System
+                    && message.body == "Claude 将保持空闲，直到您从下方编辑器提交提示。")
+        );
+        assert!(
+            ui.messages
+                .iter()
+                .all(|message| !message.body.contains("CodeBuddy 将保持空闲"))
+        );
     }
 }

@@ -345,7 +345,11 @@ export function Composer({
       setControlError(null);
       try {
         const selectedChoice = control.choices.find((choice) => choice.id === valueId);
-        await sessionSetConfigControl(control.id, valueId, selectedChoice?.provider ?? null);
+        await sessionSetConfigControl(
+          control.id,
+          valueId,
+          configControlRequestProvider(control, valueId, selectedChoice?.provider ?? null),
+        );
         onStateChange();
       } catch (error) {
         setControlError(String(error));
@@ -360,16 +364,21 @@ export function Composer({
     async (_control: SessionConfigControl, providerId: string) => {
       if (!controlsEnabled || !modelControl) return;
       const group = modelProviderGroups.find((candidate) => candidate.id === providerId);
+      const currentModelName = currentModelNameForControl(modelControl);
       const targetChoice =
-        group?.choices.find((choice) => choice.id === modelControl.current_value_id) ??
-        group?.choices.find((choice) => choice.label === modelControl.current_value_label) ??
+        group?.choices.find((choice) => modelChoiceMatchesCurrentControl(choice, modelControl, group.id)) ??
+        group?.choices.find((choice) => modelChoiceMatchesModelName(choice, currentModelName)) ??
         group?.choices[0];
       if (!targetChoice) return;
       const providerControlId = modelProviderControlId(modelControl.id);
       setPendingControlId(providerControlId);
       setControlError(null);
       try {
-        await sessionSetConfigControl(modelControl.id, targetChoice.id, targetChoice.provider ?? group?.id ?? null);
+        await sessionSetConfigControl(
+          modelControl.id,
+          targetChoice.id,
+          configControlRequestProvider(modelControl, targetChoice.id, targetChoice.provider ?? group?.id ?? null),
+        );
         onStateChange();
       } catch (error) {
         setControlError(String(error));
@@ -508,15 +517,6 @@ export function Composer({
             placeholder={turnActive ? "补充约束，或停止当前轮次" : "交给 Kodex 一个明确目标"}
             rows={compact ? 1 : 2}
           />
-          <button
-            className={`composer-send-btn ${canSend ? "composer-send-btn-active" : ""} ${turnActive ? "composer-stop-btn" : ""}`}
-            disabled={turnActive ? cancelling : !canSend}
-            onClick={turnActive ? handleCancel : handleSend}
-            title={turnActive ? "取消当前轮次" : "发送提示"}
-            aria-label={turnActive ? "取消当前轮次" : "发送提示"}
-          >
-            {turnActive ? <span className="composer-stop-icon" /> : <SendIcon />}
-          </button>
         </div>
         <div className="composer-control-rail">
           <input
@@ -536,28 +536,6 @@ export function Composer({
           >
             <PaperclipIcon />
           </button>
-          {modelProviderControl && (
-            <SessionControlSelect
-              control={modelProviderControl}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === modelProviderControl.id}
-              open={openControlId === modelProviderControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? modelProviderControl.id : null)}
-              onChange={handleModelProviderChange}
-            />
-          )}
-          {visibleModelControl ? (
-            <SessionControlSelect
-              control={visibleModelControl}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === visibleModelControl.id}
-              open={openControlId === visibleModelControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? visibleModelControl.id : null)}
-              onChange={handleControlChange}
-            />
-          ) : (
-            <span className="composer-static-control">{snapshot.session.model}</span>
-          )}
           {modeControl && (
             <SessionControlSelect
               control={modeControl}
@@ -580,10 +558,43 @@ export function Composer({
             />
           ))}
           <span className="composer-rail-spacer" />
+          {modelProviderControl && (
+            <SessionControlSelect
+              control={modelProviderControl}
+              disabled={!controlsEnabled || pendingControlId !== null}
+              pending={pendingControlId === modelProviderControl.id}
+              open={openControlId === modelProviderControl.id}
+              onOpenChange={(open) => setOpenControlId(open ? modelProviderControl.id : null)}
+              onChange={handleModelProviderChange}
+            />
+          )}
+          {visibleModelControl ? (
+            <SessionControlSelect
+              control={visibleModelControl}
+              disabled={!controlsEnabled || pendingControlId !== null}
+              pending={pendingControlId === visibleModelControl.id}
+              open={openControlId === visibleModelControl.id}
+              onOpenChange={(open) => setOpenControlId(open ? visibleModelControl.id : null)}
+              onChange={handleControlChange}
+            />
+          ) : (
+            <span className="composer-static-control" data-control-id="model">
+              {snapshot.session.model}
+            </span>
+          )}
           <span className="composer-session-state">
             <span className="composer-session-state-dot" />
             {snapshot.session.status}
           </span>
+          <button
+            className={`composer-send-btn ${canSend ? "composer-send-btn-active" : ""} ${turnActive ? "composer-stop-btn" : ""}`}
+            disabled={turnActive ? cancelling : !canSend}
+            onClick={turnActive ? handleCancel : handleSend}
+            title={turnActive ? "取消当前轮次" : "发送提示"}
+            aria-label={turnActive ? "取消当前轮次" : "发送提示"}
+          >
+            {turnActive ? <span className="composer-stop-icon" /> : <SendIcon />}
+          </button>
         </div>
         {controlError && (
           <div className="composer-error">{controlError}</div>
@@ -631,15 +642,32 @@ function byokModelProviderGroupsForControl(control: SessionConfigControl): Model
   const groups = new Map<string, SessionConfigControl["choices"]>();
   const choices = dedupeControlChoices(control.choices);
   for (const choice of choices) {
-    const providerId = choice.provider;
-    if (!providerId) return [];
+    const decoded = decodeProviderModelChoice(choice);
+    const providerId = decoded.provider;
+    if (!providerId) continue;
     const current = groups.get(providerId) ?? [];
-    current.push(choice);
+    current.push(decoded.choice);
     groups.set(providerId, current);
+  }
+  const currentModel = currentProviderModelForControl(control);
+  if (currentModel) {
+    const current = groups.get(currentModel.provider) ?? [];
+    if (!current.some((choice) => modelChoiceMatchesProviderModel(choice, currentModel, currentModel.provider))) {
+      current.push({
+        id: control.current_value_id,
+        label: currentModel.model,
+        description: null,
+        provider: currentModel.provider,
+      });
+      groups.set(currentModel.provider, current);
+    }
   }
   if (groups.size === 0) return [];
   return [...groups.entries()]
-    .sort(([left], [right]) => MODEL_PROVIDER_ORDER.indexOf(left) - MODEL_PROVIDER_ORDER.indexOf(right))
+    .sort(([left], [right]) => {
+      const byOrder = modelProviderOrderIndex(left) - modelProviderOrderIndex(right);
+      return byOrder || left.localeCompare(right);
+    })
     .map(([id, groupChoices]) => ({
       id,
       label: MODEL_PROVIDER_LABELS[id] ?? id,
@@ -652,8 +680,18 @@ function activeModelProviderGroupForControl(
   groups: ModelProviderGroup[],
 ) {
   if (!control || groups.length === 0) return null;
+  const currentModel = currentProviderModelForControl(control);
+  if (currentModel) {
+    const currentGroup = groups.find((group) => group.id === currentModel.provider);
+    if (currentGroup) return currentGroup;
+  }
+  const inferredProvider = inferredProviderForModelName(currentModelNameForControl(control), groups);
+  if (inferredProvider) {
+    const inferredGroup = groups.find((group) => group.id === inferredProvider);
+    if (inferredGroup) return inferredGroup;
+  }
   return groups.find((group) =>
-    group.choices.some((choice) => choice.id === control.current_value_id),
+    group.choices.some((choice) => modelChoiceMatchesCurrentControl(choice, control, group.id)),
   ) ?? groups[0];
 }
 
@@ -687,7 +725,7 @@ function filterModelControlForProvider(
 ): SessionConfigControl | undefined {
   if (!modelControl || !activeGroup) return modelControl;
   const selected =
-    activeGroup.choices.find((choice) => choice.id === modelControl.current_value_id) ??
+    activeGroup.choices.find((choice) => modelChoiceMatchesCurrentControl(choice, modelControl, activeGroup.id)) ??
     activeGroup.choices[0];
   return {
     ...modelControl,
@@ -699,6 +737,136 @@ function filterModelControlForProvider(
 
 function modelProviderControlId(modelControlId: string) {
   return `${modelControlId}:provider`;
+}
+
+function modelProviderOrderIndex(providerId: string) {
+  const index = MODEL_PROVIDER_ORDER.indexOf(providerId);
+  return index === -1 ? MODEL_PROVIDER_ORDER.length : index;
+}
+
+function decodeProviderModelChoice(
+  choice: SessionConfigControl["choices"][number],
+): {
+  provider: string | null;
+  choice: SessionConfigControl["choices"][number];
+} {
+  const encoded = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
+  const provider = encoded?.provider ?? choice.provider ?? null;
+  if (!provider) {
+    return { provider: null, choice };
+  }
+
+  return {
+    provider,
+    choice: {
+      ...choice,
+      provider,
+      label: encoded?.model ?? choice.label,
+    },
+  };
+}
+
+function configControlRequestProvider(
+  control: SessionConfigControl,
+  valueId: string,
+  provider: string | null,
+) {
+  if (control.category === "Model" && decodeProviderModelValue(valueId)) {
+    return null;
+  }
+  return provider;
+}
+
+function currentProviderModelForControl(control: SessionConfigControl) {
+  return decodeProviderModelValue(control.current_value_id) ??
+    decodeProviderModelValue(control.current_value_label);
+}
+
+function currentModelNameForControl(control: SessionConfigControl) {
+  return currentProviderModelForControl(control)?.model ??
+    control.current_value_label ??
+    control.current_value_id;
+}
+
+function modelChoiceMatchesCurrentControl(
+  choice: SessionConfigControl["choices"][number],
+  control: SessionConfigControl,
+  groupProvider: string | null,
+) {
+  if (choice.id === control.current_value_id || choice.label === control.current_value_label) {
+    return true;
+  }
+
+  const currentModel = currentProviderModelForControl(control);
+  if (!currentModel) return false;
+  return modelChoiceMatchesProviderModel(choice, currentModel, groupProvider);
+}
+
+function modelChoiceMatchesProviderModel(
+  choice: SessionConfigControl["choices"][number],
+  model: { provider: string; model: string },
+  groupProvider: string | null,
+) {
+  const choiceModel = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
+  if (choiceModel) {
+    return choiceModel.provider === model.provider && choiceModel.model === model.model;
+  }
+
+  const choiceProvider = choice.provider ?? groupProvider;
+  return (
+    choiceProvider === model.provider &&
+    (choice.id === model.model || choice.label === model.model)
+  );
+}
+
+function modelChoiceMatchesModelName(
+  choice: SessionConfigControl["choices"][number],
+  modelName: string,
+) {
+  const choiceModel = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
+  return choice.id === modelName || choice.label === modelName || choiceModel?.model === modelName;
+}
+
+function inferredProviderForModelName(modelName: string, groups: ModelProviderGroup[]) {
+  const normalized = modelName.trim().toLowerCase();
+  let provider: string | null = null;
+  if (
+    normalized.startsWith("qwen/") ||
+    normalized.startsWith("minimaxai/") ||
+    normalized.startsWith("moonshotai/") ||
+    normalized.startsWith("zai-org/") ||
+    normalized.startsWith("stepfun/") ||
+    normalized.startsWith("google/")
+  ) {
+    provider = "commandcode";
+  } else if (normalized.includes("deepseek")) {
+    provider = "deepseek";
+  } else if (normalized.includes("kimi")) {
+    provider = "kimi_code";
+  } else if (normalized.includes("mimo") || normalized.includes("xiaomi")) {
+    provider = "xiaomi_mimo";
+  }
+
+  if (!provider) return null;
+  const group = groups.find((candidate) => candidate.id === provider);
+  if (!group) return null;
+  return group.choices.some((choice) => modelChoiceMatchesModelName(choice, modelName))
+    ? provider
+    : null;
+}
+
+function decodeProviderModelValue(value: string) {
+  const slashMatch = value.match(/^kodex-provider\/([^/]+)\/(.+)$/i);
+  if (slashMatch) {
+    return { provider: slashMatch[1], model: slashMatch[2] };
+  }
+
+  const colonMatch = value.match(/^kodex-provider:([^:]+):(.+)$/i);
+  if (colonMatch) {
+    return { provider: colonMatch[1], model: colonMatch[2] };
+  }
+
+  return null;
 }
 
 function readAttachment(file: File): Promise<Attachment> {
@@ -1004,6 +1172,7 @@ function SessionControlSelect({
     <div
       ref={rootRef}
       className={`composer-control-select ${open ? "is-open" : ""}`}
+      data-control-id={control.id}
       onBlur={(event) => {
         const nextFocus = event.relatedTarget;
         if (!(nextFocus instanceof Node) || !event.currentTarget.contains(nextFocus)) {

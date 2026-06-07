@@ -35,10 +35,9 @@ impl Application {
             return;
         }
         self.review_changes_started = true;
-        if self.ui.review_changes.is_empty() {
-            self.persist_review_file_changes();
-            self.remove_current_agent_turn_change_set();
-        }
+        self.ui.review_changes.clear();
+        self.persist_review_file_changes();
+        self.remove_current_agent_turn_change_set();
     }
 
     pub(in crate::application) fn upsert_review_file_change(

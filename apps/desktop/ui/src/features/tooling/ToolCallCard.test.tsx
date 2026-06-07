@@ -423,6 +423,140 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("AGENTS.md");
   });
 
+  it("does not use shell heredoc markup body as edit paths", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command:
+          "cat >> /Users/kothchen/code/hotnovel/web/app.js << 'JS_EOF'\n" +
+          "render(`\n" +
+          "  <main class=\"space-y-4\">\n" +
+          "    <h2>查看某日报告</h2>\n" +
+          "    <label class=\"block\">日期</label>\n" +
+          "  </main>\n" +
+          "`);\n" +
+          "JS_EOF",
+      }),
+      terminal_output: { exit_code: 0, output: "wrote app.js" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "/Users/kothchen/code/hotnovel/web/app.js",
+    );
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("</h2>");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("</main>");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("<label");
+  });
+
+  it("does not classify non-writing shell heredocs with markup as edits", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({
+        command: "node <<'JS'\nconsole.log('<main>preview</main>')\nJS",
+      }),
+      terminal_output: { exit_code: 0, output: "<main>preview</main>" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+  });
+
+  it("does not let command stdout paths override heredoc write targets", () => {
+    const command =
+      "cat > /Users/kothchen/code/hotnovel/probe2.mjs << 'JS_EOF'\n" +
+      "import { resolve } from \"node:path\";\n" +
+      "console.log(\"here:\", import.meta.url);\n" +
+      "JS_EOF\n" +
+      "node probe2.mjs 2>&1";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      raw_output: JSON.stringify({
+        aggregated_output:
+          "here: /Users/kothchen/code/hotnovel/probe2.mjs\\ncwd: /Users/kothchen/code/hotnovel\\nfiles at ../../..:\\n  /Users/kothchen/web -> MISSING\\n",
+      }),
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "/Users/kothchen/code/hotnovel/probe2.mjs",
+    );
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("/ncwd");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("/Users/kothchen/web");
+  });
+
+  it("does not let stack trace source locations override heredoc write targets", () => {
+    const command =
+      "cat > /Users/kothchen/code/hotnovel/probe3.mjs << 'JS_EOF'\n" +
+      "console.log(\"root(\"../..\")  :\", \"broken\");\n" +
+      "JS_EOF\n" +
+      "node probe3.mjs";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      raw_output: JSON.stringify({
+        aggregated_output:
+          "file:///Users/kothchen/code/hotnovel/probe3.mjs:6\\nconsole.log(\"root(\"../..\")  :\", resolve(fakeIndex, \"../..\"));\\n",
+      }),
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "/Users/kothchen/code/hotnovel/probe3.mjs",
+    );
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("file://");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toContain("../..");
+  });
+
+  it("classifies completed same-command temporary probe writes as executed", () => {
+    const command =
+      "cat > /Users/kothchen/code/hotnovel/probe3.mjs << 'JS_EOF'\n" +
+      "console.log('probe');\n" +
+      "JS_EOF\n" +
+      "node probe3.mjs\n" +
+      "rm /Users/kothchen/code/hotnovel/probe3.mjs";
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "tool",
+      raw_input: JSON.stringify({ command }),
+      terminal_output: { exit_code: 0, output: "probe\n" },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已运行");
+    expect(container.querySelector(".tc-cmd")!.textContent).not.toBe(
+      "/Users/kothchen/code/hotnovel/probe3.mjs",
+    );
+  });
+
   it("renders CodeBuddy raw_output changes unified_diff as editing diffs", () => {
     const rawOutput = JSON.stringify({
       call_id: "call_123",
@@ -843,6 +977,28 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.querySelector(".tc-cmd")!.textContent).toBe(
       "openspec/changes/accelerate-pipeline-execution/specs/pipeline-execution/spec.md",
     );
+  });
+
+  it("keeps windows edit log paths that contain a backslash-n sequence", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Write",
+      summary: "{",
+      raw_input: '{"content":"truncated"',
+      logs: [
+        {
+          title: "Update",
+          body: "编辑 C:\\new\\file.ts",
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已编辑");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("C:/new/file.ts");
   });
 
   it("hides raw JSON from primary command output when terminal output exists", () => {

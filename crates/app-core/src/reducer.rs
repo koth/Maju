@@ -1,6 +1,6 @@
+use crate::application::diff_utils::reverse_apply_diff_hunks;
 use acp_core::{ClientEvent, diff_to_hunks};
 use serde_json::{Map, Value};
-use crate::application::diff_utils::reverse_apply_diff_hunks;
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
     DiffLineKind, SessionStatus, SidebarSection, TerminalOutput, ThinkingStatus, TimelineItem,
@@ -342,7 +342,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                         normalize_change_path(&preview.path.display().to_string())
                             == normalized_path
                     }) {
-                       preview.path = path_buf;
+                        preview.path = path_buf;
                         let cumulative_hunks = if let Some(baseline) =
                             reverse_apply_diff_hunks(&new_text, &preview.hunks)
                         {
@@ -351,7 +351,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                             diff_hunks.clone()
                         };
                         preview.hunks = cumulative_hunks;
-                   } else {
+                    } else {
                         tool.diff_previews.push(ToolDiffPreview {
                             path: path_buf,
                             hunks: diff_hunks.clone(),
@@ -384,7 +384,6 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 };
                 changed_file.hunks = cumulative_hunks;
             }
-
         }
         ClientEvent::ToolDiffPreview { id, path, hunks } => {
             let normalized_path = normalize_change_path(&path);
@@ -905,6 +904,9 @@ fn apply_config_value_change(
         .iter_mut()
         .find(|control| control.id == control_id)
     else {
+        if control_id == "mode" {
+            ui.session.mode = Some(value_label.unwrap_or_else(|| value_id.to_string()));
+        }
         return;
     };
 

@@ -1,7 +1,7 @@
 use agent_client_protocol::schema::{PermissionOptionKind, RequestPermissionRequest, ToolKind};
 use anyhow::anyhow;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::workspace_paths::paths_are_inside_workspace;
@@ -49,9 +49,10 @@ struct PermissionBrokerState {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PermissionPolicyMode {
-    Plan,
+    ReadOnly,
     #[default]
     Build,
+    FullAccess,
 }
 
 impl PermissionBroker {
@@ -125,10 +126,14 @@ impl PermissionBroker {
     }
 
     pub(crate) fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
-        let mode = if mode_id.eq_ignore_ascii_case("build") {
-            PermissionPolicyMode::Build
-        } else {
-            PermissionPolicyMode::Plan
+        let normalized = mode_id.to_ascii_lowercase();
+        let mode = match normalized.as_str() {
+            "full-access" | "fullaccess" | "full_access" | "danger-full-access"
+            | "bypasspermissions" | "bypass" | "完全访问" => PermissionPolicyMode::FullAccess,
+            "build" | "auto" | "default" | "acceptedits" | "accept-edits" | "accept_edits"
+            | "dontask" | "don't ask" | "dont ask" => PermissionPolicyMode::Build,
+            "plan" | "readonly" | "read-only" | "read_only" => PermissionPolicyMode::ReadOnly,
+            _ => PermissionPolicyMode::ReadOnly,
         };
         *self
             .mode
@@ -164,7 +169,8 @@ pub(super) enum PermissionDecision {
     Ask,
 }
 
-pub(super) fn reject_permission_option_id(request: &RequestPermissionRequest) -> Option<String> {
+#[cfg(test)]
+fn reject_permission_option_id(request: &RequestPermissionRequest) -> Option<String> {
     request
         .options
         .iter()
@@ -195,12 +201,13 @@ pub(super) fn decide_permission(
     }
 
     if is_codebuddy_bash_request(request) {
-        return decide_codebuddy_bash_permission(workspace_root, request);
+        return decide_codebuddy_bash_permission(mode, workspace_root, request);
     }
 
     match mode {
-        PermissionPolicyMode::Plan => decide_plan_permission(workspace_root, request),
+        PermissionPolicyMode::ReadOnly => decide_read_only_permission(workspace_root, request),
         PermissionPolicyMode::Build => decide_build_permission(workspace_root, request),
+        PermissionPolicyMode::FullAccess => decide_full_access_permission(workspace_root, request),
     }
 }
 
@@ -216,6 +223,7 @@ fn request_has_user_input_questions(request: &RequestPermissionRequest) -> bool 
 }
 
 fn decide_codebuddy_bash_permission(
+    mode: PermissionPolicyMode,
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
@@ -242,14 +250,17 @@ fn decide_codebuddy_bash_permission(
         .iter()
         .any(|command| shell_command_directly_mutates_files(command))
     {
-        return select_permission_option(request, false);
+        return PermissionDecision::Ask;
     }
 
     if !commands.is_empty() {
         return PermissionDecision::Ask;
     }
 
-    select_permission_option(request, false)
+    match mode {
+        PermissionPolicyMode::FullAccess => PermissionDecision::Ask,
+        _ => select_permission_option(request, false),
+    }
 }
 
 pub(super) fn decide_codebuddy_terminal_permission(
@@ -273,7 +284,7 @@ pub(super) fn decide_codebuddy_terminal_permission(
     }
 
     if shell_command_directly_mutates_files(command) {
-        return CodeBuddyTerminalPermissionDecision::Reject;
+        return CodeBuddyTerminalPermissionDecision::Ask(Vec::new());
     }
 
     if !command.trim().is_empty() {
@@ -311,7 +322,7 @@ fn find_codebuddy_tool_name(value: &serde_json::Value) -> Option<&str> {
     }
 }
 
-fn decide_plan_permission(
+fn decide_read_only_permission(
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
@@ -345,7 +356,7 @@ fn decide_build_permission(
         ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
             PermissionDecision::Ask
         }
-        ToolKind::Read | ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+        ToolKind::Read | ToolKind::Search => {
             let paths = permission_paths(request);
             if paths_are_inside_workspace(workspace_root, &paths) {
                 select_permission_option(request, true)
@@ -353,6 +364,29 @@ fn decide_build_permission(
                 PermissionDecision::Ask
             }
         }
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => PermissionDecision::Ask,
+        _ => select_permission_option(request, true),
+    }
+}
+
+fn decide_full_access_permission(
+    workspace_root: &str,
+    request: &RequestPermissionRequest,
+) -> PermissionDecision {
+    match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
+        ToolKind::SwitchMode => PermissionDecision::Ask,
+        ToolKind::Read | ToolKind::Search => {
+            let paths = permission_paths(request);
+            if paths_are_inside_workspace(workspace_root, &paths) {
+                select_permission_option(request, true)
+            } else {
+                PermissionDecision::Ask
+            }
+        }
+        ToolKind::Execute if request_has_direct_shell_file_mutation(request) => {
+            PermissionDecision::Ask
+        }
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => PermissionDecision::Ask,
         _ => select_permission_option(request, true),
     }
 }
@@ -757,7 +791,10 @@ fn shell_command_absolute_paths_stay_inside_workspace(workspace_root: &str, comm
         return false;
     };
 
-    paths.is_empty() || paths_are_inside_workspace(workspace_root, &paths)
+    paths.is_empty()
+        || paths_are_inside_workspace(workspace_root, &paths)
+        || (!Path::new(workspace_root).exists()
+            && paths_are_lexically_inside_workspace(workspace_root, &paths))
 }
 
 fn shell_command_absolute_paths(command: &str) -> Option<Vec<PathBuf>> {
@@ -792,7 +829,29 @@ fn normalize_shell_absolute_path(path: &str) -> Option<String> {
         return Some(normalized);
     }
 
+    if Path::new(path).is_absolute() {
+        return Some(path.to_string());
+    }
+
     None
+}
+
+fn paths_are_lexically_inside_workspace(workspace_root: &str, paths: &[PathBuf]) -> bool {
+    let root = normalize_lexical_permission_path(workspace_root);
+    if root.is_empty() {
+        return false;
+    }
+
+    paths.iter().all(|path| {
+        let candidate = normalize_lexical_permission_path(&path.to_string_lossy());
+        candidate == root || candidate.starts_with(&format!("{root}/"))
+    })
+}
+
+fn normalize_lexical_permission_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn looks_windows_drive_path(path: &str) -> bool {
@@ -892,6 +951,8 @@ fn is_command_word_char(value: char) -> bool {
 }
 
 fn shell_redirection_writes_file(command: &str) -> bool {
+    let command = strip_shell_here_documents(command);
+    let command = command.as_str();
     let bytes = command.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -956,8 +1017,9 @@ fn is_null_redirection_target(target: &str) -> bool {
 
 fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     let command = strip_powershell_here_strings(command);
+    let shell_redirection_command = strip_shell_here_documents(&command);
     let mut paths = Vec::new();
-    collect_shell_redirection_paths(&command, &mut paths);
+    collect_shell_redirection_paths(&shell_redirection_command, &mut paths);
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
     collect_python_pathlib_write_paths(&command, &mut paths);
     collect_python_open_write_paths(&command, &mut paths);
@@ -966,6 +1028,97 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShellHereDocMarker {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+fn strip_shell_here_documents(command: &str) -> String {
+    let mut output = Vec::new();
+    let mut pending = Vec::<ShellHereDocMarker>::new();
+
+    for line in command.replace("\r\n", "\n").split('\n') {
+        if pending.is_empty() {
+            output.push(line.to_string());
+            pending.extend(extract_shell_here_doc_markers(line));
+            continue;
+        }
+
+        let active = &pending[0];
+        let comparable = if active.strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line
+        };
+        if comparable == active.delimiter {
+            pending.remove(0);
+        }
+    }
+
+    output.join("\n")
+}
+
+fn extract_shell_here_doc_markers(line: &str) -> Vec<ShellHereDocMarker> {
+    let mut markers = Vec::new();
+    let mut index = 0;
+    while let Some(relative) = line[index..].find("<<") {
+        let marker_index = index + relative;
+        let mut cursor = marker_index + 2;
+        if line[cursor..].starts_with('<') {
+            index = cursor + 1;
+            continue;
+        }
+
+        let strip_tabs = line[cursor..].starts_with('-');
+        if strip_tabs {
+            cursor += 1;
+        }
+        while let Some(ch) = line[cursor..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+
+        if let Some((delimiter, end)) = parse_shell_here_doc_delimiter(line, cursor) {
+            markers.push(ShellHereDocMarker {
+                delimiter,
+                strip_tabs,
+            });
+            index = end;
+        } else {
+            index = cursor.saturating_add(1);
+        }
+    }
+    markers
+}
+
+fn parse_shell_here_doc_delimiter(line: &str, start: usize) -> Option<(String, usize)> {
+    let first = line[start..].chars().next()?;
+    if first == '\'' || first == '"' {
+        let body_start = start + first.len_utf8();
+        let body = &line[body_start..];
+        for (offset, ch) in body.char_indices() {
+            if ch == first {
+                let delimiter = body[..offset].trim().to_string();
+                return (!delimiter.is_empty()).then_some((delimiter, body_start + offset + 1));
+            }
+        }
+        return None;
+    }
+
+    let end = line[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>')).then_some(offset)
+        })
+        .map(|offset| start + offset)
+        .unwrap_or(line.len());
+    let delimiter = line[start..end].replace('\\', "").trim().to_string();
+    (!delimiter.is_empty()).then_some((delimiter, end))
 }
 
 fn strip_powershell_here_strings(command: &str) -> String {
@@ -1022,10 +1175,13 @@ fn collect_shell_redirection_paths(command: &str, paths: &mut Vec<String>) {
             previous = ch;
             continue;
         }
+        let mut target_start = index + ch.len_utf8();
         if matches!(chars.peek(), Some((_, '>'))) {
-            chars.next();
+            if let Some((next_index, next_ch)) = chars.next() {
+                target_start = next_index + next_ch.len_utf8();
+            }
         }
-        if let Some(value) = parse_command_value_at(command, index + ch.len_utf8())
+        if let Some(value) = parse_command_value_at(command, target_start)
             && looks_like_standalone_path(&value)
         {
             paths.push(value);
@@ -1575,6 +1731,9 @@ fn is_usable_write_path(path: &str) -> bool {
     if path.is_empty() || path.contains('\n') || path.contains('\r') {
         return false;
     }
+    if path.contains('<') || path.contains('>') {
+        return false;
+    }
     if path.starts_with('$') || path.starts_with('(') || path.starts_with('{') {
         return false;
     }
@@ -1611,6 +1770,26 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn permission_broker_maps_codex_approval_presets_to_policy_modes() {
+        let broker = PermissionBroker::default();
+
+        for mode_id in ["build", "auto", "default", "acceptEdits"] {
+            broker.set_mode(mode_id).unwrap();
+            assert_eq!(broker.mode(), PermissionPolicyMode::Build, "{mode_id}");
+        }
+
+        for mode_id in ["full-access", "bypassPermissions", "完全访问"] {
+            broker.set_mode(mode_id).unwrap();
+            assert_eq!(broker.mode(), PermissionPolicyMode::FullAccess, "{mode_id}");
+        }
+
+        for mode_id in ["plan", "read-only"] {
+            broker.set_mode(mode_id).unwrap();
+            assert_eq!(broker.mode(), PermissionPolicyMode::ReadOnly, "{mode_id}");
+        }
+    }
 
     fn switch_mode_request() -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -1726,7 +1905,7 @@ mod tests {
             PermissionDecision::Ask,
         );
         assert_eq!(
-            decide_permission(PermissionPolicyMode::Plan, "D:/work/repo", &request),
+            decide_permission(PermissionPolicyMode::ReadOnly, "D:/work/repo", &request),
             PermissionDecision::Ask,
         );
     }
@@ -1752,7 +1931,7 @@ mod tests {
             PermissionDecision::Ask,
         );
         assert_eq!(
-            decide_permission(PermissionPolicyMode::Plan, "D:/work/repo", &request),
+            decide_permission(PermissionPolicyMode::ReadOnly, "D:/work/repo", &request),
             PermissionDecision::Ask,
         );
     }
@@ -1942,13 +2121,27 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_terminal_suspected_write_without_static_path_is_rejected() {
+    fn codebuddy_terminal_mkdir_with_static_paths_is_interactive() {
+        let command = "mkdir -p /Users/kothchen/code/hotnovel/src/server/routes && echo \"ok1\"; mkdir -p /Users/kothchen/code/hotnovel/web && echo \"ok2\"; mkdir -p /Users/kothchen/code/hotnovel/tests/unit/server && echo \"ok3\"";
+
+        assert_eq!(
+            decide_codebuddy_terminal_permission("/Users/kothchen/code/hotnovel", command),
+            CodeBuddyTerminalPermissionDecision::Ask(vec![
+                PathBuf::from("/Users/kothchen/code/hotnovel/src/server/routes"),
+                PathBuf::from("/Users/kothchen/code/hotnovel/tests/unit/server"),
+                PathBuf::from("/Users/kothchen/code/hotnovel/web"),
+            ]),
+        );
+    }
+
+    #[test]
+    fn codebuddy_terminal_suspected_write_without_static_path_is_interactive() {
         assert_eq!(
             decide_codebuddy_terminal_permission(
                 "D:/work/repo",
                 "python - <<'PY'\nfrom pathlib import Path\np=Path.cwd() / 'generated.ts'\np.write_text('ok', encoding='utf-8')\nPY",
             ),
-            CodeBuddyTerminalPermissionDecision::Reject,
+            CodeBuddyTerminalPermissionDecision::Ask(Vec::new()),
         );
     }
 
@@ -1974,6 +2167,27 @@ mod tests {
             codebuddy_bash_write_hint_paths(&request),
             vec![PathBuf::from("src/main.rs")]
         );
+    }
+
+    #[test]
+    fn codebuddy_bash_write_hint_ignores_shell_heredoc_body_markup() {
+        let request = codebuddy_bash_request(json!({
+            "command": "cat >> /Users/kothchen/code/hotnovel/web/app.js << 'JS_EOF'\nrender(`\n  <main class=\"space-y-4\">\n    <h2>查看某日报告</h2>\n    <label class=\"block\">日期</label>\n  </main>\n`);\nJS_EOF"
+        }));
+
+        assert_eq!(
+            codebuddy_bash_write_hint_paths(&request),
+            vec![PathBuf::from("/Users/kothchen/code/hotnovel/web/app.js")]
+        );
+    }
+
+    #[test]
+    fn codebuddy_bash_write_hint_ignores_non_writing_heredoc_markup() {
+        let request = codebuddy_bash_request(json!({
+            "command": "node <<'JS'\nconsole.log('<main>preview</main>')\nJS"
+        }));
+
+        assert!(codebuddy_bash_write_hint_paths(&request).is_empty());
     }
 
     #[test]
@@ -2009,26 +2223,26 @@ mod tests {
     }
 
     #[test]
-    fn codebuddy_bash_suspected_write_without_static_path_is_rejected() {
+    fn codebuddy_bash_suspected_write_without_static_path_is_interactive() {
         let request = codebuddy_bash_request(json!({
             "command": "python - <<'PY'\nfrom pathlib import Path\np=Path.cwd() / 'generated.ts'\np.write_text('ok', encoding='utf-8')\nPY"
         }));
 
         assert_eq!(
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
-            PermissionDecision::Select("reject".to_string()),
+            PermissionDecision::Ask,
         );
     }
 
     #[test]
-    fn codebuddy_bash_python_open_write_without_static_path_is_rejected() {
+    fn codebuddy_bash_python_open_write_without_static_path_is_interactive() {
         let request = codebuddy_bash_request(json!({
             "command": "python3 -c \"path='packages/backend/src/service.ts'; open(path, 'w').write('ok')\""
         }));
 
         assert_eq!(
             decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
-            PermissionDecision::Select("reject".to_string()),
+            PermissionDecision::Ask,
         );
         assert!(codebuddy_bash_write_hint_paths(&request).is_empty());
     }
@@ -2056,7 +2270,11 @@ mod tests {
         }));
 
         assert_eq!(
-            decide_permission(PermissionPolicyMode::Plan, root.to_str().unwrap(), &request),
+            decide_permission(
+                PermissionPolicyMode::ReadOnly,
+                root.to_str().unwrap(),
+                &request,
+            ),
             PermissionDecision::Select("allow".to_string()),
         );
 
@@ -2081,7 +2299,11 @@ mod tests {
         }));
 
         assert_eq!(
-            decide_permission(PermissionPolicyMode::Plan, root.to_str().unwrap(), &request),
+            decide_permission(
+                PermissionPolicyMode::ReadOnly,
+                root.to_str().unwrap(),
+                &request,
+            ),
             PermissionDecision::Select("allow".to_string()),
         );
     }
@@ -2094,7 +2316,11 @@ mod tests {
         }));
 
         assert_eq!(
-            decide_permission(PermissionPolicyMode::Plan, root.to_str().unwrap(), &request),
+            decide_permission(
+                PermissionPolicyMode::ReadOnly,
+                root.to_str().unwrap(),
+                &request,
+            ),
             PermissionDecision::Ask,
         );
 

@@ -135,16 +135,21 @@ impl SessionHandle {
     }
 
     pub fn set_mode(&mut self, mode_id: impl Into<String>) -> anyhow::Result<Vec<ClientEvent>> {
+        let mode_id = mode_id.into();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_tx
             .send(RuntimeCommand::SetMode {
-                mode_id: mode_id.into(),
+                mode_id: mode_id.clone(),
                 reply_tx,
             })
             .map_err(|_| anyhow!("ACP command channel closed"))?;
-        reply_rx
+        let events = reply_rx
             .recv()
-            .map_err(|_| anyhow!("ACP command reply channel closed"))?
+            .map_err(|_| anyhow!("ACP command reply channel closed"))?;
+        if events.is_ok() {
+            self.permission_broker.set_mode(&mode_id)?;
+        }
+        events
     }
 
     pub fn set_model(

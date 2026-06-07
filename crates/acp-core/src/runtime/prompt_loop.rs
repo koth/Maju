@@ -21,6 +21,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use workspace_model::PromptInputCapabilities;
 
 const KODEX_PROVIDER_VALUE_PREFIX: &str = "kodex-provider:";
+const KODEX_PROVIDER_SLASH_VALUE_PREFIX: &str = "kodex-provider/";
 
 pub(super) async fn run_command_loop(
     session: &mut ActiveSession<'static, Agent>,
@@ -373,7 +374,9 @@ fn encode_model_value_with_provider(
 }
 
 fn encode_provider_value(value_id: String, provider: Option<String>) -> String {
-    if value_id.starts_with(KODEX_PROVIDER_VALUE_PREFIX) {
+    if value_id.starts_with(KODEX_PROVIDER_VALUE_PREFIX)
+        || value_id.starts_with(KODEX_PROVIDER_SLASH_VALUE_PREFIX)
+    {
         return value_id;
     }
     let Some(provider) = provider.map(|provider| provider.trim().to_string()) else {
@@ -471,5 +474,16 @@ mod tests {
         });
 
         assert!(is_codebuddy_session_end_update(&payload));
+    }
+
+    #[test]
+    fn slash_provider_model_values_are_not_encoded_again() {
+        assert_eq!(
+            encode_provider_value(
+                "kodex-provider/kimi_code/kimi-for-coding".to_string(),
+                Some("kimi_code".to_string()),
+            ),
+            "kodex-provider/kimi_code/kimi-for-coding"
+        );
     }
 }

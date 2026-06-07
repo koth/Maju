@@ -197,6 +197,33 @@ pub(super) fn edit_input_unified_diff_for_path<'a>(
     normalized_path: &str,
     workspace_root: &std::path::Path,
 ) -> Option<&'a str> {
+    let change = edit_input_change_entry_for_path(input, normalized_path, workspace_root)?;
+    change
+        .get("unified_diff")
+        .or_else(|| change.get("unifiedDiff"))
+        .and_then(|value| value.as_str())
+}
+
+pub(super) fn edit_input_change_type_for_path(
+    input: &serde_json::Value,
+    normalized_path: &str,
+    workspace_root: &std::path::Path,
+) -> Option<FileChangeType> {
+    let change = edit_input_change_entry_for_path(input, normalized_path, workspace_root)?;
+    let kind = change.get("type").and_then(|value| value.as_str())?;
+    match kind.to_ascii_lowercase().as_str() {
+        "add" | "create" | "created" => Some(FileChangeType::Created),
+        "delete" | "remove" | "deleted" | "removed" => Some(FileChangeType::Deleted),
+        "update" | "modify" | "modified" => Some(FileChangeType::Modified),
+        _ => None,
+    }
+}
+
+fn edit_input_change_entry_for_path<'a>(
+    input: &'a serde_json::Value,
+    normalized_path: &str,
+    workspace_root: &std::path::Path,
+) -> Option<&'a serde_json::Value> {
     let changes = input.get("changes")?.as_object()?;
     for (path, change) in changes {
         let display_path = change
@@ -205,17 +232,10 @@ pub(super) fn edit_input_unified_diff_for_path<'a>(
             .and_then(|value| value.as_str())
             .filter(|path| !path.trim().is_empty())
             .unwrap_or(path);
-        if normalize_path_for_storage(display_path, workspace_root) != normalized_path
-            && normalize_tracked_path(display_path) != normalized_path
+        if normalize_path_for_storage(display_path, workspace_root) == normalized_path
+            || normalize_tracked_path(display_path) == normalized_path
         {
-            continue;
-        }
-        if let Some(diff) = change
-            .get("unified_diff")
-            .or_else(|| change.get("unifiedDiff"))
-            .and_then(|value| value.as_str())
-        {
-            return Some(diff);
+            return Some(change);
         }
     }
     None
@@ -397,6 +417,22 @@ pub(super) fn tool_event_hint_paths(raw_input: Option<&str>) -> Vec<String> {
     paths
 }
 
+pub(super) fn tool_event_change_paths(raw_payload: Option<&str>) -> Vec<String> {
+    let Some(raw_payload) = raw_payload else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_payload) else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    collect_change_map_paths(&value, &mut paths);
+    paths.retain(|path| is_usable_write_path(path));
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(super) fn tool_command_write_hint_paths(raw_input: Option<&str>) -> Vec<String> {
     let Some(raw_input) = raw_input else {
         return Vec::new();
@@ -419,8 +455,7 @@ fn collect_path_like_values(value: &serde_json::Value, paths: &mut Vec<String>) 
         serde_json::Value::Object(object) => {
             for (key, value) in object {
                 let key = key.to_ascii_lowercase();
-                if key.contains("path") || key == "file" || key == "cwd" || key.ends_with("file")
-                {
+                if key.contains("path") || key == "file" || key == "cwd" || key.ends_with("file") {
                     collect_path_field_value(value, paths);
                 }
                 collect_path_like_values(value, paths);
@@ -572,9 +607,10 @@ fn collect_command_value_write_paths(value: &serde_json::Value, paths: &mut Vec<
 
 fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     let command = strip_powershell_here_strings(command);
+    let shell_redirection_command = strip_shell_here_documents(&command);
     let mut paths = Vec::new();
+    collect_shell_redirection_paths(&shell_redirection_command, &mut paths);
     collect_powershell_write_cmdlet_paths(&command, &mut paths);
-    collect_shell_redirection_paths(&command, &mut paths);
     collect_python_pathlib_write_paths(&command, &mut paths);
     collect_python_open_write_paths(&command, &mut paths);
     collect_common_mutation_command_paths(&command, &mut paths);
@@ -582,6 +618,97 @@ fn extract_write_paths_from_command_text(command: &str) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShellHereDocMarker {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+fn strip_shell_here_documents(command: &str) -> String {
+    let mut output = Vec::new();
+    let mut pending = Vec::<ShellHereDocMarker>::new();
+
+    for line in command.replace("\r\n", "\n").split('\n') {
+        if pending.is_empty() {
+            output.push(line.to_string());
+            pending.extend(extract_shell_here_doc_markers(line));
+            continue;
+        }
+
+        let active = &pending[0];
+        let comparable = if active.strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line
+        };
+        if comparable == active.delimiter {
+            pending.remove(0);
+        }
+    }
+
+    output.join("\n")
+}
+
+fn extract_shell_here_doc_markers(line: &str) -> Vec<ShellHereDocMarker> {
+    let mut markers = Vec::new();
+    let mut index = 0;
+    while let Some(relative) = line[index..].find("<<") {
+        let marker_index = index + relative;
+        let mut cursor = marker_index + 2;
+        if line[cursor..].starts_with('<') {
+            index = cursor + 1;
+            continue;
+        }
+
+        let strip_tabs = line[cursor..].starts_with('-');
+        if strip_tabs {
+            cursor += 1;
+        }
+        while let Some(ch) = line[cursor..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+
+        if let Some((delimiter, end)) = parse_shell_here_doc_delimiter(line, cursor) {
+            markers.push(ShellHereDocMarker {
+                delimiter,
+                strip_tabs,
+            });
+            index = end;
+        } else {
+            index = cursor.saturating_add(1);
+        }
+    }
+    markers
+}
+
+fn parse_shell_here_doc_delimiter(line: &str, start: usize) -> Option<(String, usize)> {
+    let first = line[start..].chars().next()?;
+    if first == '\'' || first == '"' {
+        let body_start = start + first.len_utf8();
+        let body = &line[body_start..];
+        for (offset, ch) in body.char_indices() {
+            if ch == first {
+                let delimiter = body[..offset].trim().to_string();
+                return (!delimiter.is_empty()).then_some((delimiter, body_start + offset + 1));
+            }
+        }
+        return None;
+    }
+
+    let end = line[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>')).then_some(offset)
+        })
+        .map(|offset| start + offset)
+        .unwrap_or(line.len());
+    let delimiter = line[start..end].replace('\\', "").trim().to_string();
+    (!delimiter.is_empty()).then_some((delimiter, end))
 }
 
 fn strip_powershell_here_strings(command: &str) -> String {
@@ -845,10 +972,13 @@ fn collect_shell_redirection_paths(command: &str, paths: &mut Vec<String>) {
             previous = ch;
             continue;
         }
+        let mut target_start = index + ch.len_utf8();
         if matches!(chars.peek(), Some((_, '>'))) {
-            chars.next();
+            if let Some((next_index, next_ch)) = chars.next() {
+                target_start = next_index + next_ch.len_utf8();
+            }
         }
-        if let Some(value) = parse_command_value_at(command, index + ch.len_utf8())
+        if let Some(value) = parse_command_value_at(command, target_start)
             && looks_like_standalone_path(&value)
         {
             paths.push(value);
@@ -1145,11 +1275,37 @@ fn is_usable_write_path(path: &str) -> bool {
     if path.is_empty() || path.contains('\n') || path.contains('\r') {
         return false;
     }
-    if path.starts_with('$') || path.starts_with('(') || path.starts_with('{') {
+    if path.contains('<') || path.contains('>') {
         return false;
     }
     let lower = path.to_ascii_lowercase();
+    if lower.starts_with("file://") {
+        return false;
+    }
+    if path
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic())
+        && path
+            .get(1..4)
+            .is_some_and(|suffix| suffix.starts_with("://") || suffix.starts_with(":\\\\"))
+    {
+        return false;
+    }
+    if path.starts_with('$') || path.starts_with('(') || path.starts_with('{') {
+        return false;
+    }
+    let normalized = path
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | ')' | '('))
+        .replace('\\', "/");
+    if normalized == "/" || is_pure_traversal_path(&normalized) {
+        return false;
+    }
     !matches!(lower.as_str(), "$null" | "null" | "nul" | "/dev/null")
+}
+
+fn is_pure_traversal_path(path: &str) -> bool {
+    path.split('/').all(|part| part == "." || part == "..")
 }
 
 fn looks_like_standalone_path(path: &str) -> bool {

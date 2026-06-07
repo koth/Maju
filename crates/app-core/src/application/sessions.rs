@@ -160,7 +160,10 @@ impl Application {
         self.agent_title_received = false;
         self.provisional_prompt_title = None;
         self.skip_replay = has_resume_id;
-        self.pending_model_restore = Some(self.ui.session.model.clone());
+        self.pending_model_restore = Some(ModelSelection::new(
+            self.ui.session.model.clone(),
+            self.current_model_provider_for_persistence(),
+        ));
         self.authoritative_model_selection = None;
         self.bump_revision();
         Ok(())
@@ -190,11 +193,17 @@ impl Application {
             }
         }
 
-        let (model, mode) = self
+        let (model, model_provider, mode) = self
             .store
-            .get_session_model_mode(id)
+            .get_session_model_provider_mode(id)
             .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| (self.ui.session.model.clone(), self.ui.session.mode.clone()));
+            .unwrap_or_else(|| {
+                (
+                    self.ui.session.model.clone(),
+                    self.current_model_provider_for_persistence(),
+                    self.ui.session.mode.clone(),
+                )
+            });
         let mode = mode.or_else(|| Some("Build".into()));
         let stored_agent_cli = self.store.get_session_agent_cli(id).unwrap_or(None);
         let current_agent_label = self.ui.session.agent_cli.as_deref();
@@ -231,6 +240,8 @@ impl Application {
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
 
         let mut ui = self.ui.clone();
+        let pending_model_restore =
+            Some(ModelSelection::new(model.clone(), model_provider.clone()));
         ui.session.id = uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4());
         ui.session.model = model;
         ui.session.mode = mode;
@@ -262,9 +273,12 @@ impl Application {
                 let _ = self.store.update_session_codex_provider(id, &provider);
             }
         }
-        let _ =
-            self.store
-                .update_session_model_mode(id, &ui.session.model, ui.session.mode.as_deref());
+        let _ = self.store.update_session_model_mode_provider(
+            id,
+            &ui.session.model,
+            model_provider.as_deref(),
+            ui.session.mode.as_deref(),
+        );
 
         let seq_counter = self.store.next_seq(id).unwrap_or(1);
         let needs_title = is_placeholder_session_title(&ui.session.title);
@@ -279,14 +293,7 @@ impl Application {
             agent_title_received: false,
             provisional_prompt_title: None,
             skip_replay: has_resume_id,
-            pending_model_restore: Some(
-                self.store
-                    .get_session_model_mode(id)
-                    .ok()
-                    .flatten()
-                    .map(|(model, _)| model)
-                    .unwrap_or_else(|| AGENT_DEFAULT_MODEL_LABEL.to_string()),
-            ),
+            pending_model_restore,
             authoritative_model_selection: None,
             file_tracker: FileChangeTracker::new(&self.ui.workspace.root),
             dirty_tool_call_ids: HashSet::new(),
