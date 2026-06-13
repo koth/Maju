@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "kodex-desktop"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "acp-core",
  "anyhow",
