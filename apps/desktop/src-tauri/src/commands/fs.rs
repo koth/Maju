@@ -5,7 +5,7 @@ use workspace_model::FileEntry;
 
 #[tauri::command]
 pub fn fs_list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<FileEntry>, String> {
-    state.with_app(|app| app.list_workspace_dir(&path))
+    state.list_workspace_dir(path)
 }
 
 #[tauri::command]

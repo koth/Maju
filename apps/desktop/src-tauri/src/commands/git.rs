@@ -9,10 +9,7 @@ pub fn git_status(state: State<'_, AppState>) -> Result<RepositorySnapshot, Stri
 
 #[tauri::command]
 pub fn git_refresh(state: State<'_, AppState>) -> Result<RepositorySnapshot, String> {
-    state.with_app(|app| {
-        app.refresh_repository();
-        Ok(app.ui.repository.clone())
-    })
+    state.git_refresh()
 }
 
 #[tauri::command]

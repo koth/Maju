@@ -44,6 +44,11 @@ impl Application {
         Ok(sessions)
     }
 
+    pub fn session_list_after_poll(&mut self) -> Result<Vec<SessionListItem>, String> {
+        self.poll_prompt_progress();
+        self.session_list()
+    }
+
     pub fn session_switch(&mut self, id: &str) -> Result<(), String> {
         if self.ui.session.id.to_string() == id {
             self.runtime_registry.clear_attention(id);
@@ -98,6 +103,29 @@ impl Application {
             runtime.session.shutdown();
         }
         self.store.delete_session(id).map_err(|e| e.to_string())
+    }
+
+    pub fn session_archive(&mut self, id: &str) -> Result<(), String> {
+        if self.ui.session.id.to_string() == id {
+            let replacement_id = self
+                .store
+                .list_sessions()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|session| session.id != id)
+                .map(|session| session.id);
+
+            if let Some(replacement_id) = replacement_id {
+                self.session_switch(&replacement_id)?;
+            } else {
+                self.session_create(None)?;
+            }
+        }
+
+        if let Some(mut runtime) = self.runtime_registry.remove_all_state(id) {
+            runtime.session.shutdown();
+        }
+        self.store.archive_session(id).map_err(|e| e.to_string())
     }
 
     pub fn reconnect_session(&mut self) -> Result<(), String> {

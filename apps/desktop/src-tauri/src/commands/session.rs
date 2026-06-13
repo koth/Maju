@@ -102,6 +102,16 @@ pub fn session_delete(
 }
 
 #[tauri::command]
+pub fn session_archive(
+    state: State<'_, AppState>,
+    id: String,
+    workspace_root: Option<String>,
+) -> Result<(), String> {
+    state.archive_session(workspace_root, &id)?;
+    save_open_workspace_state(&state)
+}
+
+#[tauri::command]
 pub fn session_get_changes(state: State<'_, AppState>) -> Result<Vec<SessionFileChange>, String> {
     state.with_app(|app| Ok(app.ui.session_changes.clone()))
 }

@@ -126,7 +126,9 @@ export function PermissionRequestPanel({
     : null;
   const actionOptions = planApprovalActions ?? request.options;
   const hasInputQuestions = !request.isPlanApproval && (request.input?.questions.length ?? 0) > 0;
-  const showGuidance = !hasInputQuestions && !request.isPlanApproval && actionOptions.some(requiresPermissionGuidance);
+  const showGuidance =
+    !hasInputQuestions &&
+    (request.isPlanApproval || actionOptions.some(requiresPermissionGuidance));
   const guidanceText = guidance.trim();
   const submitOption = findInputSubmitOption(request.options);
   const cancelOption = findInputCancelOption(request.options);
@@ -180,11 +182,11 @@ export function PermissionRequestPanel({
 
       {showGuidance && (
         <label className="permission-request-guidance">
-          <span>补充说明</span>
+          <span>{request.isPlanApproval ? "调整要求" : "补充说明"}</span>
           <textarea
             value={guidance}
             onChange={(event) => setGuidance(event.target.value)}
-            placeholder="告诉 Codex 应该怎么调整"
+            placeholder={request.isPlanApproval ? "告诉智能体应该如何调整计划" : "告诉 Codex 应该怎么调整"}
             rows={3}
           />
         </label>
@@ -243,7 +245,9 @@ export function PermissionRequestPanel({
               className={`permission-request-action ${permissionOptionTone(option, request.isPlanApproval)}`}
               disabled={!canAct || (requiresPermissionGuidance(option) && !guidanceText)}
               onClick={() => {
-                if (requiresPermissionGuidance(option)) {
+                if (request.isPlanApproval && option.id === findPlanRejectOption(request.options)?.id) {
+                  onPermissionSelect?.(request.requestId, option.id, guidanceText || null);
+                } else if (requiresPermissionGuidance(option)) {
                   onPermissionSelect?.(request.requestId, option.id, guidanceText);
                 } else {
                   onPermissionSelect?.(request.requestId, option.id);
@@ -264,6 +268,12 @@ export function PlanApprovalModal({
   entries,
   onPermissionSelect,
 }: PlanApprovalModalProps) {
+  const [guidance, setGuidance] = useState("");
+
+  useEffect(() => {
+    setGuidance("");
+  }, [approval?.requestId]);
+
   if (!approval) return null;
 
   const acceptOption = findPlanAcceptOption(approval.options);
@@ -310,13 +320,23 @@ export function PlanApprovalModal({
           </div>
         )}
 
+        <label className="permission-request-guidance">
+          <span>调整要求</span>
+          <textarea
+            value={guidance}
+            onChange={(event) => setGuidance(event.target.value)}
+            placeholder="告诉智能体应该如何调整计划"
+            rows={3}
+          />
+        </label>
+
         <div className="plan-approval-actions">
           <button
             type="button"
             className="plan-approval-action"
             disabled={!canAct || !rejectOption}
             onClick={() => {
-              if (rejectOption) onPermissionSelect?.(approval.requestId, rejectOption.id);
+              if (rejectOption) onPermissionSelect?.(approval.requestId, rejectOption.id, guidance.trim() || null);
             }}
           >
             继续规划
@@ -544,6 +564,9 @@ function permissionOptionTone(option: PermissionOption, isPlanApproval?: boolean
   const text = `${option.id} ${option.kind} ${option.label}`.toLowerCase();
   if (isPlanApproval && ["default", "allow", "allow_once"].includes(option.id.toLowerCase())) {
     return "is-primary";
+  }
+  if (isPlanApproval) {
+    return "is-neutral";
   }
   if (text.includes("always")) {
     return "is-always";

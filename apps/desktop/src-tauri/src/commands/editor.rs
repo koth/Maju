@@ -7,7 +7,7 @@ pub fn editor_open_file(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<EditorFileSnapshot, String> {
-    state.with_app(|app| app.editor_open_file(&path))
+    state.open_workspace_file(path)
 }
 
 #[tauri::command]
@@ -33,5 +33,5 @@ pub fn editor_get_content(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<EditorFileSnapshot, String> {
-    state.with_app(|app| app.editor_open_file(&path))
+    state.open_workspace_file(path)
 }

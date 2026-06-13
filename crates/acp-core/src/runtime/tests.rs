@@ -9,7 +9,7 @@ use super::session_titles::{
     select_session_title_for_sync, supports_session_list_title_sync,
 };
 use super::*;
-use crate::events::RemoteSshSessionConfig;
+use crate::events::{AgentEditPolicy, RemoteSshSessionConfig, agent_edit_policy_for_command};
 use agent_client_protocol::schema::{
     AgentCapabilities, SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities,
 };
@@ -49,6 +49,7 @@ fn remote_agent_command_quotes_workspace_args_and_env() {
         )
     );
     assert!(command.contains("KODEX_REMOTE_ACP_PORT_HEX='11D7';"));
+    assert!(command.contains("if [ \"$kodex_i\" -ge 150 ];"));
     assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
     assert!(command.contains("wait \"$kodex_agent_pid\""));
 }
@@ -497,6 +498,33 @@ fn non_codex_agent_command_does_not_imply_session_list_support() {
     let config = test_session_config("codebuddy.exe --acp");
 
     assert!(!command_implies_codex_session_list(&config));
+}
+
+#[test]
+fn codex_and_claude_acp_commands_prefer_apply_patch_edits() {
+    for command in [
+        r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\claude-agent-acp.exe"#,
+        r#"C:\Users\yvonchen\.kodex\bin\claude-acp.exe"#,
+    ] {
+        assert_eq!(
+            agent_edit_policy_for_command(command),
+            AgentEditPolicy::PreferApplyPatch,
+            "{command}",
+        );
+    }
+}
+
+#[test]
+fn non_acp_commands_keep_default_edit_policy() {
+    for command in ["codebuddy.exe --acp", "claude", "codex"] {
+        assert_eq!(
+            agent_edit_policy_for_command(command),
+            AgentEditPolicy::None,
+            "{command}",
+        );
+    }
 }
 
 #[test]

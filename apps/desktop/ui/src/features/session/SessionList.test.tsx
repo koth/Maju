@@ -4,7 +4,7 @@ import { SessionList } from "./SessionList";
 import { onRemoteOpenProgress } from "../../lib/events";
 import {
   sessionCreate,
-  sessionDelete,
+  sessionArchive,
   sessionList,
   sessionSwitch,
   workspaceSetActive,
@@ -29,7 +29,7 @@ vi.mock("../../lib/tauri", async () => {
     sessionList: vi.fn(),
     sessionSwitch: vi.fn(),
     sessionCreate: vi.fn(),
-    sessionDelete: vi.fn(),
+    sessionArchive: vi.fn(),
     sessionCancel: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
     settingsGetRemoteProfiles: vi.fn(),
@@ -180,6 +180,23 @@ function remoteProfilesSnapshot(): RemoteMachineProfilesSnapshot {
   };
 }
 
+function remoteProfilesSnapshotWithTwoMachines(): RemoteMachineProfilesSnapshot {
+  return {
+    profiles: [
+      ...remoteProfilesSnapshot().profiles,
+      {
+        id: "remote-2",
+        display_name: "GpuBox",
+        ssh_target: "root@10.0.0.8",
+        ssh_port: 22022,
+        created_at_ms: 3,
+        updated_at_ms: 4,
+        last_validation: null,
+      },
+    ],
+  };
+}
+
 describe("SessionList agent picker", () => {
   beforeEach(() => {
     vi.mocked(sessionList).mockResolvedValue(workspaceSessions);
@@ -188,7 +205,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesSnapshot());
     vi.mocked(sessionCreate).mockResolvedValue(undefined);
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
-    vi.mocked(sessionDelete).mockResolvedValue(undefined);
+    vi.mocked(sessionArchive).mockResolvedValue(undefined);
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
@@ -317,8 +334,65 @@ describe("SessionList agent picker", () => {
     await waitFor(() => expect(sessionCreate).toHaveBeenCalledWith("/Users/kothchen/code/Kodex", "codex-acp"));
   });
 
+  it("reopens dormant remote workspaces through the remote bootstrap flow", async () => {
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        workspace: {
+          id: "remote-workspace-1",
+          root: "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+          name: "CodeTrans",
+          location: {
+            kind: "remote_linux",
+            profile_id: "remote-1",
+            ssh_target: "root@9.134.121.208",
+            ssh_port: 36000,
+            remote_path: "/data/workspace/CodeTrans",
+          },
+        },
+        sessions: [],
+        active_session_id: "",
+        is_active: true,
+        connected: false,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="ssh://root@9.134.121.208:36000/data/workspace/CodeTrans"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const workspaceButton = await screen.findByTitle("双击连接远程工作区");
+    expect(screen.getByText("REMOTE")).toBeInTheDocument();
+
+    fireEvent.click(workspaceButton);
+    expect(workspaceSetActive).not.toHaveBeenCalled();
+
+    fireEvent.doubleClick(workspaceButton);
+    const dialog = await screen.findByRole("dialog", { name: "打开远程目录" });
+    expect(within(dialog).getByText("重新连接远程目录")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("remote_open_path")).toHaveValue("/data/workspace/CodeTrans");
+
+    fireEvent.change(within(dialog).getByLabelText("remote_open_password"), { target: { value: "ssh-secret" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "打开目录" }));
+
+    await waitFor(() => expect(workspaceOpenRemoteProfile).toHaveBeenCalledWith(expect.objectContaining({
+      profile_id: "remote-1",
+      remote_path: "/data/workspace/CodeTrans",
+      ssh_password: "ssh-secret",
+    })));
+    expect(workspaceSetActive).not.toHaveBeenCalled();
+  });
+
   it("opens a remote workspace from the sidebar new workspace menu", async () => {
     const onWorkspaceChanged = vi.fn();
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshotWithTwoMachines());
     render(
       <SessionList
         activeSessionId=""
@@ -337,6 +411,8 @@ describe("SessionList agent picker", () => {
     const dialog = await screen.findByRole("dialog", { name: "打开远程目录" });
     await waitFor(() => expect(onRemoteOpenProgress).toHaveBeenCalled());
     expect(within(dialog).getByText(/Devbox/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/GpuBox/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /GpuBox/ }));
     fireEvent.change(within(dialog).getByLabelText("remote_open_path"), { target: { value: "/root/kodex-remote-acp-test" } });
 
     const openRemote = within(dialog).getByRole("button", { name: "打开目录" });
@@ -346,12 +422,40 @@ describe("SessionList agent picker", () => {
     await waitFor(() =>
       expect(workspaceOpenRemoteProfile).toHaveBeenCalledWith(expect.objectContaining({
         request_id: expect.any(String),
-        profile_id: "remote-1",
+        profile_id: "remote-2",
         remote_path: "/root/kodex-remote-acp-test",
         agent_cli: "claude-agent-acp",
       })),
     );
     await waitFor(() => expect(onWorkspaceChanged).toHaveBeenCalled());
+  });
+
+  it("archives a session from the session row action", async () => {
+    const onSessionChanged = vi.fn();
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "session-archive", title: "Old work" }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="session-current"
+        activeSessionTitle="Current"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={onSessionChanged}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "归档会话 Old work" }));
+
+    await waitFor(() => {
+      expect(sessionArchive).toHaveBeenCalledWith("session-archive", "/Users/kothchen/code/Kodex");
+      expect(onSessionChanged).toHaveBeenCalled();
+    });
   });
 
   it("shows a spinner for a background session that is still running", async () => {
@@ -380,6 +484,7 @@ describe("SessionList agent picker", () => {
 
     const indicator = await screen.findByLabelText("后台会话仍在运行");
     expect(indicator).toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-background-running");
   });
 
   it("shows and clears the completed-unviewed dot from refreshed session data", async () => {
@@ -419,6 +524,7 @@ describe("SessionList agent picker", () => {
 
     const indicator = await screen.findByLabelText("后台会话已完成，尚未查看");
     expect(indicator).toHaveClass("is-complete");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-completed-unviewed");
 
     const rowTitle = screen.getByTitle("Done in background · Codex");
     const rowButton = rowTitle.closest("button");

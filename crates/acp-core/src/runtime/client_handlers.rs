@@ -1,15 +1,17 @@
 use super::agent_process::AgentTransport;
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
-    PermissionPolicyMode, PermissionResolution, codebuddy_bash_write_hint_paths,
-    decide_codebuddy_terminal_permission, decide_permission,
+    PermissionPolicyMode, PermissionResolution, apply_patch_retry_guidance,
+    codebuddy_bash_write_hint_paths, decide_codebuddy_terminal_permission,
+    decide_permission_with_edit_policy, path_prefers_apply_patch,
+    shell_command_prefers_apply_patch_for_writes,
 };
 use super::terminal::TerminalManager;
 use super::workspace_paths::{
     read_workspace_text_file, validate_client_file_path, write_workspace_text_file,
 };
 use super::{RuntimeCommand, ShutdownSignal};
-use crate::events::{ClientEvent, SessionConfig};
+use crate::events::{AgentEditPolicy, ClientEvent, SessionConfig, agent_edit_policy_for_command};
 use crate::mapping::{append_runtime_event_log, format_permission_options};
 use agent_client_protocol::schema::{
     ContentBlock, CreateTerminalRequest, KillTerminalRequest, Meta,
@@ -185,8 +187,9 @@ pub(super) async fn connect_agent_client(
                 let decision = if is_codebuddy_exit_plan_permission(&request_payload) {
                     PermissionDecision::Ask
                 } else {
-                    decide_permission(
+                    decide_permission_with_edit_policy(
                         permission_request_broker.mode(),
+                        agent_edit_policy_for_command(&permission_log_config.agent_command),
                         &permission_workspace_root,
                         &request,
                     )
@@ -194,6 +197,9 @@ pub(super) async fn connect_agent_client(
                 let permission_resolution = match decision {
                     PermissionDecision::Select(option_id) => {
                         PermissionResolution::new(Some(option_id), None, None)
+                    }
+                    PermissionDecision::SelectWithGuidance(option_id, guidance) => {
+                        PermissionResolution::new(Some(option_id), Some(guidance), None)
                     }
                     PermissionDecision::Cancel => PermissionResolution::default(),
                     PermissionDecision::Ask => {
@@ -319,6 +325,7 @@ pub(super) async fn connect_agent_client(
                     &fs_write_log_config,
                     &fs_write_workspace_root,
                     &path_for_diff,
+                    agent_edit_policy_for_command(&fs_write_log_config.agent_command),
                 )?;
                 let old_text = path_for_diff
                     .exists()
@@ -808,6 +815,22 @@ fn ensure_codebuddy_terminal_create_permission(
     }
 
     let command = terminal_request_command_text(request);
+    if permission_broker.mode() != PermissionPolicyMode::FullAccess
+        && agent_edit_policy_for_command(agent_command) == AgentEditPolicy::PreferApplyPatch
+        && shell_command_prefers_apply_patch_for_writes(workspace_root, &command)
+    {
+        let reason = apply_patch_retry_guidance().to_string();
+        append_runtime_event_log(
+            log_config,
+            "client/terminal_create_apply_patch_policy_rejected",
+            &json!({
+                "command": command,
+                "reason": reason,
+            }),
+        )?;
+        return Ok(CodeBuddyTerminalCreateGate::Deny { reason });
+    }
+
     if let Some(reason) = terminal_denials.take(&command)? {
         append_runtime_event_log(
             log_config,
@@ -1221,7 +1244,10 @@ fn ensure_fs_write_permission(
     log_config: &SessionConfig,
     workspace_root: &str,
     path: &Path,
+    edit_policy: AgentEditPolicy,
 ) -> anyhow::Result<()> {
+    let prefer_apply_patch =
+        edit_policy == AgentEditPolicy::PreferApplyPatch && path_prefers_apply_patch(path);
     if fs_write_is_auto_allowed(permission_broker.mode(), workspace_root, path) {
         return Ok(());
     }
@@ -1251,15 +1277,21 @@ fn ensure_fs_write_permission(
         &json!({
             "requestId": request_id,
             "path": path.display().to_string(),
+            "preferApplyPatch": prefer_apply_patch,
             "options": options,
         }),
     )?;
 
+    let guidance = prefer_apply_patch.then_some(apply_patch_retry_guidance());
+    let details = match guidance {
+        Some(guidance) => format!("Write file\n{}\n\n{}", path.display(), guidance),
+        None => format!("Write file\n{}", path.display()),
+    };
     let _ = tx_events.send(ClientEvent::ToolPermissionRequest {
         id: request_id.clone(),
         name: "Write".into(),
         options: options.clone(),
-        details: Some(format!("Write file\n{}", path.display())),
+        details: Some(details),
         input: None,
     });
     let _ = tx_events.send(ClientEvent::ToolProgress {
@@ -1298,6 +1330,8 @@ fn ensure_fs_write_permission(
 
     if allowed {
         Ok(())
+    } else if let Some(guidance) = guidance {
+        Err(anyhow!("{}", guidance))
     } else {
         Err(anyhow!(
             "write permission denied by user: {}",

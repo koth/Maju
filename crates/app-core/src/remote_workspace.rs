@@ -13,7 +13,8 @@ use workspace_model::{
     FileChangeType, FileEntry, PatchStatus, RepositorySnapshot, SearchResult, SessionFileChange,
 };
 
-const REMOTE_FILE_TIMEOUT: Duration = Duration::from_secs(12);
+const REMOTE_LIST_DIR_TIMEOUT: Duration = Duration::from_secs(12);
+const REMOTE_READ_FILE_TIMEOUT: Duration = Duration::from_secs(45);
 const REMOTE_SAVE_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_SEARCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -44,7 +45,7 @@ where
     pub(crate) fn list_dir(&self, path: &str) -> anyhow::Result<Vec<FileEntry>> {
         let path = sanitize_relative_path(path, true)?;
         let response: RemoteListResponse =
-            self.run_node_json(LIST_DIR_SCRIPT, &[path.as_str()], None, REMOTE_FILE_TIMEOUT)?;
+            self.run_node_json(LIST_DIR_SCRIPT, &[path.as_str()], None, REMOTE_LIST_DIR_TIMEOUT)?;
         Ok(response
             .entries
             .into_iter()
@@ -62,7 +63,7 @@ where
             READ_FILE_SCRIPT,
             &[path.as_str()],
             None,
-            REMOTE_FILE_TIMEOUT,
+            REMOTE_READ_FILE_TIMEOUT,
         )
     }
 
@@ -95,7 +96,7 @@ where
             RENAME_SCRIPT,
             &[path.as_str(), new_name],
             None,
-            REMOTE_FILE_TIMEOUT,
+            REMOTE_LIST_DIR_TIMEOUT,
         )?;
         Ok(FileEntry {
             name: entry.name,
@@ -110,7 +111,7 @@ where
             DELETE_FILE_SCRIPT,
             &[path.as_str()],
             None,
-            REMOTE_FILE_TIMEOUT,
+            REMOTE_LIST_DIR_TIMEOUT,
         )?;
         Ok(())
     }

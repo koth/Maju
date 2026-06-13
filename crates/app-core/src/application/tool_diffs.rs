@@ -600,10 +600,20 @@ impl Application {
             .position(|change| normalize_tracked_path(&change.path) == normalized_path);
         if let Some(index) = existing_index {
             let existing = &self.ui.review_changes[index];
-            if existing.old_text.as_deref() != canonical.old_text.as_deref()
-                && Some(existing.new_text.as_str()) == canonical.old_text.as_deref()
-            {
-                return None;
+            if existing.old_text.as_deref() != canonical.old_text.as_deref() {
+                if Some(existing.new_text.as_str()) == canonical.old_text.as_deref() {
+                    return None;
+                }
+
+                let cumulative = canonical_text_diff(
+                    &existing.change_type,
+                    existing.old_text.as_deref(),
+                    Some(&normalized_new_text),
+                    None,
+                );
+                if cumulative.quality == DiffQuality::Exact {
+                    return None;
+                }
             }
             let existing_canonical = canonical_text_diff(
                 &existing.change_type,

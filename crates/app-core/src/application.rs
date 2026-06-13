@@ -441,7 +441,7 @@ impl Application {
             || matches!(self.ui.session.status, SessionStatus::Interrupted)
     }
 
-    pub(super) fn remote_ssh_session_config(&self) -> Option<RemoteSshSessionConfig> {
+    pub fn remote_ssh_session_config(&self) -> Option<RemoteSshSessionConfig> {
         self.remote_ssh.clone()
     }
 

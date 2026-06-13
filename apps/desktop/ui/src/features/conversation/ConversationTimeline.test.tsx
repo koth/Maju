@@ -230,6 +230,31 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).not.toContain("Allow");
   });
 
+  it("hides resolved permission request tools from the timeline", () => {
+    const permissionTool = makePermissionTool({
+      status: "Succeeded",
+      summary: "Permission resolved: allow",
+      detail_text: "Permission 等待权限 | allow / allowAll / deny",
+      permission_options: [],
+      permission_decision: "Permission resolved: allow",
+    });
+    const snapshot = makeSnapshot({
+      timeline: [{ Tool: permissionTool.id }],
+      tools: [permissionTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+      />,
+    );
+
+    expect(container.textContent).not.toContain("已运行");
+    expect(container.textContent).not.toContain("Permission resolved: allow");
+    expect(container.textContent).not.toContain("等待权限");
+  });
+
   it("renders the active streaming assistant message as markdown", async () => {
     const snapshot = makeSnapshot({
       session: {

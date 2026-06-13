@@ -18,7 +18,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
 
-const TIMIAI_RESPONSES_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy/responses";
 const TIMIAI_RESPONSES_COMPACT_URL: &str =
     "https://api.timiai.woa.com/ai_api_manage/llmproxy/responses/compact";
 const TIMIAI_CHAT_COMPLETIONS_URL: &str =
@@ -612,22 +611,28 @@ async fn proxy_anthropic_messages_request(
     }
 
     let session_id = session_id_for_proxy_provider(&config, &provider);
-    if normalize_proxy_provider(&provider) == "timiai" && !is_claude_family_model(routing_model) {
-        return proxy_timiai_responses_to_anthropic_messages_request(
+    if should_bridge_anthropic_messages_to_chat_completions(&provider, routing_model) {
+        return proxy_completion_to_anthropic_messages_request(
             payload,
             &api_key,
+            &provider,
             &session_id,
         )
         .await;
-    }
-    if should_bridge_anthropic_messages_to_chat_completions(&provider, routing_model) {
-        return proxy_completion_to_anthropic_messages_request(payload, &api_key, &provider).await;
     }
     match normalize_proxy_provider(&provider) {
         "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
             proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id).await
         }
-        _ => proxy_completion_to_anthropic_messages_request(payload, &api_key, &provider).await,
+        _ => {
+            proxy_completion_to_anthropic_messages_request(
+                payload,
+                &api_key,
+                &provider,
+                &session_id,
+            )
+            .await
+        }
     }
 }
 
@@ -751,97 +756,11 @@ async fn proxy_native_anthropic_messages_request(
     Ok(response)
 }
 
-async fn proxy_timiai_responses_to_anthropic_messages_request(
-    payload: Value,
-    api_key: &str,
-    session_id: &str,
-) -> anyhow::Result<Response<ProxyBody>> {
-    let requested_stream = payload
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let mut responses_payload = anthropic_payload_to_responses_payload(payload);
-    if let Some(object) = responses_payload.as_object_mut() {
-        object.remove("stream");
-    }
-    responses_payload = sanitize_timiai_responses_payload(responses_payload);
-    append_codex_api_proxy_log(&format!(
-        "timiai_responses_anthropic_bridge_request method=POST url={} model={} downstream_stream={} upstream_stream=false tools={} auth_header=Authorization:{} x_api_key=present x_session_id=present",
-        TIMIAI_RESPONSES_URL,
-        responses_payload
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        requested_stream,
-        responses_payload
-            .get("tools")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0),
-        timiai_authorization_log_state(api_key)
-    ));
-    let client = reqwest::Client::new();
-    let upstream = with_timiai_headers(
-        client
-            .post(TIMIAI_RESPONSES_URL)
-            .header(CONTENT_TYPE, "application/json"),
-        api_key,
-        session_id,
-    )
-    .body(serde_json::to_vec(&responses_payload)?)
-    .send()
-    .await?;
-    let status = StatusCode::from_u16(upstream.status().as_u16())?;
-    let content_type = upstream
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
-    if is_event_stream(&content_type) {
-        return Ok(streaming_passthrough_response(
-            upstream,
-            status,
-            &content_type,
-        ));
-    }
-    let body = upstream.bytes().await?;
-    let status = normalize_upstream_error_status(status, body.as_ref());
-    if !status.is_success() {
-        append_codex_api_proxy_log(&format!(
-            "timiai_responses_anthropic_bridge_error url={} model={} status={}",
-            TIMIAI_RESPONSES_URL,
-            responses_payload
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            status.as_u16()
-        ));
-        log_suspicious_upstream_response(status, &content_type, body.as_ref());
-    }
-    let mut response_content_type = content_type.clone();
-    let body = if requested_stream && status.is_success() {
-        let response: Value = serde_json::from_slice(body.as_ref())?;
-        response_content_type = "text/event-stream".to_string();
-        anthropic_response_to_sse(&responses_response_to_anthropic_response(response))
-    } else if status.is_success() {
-        let response: Value = serde_json::from_slice(body.as_ref())?;
-        serde_json::to_vec(&responses_response_to_anthropic_response(response))?
-    } else {
-        body.to_vec()
-    };
-    let mut response = Response::new(full_body(Bytes::from(body)));
-    *response.status_mut() = status;
-    if let Ok(value) = response_content_type.parse() {
-        response.headers_mut().insert(CONTENT_TYPE, value);
-    }
-    Ok(response)
-}
-
 async fn proxy_completion_to_anthropic_messages_request(
     payload: Value,
     api_key: &str,
     provider: &str,
+    session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
@@ -861,7 +780,11 @@ async fn proxy_completion_to_anthropic_messages_request(
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
-    let request = request.bearer_auth(api_key);
+    let request = if normalize_proxy_provider(provider) == "timiai" {
+        with_timiai_headers(request, api_key, session_id)
+    } else {
+        request.bearer_auth(api_key)
+    };
     let upstream = match request
         .body(serde_json::to_vec(&chat_payload)?)
         .send()
@@ -1060,6 +983,7 @@ fn upstream_messages_url(provider: &str) -> &'static str {
 fn should_bridge_anthropic_messages_to_chat_completions(provider: &str, model: &str) -> bool {
     match normalize_proxy_provider(provider) {
         "commandcode" | "deepseek" | "kimi_code" | "xiaomi_mimo" => !is_claude_family_model(model),
+        "timiai" => !is_claude_family_model(model),
         _ => false,
     }
 }
@@ -1651,6 +1575,7 @@ fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
     payload
 }
 
+#[cfg(test)]
 fn anthropic_payload_to_responses_payload(anthropic: Value) -> Value {
     let mut input = Vec::new();
     if let Some(messages) = anthropic.get("messages").and_then(Value::as_array) {
@@ -1699,6 +1624,7 @@ fn anthropic_payload_to_responses_payload(anthropic: Value) -> Value {
     payload
 }
 
+#[cfg(test)]
 fn append_anthropic_message_to_responses_input(message: &Value, input: &mut Vec<Value>) {
     let role = message
         .get("role")
@@ -1762,6 +1688,7 @@ fn append_anthropic_message_to_responses_input(message: &Value, input: &mut Vec<
     flush_responses_text_message(input, role, &mut pending_text);
 }
 
+#[cfg(test)]
 fn flush_responses_text_message(
     input: &mut Vec<Value>,
     role: &str,
@@ -1775,6 +1702,7 @@ fn flush_responses_text_message(
     push_responses_text_message(input, role, &text);
 }
 
+#[cfg(test)]
 fn push_responses_text_message(input: &mut Vec<Value>, role: &str, text: &str) {
     if text.trim().is_empty() {
         return;
@@ -1796,6 +1724,7 @@ fn push_responses_text_message(input: &mut Vec<Value>, role: &str, text: &str) {
     }));
 }
 
+#[cfg(test)]
 fn anthropic_tools_to_responses_tools(value: Option<&Value>) -> Option<Value> {
     let tools = value?.as_array()?;
     let converted = tools
@@ -1819,6 +1748,7 @@ fn anthropic_tools_to_responses_tools(value: Option<&Value>) -> Option<Value> {
     (!converted.is_empty()).then(|| Value::Array(converted))
 }
 
+#[cfg(test)]
 fn anthropic_tool_choice_to_responses_tool_choice(value: Option<&Value>) -> Option<Value> {
     let value = value?;
     match value.get("type").and_then(Value::as_str) {
@@ -2395,6 +2325,7 @@ fn apply_patch_input_from_function_arguments(arguments: &str) -> String {
     trimmed.to_string()
 }
 
+#[cfg(test)]
 fn responses_response_to_anthropic_response(response: Value) -> Value {
     let mut content = Vec::new();
     let mut stop_reason = "end_turn";
@@ -2430,6 +2361,7 @@ fn responses_response_to_anthropic_response(response: Value) -> Value {
     })
 }
 
+#[cfg(test)]
 fn responses_message_item_to_anthropic_content(item: &Value) -> Vec<Value> {
     item.get("content")
         .and_then(Value::as_array)
@@ -2448,6 +2380,7 @@ fn responses_message_item_to_anthropic_content(item: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn responses_tool_call_item_to_anthropic_content(item: &Value) -> Value {
     let id = item
         .get("call_id")
@@ -4350,6 +4283,17 @@ mod tests {
         assert!(should_bridge_anthropic_messages_to_chat_completions(
             "xiaomi_mimo",
             "MiMo-V2.5-Pro"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "timiai",
+            "deepseek-v4-pro-r1"
+        ));
+        assert!(should_bridge_anthropic_messages_to_chat_completions(
+            "timiai", "gpt-5.5"
+        ));
+        assert!(!should_bridge_anthropic_messages_to_chat_completions(
+            "timiai",
+            "claude-opus-4.8"
         ));
     }
 

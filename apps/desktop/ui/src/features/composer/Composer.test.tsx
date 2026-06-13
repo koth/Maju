@@ -70,6 +70,56 @@ describe("Composer", () => {
     expect(container.querySelector(".composer")).toHaveClass("is-compact");
   });
 
+  it("keeps compact composer controls on the input row", () => {
+    const snapshot = makeSnapshot({
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "mode",
+            label: "Mode",
+            description: null,
+            category: "Mode",
+            source: "LocalMode",
+            current_value_id: "Build",
+            current_value_label: "Build",
+            enabled: true,
+            choices: [
+              { id: "Build", label: "Build", description: null, provider: null },
+              { id: "Plan", label: "Plan", description: null, provider: null },
+            ],
+          },
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "deepseek-v4-pro",
+            current_value_label: "deepseek-v4-pro",
+            enabled: true,
+            choices: [
+              { id: "deepseek-v4-pro", label: "deepseek-v4-pro", description: null, provider: "deepseek" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const { container } = render(
+      <Composer snapshot={snapshot} onStateChange={vi.fn()} compact />,
+    );
+
+    const composer = container.querySelector(".composer");
+    expect(composer).toHaveClass("is-compact");
+    expect(within(composer as HTMLElement).getByRole("button", { name: "附加图片或文件" })).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("textbox")).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("button", { name: "Build" })).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("button", { name: /Provider.*DeepSeek/ })).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("button", { name: /^deepseek-v4-pro/ })).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("button", { name: "发送提示" })).toBeInTheDocument();
+  });
+
   it("renders image attachments as clickable previews without visible file names", async () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgo=";
     vi.mocked(editorGetContent).mockResolvedValue({
@@ -301,6 +351,11 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: /Provider.*CommandCode/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^gpt-5\.5/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /kodex-provider\/commandcode/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^gpt-5\.5/ }));
+    expect(await screen.findByRole("option", { name: "gpt-5.5" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /kodex-provider\/commandcode/ })).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
 
     fireEvent.click(screen.getByRole("button", { name: /Provider.*CommandCode/ }));
     fireEvent.click(await screen.findByRole("option", { name: "Kimi Code" }));

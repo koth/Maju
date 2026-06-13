@@ -2,6 +2,13 @@ use super::*;
 use crate::remote_workspace::RemoteWorkspaceClient;
 
 impl Application {
+    pub fn replace_repository_snapshot(&mut self, snapshot: workspace_model::RepositorySnapshot) {
+        if snapshot != self.ui.repository {
+            self.ui.repository = snapshot;
+            self.bump_revision();
+        }
+    }
+
     pub fn refresh_repository(&mut self) {
         if self.is_remote_workspace() {
             match self

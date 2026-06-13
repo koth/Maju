@@ -19,6 +19,55 @@ pub use application::{
 };
 pub use paths::AppPaths;
 
+pub fn list_remote_workspace_dir(
+    config: &acp_core::RemoteSshSessionConfig,
+    path: &str,
+) -> Result<Vec<workspace_model::FileEntry>, String> {
+    remote_workspace::RemoteWorkspaceClient::new(config)
+        .list_dir(path)
+        .map_err(|error| format!("failed to list remote directory: {error}"))
+}
+
+pub fn read_remote_workspace_file(
+    config: &acp_core::RemoteSshSessionConfig,
+    path: &str,
+) -> Result<workspace_model::EditorFileSnapshot, String> {
+    remote_workspace::RemoteWorkspaceClient::new(config)
+        .read_file(path)
+        .map_err(|error| format!("failed to load remote file: {error}"))
+}
+
+pub fn refresh_remote_git_status(
+    config: &acp_core::RemoteSshSessionConfig,
+) -> Result<workspace_model::RepositorySnapshot, String> {
+    remote_workspace::RemoteWorkspaceClient::new(config)
+        .git_status()
+        .map_err(|error| format!("failed to refresh remote git status: {error}"))
+}
+
+pub fn build_dormant_remote_workspace_ui(
+    remote: workspace_model::RemoteLinuxWorkspace,
+) -> Result<workspace_model::UiSnapshot, String> {
+    let mut ui = bootstrap::build_initial_remote_ui(remote)
+        .map_err(|error| format!("failed to build dormant remote workspace: {error}"))?;
+    ui.repository.branch = "未连接".into();
+    ui.repository.head = "双击项目目录后连接".into();
+    ui.session.title = "远程工作区未连接".into();
+    if let Some(message) = ui.messages.first_mut() {
+        message.body = format!(
+            "{} 尚未连接。双击左侧项目目录后，将重新连接远程机器并启动远程 ACP。",
+            ui.workspace.name
+        );
+    }
+    ui.tools.clear();
+    ui.timeline.retain(|item| match item {
+        workspace_model::TimelineItem::Tool(_) => false,
+        workspace_model::TimelineItem::Message(_) => true,
+        workspace_model::TimelineItem::Thinking => true,
+    });
+    Ok(ui)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AppPaths, Application, UiPatchCursor, UiSnapshotUpdate};

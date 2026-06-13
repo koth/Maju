@@ -190,6 +190,10 @@ export async function sessionDelete(id: string, workspaceRoot?: string): Promise
   return invoke("session_delete", { id, workspaceRoot });
 }
 
+export async function sessionArchive(id: string, workspaceRoot?: string): Promise<void> {
+  return invoke("session_archive", { id, workspaceRoot });
+}
+
 export async function sessionGetChanges(): Promise<SessionFileChange[]> {
   return invoke<SessionFileChange[]>("session_get_changes");
 }

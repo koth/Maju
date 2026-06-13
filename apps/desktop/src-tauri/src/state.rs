@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use terminal_service::{TerminalEventSink, TerminalService};
 use workspace_model::{
-    AgentCliId, OpenWorkspaceItem, RemoteLinuxWorkspace, SessionListItem, TerminalOpenRequest,
-    TerminalResizeRequest, TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor,
-    WorkspaceLocation, WorkspaceSessionList,
+    AgentCliId, EditorFileSnapshot, FileEntry, OpenWorkspaceItem, RemoteLinuxWorkspace,
+    RepositorySnapshot, SessionListItem, TerminalOpenRequest, TerminalResizeRequest,
+    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceLocation,
+    WorkspaceSessionList,
 };
 
 pub struct AppState {
@@ -135,6 +136,28 @@ impl AppState {
             }),
         );
         Ok(())
+    }
+
+    pub fn restore_active_dormant_remote_workspace(
+        &self,
+        remote: RemoteLinuxWorkspace,
+    ) -> Result<UiSnapshot, String> {
+        let key = remote_workspace_key(&remote);
+        let snapshot = app_core::build_dormant_remote_workspace_ui(remote.clone())?;
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if !guard.workspaces.contains_key(&key) {
+            let workspace = remote_workspace_descriptor(remote);
+            let sessions = load_lightweight_sessions(&workspace.root).unwrap_or_default();
+            guard.workspaces.insert(
+                key.clone(),
+                WorkspaceEntry::Dormant(WorkspaceMetadata {
+                    workspace,
+                    sessions,
+                }),
+            );
+        }
+        guard.active_workspace = Some(key);
+        Ok(snapshot)
     }
 
     pub fn close_workspace(&self) -> Result<(), String> {
@@ -294,12 +317,12 @@ impl AppState {
     }
 
     pub fn list_workspace_sessions(&self) -> Result<Vec<WorkspaceSessionList>, String> {
-        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let active = guard.active_workspace.as_deref();
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active = guard.active_workspace.clone();
         let mut items = guard
             .workspaces
-            .iter()
-            .map(|(key, entry)| workspace_session_list(key, entry, Some(key.as_str()) == active))
+            .iter_mut()
+            .map(|(key, entry)| workspace_session_list(key, entry, Some(key) == active.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         sort_workspaces(
             &mut items,
@@ -379,6 +402,87 @@ impl AppState {
         f(app)
     }
 
+    pub fn list_workspace_dir(&self, path: String) -> Result<Vec<FileEntry>, String> {
+        let remote_config = {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get_mut(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                Some(app.remote_ssh_session_config().ok_or(
+                    "Remote workspace is missing SSH session config for remote filesystem list",
+                )?)
+            } else {
+                return app.list_workspace_dir(&path);
+            }
+        };
+
+        match remote_config {
+            Some(config) => app_core::list_remote_workspace_dir(&config, &path),
+            None => unreachable!("local workspace returns while holding the application lock"),
+        }
+    }
+
+    pub fn open_workspace_file(&self, path: String) -> Result<EditorFileSnapshot, String> {
+        let remote_config = {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get_mut(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                Some(app.remote_ssh_session_config().ok_or(
+                    "Remote workspace is missing SSH session config for remote editor file access",
+                )?)
+            } else {
+                return app.editor_open_file(&path);
+            }
+        };
+
+        match remote_config {
+            Some(config) => app_core::read_remote_workspace_file(&config, &path),
+            None => unreachable!("local workspace returns while holding the application lock"),
+        }
+    }
+
+    pub fn git_refresh(&self) -> Result<RepositorySnapshot, String> {
+        let remote_request = {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            let app = match guard.workspaces.get_mut(&active_key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("No connected workspace open".into()),
+            };
+            if app.is_remote_workspace() {
+                Some((
+                    active_key,
+                    app.remote_ssh_session_config()
+                        .ok_or("Remote workspace is missing SSH session config for git refresh")?,
+                ))
+            } else {
+                app.refresh_repository();
+                return Ok(app.ui.repository.clone());
+            }
+        };
+
+        let Some((workspace_key, config)) = remote_request else {
+            unreachable!("local workspace returns while holding the application lock")
+        };
+        let snapshot = app_core::refresh_remote_git_status(&config)?;
+
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if guard.active_workspace.as_deref() == Some(workspace_key.as_str())
+            && let Some(WorkspaceEntry::Connected(app)) = guard.workspaces.get_mut(&workspace_key)
+            && app.is_remote_workspace()
+        {
+            app.replace_repository_snapshot(snapshot.clone());
+        }
+        Ok(snapshot)
+    }
+
     pub fn with_workspace_app<F, R>(&self, path: Option<String>, f: F) -> Result<R, String>
     where
         F: FnOnce(&mut Application) -> Result<R, String>,
@@ -443,6 +547,49 @@ impl AppState {
                 let store = SessionStore::open(paths.root(), &metadata.workspace.root)
                     .map_err(|e| e.to_string())?;
                 store.delete_session(id).map_err(|e| e.to_string())?;
+                metadata.sessions = load_lightweight_sessions(&metadata.workspace.root)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn archive_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let key = match workspace_root {
+            Some(path) => normalize_tracked_path(&path),
+            None => guard.active_workspace.clone().ok_or("No workspace open")?,
+        };
+        let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
+
+        if is_active_workspace {
+            let (remote, path) = {
+                let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+                (entry_remote(entry), entry_path(entry))
+            };
+            if let Some(remote) = remote {
+                connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+            } else {
+                let path = path.ok_or("Workspace is not open")?;
+                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+            }
+            let app = match guard.workspaces.get_mut(&key) {
+                Some(WorkspaceEntry::Connected(app)) => app,
+                _ => return Err("Workspace is not connected".into()),
+            };
+            return app.session_archive(id);
+        }
+
+        let entry = guard
+            .workspaces
+            .get_mut(&key)
+            .ok_or("Workspace is not open")?;
+        match entry {
+            WorkspaceEntry::Connected(app) => app.session_archive(id),
+            WorkspaceEntry::Dormant(metadata) => {
+                let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+                let store = SessionStore::open(paths.root(), &metadata.workspace.root)
+                    .map_err(|e| e.to_string())?;
+                store.archive_session(id).map_err(|e| e.to_string())?;
                 metadata.sessions = load_lightweight_sessions(&metadata.workspace.root)?;
                 Ok(())
             }
@@ -532,17 +679,20 @@ fn connect_remote_workspace_locked(
 
 fn workspace_session_list(
     key: &str,
-    entry: &WorkspaceEntry,
+    entry: &mut WorkspaceEntry,
     is_active: bool,
 ) -> Result<WorkspaceSessionList, String> {
     match entry {
-        WorkspaceEntry::Connected(app) => app.session_list().map(|sessions| WorkspaceSessionList {
-            workspace: app.ui.workspace.clone(),
-            sessions,
-            active_session_id: app.ui.session.id,
-            is_active,
-            connected: true,
-        }),
+        WorkspaceEntry::Connected(app) => {
+            app.session_list_after_poll()
+                .map(|sessions| WorkspaceSessionList {
+                    workspace: app.ui.workspace.clone(),
+                    sessions,
+                    active_session_id: app.ui.session.id,
+                    is_active,
+                    connected: true,
+                })
+        }
         WorkspaceEntry::Dormant(metadata) => Ok(WorkspaceSessionList {
             workspace: metadata.workspace.clone(),
             sessions: metadata.sessions.clone(),

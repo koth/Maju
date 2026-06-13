@@ -20,8 +20,8 @@ use workspace_model::{
     FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
     MessageRole, SessionAttentionState, SessionConfigCategory, SessionConfigChoice,
     SessionConfigControl, SessionConfigSource, SessionConfigState, SessionFileChange,
-    SessionRuntimeStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
-    TurnFileChanges, WorkspaceLocation,
+    SessionListItem, SessionRuntimeStatus, TimelineItem, ToolDiffPreview, ToolInvocation,
+    ToolStatus, TurnFileChanges, WorkspaceLocation,
 };
 
 mod change_set_tests;
@@ -372,6 +372,27 @@ fn switched_away_in_flight_prompt_completes_under_original_session() {
 }
 
 #[test]
+fn session_list_refresh_marks_hidden_completed_prompt_unviewed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let background_session_id = app.ui.session.id.to_string();
+
+    app.send_prompt_background("finish from session list refresh")
+        .unwrap();
+    app.session_create(None).unwrap();
+
+    let completed = wait_for_session_attention_from_list_refresh(
+        &mut app,
+        &background_session_id,
+        SessionAttentionState::CompletedUnviewed,
+    );
+    assert_eq!(
+        completed.runtime_status,
+        SessionRuntimeStatus::BackgroundIdle
+    );
+}
+
+#[test]
 fn background_idle_runtime_retires_and_reopens_with_session_load() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -628,4 +649,24 @@ fn wait_for_session_attention(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!("session {session_id} did not reach attention state {expected:?}");
+}
+
+fn wait_for_session_attention_from_list_refresh(
+    app: &mut Application,
+    session_id: &str,
+    expected: SessionAttentionState,
+) -> SessionListItem {
+    for _ in 0..100 {
+        if let Some(session) = app
+            .session_list_after_poll()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == session_id)
+            && session.attention_state == expected
+        {
+            return session;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("session {session_id} did not reach attention state {expected:?} from list refresh");
 }

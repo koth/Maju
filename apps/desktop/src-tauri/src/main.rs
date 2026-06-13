@@ -88,6 +88,7 @@ fn main() {
             commands::session::session_switch,
             commands::session::session_create,
             commands::session::session_delete,
+            commands::session::session_archive,
             commands::session::session_get_changes,
             commands::session::session_list_change_sets,
             commands::session::session_list_change_set_files,

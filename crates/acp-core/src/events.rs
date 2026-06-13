@@ -4,6 +4,37 @@ use workspace_model::{
     PermissionOption, PromptInputCapabilities, SessionConfigState, TerminalOutput,
 };
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentEditPolicy {
+    None,
+    PreferApplyPatch,
+}
+
+impl Default for AgentEditPolicy {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+pub fn agent_edit_policy_for_command(agent_command: &str) -> AgentEditPolicy {
+    let normalized = agent_command.to_ascii_lowercase();
+    let basename = normalized
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&normalized)
+        .trim_matches(['"', '\'', '`']);
+
+    if basename.contains("codex-acp")
+        || basename.contains("kodex-acp")
+        || basename.contains("claude-agent-acp")
+        || basename.contains("claude-acp")
+    {
+        AgentEditPolicy::PreferApplyPatch
+    } else {
+        AgentEditPolicy::None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionConfig {
     pub workspace_root: String,

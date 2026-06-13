@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::workspace_paths::paths_are_inside_workspace;
+use crate::events::AgentEditPolicy;
 use workspace_model::PermissionInputResponse;
 
 #[derive(Clone, Debug, Default)]
@@ -165,11 +166,11 @@ impl PermissionBroker {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PermissionDecision {
     Select(String),
+    SelectWithGuidance(String, String),
     Cancel,
     Ask,
 }
 
-#[cfg(test)]
 fn reject_permission_option_id(request: &RequestPermissionRequest) -> Option<String> {
     request
         .options
@@ -191,13 +192,30 @@ pub(super) enum CodeBuddyTerminalPermissionDecision {
     Reject,
 }
 
+#[cfg(test)]
 pub(super) fn decide_permission(
     mode: PermissionPolicyMode,
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> PermissionDecision {
+    decide_permission_with_edit_policy(mode, AgentEditPolicy::None, workspace_root, request)
+}
+
+pub(super) fn decide_permission_with_edit_policy(
+    mode: PermissionPolicyMode,
+    edit_policy: AgentEditPolicy,
+    workspace_root: &str,
+    request: &RequestPermissionRequest,
+) -> PermissionDecision {
     if request_has_user_input_questions(request) {
         return PermissionDecision::Ask;
+    }
+
+    if mode != PermissionPolicyMode::FullAccess
+        && edit_policy == AgentEditPolicy::PreferApplyPatch
+        && request_should_retry_with_apply_patch(workspace_root, request)
+    {
+        return reject_with_apply_patch_guidance(request);
     }
 
     if is_codebuddy_bash_request(request) {
@@ -209,6 +227,200 @@ pub(super) fn decide_permission(
         PermissionPolicyMode::Build => decide_build_permission(workspace_root, request),
         PermissionPolicyMode::FullAccess => decide_full_access_permission(workspace_root, request),
     }
+}
+
+const APPLY_PATCH_RETRY_GUIDANCE: &str = "Use the apply_patch tool for ordinary text file create, update, and delete operations. Retry this edit with an apply_patch patch. Direct filesystem writes are reserved for formatters, generators, package managers, lockfiles, and binary or media files.";
+
+pub(super) fn apply_patch_retry_guidance() -> &'static str {
+    APPLY_PATCH_RETRY_GUIDANCE
+}
+
+fn reject_with_apply_patch_guidance(request: &RequestPermissionRequest) -> PermissionDecision {
+    reject_permission_option_id(request)
+        .map(|option_id| {
+            PermissionDecision::SelectWithGuidance(
+                option_id,
+                APPLY_PATCH_RETRY_GUIDANCE.to_string(),
+            )
+        })
+        .unwrap_or(PermissionDecision::Cancel)
+}
+
+pub(super) fn path_prefers_apply_patch(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        file_name.as_str(),
+        "cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lockb"
+    ) {
+        return false;
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if extension.is_empty() {
+        return true;
+    }
+
+    !matches!(
+        extension.as_str(),
+        "7z" | "a"
+            | "avi"
+            | "avif"
+            | "bin"
+            | "bmp"
+            | "class"
+            | "dll"
+            | "dmg"
+            | "doc"
+            | "docx"
+            | "dylib"
+            | "eot"
+            | "exe"
+            | "gif"
+            | "gz"
+            | "ico"
+            | "jar"
+            | "jpeg"
+            | "jpg"
+            | "lock"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "o"
+            | "otf"
+            | "pdf"
+            | "png"
+            | "ppt"
+            | "pptx"
+            | "pyc"
+            | "rar"
+            | "so"
+            | "sqlite"
+            | "tar"
+            | "tgz"
+            | "ttf"
+            | "wasm"
+            | "webm"
+            | "webp"
+            | "woff"
+            | "woff2"
+            | "xls"
+            | "xlsx"
+            | "zip"
+    )
+}
+
+fn request_should_retry_with_apply_patch(
+    workspace_root: &str,
+    request: &RequestPermissionRequest,
+) -> bool {
+    match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+            let paths = resolve_paths_against_workspace(workspace_root, permission_paths(request));
+            !paths.is_empty()
+                && paths_are_inside_workspace(workspace_root, &paths)
+                && paths.iter().any(|path| path_prefers_apply_patch(path))
+        }
+        ToolKind::Execute => {
+            request_shell_write_should_retry_with_apply_patch(workspace_root, request)
+        }
+        _ => false,
+    }
+}
+
+fn request_shell_write_should_retry_with_apply_patch(
+    workspace_root: &str,
+    request: &RequestPermissionRequest,
+) -> bool {
+    let mut commands = Vec::new();
+    if let Some(raw_input) = &request.tool_call.fields.raw_input {
+        collect_shell_commands(raw_input, &mut commands);
+    }
+    if let Some(title) = &request.tool_call.fields.title {
+        let title = title.trim();
+        if !title.is_empty() {
+            commands.push(title.to_string());
+        }
+    }
+
+    commands
+        .iter()
+        .any(|command| shell_command_prefers_apply_patch_for_writes(workspace_root, command))
+}
+
+fn shell_command_write_paths_prefer_apply_patch(workspace_root: &str, command: &str) -> bool {
+    let paths = resolve_paths_against_workspace(
+        workspace_root,
+        extract_write_paths_from_command_text(command)
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>(),
+    );
+    !paths.is_empty()
+        && paths_are_inside_workspace(workspace_root, &paths)
+        && paths.iter().any(|path| path_prefers_apply_patch(path))
+}
+
+fn resolve_paths_against_workspace(workspace_root: &str, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let root = Path::new(workspace_root);
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+        .collect()
+}
+
+pub(super) fn shell_command_prefers_apply_patch_for_writes(
+    workspace_root: &str,
+    command: &str,
+) -> bool {
+    shell_command_directly_mutates_files(command)
+        && !shell_command_write_is_apply_patch_exception(command)
+        && shell_command_write_paths_prefer_apply_patch(workspace_root, command)
+}
+
+fn shell_command_write_is_apply_patch_exception(command: &str) -> bool {
+    split_shell_pipeline(trim_shell_title(command))
+        .iter()
+        .any(|segment| {
+            let words = shell_words(segment);
+            let Some(command) = shell_command_word(&words) else {
+                return false;
+            };
+            let command = shell_command_basename(command);
+            matches!(
+                command.as_str(),
+                "cargo"
+                    | "npm"
+                    | "pnpm"
+                    | "yarn"
+                    | "bun"
+                    | "deno"
+                    | "go"
+                    | "rustfmt"
+                    | "prettier"
+                    | "eslint"
+                    | "biome"
+                    | "ruff"
+                    | "black"
+                    | "clang-format"
+                    | "taplo"
+                    | "stylua"
+                    | "npx"
+            )
+        })
 }
 
 fn request_has_user_input_questions(request: &RequestPermissionRequest) -> bool {
@@ -1824,6 +2036,23 @@ mod tests {
         )
     }
 
+    fn edit_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "edit",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Edit)
+                    .title("Edit".to_string())
+                    .raw_input(raw_input),
+            ),
+            vec![
+                PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+            ],
+        )
+    }
+
     fn user_input_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
         RequestPermissionRequest::new(
             SessionId::new("session-1"),
@@ -1906,6 +2135,104 @@ mod tests {
         );
         assert_eq!(
             decide_permission(PermissionPolicyMode::ReadOnly, "D:/work/repo", &request),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn apply_patch_policy_rejects_patchable_direct_shell_writes_with_guidance() {
+        let root = temp_workspace("apply-patch-policy");
+        let request = execute_request(json!({
+            "command": "echo ok > packages/backend/src/service.ts"
+        }));
+
+        assert_eq!(
+            decide_permission_with_edit_policy(
+                PermissionPolicyMode::Build,
+                AgentEditPolicy::PreferApplyPatch,
+                root.to_str().unwrap(),
+                &request,
+            ),
+            PermissionDecision::SelectWithGuidance(
+                "reject".to_string(),
+                apply_patch_retry_guidance().to_string(),
+            ),
+        );
+    }
+
+    #[test]
+    fn apply_patch_policy_rejects_patchable_direct_edit_tools_with_guidance() {
+        let root = temp_workspace("apply-patch-edit-policy");
+        let request = edit_request(json!({
+            "path": "packages/backend/src/service.ts"
+        }));
+
+        assert_eq!(
+            decide_permission_with_edit_policy(
+                PermissionPolicyMode::Build,
+                AgentEditPolicy::PreferApplyPatch,
+                root.to_str().unwrap(),
+                &request,
+            ),
+            PermissionDecision::SelectWithGuidance(
+                "reject".to_string(),
+                apply_patch_retry_guidance().to_string(),
+            ),
+        );
+    }
+
+    #[test]
+    fn full_access_overrides_apply_patch_policy_interception() {
+        let root = temp_workspace("apply-patch-full-access");
+        let request = execute_request(json!({
+            "command": "echo ok > packages/backend/src/service.ts"
+        }));
+
+        assert_eq!(
+            decide_permission_with_edit_policy(
+                PermissionPolicyMode::FullAccess,
+                AgentEditPolicy::PreferApplyPatch,
+                root.to_str().unwrap(),
+                &request,
+            ),
+            PermissionDecision::Ask,
+        );
+    }
+
+    #[test]
+    fn apply_patch_policy_keeps_lockfiles_and_formatters_out_of_patch_gate() {
+        let lockfile_request = execute_request(json!({
+            "command": "python3 -c \"open('package-lock.json', 'w', encoding='utf-8').write('ok')\""
+        }));
+        assert_eq!(
+            decide_permission_with_edit_policy(
+                PermissionPolicyMode::Build,
+                AgentEditPolicy::PreferApplyPatch,
+                "D:/work/repo",
+                &lockfile_request,
+            ),
+            PermissionDecision::Ask,
+        );
+
+        assert!(!shell_command_prefers_apply_patch_for_writes(
+            "D:/work/repo",
+            "prettier --write packages/backend/src/service.ts",
+        ));
+    }
+
+    #[test]
+    fn default_edit_policy_preserves_existing_direct_write_behavior() {
+        let request = execute_request(json!({
+            "command": "python3 -c \"open('packages/backend/src/service.ts', 'w', encoding='utf-8').write('ok')\""
+        }));
+
+        assert_eq!(
+            decide_permission_with_edit_policy(
+                PermissionPolicyMode::Build,
+                AgentEditPolicy::None,
+                "D:/work/repo",
+                &request,
+            ),
             PermissionDecision::Ask,
         );
     }

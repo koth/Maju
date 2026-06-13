@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import type { AgentCliId, AgentSettingsSnapshot, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
+import type { AgentCliId, AgentSettingsSnapshot, RemoteLinuxWorkspace, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
   sessionList,
   sessionSwitch,
   sessionCreate,
-  sessionDelete,
+  sessionArchive,
   sessionCancel,
   settingsGetAgentSnapshot,
   workspaceOpen,
@@ -55,6 +55,7 @@ export function SessionList({
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
+  const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
 
@@ -157,21 +158,31 @@ export function SessionList({
   const handleOpenRemoteWorkspace = useCallback(() => {
     setWorkspaceMenuOpen(false);
     setModalError(null);
+    setRemoteReconnect(null);
     setRemoteOpenVisible(true);
   }, []);
 
   const closeRemoteOpen = useCallback(() => {
     setRemoteOpenVisible(false);
+    setRemoteReconnect(null);
   }, []);
 
   const handleRemoteWorkspaceOpened = useCallback(
     (snapshot: UiSnapshot) => {
       setRemoteOpenVisible(false);
+      setRemoteReconnect(null);
       onWorkspaceChanged(snapshot);
       refresh();
     },
     [onWorkspaceChanged, refresh],
   );
+
+  const handleReconnectRemoteWorkspace = useCallback((remote: RemoteLinuxWorkspace) => {
+    setWorkspaceMenuOpen(false);
+    setModalError(null);
+    setRemoteReconnect(remote);
+    setRemoteOpenVisible(true);
+  }, []);
 
   const handleChooseWorkspaceDirectory = useCallback(async () => {
     try {
@@ -262,14 +273,14 @@ export function SessionList({
     }
   }, [modalMode, onSessionChanged, onWorkspaceChanged, pendingWorkspacePath, pendingWorkspaceRoot, refresh, selectedAgent]);
 
-  const handleDelete = useCallback(
+  const handleArchive = useCallback(
     async (id: string, workspaceRoot: string) => {
       try {
-        await sessionDelete(id, workspaceRoot);
+        await sessionArchive(id, workspaceRoot);
         onSessionChanged();
         refresh();
       } catch (error) {
-        console.error("Failed to delete session", error);
+        console.error("Failed to archive session", error);
       }
     },
     [onSessionChanged, refresh],
@@ -362,9 +373,10 @@ export function SessionList({
             item={workspaceItem}
             activeSessionId={activeSessionId}
             onActivateWorkspace={handleActivateWorkspace}
+            onReconnectRemoteWorkspace={handleReconnectRemoteWorkspace}
             onCreateSession={handleOpenAgentPicker}
             onSwitch={handleSwitch}
-            onDelete={handleDelete}
+            onArchive={handleArchive}
           />
         ))}
       </div>
@@ -413,9 +425,12 @@ export function SessionList({
               <button type="button" className="sl-agent-close" onClick={closeRemoteOpen}>x</button>
             </div>
             <RemoteOpenPanel
+              initialRemote={remoteReconnect}
+              headingTitle={remoteReconnect ? "重新连接远程目录" : "打开远程目录"}
               onWorkspaceOpened={handleRemoteWorkspaceOpened}
               onOpenSettings={() => {
                 setRemoteOpenVisible(false);
+                setRemoteReconnect(null);
                 onOpenSettings();
               }}
               onCancel={closeRemoteOpen}
@@ -586,28 +601,61 @@ function WorkspaceSection({
   item,
   activeSessionId,
   onActivateWorkspace,
+  onReconnectRemoteWorkspace,
   onCreateSession,
   onSwitch,
-  onDelete,
+  onArchive,
 }: {
   item: WorkspaceSessionList;
   activeSessionId: string;
   onActivateWorkspace: (workspaceRoot: string) => void;
+  onReconnectRemoteWorkspace: (remote: RemoteLinuxWorkspace) => void;
   onCreateSession: (workspaceRoot: string) => void;
   onSwitch: (id: string, workspaceRoot: string) => void;
-  onDelete: (id: string, workspaceRoot: string) => void;
+  onArchive: (id: string, workspaceRoot: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
   const workspaceRoot = item.workspace.root;
+  const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
+  const isDormantRemoteWorkspace = isRemoteWorkspace && !item.connected;
+  const remoteWorkspace = item.workspace.location?.kind === "remote_linux" ? item.workspace.location : null;
+  const workspaceStateLabel = isDormantRemoteWorkspace ? "REMOTE" : item.connected ? "LIVE" : "SLEEP";
+  const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
 
   return (
-    <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"}`}>
+    <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""}`}>
       <div className="sl-workspace-row">
-        <button className="sl-workspace-node" type="button" aria-current={item.is_active ? "true" : undefined} onClick={() => onActivateWorkspace(workspaceRoot)}>
+        <button
+          className="sl-workspace-node"
+          type="button"
+          aria-current={item.is_active ? "true" : undefined}
+          onClick={() => {
+            if (!isDormantRemoteWorkspace) {
+              onActivateWorkspace(workspaceRoot);
+            }
+          }}
+          onDoubleClick={() => {
+            if (isDormantRemoteWorkspace && remoteWorkspace) {
+              onReconnectRemoteWorkspace(remoteWorkspace);
+            }
+          }}
+          title={workspaceActionHint}
+        >
           <FolderIcon />
-          <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
+          <span className="sl-workspace-copy">
+            <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
+            <span className="sl-workspace-path">{workspaceRoot}</span>
+          </span>
+          <span className="sl-workspace-state">{workspaceStateLabel}</span>
         </button>
-        <button className="sl-workspace-edit" type="button" onClick={() => onCreateSession(workspaceRoot)} title="新建会话" aria-label={`在 ${item.workspace.name} 中新建会话`}>
+        <button
+          className="sl-workspace-edit"
+          type="button"
+          onClick={() => onCreateSession(workspaceRoot)}
+          title={isDormantRemoteWorkspace ? "先双击连接远程工作区" : "新建会话"}
+          aria-label={`在 ${item.workspace.name} 中新建会话`}
+          disabled={isDormantRemoteWorkspace}
+        >
           <EditIcon />
         </button>
       </div>
@@ -617,7 +665,7 @@ function WorkspaceSection({
           {item.sessions.length === 0 && (
             <div className="sl-empty sl-session-empty">
               <span className="sl-empty-title">{item.connected ? "暂无会话" : "未加载会话"}</span>
-              <span className="sl-empty-copy">{item.connected ? "在此工作区中开始一个会话。" : "点击工作区后按需加载。"}</span>
+              <span className="sl-empty-copy">{item.connected ? "在此工作区中开始一个会话。" : isDormantRemoteWorkspace ? "双击项目目录后重新连接。" : "点击工作区后按需加载。"}</span>
             </div>
           )}
 
@@ -628,7 +676,7 @@ function WorkspaceSection({
               active={session.id === activeSessionId && item.is_active}
               connected={session.id === activeSessionId && item.is_active && item.connected}
               onSwitch={(id) => onSwitch(id, workspaceRoot)}
-              onDelete={(id) => onDelete(id, workspaceRoot)}
+              onArchive={(id) => onArchive(id, workspaceRoot)}
             />
           ))}
         </div>
@@ -642,13 +690,13 @@ function ThreadRow({
   active,
   connected,
   onSwitch,
-  onDelete,
+  onArchive,
 }: {
   session: SessionListItem;
   active: boolean;
   connected: boolean;
   onSwitch: (id: string) => void;
-  onDelete: (id: string) => void;
+  onArchive: (id: string) => void;
 }) {
   const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
   const agentLabel = formatAgentLabel(session.agent_cli);
@@ -669,7 +717,15 @@ function ThreadRow({
           : undefined;
 
   return (
-    <div className={`sl-item ${active ? "sl-active" : ""}`}>
+    <div
+      className={[
+        "sl-item",
+        active ? "sl-active" : "",
+        showBackgroundProgress ? "is-background-running" : "",
+        showCompletedDot ? "is-completed-unviewed" : "",
+        showAttentionDot ? "is-needs-attention" : "",
+      ].filter(Boolean).join(" ")}
+    >
       <button
         className="sl-item-button"
         type="button"
@@ -698,7 +754,7 @@ function ThreadRow({
         )}
       </button>
       <button
-        className="sl-delete-btn"
+        className="sl-archive-btn"
         type="button"
         onPointerDown={(event) => {
           event.preventDefault();
@@ -707,12 +763,12 @@ function ThreadRow({
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          onDelete(session.id);
+          onArchive(session.id);
         }}
-        title="删除会话"
-        aria-label={`删除会话 ${session.title}`}
+        title="归档会话"
+        aria-label={`归档会话 ${session.title}`}
       >
-        <TrashIcon />
+        <ArchiveIcon />
       </button>
     </div>
   );
@@ -787,14 +843,12 @@ function EditIcon() {
   );
 }
 
-function TrashIcon() {
+function ArchiveIcon() {
   return (
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M4.4 6.2h11.2" />
-      <path d="M8.1 6.2V4.8c0-.6.5-1.1 1.1-1.1h1.6c.6 0 1.1.5 1.1 1.1v1.4" />
-      <path d="m6.2 6.2.6 9.1c0 .6.5 1 1.1 1h4.2c.6 0 1.1-.4 1.1-1l.6-9.1" />
-      <path d="M8.8 9.1v4.1" />
-      <path d="M11.2 9.1v4.1" />
+      <path d="M4.2 5.4h11.6v3H4.2z" />
+      <path d="M5.5 8.4v6.2c0 .7.5 1.2 1.2 1.2h6.6c.7 0 1.2-.5 1.2-1.2V8.4" />
+      <path d="M8 11.1h4" />
     </svg>
   );
 }

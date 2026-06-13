@@ -579,7 +579,7 @@ export function Composer({
             />
           ) : (
             <span className="composer-static-control" data-control-id="model">
-              {snapshot.session.model}
+              {displayModelValue(snapshot.session.model)}
             </span>
           )}
           <span className="composer-session-state">
@@ -761,7 +761,7 @@ function decodeProviderModelChoice(
     choice: {
       ...choice,
       provider,
-      label: encoded?.model ?? choice.label,
+      label: displayModelChoiceLabel(choice),
     },
   };
 }
@@ -867,6 +867,18 @@ function decodeProviderModelValue(value: string) {
   }
 
   return null;
+}
+
+function displayModelValue(value: string) {
+  return decodeProviderModelValue(value)?.model ?? value;
+}
+
+function displayModelChoiceLabel(choice: SessionConfigControl["choices"][number]) {
+  const label = choice.label.trim();
+  const labelModel = label ? decodeProviderModelValue(label)?.model : null;
+  if (labelModel) return labelModel;
+  if (label) return label;
+  return displayModelValue(choice.id);
 }
 
 function readAttachment(file: File): Promise<Attachment> {
@@ -1167,6 +1179,7 @@ function SessionControlSelect({
     choices.find((choice) => choice.id === control.current_value_id) ??
     choices[0];
   const label = displayControlLabel(control);
+  const selectedLabel = displayChoiceLabel(control, selected);
 
   return (
     <div
@@ -1189,7 +1202,7 @@ function SessionControlSelect({
         onClick={() => onOpenChange(!open)}
       >
         {label && <span className="composer-control-label">{label}</span>}
-        <span className="composer-control-value">{pending ? "更新中" : selected.label}</span>
+        <span className="composer-control-value">{pending ? "更新中" : selectedLabel}</span>
         <span className="composer-control-chevron">
           <ChevronDownIcon />
         </span>
@@ -1198,6 +1211,7 @@ function SessionControlSelect({
         <div className="composer-control-menu" role="listbox">
           {choices.map((choice) => {
             const selectedChoice = choice.id === control.current_value_id;
+            const choiceLabel = displayChoiceLabel(control, choice);
             return (
               <button
                 key={`${choice.provider ?? ""}:${choice.id}`}
@@ -1205,12 +1219,13 @@ function SessionControlSelect({
                 type="button"
                 role="option"
                 aria-selected={selectedChoice}
+                title={choiceLabel === choice.label ? undefined : choice.label}
                 onClick={() => {
                   onChange(control, choice.id);
                   onOpenChange(false);
                 }}
               >
-                <span>{choice.label}</span>
+                <span>{choiceLabel}</span>
               </button>
             );
           })}
@@ -1260,4 +1275,12 @@ function dedupeControlChoices(controlChoices: SessionConfigControl["choices"]) {
 function displayControlLabel(control: SessionConfigControl) {
   if (control.category === "Model" || control.category === "Mode") return null;
   return control.label;
+}
+
+function displayChoiceLabel(
+  control: SessionConfigControl,
+  choice: SessionConfigControl["choices"][number],
+) {
+  if (control.category !== "Model") return choice.label;
+  return displayModelChoiceLabel(choice);
 }

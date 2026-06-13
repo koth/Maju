@@ -89,7 +89,7 @@ const AGENT_STRATEGIES: &[AgentBootstrapStrategy] = &[
         install: AgentInstallStrategy::NpmPackage {
             package: "@tencent-ai/codebuddy-code",
         },
-        args: &["--acp"],
+        args: &["--acp", "--acp-transport", "streamable-http"],
     },
 ];
 
@@ -1046,7 +1046,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "/home/user/.kodex/remote-agents/codebuddy/current/bin/codebuddy --acp"
+            "/home/user/.kodex/remote-agents/codebuddy/current/bin/codebuddy --acp --acp-transport streamable-http"
         );
     }
 }

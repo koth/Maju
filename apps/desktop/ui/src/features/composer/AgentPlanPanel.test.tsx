@@ -113,7 +113,7 @@ describe("AgentPlanPanel", () => {
 });
 
 describe("PlanApprovalModal", () => {
-  it("shows pending plan approval content and resolves accept/reject actions", () => {
+  it("shows pending plan approval content and resolves accept/replan actions", () => {
     const onPermissionSelect = vi.fn();
 
     render(
@@ -143,12 +143,16 @@ describe("PlanApprovalModal", () => {
     expect(screen.getByText("检查实现").className).toContain("md-bold");
     expect(screen.getByText("修改交互").className).toContain("md-inline-code");
     expect(screen.getByText(/修改交互/)).toBeTruthy();
+    expect(screen.getByLabelText("调整要求")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "接受计划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "default");
 
+    fireEvent.change(screen.getByLabelText("调整要求"), {
+      target: { value: "先缩小范围再规划" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "继续规划" }));
-    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "plan");
+    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "plan", "先缩小范围再规划");
   });
 
   it("prefers one-shot CodeBuddy plan options over allow always", () => {
@@ -334,6 +338,7 @@ describe("PermissionRequestPanel", () => {
 
     expect(screen.getByText("待确认计划")).toBeTruthy();
     expect(screen.getByText("检查现有实现")).toBeTruthy();
+    expect(screen.getByLabelText("调整要求")).toBeTruthy();
     expect(screen.getByRole("button", { name: "接受计划" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "继续规划" })).toBeTruthy();
   });
@@ -364,8 +369,11 @@ describe("PermissionRequestPanel", () => {
     expect(screen.getAllByRole("button", { name: "接受计划" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "继续规划" })).toHaveLength(1);
 
+    fireEvent.change(screen.getByLabelText("调整要求"), {
+      target: { value: "补充风险和验证步骤" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "继续规划" }));
-    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "reject");
+    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "reject", "补充风险和验证步骤");
 
     fireEvent.click(screen.getByRole("button", { name: "接受计划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "allow");

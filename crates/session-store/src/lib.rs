@@ -51,7 +51,8 @@ impl SessionStore {
                 model_provider TEXT,
                 status TEXT NOT NULL DEFAULT 'Idle',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                archived_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -249,6 +250,17 @@ impl SessionStore {
         if !has_codex_provider_col {
             self.conn
                 .execute_batch("ALTER TABLE sessions ADD COLUMN codex_provider TEXT;")?;
+        }
+
+        let has_archived_at_col: bool = self
+            .conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'archived_at'",
+            )?
+            .query_row([], |row| row.get(0))?;
+        if !has_archived_at_col {
+            self.conn
+                .execute_batch("ALTER TABLE sessions ADD COLUMN archived_at TEXT;")?;
         }
 
         Ok(())
@@ -544,7 +556,7 @@ impl SessionStore {
                     s.acp_session_id, s.agent_cli
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
-             WHERE s.workspace_root = ?1
+             WHERE s.workspace_root = ?1 AND s.archived_at IS NULL
              GROUP BY s.id
              ORDER BY s.updated_at DESC",
         )?;
@@ -575,7 +587,7 @@ impl SessionStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, status, created_at, updated_at, acp_session_id, agent_cli
              FROM sessions
-             WHERE workspace_root = ?1
+             WHERE workspace_root = ?1 AND archived_at IS NULL
              ORDER BY updated_at DESC",
         )?;
 
@@ -604,6 +616,15 @@ impl SessionStore {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn archive_session(&self, id: &str) -> Result<()> {
+        let now = now_iso();
+        self.conn.execute(
+            "UPDATE sessions SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
         Ok(())
     }
 
@@ -1925,6 +1946,32 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].title, "新会话");
+    }
+
+    #[test]
+    fn test_archive_session_hides_from_lists_without_deleting_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+        store.create_session("s1", "gpt-4").unwrap();
+        store.create_session("s2", "claude-3").unwrap();
+        store
+            .insert_message("s1", "m1", "User", "keep me", 1)
+            .unwrap();
+
+        store.archive_session("s1").unwrap();
+
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "s2");
+
+        let summaries = store.list_session_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "s2");
+
+        let (messages, _tools, _timeline) = store.load_session("s1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "keep me");
     }
 
     #[test]

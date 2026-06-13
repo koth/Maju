@@ -120,7 +120,7 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
             .as_ref()
             .and_then(|record| record.remote.clone())
         {
-            state.restore_dormant_remote_workspace(remote)?;
+            snapshot = Some(state.restore_active_dormant_remote_workspace(remote)?);
             opened_active_path = Some(active_path);
         } else {
             let dir = PathBuf::from(&active_path);

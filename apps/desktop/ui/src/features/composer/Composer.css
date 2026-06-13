@@ -25,19 +25,21 @@
 
 .composer.is-compact .composer-inner {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto auto auto;
+  align-items: center;
+  column-gap: 6px;
+  row-gap: 6px;
   min-height: 0;
-  padding: 10px 12px;
-  border-radius: 18px;
+  padding: 6px 8px;
+  border-radius: 14px;
 }
 
 .composer.is-compact.has-attachments .composer-inner {
-  display: flex;
+  display: grid;
   min-height: 0;
-  padding: 10px 12px;
-  border-radius: 18px;
+  padding: 6px 8px;
+  border-radius: 14px;
 }
 
 .composer-inner:focus-within {
@@ -226,6 +228,11 @@
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
+}
+
+.permission-request.is-plan-approval .permission-request-guidance,
+.plan-approval-modal .permission-request-guidance {
+  margin: 0 12px 10px;
 }
 
 .permission-request-guidance textarea {
@@ -804,6 +811,8 @@
 
 .composer.is-compact .composer-input-wrap {
   position: static;
+  grid-column: 2;
+  order: 2;
   min-width: 0;
   min-height: 34px;
   background: transparent;
@@ -901,7 +910,7 @@
   min-height: 34px;
   max-height: 34px;
   overflow-y: hidden;
-  padding: 4px 2px;
+  padding: 4px 4px;
   line-height: 24px;
 }
 
@@ -1111,13 +1120,7 @@
 }
 
 .composer.is-compact .composer-control-rail {
-  position: static;
-  min-width: 0;
-  min-height: 38px;
-  margin-top: 0;
-  padding: 0;
-  border-top: 0;
-  gap: 6px;
+  display: contents;
 }
 
 .composer.is-compact:not(.has-attachments) .composer-session-state {
@@ -1125,9 +1128,7 @@
 }
 
 .composer.is-compact.has-attachments .composer-control-rail {
-  position: relative;
-  display: flex;
-  padding-top: 2px;
+  display: contents;
 }
 
 .composer-utility {
@@ -1178,7 +1179,10 @@
 }
 
 .composer.is-compact .composer-attachment-btn {
-  width: 28px;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  order: 1;
 }
 
 .composer.is-compact:not(.has-attachments) .composer-attachment-btn {
@@ -1299,7 +1303,7 @@
 }
 
 .composer.is-compact .composer-control-trigger {
-  min-height: 26px;
+  min-height: 32px;
   padding-inline: 9px;
 }
 
@@ -1314,6 +1318,7 @@
 
 .composer.is-compact .composer-static-control,
 .composer.is-compact .composer-control-select {
+  order: 3;
   max-width: 150px;
 }
 
@@ -1443,6 +1448,10 @@
   flex: 1;
 }
 
+.composer.is-compact .composer-rail-spacer {
+  display: none;
+}
+
 .composer-session-state {
   display: none;
   align-items: center;
@@ -1458,6 +1467,10 @@
   font-weight: 600;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.composer.is-compact .composer-session-state {
+  order: 8;
 }
 
 .composer-session-state-dot {
@@ -1481,6 +1494,7 @@
 
 .composer.is-compact .composer-error {
   grid-column: 1 / -1;
+  order: 10;
   padding: 4px 8px 0;
 }
 
@@ -1507,14 +1521,15 @@
 }
 
 .composer.is-compact .composer-send-btn {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
+  order: 9;
   border-radius: 999px;
 }
 
 .composer.is-compact:not(.has-attachments) .composer-send-btn {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   border-radius: 999px;
   transform: none;
 }

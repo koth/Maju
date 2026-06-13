@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentCliId, RemoteMachineProfile, RemoteMachineProfilesSnapshot, RemoteOpenPhaseKind, RemoteOpenProgressEvent, UiSnapshot } from "../../types";
+import type { AgentCliId, RemoteLinuxWorkspace, RemoteMachineProfile, RemoteMachineProfilesSnapshot, RemoteOpenPhaseKind, RemoteOpenProgressEvent, UiSnapshot } from "../../types";
 import {
   settingsGetAgentSnapshot,
   settingsGetRemoteProfiles,
@@ -13,6 +13,8 @@ interface Props {
   onWorkspaceOpened: (snapshot: UiSnapshot) => void;
   onOpenSettings: () => void;
   onCancel?: () => void;
+  initialRemote?: RemoteLinuxWorkspace | null;
+  headingTitle?: string;
 }
 
 const REMOTE_OPEN_AGENT_CHOICES: Array<{ id: AgentCliId; label: string; detail: string }> = [
@@ -31,7 +33,7 @@ const REMOTE_OPEN_PHASES: Array<{ id: RemoteOpenPhaseKind; label: string }> = [
   { id: "acp_launch", label: "启动" },
 ];
 
-export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }: Props) {
+export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, initialRemote, headingTitle = "打开远程目录" }: Props) {
   const [snapshot, setSnapshot] = useState<RemoteMachineProfilesSnapshot>({ profiles: [] });
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [selectedAgent, setSelectedAgent] = useState<AgentCliId>("claude-agent-acp");
@@ -59,12 +61,28 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
         settingsGetAgentSnapshot().catch(() => null),
       ]);
       setSnapshot(nextSnapshot);
-      setSelectedProfileId((current) =>
-        current && nextSnapshot.profiles.some((profile) => profile.id === current)
+      setSelectedProfileId((current) => {
+        if (initialRemote?.profile_id && nextSnapshot.profiles.some((profile) => profile.id === initialRemote.profile_id)) {
+          return initialRemote.profile_id;
+        }
+        const matchingProfile = initialRemote
+          ? nextSnapshot.profiles.find(
+              (profile) =>
+                profile.ssh_target === initialRemote.ssh_target &&
+                (profile.ssh_port ?? null) === (initialRemote.ssh_port ?? null),
+            )
+          : null;
+        if (matchingProfile) return matchingProfile.id;
+        return current && nextSnapshot.profiles.some((profile) => profile.id === current)
           ? current
-          : nextSnapshot.profiles[0]?.id ?? "",
-      );
-      if (agentSnapshot?.settings.selected_agent && isRemoteOpenAgent(agentSnapshot.settings.selected_agent)) {
+          : nextSnapshot.profiles[0]?.id ?? "";
+      });
+      if (initialRemote?.remote_path) {
+        setRemotePath(initialRemote.remote_path);
+      }
+      if (initialRemote?.agent_cli && isRemoteOpenAgent(initialRemote.agent_cli)) {
+        setSelectedAgent(initialRemote.agent_cli);
+      } else if (agentSnapshot?.settings.selected_agent && isRemoteOpenAgent(agentSnapshot.settings.selected_agent)) {
         setSelectedAgent(agentSnapshot.settings.selected_agent);
       }
     } catch (e) {
@@ -72,7 +90,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [initialRemote]);
 
   useEffect(() => {
     load();
@@ -189,7 +207,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
     <div className="remote-open-panel">
       <div className="remote-open-heading">
         <div>
-          <div className="remote-open-title">打开远程目录</div>
+          <div className="remote-open-title">{headingTitle}</div>
           <p>选择一台已保存的 Linux 开发机和远程路径，作为工作区打开。</p>
         </div>
       </div>
@@ -204,16 +222,27 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel }:
               <small>{selectedProfile ? formatProfileTarget(selectedProfile) : "未选择"}</small>
             </div>
           </div>
-          <label className="remote-open-field">
+          <div className="remote-open-field remote-open-machine-field">
             <span>机器</span>
-            <select value={selectedProfile?.id ?? ""} onChange={(event) => setSelectedProfileId(event.currentTarget.value)}>
-              {snapshot.profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.display_name} · {formatProfileTarget(profile)}
-                </option>
-              ))}
-            </select>
-          </label>
+            <div className="remote-open-machine-options" role="radiogroup" aria-label="remote_open_profile">
+              {snapshot.profiles.map((profile) => {
+                const selected = profile.id === selectedProfile?.id;
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    className={`remote-open-machine-option ${selected ? "is-selected" : ""}`}
+                    onClick={() => setSelectedProfileId(profile.id)}
+                  >
+                    <strong>{profile.display_name}</strong>
+                    <small>{formatProfileTarget(profile)}</small>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <label className="remote-open-field">
             <span>SSH 密码</span>
             <input

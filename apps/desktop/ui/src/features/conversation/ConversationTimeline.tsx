@@ -644,6 +644,8 @@ export function ConversationTimeline({
           if (typeof item === "object" && "Tool" in item) {
             const tool = toolsById.get(item.Tool);
             if (!tool) return null;
+            if (shouldHidePermissionTool(tool, hiddenPermissionRequestIds))
+              return null;
             if (tool.call_id === "workspace.scan" && !tool.parent_call_id)
               return null;
             if (tool.parent_call_id) return null;
@@ -671,5 +673,17 @@ export function ConversationTimeline({
         <div className="timeline-bottom-sentinel" ref={bottomSentinelRef} aria-hidden="true" />
       </div>
     </div>
+  );
+}
+
+function shouldHidePermissionTool(
+  tool: UiSnapshot["tools"][number],
+  hiddenPermissionRequestIds?: ReadonlySet<string>,
+) {
+  return (
+    tool.kind === "permission" &&
+    (hiddenPermissionRequestIds?.has(tool.call_id) ||
+      tool.status !== "Running" ||
+      !!tool.permission_decision)
   );
 }

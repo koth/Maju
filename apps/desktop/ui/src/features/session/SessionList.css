@@ -217,6 +217,19 @@
   text-align: left;
 }
 
+.sl-workspace-section.is-dormant.is-remote .sl-workspace-node {
+  color: var(--text-soft);
+}
+
+.sl-workspace-section.is-dormant.is-remote .sl-workspace-node:hover {
+  background: rgba(215, 225, 223, 0.025);
+}
+
+.sl-workspace-section.is-dormant.is-remote .sl-workspace-name,
+.sl-workspace-section.is-dormant.is-remote .sl-workspace-path {
+  color: var(--text-soft);
+}
+
 .sl-workspace-node:hover .sl-workspace-mark {
   transform: none;
 }
@@ -272,6 +285,7 @@
 }
 
 .sl-workspace-state {
+  flex-shrink: 0;
   padding: 3px 7px;
   border: 1px solid rgba(143, 202, 255, 0.18);
   border-radius: 6px;
@@ -286,6 +300,17 @@
   border-color: rgba(215, 225, 223, 0.1);
   background: rgba(215, 225, 223, 0.035);
   color: var(--text-soft);
+}
+
+.is-dormant.is-remote .sl-workspace-state {
+  border-color: rgba(215, 225, 223, 0.13);
+  background: rgba(215, 225, 223, 0.045);
+  color: rgba(215, 225, 223, 0.7);
+}
+
+.is-dormant.is-remote .sl-workspace-edit {
+  cursor: not-allowed;
+  opacity: 0.38;
 }
 
 .sl-workspace-count {
@@ -501,7 +526,7 @@
   background: var(--danger);
 }
 
-.sl-delete-btn {
+.sl-archive-btn {
   display: grid;
   width: 24px;
   height: 24px;
@@ -520,14 +545,14 @@
   display: none;
 }
 
-.sl-item:hover .sl-delete-btn,
-.sl-delete-btn:focus-visible {
+.sl-item:hover .sl-archive-btn,
+.sl-archive-btn:focus-visible {
   opacity: 1;
 }
 
-.sl-delete-btn:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
+.sl-archive-btn:hover {
+  background: var(--interactive-hover);
+  color: var(--sidebar-accent-hover);
 }
 
 .sl-empty,
@@ -1008,7 +1033,7 @@
 
 .sl-workspace-node:focus-visible,
 .sl-workspace-edit:focus-visible,
-.sl-delete-btn:focus-visible,
+.sl-archive-btn:focus-visible,
 .sl-new-btn:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 2px;
@@ -1031,7 +1056,7 @@
 }
 
 .sl-workspace-edit,
-.sl-delete-btn {
+.sl-archive-btn {
   display: grid;
   place-items: center;
   width: 26px;
@@ -1142,9 +1167,11 @@
 }
 
 .sl-session-online {
-  width: 7px;
-  height: 7px;
+  position: relative;
+  width: 10px;
+  height: 10px;
   align-self: center;
+  flex-shrink: 0;
   border-radius: 999px;
   background: transparent;
 }
@@ -1155,19 +1182,21 @@
 }
 
 .sl-session-online.is-progress {
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid rgba(143, 202, 255, 0.22);
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(143, 202, 255, 0.26);
   border-top-color: var(--sidebar-accent-hover);
-  background: transparent;
-  animation: sl-session-spin 0.8s linear infinite;
+  border-right-color: rgba(143, 202, 255, 0.54);
+  background: rgba(143, 202, 255, 0.08);
+  box-shadow: 0 0 0 3px rgba(143, 202, 255, 0.08);
+  animation: sl-session-spin 0.75s linear infinite, sl-session-progress-pulse 1.45s ease-in-out infinite;
 }
 
 .sl-session-online.is-complete {
-  width: 7px;
-  height: 7px;
-  background: var(--sidebar-accent-hover);
-  box-shadow: 0 0 0 3px rgba(143, 202, 255, 0.12);
+  width: 9px;
+  height: 9px;
+  background: #4da3ff;
+  box-shadow: 0 0 0 4px rgba(77, 163, 255, 0.16), 0 0 12px rgba(77, 163, 255, 0.46);
 }
 
 .sl-session-online.is-attention {
@@ -1180,6 +1209,17 @@
 @keyframes sl-session-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes sl-session-progress-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(143, 202, 255, 0.08);
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px rgba(143, 202, 255, 0.16);
   }
 }
 
@@ -1219,7 +1259,7 @@
   color: var(--text-muted);
 }
 
-.sl-delete-btn {
+.sl-archive-btn {
   display: grid;
   width: 26px;
   height: 26px;
@@ -1237,15 +1277,15 @@
   display: block;
 }
 
-.sl-item:hover .sl-delete-btn,
-.sl-delete-btn:focus-visible {
+.sl-item:hover .sl-archive-btn,
+.sl-archive-btn:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }
 
-.sl-delete-btn:hover {
-  background: rgba(227, 97, 97, 0.12);
-  color: var(--danger);
+.sl-archive-btn:hover {
+  background: var(--interactive-hover);
+  color: var(--sidebar-accent-hover);
 }
 
 .sl-session-empty {

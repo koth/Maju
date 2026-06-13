@@ -1691,6 +1691,102 @@ fn same_file_second_tool_hunks_merge_into_cumulative_review_change() {
 }
 
 #[test]
+fn pending_review_change_set_merges_landed_hunks_from_intermediate_detection_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let before = "export const a = 1;\nexport const b = 1;\n";
+    let middle = "export const a = 2;\nexport const b = 1;\n";
+    let detection_base = "export const a = 2;\nexport const b = 1;\nexport const c = 0;\n";
+    let after =
+        "export const a = 2;\nexport const b = 2;\nexport const c = 1;\nexport const d = 1;\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    app.current_turn_user_message_id = Some(user_id);
+
+    assert!(app.apply_tracker_changes(
+        "first-edit",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(before.into()),
+            new_text: middle.into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+
+    let landed_hunks = diff_to_hunks(Some(detection_base), after);
+    app.ui.tools.push(ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "second-edit".into(),
+        parent_call_id: None,
+        name: "Edit".into(),
+        kind: "Edit".into(),
+        summary: "Edited BoostChip".into(),
+        status: ToolStatus::Succeeded,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: vec![relative_path.into()],
+        diff_previews: vec![ToolDiffPreview {
+            path: relative_path.into(),
+            hunks: landed_hunks,
+        }],
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+    });
+
+    assert!(app.apply_tracker_changes(
+        "second-edit",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some(detection_base.into()),
+            new_text: after.into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let review_change = &app.ui.review_changes[0];
+    assert_eq!(review_change.old_text.as_deref(), Some(before));
+    assert_eq!(review_change.new_text, after);
+
+    let pending = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|summary| summary.status == ChangeSetStatus::Pending)
+        .expect("current turn should have a pending review change set");
+    let files = app.store.list_change_set_files(&pending.id).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path, relative_path);
+
+    let stored_diff = app
+        .store
+        .load_change_set_file_diff(&pending.id, relative_path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_diff.old_text.as_deref(), Some(before));
+    assert_eq!(stored_diff.new_text.as_deref(), Some(after));
+}
+
+#[test]
 fn created_file_second_edit_remains_created_in_review_change() {
     let dir = tempfile::tempdir().unwrap();
     let relative_path = "packages/frontend/src/pages/gallery/components/NewChip.tsx";
