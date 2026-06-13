@@ -230,6 +230,29 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).not.toContain("Allow");
   });
 
+  it("hides execute tools while their permission request is shown near the composer", () => {
+    const executeTool = makePermissionTool({
+      kind: "execute",
+      name: "`ls -la /g/kothbot/ 2>&1`",
+      raw_input: JSON.stringify({ command: "ls -la /g/kothbot/ 2>&1" }),
+    });
+    const snapshot = makeSnapshot({
+      timeline: [{ Tool: executeTool.id }],
+      tools: [executeTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        hiddenPermissionRequestIds={new Set([executeTool.call_id])}
+      />,
+    );
+
+    expect(container.textContent).not.toContain("ls -la /g/kothbot");
+    expect(container.textContent).not.toContain("Allow");
+  });
+
   it("hides resolved permission request tools from the timeline", () => {
     const permissionTool = makePermissionTool({
       status: "Succeeded",

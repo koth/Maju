@@ -681,9 +681,8 @@ function shouldHidePermissionTool(
   hiddenPermissionRequestIds?: ReadonlySet<string>,
 ) {
   return (
-    tool.kind === "permission" &&
-    (hiddenPermissionRequestIds?.has(tool.call_id) ||
-      tool.status !== "Running" ||
-      !!tool.permission_decision)
+    hiddenPermissionRequestIds?.has(tool.call_id) ||
+    (tool.kind === "permission" &&
+      (tool.status !== "Running" || !!tool.permission_decision))
   );
 }

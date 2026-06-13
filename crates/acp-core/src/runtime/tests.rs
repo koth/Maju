@@ -1,6 +1,7 @@
 use super::agent_process::{
     RemoteSshAgentProcess, build_remote_agent_command, build_remote_ssh_args,
-    connect_loopback_tcp_with_retry, connect_tcp_stream, kill_child_handle,
+    build_remote_ssh_command_args, connect_loopback_tcp_with_retry, connect_tcp_stream,
+    kill_child_handle,
 };
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::prompt_content::prompt_title_text;
@@ -80,18 +81,18 @@ fn remote_ssh_args_use_loopback_forwarding_and_exit_on_forward_failure() {
         3456,
         4567,
         "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+        false,
     );
 
+    assert!(args.contains(&"ExitOnForwardFailure=yes".to_string()));
+    assert!(args.contains(&"BatchMode=yes".to_string()));
+    assert!(args.contains(&"ConnectTimeout=5".to_string()));
+    assert!(args.contains(&"-L".to_string()));
+    assert!(args.contains(&"127.0.0.1:3456:127.0.0.1:4567".to_string()));
+    assert_eq!(args[args.len() - 2], "alice@devbox");
     assert_eq!(
-        args,
-        vec![
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-L",
-            "127.0.0.1:3456:127.0.0.1:4567",
-            "alice@devbox",
-            "cd '/srv/project' && exec 'codex-acp' --port 4567",
-        ]
+        args.last().unwrap(),
+        "cd '/srv/project' && exec 'codex-acp' --port 4567"
     );
 }
 
@@ -103,21 +104,72 @@ fn remote_ssh_args_include_custom_ssh_port_when_configured() {
         3456,
         4567,
         "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+        false,
     );
 
+    assert!(args.contains(&"ExitOnForwardFailure=yes".to_string()));
+    assert!(args.contains(&"BatchMode=yes".to_string()));
+    assert!(args.contains(&"ConnectTimeout=5".to_string()));
+    assert!(args.contains(&"127.0.0.1:3456:127.0.0.1:4567".to_string()));
+    assert!(args.contains(&"-p".to_string()));
+    assert!(args.contains(&"2222".to_string()));
+    assert_eq!(args[args.len() - 2], "alice@devbox");
     assert_eq!(
-        args,
-        vec![
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-L",
-            "127.0.0.1:3456:127.0.0.1:4567",
-            "-p",
-            "2222",
-            "alice@devbox",
-            "cd '/srv/project' && exec 'codex-acp' --port 4567",
-        ]
+        args.last().unwrap(),
+        "cd '/srv/project' && exec 'codex-acp' --port 4567"
     );
+}
+
+#[test]
+fn remote_ssh_args_allow_one_password_prompt_when_password_is_supplied() {
+    let args = build_remote_ssh_args(
+        "alice@devbox",
+        None,
+        3456,
+        4567,
+        "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+        true,
+    );
+
+    assert!(args.contains(&"NumberOfPasswordPrompts=1".to_string()));
+    assert!(!args.contains(&"BatchMode=yes".to_string()));
+    assert!(args.contains(&"ConnectTimeout=5".to_string()));
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_ssh_args_do_not_multiplex_long_lived_agent_forward() {
+    let args = build_remote_ssh_args(
+        "alice@devbox",
+        None,
+        3456,
+        4567,
+        "cd '/srv/project' && exec 'codex-acp' --port 4567".into(),
+        false,
+    );
+
+    assert!(!args.contains(&"ControlMaster=auto".to_string()));
+    assert!(!args.contains(&"ControlPersist=300".to_string()));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
+    assert!(args.contains(&"ControlPath=none".to_string()));
+    assert!(args.contains(&"ControlPersist=no".to_string()));
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_ssh_command_args_do_not_multiplex_long_lived_agent_command() {
+    let args = build_remote_ssh_command_args(
+        "alice@devbox",
+        None,
+        "cd '/srv/project' && exec 'codebuddy' --acp".into(),
+        false,
+    );
+
+    assert!(!args.contains(&"ControlMaster=auto".to_string()));
+    assert!(!args.contains(&"ControlPersist=300".to_string()));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
+    assert!(args.contains(&"ControlPath=none".to_string()));
+    assert!(args.contains(&"ControlPersist=no".to_string()));
 }
 
 #[test]

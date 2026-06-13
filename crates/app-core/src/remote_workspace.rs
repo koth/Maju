@@ -44,8 +44,12 @@ where
 
     pub(crate) fn list_dir(&self, path: &str) -> anyhow::Result<Vec<FileEntry>> {
         let path = sanitize_relative_path(path, true)?;
-        let response: RemoteListResponse =
-            self.run_node_json(LIST_DIR_SCRIPT, &[path.as_str()], None, REMOTE_LIST_DIR_TIMEOUT)?;
+        let response: RemoteListResponse = self.run_node_json(
+            LIST_DIR_SCRIPT,
+            &[path.as_str()],
+            None,
+            REMOTE_LIST_DIR_TIMEOUT,
+        )?;
         Ok(response
             .entries
             .into_iter()

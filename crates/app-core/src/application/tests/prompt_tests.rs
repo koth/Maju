@@ -283,3 +283,37 @@ fn context_length_disconnect_reason_is_human_readable() {
     assert!(reason.contains("模型上下文超限"));
     assert!(!reason.contains("Internal error"));
 }
+
+#[test]
+fn internal_error_json_disconnect_reason_uses_data_without_spawn_location() {
+    let reason = humanize_acp_disconnect_reason(
+        r#"Internal error: { "data": "plain remote startup failure", "spawned_at": "/tmp/jsonrpc.rs:1203:39" }"#,
+    );
+
+    assert_eq!(reason, "plain remote startup failure");
+    assert!(!reason.contains("spawned_at"));
+    assert!(!reason.contains("jsonrpc.rs"));
+}
+
+#[test]
+fn remote_agent_readiness_disconnect_reason_is_human_readable() {
+    let reason = humanize_acp_disconnect_reason(
+        r#"Internal error: { "data": "ssh remote agent process ended before readiness was reported: missing remote provider configuration", "spawned_at": "/tmp/jsonrpc.rs:1203:39" }"#,
+    );
+
+    assert!(reason.contains("远程 ACP Agent"));
+    assert!(reason.contains("missing remote provider configuration"));
+    assert!(!reason.contains("Internal error"));
+    assert!(!reason.contains("spawned_at"));
+}
+
+#[test]
+fn streamable_http_connection_not_found_reason_is_human_readable() {
+    let reason = humanize_acp_disconnect_reason(
+        r#"streamable-http ACP request failed with status 409 Conflict using connection_id=Some("ecdf6795-f370-4ed1-92f2-17610a4e8257"): {"jsonrpc":"2.0","error":{"code":-32000,"message":"Connection not found. Please establish a connection first via POST /acp/connect before sending requests."},"id":null}"#,
+    );
+
+    assert!(reason.contains("CodeBuddy ACP 连接状态已失效"));
+    assert!(!reason.contains("connection_id=Some"));
+    assert!(!reason.contains("jsonrpc"));
+}

@@ -406,6 +406,7 @@ impl AppState {
         let remote_config = {
             let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
             let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            ensure_workspace_connected_locked(&mut guard, &active_key)?;
             let app = match guard.workspaces.get_mut(&active_key) {
                 Some(WorkspaceEntry::Connected(app)) => app,
                 _ => return Err("No connected workspace open".into()),
@@ -429,6 +430,7 @@ impl AppState {
         let remote_config = {
             let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
             let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+            ensure_workspace_connected_locked(&mut guard, &active_key)?;
             let app = match guard.workspaces.get_mut(&active_key) {
                 Some(WorkspaceEntry::Connected(app)) => app,
                 _ => return Err("No connected workspace open".into()),
@@ -677,6 +679,30 @@ fn connect_remote_workspace_locked(
     Ok(snapshot)
 }
 
+fn ensure_workspace_connected_locked(
+    guard: &mut WorkspaceRegistry,
+    key: &str,
+) -> Result<(), String> {
+    if matches!(
+        guard.workspaces.get(key),
+        Some(WorkspaceEntry::Connected(_))
+    ) {
+        return Ok(());
+    }
+
+    let (remote, path) = {
+        let entry = guard.workspaces.get(key).ok_or("Workspace is not open")?;
+        (entry_remote(entry), entry_path(entry))
+    };
+    if let Some(remote) = remote {
+        connect_remote_workspace_locked(guard, key.to_string(), remote)?;
+    } else {
+        let path = path.ok_or("Workspace is not open")?;
+        connect_workspace_locked(guard, key.to_string(), path, None)?;
+    }
+    Ok(())
+}
+
 fn workspace_session_list(
     key: &str,
     entry: &mut WorkspaceEntry,
@@ -844,12 +870,12 @@ mod tests {
             runtime_status: Default::default(),
             attention_state: Default::default(),
         };
-        let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
+        let mut entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
             workspace,
             sessions: vec![session.clone()],
         });
 
-        let list = workspace_session_list("dormant", &entry, false).unwrap();
+        let list = workspace_session_list("dormant", &mut entry, false).unwrap();
 
         assert!(!list.connected);
         assert_eq!(list.sessions.len(), 1);
@@ -872,12 +898,12 @@ mod tests {
         };
         let workspace = remote_workspace_descriptor(remote.clone());
         let key = remote_workspace_key(&remote);
-        let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
+        let mut entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
             workspace,
             sessions: Vec::new(),
         });
 
-        let list = workspace_session_list(&key, &entry, true).unwrap();
+        let list = workspace_session_list(&key, &mut entry, true).unwrap();
 
         assert!(!list.connected);
         assert!(list.is_active);
@@ -1001,9 +1027,10 @@ mod tests {
         assert!(!session.terminal_id.is_empty());
         assert_eq!(session.cols, 80);
         assert_eq!(session.rows, 24);
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
         assert_eq!(
             normalize_tracked_path(&session.workspace_root),
-            normalize_tracked_path(&path.display().to_string())
+            normalize_tracked_path(&canonical_path.display().to_string())
         );
 
         let resized = state
@@ -1021,6 +1048,41 @@ mod tests {
         assert_eq!(listed[0].terminal_id, session.terminal_id);
 
         state.terminal_terminate(&session.terminal_id).unwrap();
+        state.shutdown_all();
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn active_dormant_workspace_lists_files_after_connecting() {
+        let path = std::env::temp_dir().join(format!(
+            "kodex-dormant-list-files-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("hello.txt"), "hello").unwrap();
+        let key = workspace_key(&path);
+        let state = AppState::new();
+        {
+            let mut guard = state.workspaces.lock().unwrap();
+            guard.active_workspace = Some(key.clone());
+            guard.workspaces.insert(
+                key.clone(),
+                WorkspaceEntry::Dormant(WorkspaceMetadata {
+                    workspace: workspace_descriptor(&path),
+                    sessions: Vec::new(),
+                }),
+            );
+        }
+
+        let entries = state.list_workspace_dir(String::new()).unwrap();
+
+        assert!(entries.iter().any(|entry| entry.name == "hello.txt"));
+        let guard = state.workspaces.lock().unwrap();
+        assert!(matches!(
+            guard.workspaces.get(&key),
+            Some(WorkspaceEntry::Connected(_))
+        ));
+        drop(guard);
         state.shutdown_all();
         let _ = std::fs::remove_dir_all(&path);
     }

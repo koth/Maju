@@ -50,6 +50,7 @@ pub fn build_dormant_remote_workspace_ui(
 ) -> Result<workspace_model::UiSnapshot, String> {
     let mut ui = bootstrap::build_initial_remote_ui(remote)
         .map_err(|error| format!("failed to build dormant remote workspace: {error}"))?;
+    ui.workspace_connected = false;
     ui.repository.branch = "未连接".into();
     ui.repository.head = "双击项目目录后连接".into();
     ui.session.title = "远程工作区未连接".into();

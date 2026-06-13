@@ -177,7 +177,15 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             details,
             input,
         } => {
+            let existing_kind = ui
+                .tools
+                .iter()
+                .find(|tool| tool.call_id == id)
+                .map(|tool| tool.kind.clone());
             let tool = ensure_tool(ui, &id, None, &name, "permission", false);
+            let is_existing_execution_tool = existing_kind
+                .as_deref()
+                .is_some_and(|kind| kind != "permission");
             let summary = if options.is_empty() {
                 "等待权限".to_string()
             } else {
@@ -188,8 +196,10 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                     .join(" / ");
                 format!("等待权限 | {labels}")
             };
-            tool.name = name;
-            tool.kind = "permission".into();
+            if !is_existing_execution_tool {
+                tool.name = name;
+                tool.kind = "permission".into();
+            }
             tool.summary = summary.clone();
             tool.status = ToolStatus::Running;
             tool.error = None;
@@ -198,7 +208,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.permission_decision = None;
             if let Some(details) = details.filter(|details| !details.trim().is_empty()) {
                 tool.detail_text = details.clone();
-                tool.raw_input = Some(details.clone());
+                if !is_existing_execution_tool || tool.raw_input.is_none() {
+                    tool.raw_input = Some(details.clone());
+                }
                 push_tool_log(tool, "Plan", collapse_whitespace(&details));
             }
             push_tool_log(tool, "Permission", summary);
@@ -214,12 +226,26 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                     refresh_session_status(ui);
                     return;
                 }
-                tool.summary = outcome.clone();
-                tool.status = ToolStatus::Succeeded;
+                let is_execution_tool = tool.kind != "permission";
+                if is_execution_tool && permission_outcome_allows_execution(&outcome) {
+                    tool.summary = "权限已通过，等待工具执行".into();
+                    if !matches!(tool.status, ToolStatus::Succeeded | ToolStatus::Failed) {
+                        tool.status = ToolStatus::Running;
+                    }
+                } else if is_execution_tool {
+                    tool.summary = outcome.clone();
+                    tool.status = ToolStatus::Interrupted;
+                    tool.error = Some(outcome.clone());
+                } else {
+                    tool.summary = outcome.clone();
+                    tool.status = ToolStatus::Succeeded;
+                }
                 tool.permission_options.clear();
                 tool.permission_input = None;
                 tool.permission_decision = Some(outcome.clone());
-                tool.error = None;
+                if !is_execution_tool || permission_outcome_allows_execution(&outcome) {
+                    tool.error = None;
+                }
                 push_tool_log(tool, "Decision", outcome);
                 refresh_session_status(ui);
             }
@@ -1126,6 +1152,14 @@ fn permission_resolution_should_preserve_local_reject(
     next.contains("permission resolved") && (next.contains("allow") || next.contains("default"))
 }
 
+fn permission_outcome_allows_execution(outcome: &str) -> bool {
+    let outcome = outcome.to_ascii_lowercase();
+    (outcome.contains("allow") || outcome.contains("approved") || outcome.contains("default"))
+        && !outcome.contains("reject")
+        && !outcome.contains("deny")
+        && !outcome.contains("cancel")
+}
+
 fn looks_like_fragment_old_text(old_text: &str, new_text: &str) -> bool {
     let old_lines = old_text.lines().count();
     let new_lines = new_text.lines().count();
@@ -1342,6 +1376,7 @@ mod tests {
                 root: PathBuf::from("/test"),
                 location: WorkspaceLocation::Local,
             },
+            workspace_connected: true,
             session: SessionSummary {
                 id: uuid::Uuid::new_v4(),
                 workspace_id,
@@ -1588,6 +1623,57 @@ mod tests {
                 .iter()
                 .any(|entry| entry.body == "Permission resolved: allow")
         );
+    }
+
+    #[test]
+    fn permission_resolution_for_existing_execution_tool_keeps_tool_running() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call_bash".into(),
+                parent_id: None,
+                name: "Bash".into(),
+                kind: "execute".into(),
+                summary: "`pwd`".into(),
+                is_subagent: false,
+                raw_input: Some(r#"{"command":"pwd"}"#.into()),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "call_bash".into(),
+                name: "Bash".into(),
+                options: Vec::new(),
+                details: Some("Check current directory".into()),
+                input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_bash".into(),
+                outcome: "Permission selected: Allow".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_bash")
+            .expect("execution tool should exist");
+        assert_eq!(tool.name, "Bash");
+        assert_eq!(tool.kind, "execute");
+        assert_eq!(tool.status, ToolStatus::Running);
+        assert_eq!(tool.raw_input.as_deref(), Some(r#"{"command":"pwd"}"#));
+        assert_eq!(
+            tool.permission_decision.as_deref(),
+            Some("Permission selected: Allow")
+        );
+        assert_eq!(tool.summary, "权限已通过，等待工具执行");
+        assert_eq!(ui.session.status, SessionStatus::WaitingForTool);
     }
 
     #[test]

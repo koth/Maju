@@ -258,6 +258,7 @@ fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<St
 }
 
 fn humanize_acp_disconnect_reason(reason: &str) -> String {
+    let reason = unpack_acp_internal_error(reason).unwrap_or_else(|| reason.trim().to_string());
     let lower = reason.to_ascii_lowercase();
     if lower.contains("requested token count exceeds")
         || lower.contains("maximum context length")
@@ -266,7 +267,55 @@ fn humanize_acp_disconnect_reason(reason: &str) -> String {
         return "模型上下文超限：本轮携带的历史消息或工具输出太多，超过了上游模型窗口。请新建会话或压缩上下文后重试。".into();
     }
 
-    reason.to_string()
+    if lower.contains("streamable-http acp request failed with status 409")
+        && lower.contains("connection not found")
+    {
+        return "CodeBuddy ACP 连接状态已失效：远程服务端没有找到当前连接。请重新打开远程目录；如果仍然复现，请重启远程 CodeBuddy Agent 后重试。".into();
+    }
+
+    if lower.contains("ssh remote agent process ended before readiness was reported") {
+        return remote_agent_readiness_notice(&reason, "远程 ACP Agent 启动后在报告就绪前退出");
+    }
+    if lower.contains("timed out waiting for remote acp agent readiness") {
+        return remote_agent_readiness_notice(&reason, "等待远程 ACP Agent 就绪超时");
+    }
+    if lower.contains("ssh remote agent process exited before acp tcp became reachable") {
+        return "远程 ACP Agent 启动后退出，尚未建立可用的 ACP TCP 连接。请检查远程 Agent 配置、模型凭据和远程目录后重试。".into();
+    }
+
+    reason
+}
+
+fn unpack_acp_internal_error(reason: &str) -> Option<String> {
+    let rest = reason.trim().strip_prefix("Internal error:")?.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(rest)
+        && let Some(data) = value.get("data").and_then(|data| data.as_str())
+    {
+        let data = data.trim();
+        if !data.is_empty() {
+            return Some(data.to_string());
+        }
+    }
+    Some(rest.to_string())
+}
+
+fn remote_agent_readiness_notice(reason: &str, summary: &str) -> String {
+    let diagnostic = reason
+        .split_once(':')
+        .map(|(_, diagnostic)| diagnostic.trim())
+        .filter(|diagnostic| !diagnostic.is_empty());
+    match diagnostic {
+        Some(diagnostic) => format!("{summary}：{diagnostic}"),
+        None => {
+            format!(
+                "{summary}。请检查远程 Agent 是否能在该目录启动，以及远程机器上的模型凭据/配置。"
+            )
+        }
+    }
 }
 
 fn interrupt_incomplete_tools(tools: &mut [ToolInvocation]) -> Vec<String> {

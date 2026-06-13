@@ -166,6 +166,34 @@ describe("ToolCallCard animation states", () => {
     fireEvent.click(getByText("1 个工具调用"));
     expect(container.textContent).toContain("child detail");
   });
+
+  it("shows permission actions for running execute tools", () => {
+    const tool = makeTool({
+      call_id: "call-bash",
+      status: "Running",
+      kind: "execute",
+      name: "`ls -la /g/kothbot/ 2>&1`",
+      raw_input: JSON.stringify({ command: "ls -la /g/kothbot/ 2>&1" }),
+      permission_options: [
+        { id: "allow", label: "Allow", kind: "AllowOnce" },
+        { id: "reject", label: "Reject", kind: "RejectOnce" },
+      ],
+    });
+    let selected: string | null = null;
+    const { getByText } = render(
+      <ToolCallCard
+        tool={tool}
+        nested={false}
+        onPermissionSelect={(_, optionId) => {
+          selected = optionId;
+        }}
+      />,
+    );
+
+    fireEvent.click(getByText("Allow"));
+
+    expect(selected).toBe("allow");
+  });
 });
 
 describe("ToolCallCard tracker-confirmed diffs", () => {

@@ -1,4 +1,5 @@
 use super::agent_process::AgentTransport;
+use super::codebuddy::send_codebuddy_interruption_resolution;
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
     PermissionPolicyMode, PermissionResolution, apply_patch_retry_guidance,
@@ -8,7 +9,8 @@ use super::permissions::{
 };
 use super::terminal::TerminalManager;
 use super::workspace_paths::{
-    read_workspace_text_file, validate_client_file_path, write_workspace_text_file,
+    read_remote_workspace_text_file, read_workspace_text_file, validate_client_file_path,
+    validate_remote_client_file_path, write_remote_workspace_text_file, write_workspace_text_file,
 };
 use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{AgentEditPolicy, ClientEvent, SessionConfig, agent_edit_policy_for_command};
@@ -132,11 +134,14 @@ pub(super) async fn connect_agent_client(
     let fs_write_tx = tx_events.clone();
     let fs_write_workspace_root = config.workspace_root.clone();
     let fs_write_permission_broker = permission_broker.clone();
+    let fs_write_remote_ssh = config.remote_ssh.clone();
     let fs_read_workspace_root = config.workspace_root.clone();
+    let fs_read_remote_ssh = config.remote_ssh.clone();
     let terminal_manager = Arc::new(TerminalManager::default());
     let terminal_create_log_config = config.clone();
     let terminal_create_agent_command = config.agent_command.clone();
     let terminal_create_workspace_root = config.workspace_root.clone();
+    let terminal_create_remote_ssh = config.remote_ssh.clone();
     let terminal_create_tx = tx_events.clone();
     let terminal_create_permission_broker = permission_broker.clone();
     let terminal_output_log_config = config.clone();
@@ -159,7 +164,7 @@ pub(super) async fn connect_agent_client(
         .builder()
         .name("acp-editor")
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _connection| {
+            async move |request: RequestPermissionRequest, responder, connection| {
                 let request_payload =
                     serde_json::to_value(&request).map_err(|err| anyhow!(err.to_string()))?;
                 append_runtime_event_log(
@@ -252,6 +257,12 @@ pub(super) async fn connect_agent_client(
                     None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
                 };
                 let response = attach_permission_meta(response, &permission_resolution);
+                let codebuddy_interruption_decision =
+                    codebuddy_interruption_decision_for_permission(
+                        &permission_log_config.agent_command,
+                        &request_payload,
+                        selected_option_id,
+                    );
 
                 let outcome = match selected_option_id {
                     Some(option_id) => {
@@ -278,7 +289,51 @@ pub(super) async fn connect_agent_client(
                     &response_payload,
                 )?;
 
-                responder.respond(response)
+                let respond_result = responder.respond(response);
+                match &respond_result {
+                    Ok(()) => append_runtime_event_log(
+                        &permission_log_config,
+                        "client/request_permission_response_sent",
+                        &json!({
+                            "sessionId": request.session_id.0.as_ref(),
+                            "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
+                            "selectedOptionId": selected_option_id,
+                        }),
+                    )?,
+                    Err(error) => append_runtime_event_log(
+                        &permission_log_config,
+                        "client/request_permission_response_send_error",
+                        &json!({
+                            "sessionId": request.session_id.0.as_ref(),
+                            "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
+                            "selectedOptionId": selected_option_id,
+                            "error": error.to_string(),
+                        }),
+                    )?,
+                }
+                if respond_result.is_ok()
+                    && let Some(decision) = codebuddy_interruption_decision
+                    && let Err(error) = send_codebuddy_interruption_resolution(
+                        &permission_log_config,
+                        &connection,
+                        request.session_id.0.as_ref(),
+                        request.tool_call.tool_call_id.0.as_ref(),
+                        &decision,
+                    )
+                {
+                    let _ = append_runtime_event_log(
+                        &permission_log_config,
+                        "codebuddy/resolve_interruption_error",
+                        &json!({
+                            "sessionId": request.session_id.0.as_ref(),
+                            "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
+                            "decision": decision,
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+
+                respond_result
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -292,7 +347,21 @@ pub(super) async fn connect_agent_client(
                     &request_payload,
                 )?;
 
-                let content = read_workspace_text_file(&fs_read_workspace_root, &request)?;
+                let content_result = match fs_read_remote_ssh.as_ref() {
+                    Some(remote_ssh) => read_remote_workspace_text_file(remote_ssh, &request),
+                    None => read_workspace_text_file(&fs_read_workspace_root, &request),
+                };
+                let content = match content_result {
+                    Ok(content) => content,
+                    Err(error) => {
+                        append_runtime_event_log(
+                            &fs_log_config,
+                            "client/fs_read_text_file_error",
+                            &json!({ "error": error.to_string() }),
+                        )?;
+                        return responder.respond_with_internal_error(error.to_string());
+                    }
+                };
                 let response = ReadTextFileResponse::new(content);
                 let response_payload =
                     serde_json::to_value(&response).map_err(|err| anyhow!(err.to_string()))?;
@@ -302,7 +371,16 @@ pub(super) async fn connect_agent_client(
                     &response_payload,
                 )?;
 
-                responder.respond(response)
+                let respond_result = responder.respond(response);
+                let _ = append_runtime_event_log(
+                    &fs_log_config,
+                    "client/fs_read_text_file_response_sent",
+                    &json!({
+                        "ok": respond_result.is_ok(),
+                        "error": respond_result.as_ref().err().map(|error| error.to_string()),
+                    }),
+                );
+                respond_result
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -316,26 +394,68 @@ pub(super) async fn connect_agent_client(
                     &request_payload,
                 )?;
 
-                // Read old content before writing for diff tracking
-                let path_for_diff =
-                    validate_client_file_path(&fs_write_workspace_root, &request.path)?;
-                ensure_fs_write_permission(
-                    &fs_write_permission_broker,
-                    &fs_write_tx,
-                    &fs_write_log_config,
-                    &fs_write_workspace_root,
-                    &path_for_diff,
-                    agent_edit_policy_for_command(&fs_write_log_config.agent_command),
-                )?;
-                let old_text = path_for_diff
-                    .exists()
-                    .then(|| fs::read_to_string(&path_for_diff).ok())
-                    .flatten();
+                let write_result = match fs_write_remote_ssh.as_ref() {
+                    Some(remote_ssh) => {
+                        let path_for_diff = validate_remote_client_file_path(
+                            &remote_ssh.remote_workspace_root,
+                            &request.path,
+                        )
+                        .map(PathBuf::from);
+                        let result = path_for_diff.and_then(|path_for_diff| {
+                            ensure_fs_write_permission(
+                                &fs_write_permission_broker,
+                                &fs_write_tx,
+                                &fs_write_log_config,
+                                &remote_ssh.remote_workspace_root,
+                                &path_for_diff,
+                                agent_edit_policy_for_command(&fs_write_log_config.agent_command),
+                            )?;
+                            let outcome = write_remote_workspace_text_file(remote_ssh, &request)?;
+                            Ok((outcome.path, outcome.old_text))
+                        });
+                        result
+                    }
+                    None => {
+                        (|| {
+                            // Read old content before writing for diff tracking
+                            let path_for_diff =
+                                validate_client_file_path(&fs_write_workspace_root, &request.path)?;
+                            ensure_fs_write_permission(
+                                &fs_write_permission_broker,
+                                &fs_write_tx,
+                                &fs_write_log_config,
+                                &fs_write_workspace_root,
+                                &path_for_diff,
+                                agent_edit_policy_for_command(&fs_write_log_config.agent_command),
+                            )?;
+                            let old_text = path_for_diff
+                                .exists()
+                                .then(|| fs::read_to_string(&path_for_diff).ok())
+                                .flatten();
 
-                write_workspace_text_file(&fs_write_log_config.workspace_root, &request)?;
+                            write_workspace_text_file(
+                                &fs_write_log_config.workspace_root,
+                                &request,
+                            )?;
+
+                            Ok((path_for_diff.display().to_string(), old_text))
+                        })()
+                    }
+                };
+
+                let (path_display, old_text) = match write_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        append_runtime_event_log(
+                            &fs_write_log_config,
+                            "client/fs_write_text_file_error",
+                            &json!({ "error": error.to_string() }),
+                        )?;
+                        return responder.respond_with_internal_error(error.to_string());
+                    }
+                };
 
                 // Emit ToolDiff event so session changes can be tracked
-                let path_display = path_for_diff.display().to_string();
                 let _ = fs_write_tx.send(ClientEvent::ToolDiff {
                     id: format!("fs_write:{}", path_display),
                     path: path_display,
@@ -377,11 +497,28 @@ pub(super) async fn connect_agent_client(
                     &request,
                 )?;
 
-                let response = match terminal_gate {
-                    CodeBuddyTerminalCreateGate::Allow => terminal_create_manager
-                        .create_terminal(&terminal_create_log_config.workspace_root, &request)?,
+                let response_result = match terminal_gate {
+                    CodeBuddyTerminalCreateGate::Allow => match terminal_create_remote_ssh.as_ref()
+                    {
+                        Some(remote_ssh) => {
+                            terminal_create_manager.create_remote_terminal(remote_ssh, &request)
+                        }
+                        None => terminal_create_manager
+                            .create_terminal(&terminal_create_log_config.workspace_root, &request),
+                    },
                     CodeBuddyTerminalCreateGate::Deny { reason } => {
-                        terminal_create_manager.create_denied_terminal(&request, &reason)?
+                        terminal_create_manager.create_denied_terminal(&request, &reason)
+                    }
+                };
+                let response = match response_result {
+                    Ok(response) => response,
+                    Err(error) => {
+                        append_runtime_event_log(
+                            &terminal_create_log_config,
+                            "client/terminal_create_error",
+                            &json!({ "error": error.to_string() }),
+                        )?;
+                        return responder.respond_with_internal_error(error.to_string());
                     }
                 };
                 let response_payload =
@@ -1367,6 +1504,39 @@ fn codebuddy_permission_tool_name(request: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn codebuddy_interruption_decision_for_permission(
+    agent_command: &str,
+    request: &Value,
+    selected_option_id: Option<&str>,
+) -> Option<String> {
+    if !agent_command_is_codebuddy(agent_command) {
+        return None;
+    }
+    codebuddy_permission_tool_name(request)?;
+    Some(normalize_codebuddy_interruption_decision(
+        selected_option_id,
+    ))
+}
+
+fn normalize_codebuddy_interruption_decision(option_id: Option<&str>) -> String {
+    let Some(option_id) = option_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "deny".into();
+    };
+    let normalized = option_id
+        .chars()
+        .filter(|ch| *ch != '-' && *ch != '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "allowalways" | "alwaysallow" | "allowall" => "allowAll".into(),
+        "allowonce" | "allow" => "allow".into(),
+        "rejectonce" | "rejectalways" | "reject" | "deny" | "cancel" | "cancelled" | "canceled" => {
+            "deny".into()
+        }
+        _ => option_id.to_string(),
+    }
+}
+
 fn is_codebuddy_exit_plan_permission(request: &Value) -> bool {
     codebuddy_permission_tool_name(request)
         .as_deref()
@@ -1415,6 +1585,41 @@ mod tests {
         });
 
         assert!(!is_codebuddy_exit_plan_permission(&payload));
+    }
+
+    #[test]
+    fn codebuddy_interruption_decision_is_derived_for_codebuddy_permissions() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "Bash"
+                },
+                "toolCallId": "call_bash"
+            }
+        });
+
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("allow_always")
+            )
+            .as_deref(),
+            Some("allowAll")
+        );
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("reject")
+            )
+            .as_deref(),
+            Some("deny")
+        );
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission("codex-acp", &payload, Some("allow")),
+            None
+        );
     }
 
     #[test]

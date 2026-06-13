@@ -99,6 +99,30 @@ describe("findPendingPermissionRequest", () => {
     expect(request?.options.map((option) => option.id)).toEqual(["allow", "reject"]);
   });
 
+  it("extracts permission requests attached to running execute tools", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "call-bash",
+        kind: "execute",
+        name: "`ls -la /g/kothbot/ 2>&1`",
+        raw_input: JSON.stringify({ command: "ls -la /g/kothbot/ 2>&1" }),
+        permission_options: [
+          { id: "allow_always", label: "Always Allow", kind: "AllowAlways" },
+          { id: "allow", label: "Allow", kind: "AllowOnce" },
+          { id: "reject", label: "Reject", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(request?.requestId).toBe("call-bash");
+    expect(request?.title).toContain("ls -la /g/kothbot");
+    expect(request?.options.map((option) => option.id)).toEqual([
+      "allow_always",
+      "allow",
+      "reject",
+    ]);
+  });
+
   it("promotes extracted permission paths into the request title", () => {
     const request = findPendingPermissionRequest([
       tool({
@@ -163,6 +187,11 @@ describe("findPendingPermissionRequest", () => {
       pendingPermissionRequestIds([
         tool({ call_id: "pending-1", permission_options: [{ id: "allow", label: "Allow", kind: "AllowOnce" }] }),
         tool({
+          call_id: "pending-execute",
+          kind: "execute",
+          permission_options: [{ id: "allow", label: "Allow", kind: "AllowOnce" }],
+        }),
+        tool({
           call_id: "resolved",
           permission_options: [{ id: "allow", label: "Allow", kind: "AllowOnce" }],
           permission_decision: "Permission selected: Allow",
@@ -170,7 +199,7 @@ describe("findPendingPermissionRequest", () => {
         }),
         tool({ call_id: "pending-2", permission_options: [{ id: "reject", label: "Reject", kind: "RejectOnce" }] }),
       ]),
-    ).toEqual(["pending-1", "pending-2"]);
+    ).toEqual(["pending-1", "pending-execute", "pending-2"]);
   });
 });
 

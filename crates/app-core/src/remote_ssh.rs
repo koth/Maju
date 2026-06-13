@@ -3,8 +3,14 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 pub const DEFAULT_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
@@ -182,6 +188,7 @@ pub fn build_ssh_args(request: &RemoteSshCommand) -> Vec<String> {
         "-o".to_string(),
         format!("ConnectTimeout={}", request.connect_timeout_secs),
     ]);
+    args.extend(ssh_multiplex_args());
     if let Some(port) = request.ssh_port {
         args.push("-p".to_string());
         args.push(port.to_string());
@@ -189,6 +196,63 @@ pub fn build_ssh_args(request: &RemoteSshCommand) -> Vec<String> {
     args.push(request.ssh_target.clone());
     args.push(request.remote_command.clone());
     args
+}
+
+#[cfg(unix)]
+fn ssh_multiplex_args() -> Vec<String> {
+    let Some(control_path) = ssh_control_path_template() else {
+        return Vec::new();
+    };
+    vec![
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=300".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={control_path}"),
+    ]
+}
+
+#[cfg(not(unix))]
+fn ssh_multiplex_args() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn ssh_control_path_template() -> Option<String> {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let dir = PathBuf::from(home).join(".kodex").join("ssh-control");
+        if fs::create_dir_all(&dir).is_ok() {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            let path = dir.join("%C");
+            let path = path.to_string_lossy().into_owned();
+            if path.len() < 95 {
+                return Some(path);
+            }
+        }
+    }
+
+    let user = std::env::var("USER")
+        .ok()
+        .map(|value| sanitize_control_path_part(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "user".into());
+    Some(format!("/tmp/kodex-ssh-{user}-%C"))
+}
+
+#[cfg(unix)]
+fn sanitize_control_path_part(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .take(32)
+        .collect()
 }
 
 pub fn first_nonempty<'a>(a: &'a str, b: &'a str) -> Option<&'a str> {
@@ -217,7 +281,11 @@ pub fn sanitize_ssh_diagnostic(value: &str) -> String {
     if trimmed.len() <= MAX_DIAGNOSTIC_LEN {
         return trimmed.to_string();
     }
-    format!("{}...", &trimmed[..MAX_DIAGNOSTIC_LEN])
+    let mut end = MAX_DIAGNOSTIC_LEN;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
 }
 
 fn contains_secret_material(value: &str) -> bool {
@@ -275,6 +343,24 @@ mod tests {
         assert!(args.contains(&"36000".to_string()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ssh_args_enable_connection_multiplexing() {
+        let request = RemoteSshCommand::new(
+            "root@devbox",
+            None,
+            "printf ok",
+            None,
+            Duration::from_secs(1),
+        );
+
+        let args = build_ssh_args(&request);
+
+        assert!(args.contains(&"ControlMaster=auto".to_string()));
+        assert!(args.contains(&"ControlPersist=300".to_string()));
+        assert!(args.iter().any(|arg| arg.starts_with("ControlPath=")));
+    }
+
     #[test]
     fn ssh_args_use_askpass_mode_with_password() {
         let request = RemoteSshCommand::new(
@@ -301,5 +387,14 @@ mod tests {
             sanitize_ssh_diagnostic("password=secret rejected"),
             "Credential details redacted"
         );
+    }
+
+    #[test]
+    fn sanitizer_truncates_utf8_diagnostics_on_char_boundary() {
+        let diagnostic = "远程错误".repeat(200);
+        let sanitized = sanitize_ssh_diagnostic(&diagnostic);
+
+        assert!(sanitized.ends_with("..."));
+        assert!(sanitized.len() <= 603);
     }
 }

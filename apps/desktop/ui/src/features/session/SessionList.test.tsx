@@ -368,8 +368,8 @@ describe("SessionList agent picker", () => {
       />,
     );
 
-    const workspaceButton = await screen.findByTitle("双击连接远程工作区");
-    expect(screen.getByText("REMOTE")).toBeInTheDocument();
+    const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/);
+    expect(screen.getByText("远程")).toBeInTheDocument();
 
     fireEvent.click(workspaceButton);
     expect(workspaceSetActive).not.toHaveBeenCalled();
@@ -388,6 +388,50 @@ describe("SessionList agent picker", () => {
       ssh_password: "ssh-secret",
     })));
     expect(workspaceSetActive).not.toHaveBeenCalled();
+  });
+
+  it("disables session rows for disconnected remote workspaces", async () => {
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        workspace: {
+          id: "remote-workspace-1",
+          root: "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+          name: "CodeTrans",
+          location: {
+            kind: "remote_linux",
+            profile_id: "remote-1",
+            ssh_target: "root@9.134.121.208",
+            ssh_port: 36000,
+            remote_path: "/data/workspace/CodeTrans",
+          },
+        },
+        sessions: [sessionItem({ id: "remote-session-1", title: "继续任务" })],
+        active_session_id: "remote-session-1",
+        is_active: true,
+        connected: false,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId="remote-session-1"
+        activeSessionTitle="继续任务"
+        activeWorkspaceRoot="ssh://root@9.134.121.208:36000/data/workspace/CodeTrans"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const sessionTitle = await screen.findByText("继续任务");
+    const sessionButton = sessionTitle.closest("button") as HTMLButtonElement;
+    expect(sessionButton).toBeDisabled();
+
+    fireEvent.click(sessionButton);
+    expect(sessionSwitch).not.toHaveBeenCalled();
+
+    expect(screen.getByRole("button", { name: "归档会话 继续任务" })).toBeDisabled();
   });
 
   it("opens a remote workspace from the sidebar new workspace menu", async () => {

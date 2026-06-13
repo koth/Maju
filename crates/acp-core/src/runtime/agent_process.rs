@@ -12,7 +12,11 @@ use anyhow::anyhow;
 use futures::{StreamExt, channel::mpsc as futures_mpsc};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
 use serde_json::json;
+#[cfg(unix)]
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -25,9 +29,11 @@ const REMOTE_AGENT_READY_MARKER: &str = "__KODEX_ACP_REMOTE_AGENT_READY__";
 const REMOTE_STREAMABLE_HTTP_ENDPOINT_MARKER: &str = "ACP streamable-http endpoint:";
 const REMOTE_AGENT_LISTEN_ATTEMPTS: u16 = 150;
 const REMOTE_AGENT_READY_TIMEOUT: Duration = Duration::from_secs(35);
+const REMOTE_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 const STREAMABLE_HTTP_PATH: &str = "/api/v1/acp";
+const CODEBUDDY_RESOLVE_INTERRUPTION_METHOD: &str = "_codebuddy.ai/resolveInterruption";
 const CODEBUDDY_REQUEST_HEADER: &str = "X-CodeBuddy-Request";
 const CODEBUDDY_ACP_CONNECTION_ID_HEADER: &str = "acp-connection-id";
 const ACP_CONNECTION_ID_HEADER: &str = "Acp-Connection-Id";
@@ -168,8 +174,12 @@ impl ConnectTo<Client> for HiddenAgentProcess {
 
         let log_config = self.log_config.clone();
         let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
-        let child_monitor =
-            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, log_config.clone());
+        let child_monitor = monitor_hidden_agent_child(
+            child_guard.handle(),
+            stderr_rx,
+            log_config.clone(),
+            "stdio-agent",
+        );
         let outgoing_sink = futures::sink::unfold(stdin_tx, |tx, line: String| async move {
             tx.send(line).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stdin closed")
@@ -433,8 +443,12 @@ impl ConnectTo<Client> for TcpAgentProcess {
 
         let log_config = self.log_config.clone();
         let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
-        let child_monitor =
-            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, Some(log_config.clone()));
+        let child_monitor = monitor_hidden_agent_child(
+            child_guard.handle(),
+            stderr_rx,
+            Some(log_config.clone()),
+            "tcp-agent",
+        );
 
         let stream = connect_loopback_tcp(self.port, "agent", Some(&log_config)).await?;
         let protocol = connect_tcp_stream(stream, client)?;
@@ -494,8 +508,14 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 self.remote_port,
             )
         };
+        let has_password = self.ssh_password.is_some();
         let args = if is_streamable_http {
-            build_remote_ssh_command_args(&self.ssh_target, self.ssh_port, remote_command)
+            build_remote_ssh_command_args(
+                &self.ssh_target,
+                self.ssh_port,
+                remote_command,
+                has_password,
+            )
         } else {
             build_remote_ssh_args(
                 &self.ssh_target,
@@ -503,6 +523,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 self.local_port,
                 self.remote_port,
                 remote_command,
+                has_password,
             )
         };
         let mut command = agent_spawn_command(&self.ssh_command, &args);
@@ -543,8 +564,12 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
 
         let log_config = self.log_config.clone();
         let child_guard = AgentChildGuard::new(child, self.shutdown_signal.clone());
-        let child_monitor =
-            monitor_hidden_agent_child(child_guard.handle(), stderr_rx, Some(log_config.clone()));
+        let child_monitor = monitor_hidden_agent_child(
+            child_guard.handle(),
+            stderr_rx,
+            Some(log_config.clone()),
+            "remote-ssh-agent",
+        );
 
         let _child_guard = child_guard;
 
@@ -595,6 +620,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                     self.ssh_port,
                     self.local_port,
                     remote_port,
+                    has_password,
                 );
                 let mut forward_command = agent_spawn_command(&self.ssh_command, &forward_args);
                 forward_command
@@ -623,6 +649,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                     forward_guard.handle(),
                     forward_stderr_rx,
                     Some(log_config.clone()),
+                    "remote-ssh-forward",
                 );
                 let _forward_guard = forward_guard;
                 let stream = connect_loopback_tcp(
@@ -757,13 +784,13 @@ pub(super) fn build_remote_ssh_args(
     local_port: u16,
     remote_port: u16,
     remote_command: String,
+    has_password: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        "-o".to_string(),
-        "ExitOnForwardFailure=yes".to_string(),
+    let mut args = remote_ssh_base_args(has_password, false);
+    args.extend([
         "-L".to_string(),
         format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
-    ];
+    ]);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());
         args.push(ssh_port.to_string());
@@ -776,8 +803,9 @@ pub(super) fn build_remote_ssh_command_args(
     ssh_target: &str,
     ssh_port: Option<u16>,
     remote_command: String,
+    has_password: bool,
 ) -> Vec<String> {
-    let mut args = vec!["-o".to_string(), "ExitOnForwardFailure=yes".to_string()];
+    let mut args = remote_ssh_base_args(has_password, false);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());
         args.push(ssh_port.to_string());
@@ -791,20 +819,117 @@ pub(super) fn build_remote_ssh_forward_args(
     ssh_port: Option<u16>,
     local_port: u16,
     remote_port: u16,
+    has_password: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        "-o".to_string(),
-        "ExitOnForwardFailure=yes".to_string(),
+    let mut args = remote_ssh_base_args(has_password, false);
+    args.extend([
         "-N".to_string(),
         "-L".to_string(),
         format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
-    ];
+    ]);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());
         args.push(ssh_port.to_string());
     }
     args.push(ssh_target.to_string());
     args
+}
+
+fn remote_ssh_base_args(has_password: bool, use_multiplex: bool) -> Vec<String> {
+    let mut args = vec![
+        "-o".to_string(),
+        "ExitOnForwardFailure=yes".to_string(),
+        "-o".to_string(),
+    ];
+    if has_password {
+        args.push("NumberOfPasswordPrompts=1".to_string());
+    } else {
+        args.push("BatchMode=yes".to_string());
+    }
+    args.extend([
+        "-o".to_string(),
+        format!("ConnectTimeout={REMOTE_SSH_CONNECT_TIMEOUT_SECS}"),
+    ]);
+    if use_multiplex {
+        args.extend(ssh_multiplex_args());
+    } else {
+        args.extend(ssh_disable_multiplex_args());
+    }
+    args
+}
+
+#[cfg(unix)]
+fn ssh_disable_multiplex_args() -> Vec<String> {
+    vec![
+        "-o".to_string(),
+        "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ControlPath=none".to_string(),
+        "-o".to_string(),
+        "ControlPersist=no".to_string(),
+    ]
+}
+
+#[cfg(not(unix))]
+fn ssh_disable_multiplex_args() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn ssh_multiplex_args() -> Vec<String> {
+    let Some(control_path) = ssh_control_path_template() else {
+        return Vec::new();
+    };
+    vec![
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=300".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={control_path}"),
+    ]
+}
+
+#[cfg(not(unix))]
+fn ssh_multiplex_args() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn ssh_control_path_template() -> Option<String> {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let dir = PathBuf::from(home).join(".kodex").join("ssh-control");
+        if fs::create_dir_all(&dir).is_ok() {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            let path = dir.join("%C");
+            let path = path.to_string_lossy().into_owned();
+            if path.len() < 95 {
+                return Some(path);
+            }
+        }
+    }
+
+    let user = std::env::var("USER")
+        .ok()
+        .map(|value| sanitize_control_path_part(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "user".into());
+    Some(format!("/tmp/kodex-ssh-{user}-%C"))
+}
+
+#[cfg(unix)]
+fn sanitize_control_path_part(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .take(32)
+        .collect()
 }
 
 fn configure_ssh_askpass(
@@ -957,6 +1082,9 @@ pub(super) fn connect_streamable_http_endpoint(
     let connection_id = Arc::new(Mutex::new(None));
     let session_token = Arc::new(Mutex::new(None));
     let get_task = Arc::new(Mutex::new(None));
+    let last_initialize = Arc::new(Mutex::new(None));
+    let current_session_id = Arc::new(Mutex::new(None));
+    let current_session_cwd = Arc::new(Mutex::new(None));
     let state = StreamableHttpState {
         http: http.clone(),
         endpoint: endpoint.clone(),
@@ -964,6 +1092,10 @@ pub(super) fn connect_streamable_http_endpoint(
         connection_id: connection_id.clone(),
         session_token: session_token.clone(),
         get_task: get_task.clone(),
+        acp_transport,
+        last_initialize: last_initialize.clone(),
+        current_session_id: current_session_id.clone(),
+        current_session_cwd: current_session_cwd.clone(),
         log_config: log_config.clone(),
     };
 
@@ -1016,6 +1148,7 @@ pub(super) fn connect_streamable_http_endpoint(
                     &connect_endpoint,
                     &connect_http,
                     &connect_connection_id,
+                    &connect_session_token,
                     connect_log_config.as_ref(),
                 )
                 .await
@@ -1034,6 +1167,10 @@ pub(super) fn connect_streamable_http_endpoint(
             connection_id,
             session_token,
             get_task: get_task.clone(),
+            acp_transport,
+            last_initialize,
+            current_session_id,
+            current_session_cwd,
             log_config,
         };
         maybe_spawn_streamable_http_get(&state);
@@ -1055,6 +1192,10 @@ struct StreamableHttpState {
     connection_id: Arc<Mutex<Option<String>>>,
     session_token: Arc<Mutex<Option<String>>>,
     get_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    acp_transport: RemoteAcpTransport,
+    last_initialize: Arc<Mutex<Option<serde_json::Value>>>,
+    current_session_id: Arc<Mutex<Option<String>>>,
+    current_session_cwd: Arc<Mutex<Option<String>>>,
     log_config: Option<SessionConfig>,
 }
 
@@ -1138,6 +1279,7 @@ async fn codebuddy_acp_connect(
     endpoint: &str,
     http: &reqwest::Client,
     connection_id: &Arc<Mutex<Option<String>>>,
+    session_token: &Arc<Mutex<Option<String>>>,
     log_config: Option<&SessionConfig>,
 ) -> std::io::Result<()> {
     let connect_url = format!("{endpoint}/connect");
@@ -1174,7 +1316,7 @@ async fn codebuddy_acp_connect(
                 }
             }
         }
-    };
+    }
     let Some(response) = response else {
         return Err(io_other(format!(
             "request failed after {CODEBUDDY_ACP_CONNECT_ATTEMPTS} attempts for {connect_url}: {}",
@@ -1189,7 +1331,29 @@ async fn codebuddy_acp_connect(
         )));
     }
     let payload = response.text().await.map_err(io_other)?;
-    let value: serde_json::Value = serde_json::from_str(&payload)
+    let (id, token) = codebuddy_connect_parts_from_payload(&payload)?;
+    if let Ok(mut guard) = connection_id.lock() {
+        *guard = Some(id.clone());
+    }
+    if let Some(token) = token.as_ref() {
+        if let Ok(mut guard) = session_token.lock() {
+            *guard = Some(token.clone());
+        }
+    }
+    if let Some(config) = log_config {
+        let _ = append_runtime_event_log(
+            config,
+            "agent/codebuddy_acp_connected",
+            &json!({ "connection_id": id, "session_token_present": token.is_some() }),
+        );
+    }
+    Ok(())
+}
+
+fn codebuddy_connect_parts_from_payload(
+    payload: &str,
+) -> std::io::Result<(String, Option<String>)> {
+    let value: serde_json::Value = serde_json::from_str(payload)
         .map_err(|error| io_other(format!("invalid CodeBuddy ACP connect response: {error}")))?;
     let data = value.get("data").unwrap_or(&value);
     let id = data
@@ -1197,46 +1361,79 @@ async fn codebuddy_acp_connect(
         .or_else(|| data.get("connection_id"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| io_other("CodeBuddy ACP connect response missing connectionId"))?;
-    let _session_token = data
+    let token = data
         .get("sessionToken")
         .or_else(|| data.get("session_token"))
-        .and_then(|value| value.as_str());
-    if let Ok(mut guard) = connection_id.lock() {
-        *guard = Some(id.to_string());
-    }
-    if let Some(config) = log_config {
-        let _ = append_runtime_event_log(
-            config,
-            "agent/codebuddy_acp_connected",
-            &json!({ "connection_id": id }),
-        );
-    }
-    Ok(())
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    Ok((id.to_string(), token))
 }
 
 async fn post_streamable_http_line(
     state: &StreamableHttpState,
     line: String,
 ) -> std::io::Result<()> {
-    let response = send_streamable_http_request_with_retry(state, &line).await?;
-    handle_streamable_http_response(
-        response,
-        &state.connection_id,
-        &state.incoming_tx,
-        state.log_config.as_ref(),
-    )
-    .await?;
-    maybe_spawn_streamable_http_get(state);
+    let body = serde_json::from_str::<serde_json::Value>(&line)
+        .map_err(|error| io_other(format!("invalid ACP JSON-RPC message: {error}")))?;
+    let expects_response_body = streamable_http_message_expects_response_body(&body);
+    for attempt in 0..2 {
+        match send_streamable_http_request_with_retry(state, &body).await {
+            Ok(response) => {
+                if !expects_response_body {
+                    let result = handle_streamable_http_ack_response(
+                        response,
+                        &state.connection_id,
+                        state.log_config.as_ref(),
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => {
+                            maybe_spawn_streamable_http_get(state);
+                            return Ok(());
+                        }
+                        Err(error)
+                            if attempt == 0 && streamable_connection_not_found_error(&error) =>
+                        {
+                            reconnect_streamable_http_for_retry(state, &body).await?;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                let result = handle_streamable_http_response(
+                    response,
+                    &state.connection_id,
+                    &state.incoming_tx,
+                    state.log_config.as_ref(),
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        maybe_spawn_streamable_http_get(state);
+                        return Ok(());
+                    }
+                    Err(error) if attempt == 0 && streamable_connection_not_found_error(&error) => {
+                        reconnect_streamable_http_for_retry(state, &body).await?;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) if attempt == 0 && streamable_connection_not_found_error(&error) => {
+                reconnect_streamable_http_for_retry(state, &body).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     Ok(())
 }
 
 async fn send_streamable_http_request_with_retry(
     state: &StreamableHttpState,
-    line: &str,
+    body: &serde_json::Value,
 ) -> std::io::Result<reqwest::Response> {
-    let body = serde_json::from_str::<serde_json::Value>(line)
-        .map_err(|error| io_other(format!("invalid ACP JSON-RPC message: {error}")))?;
-    let session_id = acp_session_id_from_message(&body);
+    remember_streamable_http_outgoing_request(state, body);
+    let session_id = streamable_http_session_id_for_message(state, body);
     let mut last_error = None;
     for attempt in 0..50 {
         let request = state
@@ -1246,8 +1443,28 @@ async fn send_streamable_http_request_with_retry(
         let request = codebuddy_http_headers(request, &state.connection_id);
         let request = acp_session_token_header(request, &state.session_token);
         let request = acp_session_header(request, session_id.as_deref());
-        match request.json(&body).send().await {
-            Ok(response) => return Ok(response),
+        match request.json(body).send().await {
+            Ok(response) => {
+                if response.status().as_u16() == 409 {
+                    let status = response.status();
+                    let response_body = response.text().await.unwrap_or_default();
+                    if codebuddy_connection_not_found_response(&response_body) {
+                        reconnect_streamable_http_for_retry(state, &body).await?;
+                        if attempt + 1 < 50 {
+                            continue;
+                        }
+                    }
+                    let connection_id = state
+                        .connection_id
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone());
+                    return Err(io_other(format!(
+                        "streamable-http ACP request failed with status {status} using connection_id={connection_id:?}: {response_body}"
+                    )));
+                }
+                return Ok(response);
+            }
             Err(error) => {
                 last_error = Some(format!("{error:?}"));
                 if attempt + 1 < 50 {
@@ -1260,6 +1477,210 @@ async fn send_streamable_http_request_with_retry(
         "streamable-http ACP request failed after retries: {}",
         last_error.unwrap_or_else(|| "unknown error".to_string())
     )))
+}
+
+fn remember_streamable_http_outgoing_request(
+    state: &StreamableHttpState,
+    body: &serde_json::Value,
+) {
+    if message_has_method(body, "initialize") {
+        if let Ok(mut guard) = state.last_initialize.lock() {
+            *guard = Some(body.clone());
+        }
+    }
+
+    if let Some(session_id) = acp_session_id_from_message(body) {
+        if let Ok(mut guard) = state.current_session_id.lock() {
+            *guard = Some(session_id);
+        }
+    }
+
+    if let Some(cwd) = acp_session_cwd_from_message(body) {
+        if let Ok(mut guard) = state.current_session_cwd.lock() {
+            *guard = Some(cwd);
+        }
+    }
+}
+
+fn streamable_http_session_id_for_message(
+    state: &StreamableHttpState,
+    body: &serde_json::Value,
+) -> Option<String> {
+    acp_session_id_from_message(body).or_else(|| {
+        state
+            .current_session_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    })
+}
+
+fn streamable_http_message_expects_response_body(body: &serde_json::Value) -> bool {
+    !streamable_http_message_is_response(body)
+        && !message_has_method(body, CODEBUDDY_RESOLVE_INTERRUPTION_METHOD)
+}
+
+fn streamable_http_message_is_response(body: &serde_json::Value) -> bool {
+    match body {
+        serde_json::Value::Array(items) => {
+            !items.is_empty() && items.iter().all(streamable_http_message_is_response)
+        }
+        serde_json::Value::Object(object) => {
+            object.get("method").is_none()
+                && object.get("id").is_some()
+                && (object.get("result").is_some() || object.get("error").is_some())
+        }
+        _ => false,
+    }
+}
+
+async fn reconnect_streamable_http_for_retry(
+    state: &StreamableHttpState,
+    retry_body: &serde_json::Value,
+) -> std::io::Result<()> {
+    if let Ok(mut guard) = state.get_task.lock() {
+        if let Some(task) = guard.take() {
+            task.abort();
+        }
+    }
+    if let Ok(mut guard) = state.connection_id.lock() {
+        guard.take();
+    }
+    if let Ok(mut guard) = state.session_token.lock() {
+        guard.take();
+    }
+
+    reconnect_streamable_http_transport(state).await?;
+
+    if let Some(config) = state.log_config.as_ref() {
+        let _ = append_runtime_event_log(
+            config,
+            "agent/streamable_http_reconnected",
+            &json!({
+                "retry_method": acp_method_from_message(retry_body)
+            }),
+        );
+    }
+
+    maybe_spawn_streamable_http_get(state);
+
+    if message_has_method(retry_body, "initialize") {
+        return Ok(());
+    }
+
+    let initialize = state
+        .last_initialize
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .ok_or_else(|| io_other("CodeBuddy ACP reconnect cannot replay initialize request"))?;
+    send_streamable_http_control_request(state, initialize, "initialize").await?;
+
+    if message_has_method(retry_body, "session/new")
+        || message_has_method(retry_body, "session/load")
+    {
+        return Ok(());
+    }
+
+    let session_id = acp_session_id_from_message(retry_body).or_else(|| {
+        state
+            .current_session_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    });
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    let cwd = state
+        .current_session_cwd
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(|| ".".to_string());
+    send_streamable_http_control_request(
+        state,
+        codebuddy_session_load_request(&session_id, &cwd),
+        "session/load",
+    )
+    .await
+}
+
+async fn reconnect_streamable_http_transport(state: &StreamableHttpState) -> std::io::Result<()> {
+    match state.acp_transport {
+        RemoteAcpTransport::AcpStreamableHttp => {
+            acp_streamable_http_connect(
+                &state.endpoint,
+                &state.http,
+                &state.connection_id,
+                &state.session_token,
+                state.log_config.as_ref(),
+            )
+            .await
+        }
+        RemoteAcpTransport::CodeBuddyServeHttp => {
+            codebuddy_acp_connect(
+                &state.endpoint,
+                &state.http,
+                &state.connection_id,
+                &state.session_token,
+                state.log_config.as_ref(),
+            )
+            .await
+        }
+        RemoteAcpTransport::Tcp => Err(io_other(
+            "cannot reconnect TCP transport as streamable-http",
+        )),
+    }
+}
+
+async fn send_streamable_http_control_request(
+    state: &StreamableHttpState,
+    body: serde_json::Value,
+    label: &str,
+) -> std::io::Result<()> {
+    let session_id = acp_session_id_from_message(&body);
+    let request = state
+        .http
+        .post(&state.endpoint)
+        .header(ACCEPT, "text/event-stream, application/json");
+    let request = codebuddy_http_headers(request, &state.connection_id);
+    let request = acp_session_token_header(request, &state.session_token);
+    let request = acp_session_header(request, session_id.as_deref());
+    let response = request.json(&body).send().await.map_err(io_other)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        return Err(io_other(format!(
+            "CodeBuddy ACP reconnect {label} failed with status {status}: {response_body}"
+        )));
+    }
+    remember_acp_connection_id_from_headers(response.headers(), &state.connection_id);
+    let response_body = response.text().await.unwrap_or_default();
+    remember_acp_connection_id_from_payload(&response_body, &state.connection_id);
+    remember_acp_session_token_from_payload(&response_body, &state.session_token);
+    Ok(())
+}
+
+fn codebuddy_session_load_request(session_id: &str, cwd: &str) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": "kodex-codebuddy-reconnect-session-load",
+        "method": "session/load",
+        "params": {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": []
+        }
+    })
+}
+
+fn codebuddy_connection_not_found_response(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("connection not found")
+}
+
+fn streamable_connection_not_found_error(error: &std::io::Error) -> bool {
+    codebuddy_connection_not_found_response(&error.to_string())
 }
 
 fn maybe_spawn_streamable_http_get(state: &StreamableHttpState) {
@@ -1289,16 +1710,15 @@ fn maybe_spawn_streamable_http_get(state: &StreamableHttpState) {
     let log_config = state.log_config.clone();
     let get_task_store = state.get_task.clone();
     let task = tokio::spawn(async move {
-        if let Err(error) =
-            run_streamable_http_get(
-                http,
-                endpoint,
-                incoming_tx,
-                connection_id,
-                session_token,
-                log_config,
-            )
-            .await
+        if let Err(error) = run_streamable_http_get(
+            http,
+            endpoint,
+            incoming_tx,
+            connection_id,
+            session_token,
+            log_config,
+        )
+        .await
         {
             let _ = error;
         }
@@ -1343,6 +1763,42 @@ async fn run_streamable_http_get(
         .await
 }
 
+async fn handle_streamable_http_ack_response(
+    response: reqwest::Response,
+    connection_id: &Arc<Mutex<Option<String>>>,
+    log_config: Option<&SessionConfig>,
+) -> std::io::Result<()> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let connection_id = connection_id.lock().ok().and_then(|guard| guard.clone());
+        return Err(io_other(format!(
+            "streamable-http ACP request failed with status {status} using connection_id={connection_id:?}: {body}"
+        )));
+    }
+
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    remember_acp_connection_id_from_headers(response.headers(), connection_id);
+    if !content_type.contains("text/event-stream") {
+        let body = response.text().await.unwrap_or_default();
+        remember_acp_connection_id_from_payload(&body, connection_id);
+    }
+
+    if let Some(config) = log_config {
+        let _ = append_runtime_event_log(
+            config,
+            "agent/streamable_http_response_ack",
+            &json!({ "contentType": content_type }),
+        );
+    }
+    Ok(())
+}
+
 async fn handle_streamable_http_response(
     response: reqwest::Response,
     connection_id: &Arc<Mutex<Option<String>>>,
@@ -1366,7 +1822,7 @@ async fn handle_streamable_http_response(
         .to_ascii_lowercase();
     remember_acp_connection_id_from_headers(response.headers(), connection_id);
     if content_type.contains("text/event-stream") {
-        consume_streamable_http_sse(response, incoming_tx).await?;
+        spawn_streamable_http_sse_consumer(response, incoming_tx.clone(), log_config.cloned());
     } else {
         let body = response.text().await.map_err(io_other)?;
         remember_acp_connection_id_from_payload(&body, connection_id);
@@ -1374,9 +1830,41 @@ async fn handle_streamable_http_response(
     }
 
     if let Some(config) = log_config {
-        let _ = append_runtime_event_log(config, "agent/streamable_http_response", &json!({}));
+        let _ = append_runtime_event_log(
+            config,
+            "agent/streamable_http_response",
+            &json!({ "contentType": content_type }),
+        );
     }
     Ok(())
+}
+
+fn spawn_streamable_http_sse_consumer(
+    response: reqwest::Response,
+    incoming_tx: futures_mpsc::UnboundedSender<std::io::Result<String>>,
+    log_config: Option<SessionConfig>,
+) {
+    tokio::spawn(async move {
+        let result = consume_streamable_http_sse(response, &incoming_tx).await;
+        if let Some(config) = log_config.as_ref() {
+            match result {
+                Ok(()) => {
+                    let _ = append_runtime_event_log(
+                        config,
+                        "agent/streamable_http_sse_finished",
+                        &json!({}),
+                    );
+                }
+                Err(error) => {
+                    let _ = append_runtime_event_log(
+                        config,
+                        "agent/streamable_http_sse_error",
+                        &json!({ "error": error.to_string() }),
+                    );
+                }
+            }
+        }
+    });
 }
 
 async fn consume_streamable_http_sse(
@@ -1454,9 +1942,7 @@ fn codebuddy_http_headers(
         return request;
     };
     match HeaderValue::from_str(&value) {
-        Ok(value) => request
-            .header(CODEBUDDY_ACP_CONNECTION_ID_HEADER, value.clone())
-            .header(ACP_CONNECTION_ID_HEADER, value),
+        Ok(value) => request.header(CODEBUDDY_ACP_CONNECTION_ID_HEADER, value),
         Err(_) => request,
     }
 }
@@ -1494,6 +1980,33 @@ fn acp_session_id_from_message(message: &serde_json::Value) -> Option<String> {
         .and_then(|params| params.get("sessionId").or_else(|| params.get("session_id")))
         .and_then(|value| value.as_str())
         .map(ToString::to_string)
+}
+
+fn acp_session_cwd_from_message(message: &serde_json::Value) -> Option<String> {
+    message
+        .get("params")
+        .and_then(|params| params.get("cwd"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
+fn acp_method_from_message(message: &serde_json::Value) -> Option<String> {
+    message
+        .get("method")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
+fn message_has_method(message: &serde_json::Value, method: &str) -> bool {
+    match message {
+        serde_json::Value::Array(items) => {
+            items.iter().any(|item| message_has_method(item, method))
+        }
+        _ => message
+            .get("method")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == method),
+    }
 }
 
 fn remember_acp_connection_id_from_headers(
@@ -1720,21 +2233,67 @@ async fn wait_remote_agent_ready(
             Ok(ready)
         }
         Ok(Err(_)) => Err(agent_client_protocol::util::internal_error(
-            "ssh remote agent process ended before readiness was reported",
+            remote_agent_readiness_error(
+                "ssh remote agent process ended before readiness was reported",
+                &live_stderr,
+            ),
         )),
         Err(_) => {
-            let stderr = live_stderr
-                .lock()
-                .map(|stderr| stderr.clone())
-                .unwrap_or_default();
-            let message = if stderr.trim().is_empty() {
-                "timed out waiting for remote ACP agent readiness".to_string()
-            } else {
-                format!("timed out waiting for remote ACP agent readiness: {stderr}")
-            };
+            let message = remote_agent_readiness_error(
+                "timed out waiting for remote ACP agent readiness",
+                &live_stderr,
+            );
             Err(agent_client_protocol::util::internal_error(message))
         }
     }
+}
+
+fn remote_agent_readiness_error(prefix: &str, live_stderr: &Arc<Mutex<String>>) -> String {
+    let stderr = live_stderr
+        .lock()
+        .map(|stderr| sanitize_remote_agent_diagnostic(&stderr))
+        .unwrap_or_default();
+    if stderr.trim().is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}: {stderr}")
+    }
+}
+
+fn sanitize_remote_agent_diagnostic(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed
+        .lines()
+        .any(|line| contains_secret_material(line) || line.contains("-----BEGIN "))
+    {
+        return "Credential details redacted".into();
+    }
+    const MAX_DIAGNOSTIC_LEN: usize = 1200;
+    if trimmed.len() <= MAX_DIAGNOSTIC_LEN {
+        return trimmed.to_string();
+    }
+    format!(
+        "{}...",
+        trimmed.chars().take(MAX_DIAGNOSTIC_LEN).collect::<String>()
+    )
+}
+
+fn contains_secret_material(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "password=",
+        "password:",
+        "passphrase",
+        "private key",
+        "api_key",
+        "apikey",
+        "secret=",
+        "token=",
+        "auth_token",
+        "authorization:",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn write_agent_stdin(
@@ -1822,9 +2381,665 @@ mod tests {
 
     #[test]
     fn remote_ssh_forward_args_use_discovered_remote_port() {
-        let args = build_remote_ssh_forward_args("root@example.com", Some(2222), 3456, 45913);
+        let args =
+            build_remote_ssh_forward_args("root@example.com", Some(2222), 3456, 45913, false);
         assert!(args.contains(&"-N".to_string()));
         assert!(args.contains(&"127.0.0.1:3456:127.0.0.1:45913".to_string()));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        assert!(!args.contains(&"ControlMaster=auto".to_string()));
+        assert!(!args.contains(&"ControlPersist=300".to_string()));
+        assert!(args.contains(&"ControlMaster=no".to_string()));
+        assert!(args.contains(&"ControlPath=none".to_string()));
+        assert!(args.contains(&"ControlPersist=no".to_string()));
+    }
+
+    #[test]
+    fn readiness_error_includes_remote_agent_stderr() {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<RemoteAgentReady>();
+        drop(ready_tx);
+        let live_stderr = Arc::new(Mutex::new(
+            "agent startup failed\nmissing remote provider configuration".to_string(),
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(wait_remote_agent_ready(ready_rx, live_stderr, None))
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("ended before readiness was reported"));
+        assert!(message.contains("missing remote provider configuration"));
+    }
+
+    #[test]
+    fn codebuddy_connect_payload_extracts_session_token() {
+        let (connection_id, session_token) = codebuddy_connect_parts_from_payload(
+            r#"{"data":{"connectionId":"conn-123","sessionToken":"token-456"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(connection_id, "conn-123");
+        assert_eq!(session_token.as_deref(), Some("token-456"));
+    }
+
+    #[test]
+    fn codebuddy_connect_payload_accepts_root_level_fields() {
+        let (connection_id, session_token) = codebuddy_connect_parts_from_payload(
+            r#"{"connection_id":"conn-abc","session_token":"token-def"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(connection_id, "conn-abc");
+        assert_eq!(session_token.as_deref(), Some("token-def"));
+    }
+
+    #[test]
+    fn codebuddy_connection_not_found_response_is_detected() {
+        assert!(codebuddy_connection_not_found_response(
+            r#"{"jsonrpc":"2.0","error":{"message":"Connection not found. Please establish a connection first via POST /acp/connect before sending requests."}}"#,
+        ));
+        assert!(!codebuddy_connection_not_found_response(
+            r#"{"jsonrpc":"2.0","error":{"message":"Another ACP client is already connected."}}"#,
+        ));
+    }
+
+    #[test]
+    fn codebuddy_reconnect_session_load_request_uses_current_session() {
+        let request = codebuddy_session_load_request("session-123", "/workspace/project");
+
+        assert_eq!(request["jsonrpc"], "2.0");
+        assert_eq!(request["method"], "session/load");
+        assert_eq!(request["params"]["sessionId"], "session-123");
+        assert_eq!(request["params"]["cwd"], "/workspace/project");
+        assert_eq!(request["params"]["mcpServers"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn message_has_method_matches_batched_requests() {
+        let request = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "session/cancel" },
+            { "jsonrpc": "2.0", "id": 2, "method": "initialize" }
+        ]);
+
+        assert!(message_has_method(&request, "initialize"));
+        assert!(!message_has_method(&request, "session/load"));
+    }
+
+    #[test]
+    fn streamable_http_message_response_posts_are_ack_only() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "allow"
+                }
+            }
+        });
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "session-123"
+            }
+        });
+        let resolve_interruption = json!({
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": CODEBUDDY_RESOLVE_INTERRUPTION_METHOD,
+            "params": {
+                "sessionId": "session-123",
+                "toolCallId": "call_123",
+                "interruptionId": "ir-call_123",
+                "decision": "allow"
+            }
+        });
+        let mixed_batch = json!([response.clone(), request.clone()]);
+
+        assert!(!streamable_http_message_expects_response_body(&response));
+        assert!(streamable_http_message_expects_response_body(&request));
+        assert!(!streamable_http_message_expects_response_body(
+            &resolve_interruption
+        ));
+        assert!(streamable_http_message_expects_response_body(&mixed_batch));
+    }
+
+    #[test]
+    fn streamable_http_session_id_falls_back_to_current_session_for_responses() {
+        let (incoming_tx, _incoming_rx) = futures_mpsc::unbounded::<std::io::Result<String>>();
+        let state = StreamableHttpState {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            endpoint: "http://127.0.0.1:1/api/v1/acp".into(),
+            incoming_tx,
+            connection_id: Arc::new(Mutex::new(Some("connection-1".into()))),
+            session_token: Arc::new(Mutex::new(Some("token-1".into()))),
+            get_task: Arc::new(Mutex::new(None)),
+            acp_transport: RemoteAcpTransport::AcpStreamableHttp,
+            last_initialize: Arc::new(Mutex::new(None)),
+            current_session_id: Arc::new(Mutex::new(Some("session-123".into()))),
+            current_session_cwd: Arc::new(Mutex::new(None)),
+            log_config: None,
+        };
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "allow"
+                }
+            }
+        });
+
+        assert_eq!(
+            streamable_http_session_id_for_message(&state, &response).as_deref(),
+            Some("session-123")
+        );
+    }
+
+    #[test]
+    fn streamable_http_ack_only_posts_do_not_wait_for_sse_body() {
+        let permission_response = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": "allow"
+                }
+            }
+        });
+        let resolve_interruption = json!({
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": CODEBUDDY_RESOLVE_INTERRUPTION_METHOD,
+            "params": {
+                "sessionId": "session-123",
+                "toolCallId": "call_123",
+                "interruptionId": "ir-call_123",
+                "decision": "allow"
+            }
+        });
+
+        assert_ack_only_post_does_not_wait_for_sse_body(permission_response);
+        assert_ack_only_post_does_not_wait_for_sse_body(resolve_interruption);
+    }
+
+    #[test]
+    fn streamable_http_request_posts_do_not_wait_for_sse_body() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_http_request(&mut stream);
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.header("acp-session-id").as_deref(),
+                Some("session-123")
+            );
+
+            let value: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            assert!(streamable_http_message_expects_response_body(&value));
+
+            use std::io::Write;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n: open\n\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        });
+
+        let (incoming_tx, _incoming_rx) = futures_mpsc::unbounded::<std::io::Result<String>>();
+        let state = StreamableHttpState {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            endpoint: format!("http://{addr}{STREAMABLE_HTTP_PATH}"),
+            incoming_tx,
+            connection_id: Arc::new(Mutex::new(Some("connection-1".into()))),
+            session_token: Arc::new(Mutex::new(Some("token-1".into()))),
+            get_task: Arc::new(Mutex::new(None)),
+            acp_transport: RemoteAcpTransport::AcpStreamableHttp,
+            last_initialize: Arc::new(Mutex::new(None)),
+            current_session_id: Arc::new(Mutex::new(Some("session-123".into()))),
+            current_session_cwd: Arc::new(Mutex::new(None)),
+            log_config: None,
+        };
+        let prompt = json!({
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "session-123",
+                "prompt": [{ "type": "text", "text": "hello" }]
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    post_streamable_http_line(&state, prompt.to_string()),
+                )
+                .await
+            })
+            .expect("request POST should hand off the SSE body to a background task")
+            .unwrap();
+
+        if let Ok(mut guard) = state.get_task.lock() {
+            if let Some(task) = guard.take() {
+                task.abort();
+            }
+        }
+        server_thread.join().unwrap();
+    }
+
+    fn assert_ack_only_post_does_not_wait_for_sse_body(payload: serde_json::Value) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_mock_http_request(&mut stream);
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.header("acp-session-id").as_deref(),
+                Some("session-123")
+            );
+
+            let value: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+            assert!(!streamable_http_message_expects_response_body(&value));
+
+            use std::io::Write;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n: open\n\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        });
+
+        let (incoming_tx, _incoming_rx) = futures_mpsc::unbounded::<std::io::Result<String>>();
+        let state = StreamableHttpState {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            endpoint: format!("http://{addr}{STREAMABLE_HTTP_PATH}"),
+            incoming_tx,
+            connection_id: Arc::new(Mutex::new(Some("connection-1".into()))),
+            session_token: Arc::new(Mutex::new(Some("token-1".into()))),
+            get_task: Arc::new(Mutex::new(None)),
+            acp_transport: RemoteAcpTransport::AcpStreamableHttp,
+            last_initialize: Arc::new(Mutex::new(None)),
+            current_session_id: Arc::new(Mutex::new(Some("session-123".into()))),
+            current_session_cwd: Arc::new(Mutex::new(None)),
+            log_config: None,
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    post_streamable_http_line(&state, payload.to_string()),
+                )
+                .await
+            })
+            .expect("response POST should not wait for the SSE body")
+            .unwrap();
+
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn streamable_http_post_reconnects_and_retries_when_connection_is_missing() {
+        let server = MockStreamableHttpServer::start();
+        let (incoming_tx, _incoming_rx) = futures_mpsc::unbounded::<std::io::Result<String>>();
+        let state = StreamableHttpState {
+            http: reqwest::Client::builder().no_proxy().build().unwrap(),
+            endpoint: server.endpoint.clone(),
+            incoming_tx,
+            connection_id: Arc::new(Mutex::new(Some("stale-connection".into()))),
+            session_token: Arc::new(Mutex::new(Some("stale-token".into()))),
+            get_task: Arc::new(Mutex::new(None)),
+            acp_transport: RemoteAcpTransport::AcpStreamableHttp,
+            last_initialize: Arc::new(Mutex::new(Some(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "protocolVersion": 1 }
+            })))),
+            current_session_id: Arc::new(Mutex::new(Some("session-123".into()))),
+            current_session_cwd: Arc::new(Mutex::new(Some("/workspace/project".into()))),
+            log_config: None,
+        };
+        let prompt = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "session-123",
+                "prompt": [{ "type": "text", "text": "hello" }]
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+
+        let response = runtime
+            .block_on(send_streamable_http_request_with_retry(&state, &prompt))
+            .unwrap();
+        assert!(response.status().is_success());
+        let _ = runtime.block_on(response.text()).unwrap();
+        if let Ok(mut guard) = state.get_task.lock() {
+            if let Some(task) = guard.take() {
+                task.abort();
+            }
+        }
+
+        server.wait_until_complete();
+        assert_eq!(server.connect_count(), 1);
+        assert_eq!(server.initialize_count(), 1);
+        assert_eq!(server.session_load_count(), 1);
+        assert_eq!(server.retried_prompt_count(), 1);
+        assert_eq!(
+            state
+                .connection_id
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .as_deref(),
+            Some("fresh-connection")
+        );
+        assert_eq!(
+            state
+                .session_token
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .as_deref(),
+            Some("fresh-token")
+        );
+    }
+
+    struct MockStreamableHttpServer {
+        endpoint: String,
+        state: Arc<MockStreamableHttpState>,
+    }
+
+    #[derive(Default)]
+    struct MockStreamableHttpState {
+        connect_count: std::sync::atomic::AtomicUsize,
+        prompt_count: std::sync::atomic::AtomicUsize,
+        initialize_count: std::sync::atomic::AtomicUsize,
+        session_load_count: std::sync::atomic::AtomicUsize,
+        retried_prompt_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockStreamableHttpServer {
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let state = Arc::new(MockStreamableHttpState::default());
+            let thread_state = state.clone();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline
+                    && thread_state
+                        .retried_prompt_count
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            handle_mock_streamable_http_request(&mut stream, &thread_state)
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                endpoint: format!("http://{addr}{STREAMABLE_HTTP_PATH}"),
+                state,
+            }
+        }
+
+        fn wait_until_complete(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if self.retried_prompt_count() > 0 {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("mock streamable-http server did not receive retried prompt");
+        }
+
+        fn connect_count(&self) -> usize {
+            self.state
+                .connect_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn initialize_count(&self) -> usize {
+            self.state
+                .initialize_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn session_load_count(&self) -> usize {
+            self.state
+                .session_load_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn retried_prompt_count(&self) -> usize {
+            self.state
+                .retried_prompt_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn handle_mock_streamable_http_request(
+        stream: &mut std::net::TcpStream,
+        state: &MockStreamableHttpState,
+    ) {
+        let request = read_mock_http_request(stream);
+        match (request.method.as_str(), request.path.as_str()) {
+            ("POST", path) if path.ends_with("/connect") => {
+                state
+                    .connect_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                write_mock_json_response(
+                    stream,
+                    200,
+                    r#"{"connectionId":"fresh-connection","sessionToken":"fresh-token"}"#,
+                );
+            }
+            ("GET", _) => {
+                write_mock_response(stream, 200, "text/event-stream", ":ok\n\n");
+            }
+            ("POST", _) => {
+                let value: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+                let method = value
+                    .get("method")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                match method {
+                    "session/prompt" => {
+                        let count = state
+                            .prompt_count
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if count == 0 {
+                            write_mock_json_response(
+                                stream,
+                                409,
+                                r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Connection not found. Please establish a connection first via POST /acp/connect before sending requests."},"id":null}"#,
+                            );
+                        } else {
+                            assert_eq!(
+                                request.header("acp-connection-id").as_deref(),
+                                Some("fresh-connection")
+                            );
+                            assert_eq!(request.header_count("acp-connection-id"), 1);
+                            assert_eq!(
+                                request.header("acp-session-token").as_deref(),
+                                Some("fresh-token")
+                            );
+                            state
+                                .retried_prompt_count
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            write_mock_json_response(
+                                stream,
+                                200,
+                                r#"{"jsonrpc":"2.0","id":2,"result":{}}"#,
+                            );
+                        }
+                    }
+                    "initialize" => {
+                        state
+                            .initialize_count
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        write_mock_json_response(
+                            stream,
+                            200,
+                            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                        );
+                    }
+                    "session/load" => {
+                        assert_eq!(value["params"]["sessionId"], "session-123");
+                        assert_eq!(value["params"]["cwd"], "/workspace/project");
+                        state
+                            .session_load_count
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        write_mock_json_response(
+                            stream,
+                            200,
+                            r#"{"jsonrpc":"2.0","id":"kodex-codebuddy-reconnect-session-load","result":{}}"#,
+                        );
+                    }
+                    other => panic!("unexpected mock ACP method {other}"),
+                }
+            }
+            other => panic!("unexpected mock HTTP request {other:?}"),
+        }
+    }
+
+    struct MockHttpRequest {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl MockHttpRequest {
+        fn header(&self, name: &str) -> Option<String> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        }
+
+        fn header_count(&self, name: &str) -> usize {
+            self.headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .count()
+        }
+    }
+
+    fn read_mock_http_request(stream: &mut std::net::TcpStream) -> MockHttpRequest {
+        use std::io::Read;
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "mock HTTP request ended before headers");
+            buffer.extend_from_slice(&chunk[..count]);
+            if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        let header_text = String::from_utf8_lossy(&buffer[..header_end]).to_string();
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap().to_string();
+        let path = request_parts.next().unwrap().to_string();
+        let headers = lines
+            .filter_map(|line| {
+                if line.is_empty() {
+                    return None;
+                }
+                let (key, value) = line.split_once(':')?;
+                Some((key.trim().to_string(), value.trim().to_string()))
+            })
+            .collect::<Vec<_>>();
+        let content_length = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while buffer.len() < header_end + content_length {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "mock HTTP request ended before body");
+            buffer.extend_from_slice(&chunk[..count]);
+        }
+        let body =
+            String::from_utf8_lossy(&buffer[header_end..header_end + content_length]).to_string();
+        MockHttpRequest {
+            method,
+            path,
+            headers,
+            body,
+        }
+    }
+
+    fn write_mock_json_response(stream: &mut std::net::TcpStream, status: u16, body: &str) {
+        write_mock_response(stream, status, "application/json", body);
+    }
+
+    fn write_mock_response(
+        stream: &mut std::net::TcpStream,
+        status: u16,
+        content_type: &str,
+        body: &str,
+    ) {
+        use std::io::Write;
+
+        let status_text = match status {
+            200 => "OK",
+            409 => "Conflict",
+            _ => "Status",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
     }
 }
 
@@ -1953,6 +3168,7 @@ async fn monitor_hidden_agent_child(
     child: Arc<Mutex<Option<Child>>>,
     stderr_rx: mpsc::Receiver<String>,
     log_config: Option<SessionConfig>,
+    label: &'static str,
 ) -> agent_client_protocol::Result<()> {
     let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
     thread::spawn(move || {
@@ -1999,16 +3215,20 @@ async fn monitor_hidden_agent_child(
     let stderr = if success {
         String::new()
     } else {
-        stderr_rx.try_recv().unwrap_or_default()
+        stderr_rx
+            .recv_timeout(Duration::from_millis(200))
+            .unwrap_or_default()
     };
     let payload = if stderr.is_empty() {
         json!({
+            "label": label,
             "success": success,
             "status": status.to_string(),
             "exitCode": status.code()
         })
     } else {
         json!({
+            "label": label,
             "success": success,
             "status": status.to_string(),
             "exitCode": status.code(),

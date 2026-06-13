@@ -117,15 +117,6 @@ impl PermissionBroker {
         Ok(true)
     }
 
-    pub(crate) fn clear_early_resolution(&self, request_id: &str) -> anyhow::Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow!("permission broker lock poisoned"))?
-            .early_resolutions
-            .remove(request_id);
-        Ok(())
-    }
-
     pub(crate) fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
         let normalized = mode_id.to_ascii_lowercase();
         let mode = match normalized.as_str() {

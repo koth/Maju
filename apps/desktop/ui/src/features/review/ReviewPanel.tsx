@@ -276,6 +276,7 @@ export function ReviewPanel({
   const activeFilePath = activeTab.kind === "file" ? activeTab.path : null;
   const activeDiffTab = activeTab.kind === "diff" ? activeTab : null;
   const activeSideTreeKeyRef = useRef<string | null>(null);
+  const workspaceConnected = snapshot.workspace_connected !== false;
   const hasOpenFileTab = openTabs.some((tab) => tab.kind === "file");
   const hasOpenDiffTab = openTabs.some((tab) => tab.kind === "diff");
   const activeSideTreeKey = activeFilePath
@@ -285,13 +286,14 @@ export function ReviewPanel({
       : null;
 
   const handleRefresh = useCallback(() => {
+    if (!workspaceConnected) return;
     if (activeBaseTab === "Diff") {
       onRefresh();
       return;
     }
 
     setFileTreeRefreshSignal((signal) => signal + 1);
-  }, [activeBaseTab, onRefresh]);
+  }, [activeBaseTab, onRefresh, workspaceConnected]);
 
   const handlePanelExpandedToggle = useCallback(() => {
     onPanelExpandedChange?.(!panelExpanded);
@@ -516,7 +518,7 @@ export function ReviewPanel({
             type="button"
             className="review-refresh-btn"
             onClick={handleRefresh}
-            disabled={activeBaseTab === "Diff" && refreshing}
+            disabled={!workspaceConnected || (activeBaseTab === "Diff" && refreshing)}
             title={activeBaseTab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
             aria-label={activeBaseTab === "Diff" ? "刷新 Git 状态" : "刷新选中的文件目录"}
           >
@@ -550,13 +552,17 @@ export function ReviewPanel({
       </div>
 
       <div className="review-tab-panel review-tab-panel-files" hidden={activeBaseTab !== "Files"}>
-        <FileTree
-          workspaceRoot={snapshot.workspace.root}
-          onFileOpen={handleFileTreeOpen}
-          refreshSignal={fileTreeRefreshSignal}
-          onAddComposerReference={onAddComposerReference}
-          composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
-        />
+        {workspaceConnected ? (
+          <FileTree
+            workspaceRoot={snapshot.workspace.root}
+            onFileOpen={handleFileTreeOpen}
+            refreshSignal={fileTreeRefreshSignal}
+            onAddComposerReference={onAddComposerReference}
+            composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+          />
+        ) : (
+          <div className="review-empty-state">远程工作区未连接</div>
+        )}
       </div>
 
       <div className="review-tab-panel review-tab-panel-git" hidden={activeBaseTab !== "Diff"}>
@@ -605,14 +611,14 @@ export function ReviewPanel({
         )}
       </div>
       {activeFilePath && renderFileTab && (
-        <div className={`review-tab-panel review-tab-panel-editor review-tab-panel-file-editor ${editorFileTreeVisible ? "has-filetree" : ""}`}>
+        <div className={`review-tab-panel review-tab-panel-editor review-tab-panel-file-editor ${editorFileTreeVisible && workspaceConnected ? "has-filetree" : ""}`}>
           <div className="review-editor-main">
             {renderFileTab(activeFilePath, {
               fileTreeVisible: editorFileTreeVisible,
               onToggleFileTree: handleEditorFileTreeToggle,
             })}
           </div>
-          {editorFileTreeVisible && (
+          {editorFileTreeVisible && workspaceConnected && (
             <aside className="review-editor-filetree" aria-label="文件树">
               <FileTree
                 workspaceRoot={snapshot.workspace.root}

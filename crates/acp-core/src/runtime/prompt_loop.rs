@@ -187,11 +187,7 @@ pub(super) async fn run_command_loop(
                                     &session_id,
                                     &tool_call_id,
                                     &decision,
-                                )
-                                .await;
-                                if result.is_ok() {
-                                    let _ = permission_broker.clear_early_resolution(&tool_call_id);
-                                }
+                                );
                                 let _ = reply_tx.send(result);
                             }
                             RuntimeCommand::SendPrompt(_)
@@ -340,11 +336,7 @@ pub(super) async fn run_command_loop(
                     &session_id,
                     &tool_call_id,
                     &decision,
-                )
-                .await;
-                if result.is_ok() {
-                    let _ = permission_broker.clear_early_resolution(&tool_call_id);
-                }
+                );
                 let _ = reply_tx.send(result);
             }
             RuntimeCommand::CancelPrompt { reply_tx } => {

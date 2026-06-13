@@ -251,6 +251,7 @@ impl Application {
         workspace_model::UiSnapshot {
             revision: self.ui.revision,
             workspace: self.ui.workspace.clone(),
+            workspace_connected: true,
             session: self.ui.session.clone(),
             session_config: self.ui.session_config.clone(),
             prompt_capabilities: self.ui.prompt_capabilities.clone(),

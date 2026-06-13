@@ -164,7 +164,7 @@ impl Application {
             .map_err(|error| error.to_string())?;
 
         if !delivered_to_acp_request {
-            let decision = option_id.unwrap_or_else(|| "deny".into());
+            let decision = codebuddy_interruption_decision(option_id.as_deref());
             self.session
                 .resolve_codebuddy_interruption(request_id, &decision)
                 .map_err(|error| error.to_string())?;
@@ -532,6 +532,25 @@ fn allow_permission_option_id(options: &[workspace_model::PermissionOption]) -> 
         .map(|option| option.id.clone())
 }
 
+fn codebuddy_interruption_decision(option_id: Option<&str>) -> String {
+    let Some(option_id) = option_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "deny".into();
+    };
+    let normalized = option_id
+        .chars()
+        .filter(|ch| *ch != '-' && *ch != '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "allowalways" | "alwaysallow" | "allowall" => "allowAll".into(),
+        "allowonce" | "allow" => "allow".into(),
+        "rejectonce" | "rejectalways" | "reject" | "deny" | "cancel" | "cancelled" | "canceled" => {
+            "deny".into()
+        }
+        _ => option_id.to_string(),
+    }
+}
+
 fn session_mode_is_full_access(mode: Option<&str>) -> bool {
     let Some(mode) = mode else {
         return false;
@@ -612,4 +631,20 @@ fn permission_details_write_paths(details: &str) -> Vec<String> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codebuddy_interruption_decision;
+
+    #[test]
+    fn codebuddy_interruption_decision_normalizes_acp_option_ids() {
+        assert_eq!(
+            codebuddy_interruption_decision(Some("allow_always")),
+            "allowAll"
+        );
+        assert_eq!(codebuddy_interruption_decision(Some("allow")), "allow");
+        assert_eq!(codebuddy_interruption_decision(Some("reject")), "deny");
+        assert_eq!(codebuddy_interruption_decision(None), "deny");
+    }
 }

@@ -870,6 +870,24 @@ describe("ReviewPanel scoped change sets", () => {
     expect(fsListDir).toHaveBeenNthCalledWith(2, "");
   });
 
+  it("does not list files for disconnected remote workspace snapshots", async () => {
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({ workspace_connected: false })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+
+    expect(screen.getByText("远程工作区未连接")).toBeTruthy();
+    expect(fsListDir).not.toHaveBeenCalled();
+  });
+
   it("opens file tree selections as review tabs when a file renderer is provided", async () => {
     const onFileOpen = vi.fn();
     vi.mocked(fsListDir).mockResolvedValue([

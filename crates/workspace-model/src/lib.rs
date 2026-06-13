@@ -932,6 +932,8 @@ pub struct UiSnapshot {
     #[serde(default)]
     pub revision: u64,
     pub workspace: WorkspaceDescriptor,
+    #[serde(default = "default_true")]
+    pub workspace_connected: bool,
     pub session: SessionSummary,
     #[serde(default)]
     pub session_config: SessionConfigState,
@@ -954,6 +956,10 @@ pub struct UiSnapshot {
     pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

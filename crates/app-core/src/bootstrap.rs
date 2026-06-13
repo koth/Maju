@@ -56,6 +56,7 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
     Ok(UiSnapshot {
         revision: 1,
         workspace: descriptor.clone(),
+        workspace_connected: true,
         session: SessionSummary {
             id: uuid::Uuid::new_v4(),
             workspace_id: descriptor.id,

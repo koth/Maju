@@ -33,7 +33,7 @@ export function useWorkbenchGit({
     }
     const currentSnapshot = snapshotRef.current;
     const workspaceRoot = currentSnapshot?.workspace.root;
-    if (!workspaceRoot) return;
+    if (!workspaceRoot || currentSnapshot?.workspace_connected === false) return;
     const requestKey = ++gitHydrationKey.current;
     gitRefreshInFlight.current = true;
     gitRefreshPending.current = false;
@@ -70,6 +70,11 @@ export function useWorkbenchGit({
   useEffect(() => {
     const workspaceRoot = snapshot?.workspace.root;
     if (!workspaceReady || !workspaceRoot) return;
+    if (snapshot?.workspace_connected === false) {
+      setGitHydrated(true);
+      setGitRefreshing(false);
+      return;
+    }
 
     const requestKey = ++gitHydrationKey.current;
     setGitHydrated(false);
@@ -105,7 +110,13 @@ export function useWorkbenchGit({
     return () => {
       disposed = true;
     };
-  }, [setSnapshot, snapshot?.workspace.location?.kind, snapshot?.workspace.root, workspaceReady]);
+  }, [
+    setSnapshot,
+    snapshot?.workspace.location?.kind,
+    snapshot?.workspace.root,
+    snapshot?.workspace_connected,
+    workspaceReady,
+  ]);
 
   return {
     gitRefreshing,

@@ -367,6 +367,7 @@ export interface SidebarSection {
 export interface UiSnapshot {
   revision: number;
   workspace: WorkspaceDescriptor;
+  workspace_connected?: boolean;
   session: SessionSummary;
   session_config: SessionConfigState;
   prompt_capabilities: PromptInputCapabilities;

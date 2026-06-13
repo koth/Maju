@@ -619,8 +619,9 @@ function WorkspaceSection({
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
   const isDormantRemoteWorkspace = isRemoteWorkspace && !item.connected;
   const remoteWorkspace = item.workspace.location?.kind === "remote_linux" ? item.workspace.location : null;
-  const workspaceStateLabel = isDormantRemoteWorkspace ? "REMOTE" : item.connected ? "LIVE" : "SLEEP";
+  const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
   const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
+  const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
 
   return (
     <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""}`}>
@@ -639,12 +640,11 @@ function WorkspaceSection({
               onReconnectRemoteWorkspace(remoteWorkspace);
             }
           }}
-          title={workspaceActionHint}
+          title={workspaceTooltip}
         >
           <FolderIcon />
           <span className="sl-workspace-copy">
             <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
-            <span className="sl-workspace-path">{workspaceRoot}</span>
           </span>
           <span className="sl-workspace-state">{workspaceStateLabel}</span>
         </button>
@@ -673,8 +673,9 @@ function WorkspaceSection({
             <ThreadRow
               key={session.id}
               session={session}
-              active={session.id === activeSessionId && item.is_active}
+              active={session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace}
               connected={session.id === activeSessionId && item.is_active && item.connected}
+              disabled={isDormantRemoteWorkspace}
               onSwitch={(id) => onSwitch(id, workspaceRoot)}
               onArchive={(id) => onArchive(id, workspaceRoot)}
             />
@@ -689,24 +690,33 @@ function ThreadRow({
   session,
   active,
   connected,
+  disabled = false,
   onSwitch,
   onArchive,
 }: {
   session: SessionListItem;
   active: boolean;
   connected: boolean;
+  disabled?: boolean;
   onSwitch: (id: string) => void;
   onArchive: (id: string) => void;
 }) {
   const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
   const agentLabel = formatAgentLabel(session.agent_cli);
-  const sessionTooltip = agentLabel ? `${session.title} · ${agentLabel}` : session.title;
+  const disabledHint = "先连接远程项目后再打开会话";
+  const sessionTooltip = disabled
+    ? `${session.title} · ${disabledHint}`
+    : agentLabel
+      ? `${session.title} · ${agentLabel}`
+      : session.title;
   const runtimeStatus = session.runtime_status ?? "none";
   const attentionState = session.attention_state ?? "none";
-  const showBackgroundProgress = !active && runtimeStatus === "background_running";
-  const showCompletedDot = !active && attentionState === "completed_unviewed";
-  const showAttentionDot = !active && attentionState === "needs_attention";
-  const indicatorLabel = showBackgroundProgress
+  const showBackgroundProgress = !disabled && !active && runtimeStatus === "background_running";
+  const showCompletedDot = !disabled && !active && attentionState === "completed_unviewed";
+  const showAttentionDot = !disabled && !active && attentionState === "needs_attention";
+  const indicatorLabel = disabled
+    ? disabledHint
+    : showBackgroundProgress
     ? "后台会话仍在运行"
     : showAttentionDot
       ? "后台会话需要处理"
@@ -721,6 +731,7 @@ function ThreadRow({
       className={[
         "sl-item",
         active ? "sl-active" : "",
+        disabled ? "is-disabled" : "",
         showBackgroundProgress ? "is-background-running" : "",
         showCompletedDot ? "is-completed-unviewed" : "",
         showAttentionDot ? "is-needs-attention" : "",
@@ -731,6 +742,7 @@ function ThreadRow({
         type="button"
         onClick={() => onSwitch(session.id)}
         aria-current={active ? "page" : undefined}
+        disabled={disabled}
       >
         <span
           className={[
@@ -756,6 +768,7 @@ function ThreadRow({
       <button
         className="sl-archive-btn"
         type="button"
+        disabled={disabled}
         onPointerDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -763,9 +776,11 @@ function ThreadRow({
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          onArchive(session.id);
+          if (!disabled) {
+            onArchive(session.id);
+          }
         }}
-        title="归档会话"
+        title={disabled ? disabledHint : "归档会话"}
         aria-label={`归档会话 ${session.title}`}
       >
         <ArchiveIcon />

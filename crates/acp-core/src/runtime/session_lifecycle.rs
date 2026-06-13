@@ -30,11 +30,12 @@ pub(super) async fn start_session(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
 ) -> anyhow::Result<StartedSession> {
+    let fs_read_text_file = should_advertise_client_fs_read_text_file(config);
     let init = InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(
             ClientCapabilities::new()
                 .fs(FileSystemCapabilities::new()
-                    .read_text_file(true)
+                    .read_text_file(fs_read_text_file)
                     .write_text_file(true))
                 .terminal(true),
         )
@@ -58,6 +59,9 @@ pub(super) async fn start_session(
         config,
         "session/capabilities",
         &json!({
+            "clientFsReadTextFile": fs_read_text_file,
+            "clientFsWriteTextFile": true,
+            "clientTerminal": true,
             "loadSession": supports_load_session,
             "sessionCapabilities": &init_response.agent_capabilities.session_capabilities,
             "advertisedSessionList": advertised_session_list,
@@ -139,6 +143,74 @@ pub(super) async fn start_session(
         supports_session_list,
         prompt_capabilities,
     })
+}
+
+fn should_advertise_client_fs_read_text_file(config: &SessionConfig) -> bool {
+    if config.remote_ssh.is_none() {
+        return true;
+    }
+
+    !config
+        .agent_command
+        .to_ascii_lowercase()
+        .contains("codebuddy")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::RemoteSshSessionConfig;
+
+    fn config(agent_command: &str, remote_ssh: bool) -> SessionConfig {
+        SessionConfig {
+            workspace_root: if remote_ssh {
+                "/srv/project"
+            } else {
+                "/tmp/project"
+            }
+            .into(),
+            app_data_root: "/tmp/kodex".into(),
+            model: String::new(),
+            agent_command: agent_command.into(),
+            agent_env: Vec::new(),
+            resume_session_id: None,
+            log_id: String::new(),
+            acp_port: 0,
+            remote_ssh: remote_ssh.then(|| RemoteSshSessionConfig {
+                ssh_target: "alice@example.com".into(),
+                ssh_port: None,
+                remote_workspace_root: "/srv/project".into(),
+                local_port: 12345,
+                remote_port: 23456,
+                ssh_command: None,
+                ssh_password: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn advertises_client_fs_read_for_local_agents() {
+        assert!(should_advertise_client_fs_read_text_file(&config(
+            "codebuddy --acp",
+            false,
+        )));
+    }
+
+    #[test]
+    fn suppresses_client_fs_read_for_remote_codebuddy() {
+        assert!(!should_advertise_client_fs_read_text_file(&config(
+            "/home/alice/.kodex/remote-agents/codebuddy/current/bin/codebuddy --acp",
+            true,
+        )));
+    }
+
+    #[test]
+    fn advertises_client_fs_read_for_other_remote_agents() {
+        assert!(should_advertise_client_fs_read_text_file(&config(
+            "codex-acp --acp",
+            true,
+        )));
+    }
 }
 
 async fn drain_initial_session_updates(

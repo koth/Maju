@@ -810,7 +810,6 @@ export function pendingPermissionRequestIds(tools: ToolInvocation[]) {
 
 function isPendingPermissionTool(tool: ToolInvocation) {
   return (
-    tool.kind === "permission" &&
     tool.status === "Running" &&
     !tool.permission_decision &&
     (tool.permission_options.length > 0 || (tool.permission_input?.questions.length ?? 0) > 0)

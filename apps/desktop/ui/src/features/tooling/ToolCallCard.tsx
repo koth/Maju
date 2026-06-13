@@ -31,7 +31,6 @@ function ToolCallCardImpl({
   hiddenPermissionRequestIds,
 }: Props) {
   const hiddenPermissionRequest =
-    tool.kind === "permission" &&
     hiddenPermissionRequestIds?.has(tool.call_id);
 
   const [expanded, setExpanded] = useState(false);
@@ -98,7 +97,6 @@ function ToolCallCardImpl({
       ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
       : null;
   const needsPermission =
-    tool.kind === "permission" &&
     tool.status === "Running" &&
     tool.permission_options.length > 0 &&
     !tool.permission_decision;
