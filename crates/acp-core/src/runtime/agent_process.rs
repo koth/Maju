@@ -5,7 +5,7 @@ use super::process::{
 use crate::codex_api_proxy::{
     configure_codex_api_proxy_model_provider_map, ensure_codex_api_proxy,
 };
-use crate::events::SessionConfig;
+use crate::events::{RemoteSshReverseForward, SessionConfig};
 use crate::mapping::append_runtime_event_log;
 use agent_client_protocol::{Client, ConnectTo, Lines, Role};
 use anyhow::anyhow;
@@ -297,6 +297,7 @@ pub(super) struct RemoteSshAgentProcess {
     agent_env: Vec<(String, String)>,
     local_port: u16,
     remote_port: u16,
+    reverse_forwards: Vec<RemoteSshReverseForward>,
     acp_transport: RemoteAcpTransport,
     log_config: SessionConfig,
     shutdown_signal: ShutdownSignal,
@@ -341,6 +342,7 @@ impl RemoteSshAgentProcess {
             agent_env,
             local_port: remote.local_port,
             remote_port: remote.remote_port,
+            reverse_forwards: remote.reverse_forwards,
             log_config: config.clone(),
             shutdown_signal: ShutdownSignal::default(),
         })
@@ -489,6 +491,15 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 "remote workspace path must be absolute",
             ));
         }
+
+        let reverse_forward_guards = self
+            .spawn_reverse_forwards(Some(&self.log_config))
+            .map_err(|error| {
+                agent_client_protocol::util::internal_error(format!(
+                    "failed to establish remote reverse forward: {error}"
+                ))
+            })?;
+        let _reverse_forward_guards = reverse_forward_guards;
 
         let is_streamable_http = self.acp_transport != RemoteAcpTransport::Tcp;
         let remote_command = if is_streamable_http {
@@ -701,6 +712,90 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
     }
 }
 
+impl RemoteSshAgentProcess {
+    fn spawn_reverse_forwards(
+        &self,
+        log_config: Option<&SessionConfig>,
+    ) -> anyhow::Result<Vec<AgentChildGuard>> {
+        let mut guards = Vec::new();
+        for forward in &self.reverse_forwards {
+            let guard = self.spawn_reverse_forward(forward, log_config)?;
+            guards.push(guard);
+        }
+        Ok(guards)
+    }
+
+    fn spawn_reverse_forward(
+        &self,
+        forward: &RemoteSshReverseForward,
+        log_config: Option<&SessionConfig>,
+    ) -> anyhow::Result<AgentChildGuard> {
+        let has_password = self.ssh_password.is_some();
+        let args = build_remote_ssh_reverse_forward_args(
+            &self.ssh_target,
+            self.ssh_port,
+            forward.remote_port,
+            forward.local_port,
+            has_password,
+        );
+        let mut command = agent_spawn_command(&self.ssh_command, &args);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        if let Some(password) = self.ssh_password.as_deref() {
+            configure_ssh_askpass(&mut command, password)?;
+        }
+        hide_console_window(&mut command);
+
+        let mut child = command.spawn()?;
+        let child_stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("failed to open ssh reverse forward stderr"))?;
+        let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+        thread::spawn(move || read_agent_stderr(child_stderr, stderr_tx));
+
+        thread::sleep(Duration::from_millis(250));
+        if let Some(status) = child.try_wait()? {
+            let stderr = stderr_rx
+                .recv_timeout(Duration::from_millis(200))
+                .unwrap_or_default();
+            if let Some(config) = log_config {
+                let _ = append_runtime_event_log(
+                    config,
+                    "agent/reverse_forward_exit",
+                    &json!({
+                        "remotePort": forward.remote_port,
+                        "localPort": forward.local_port,
+                        "status": status.to_string(),
+                        "stderr": stderr,
+                    }),
+                );
+            }
+            anyhow::bail!(
+                "ssh reverse forward 127.0.0.1:{} -> 127.0.0.1:{} exited with {}",
+                forward.remote_port,
+                forward.local_port,
+                status
+            );
+        }
+
+        if let Some(config) = log_config {
+            let _ = append_runtime_event_log(
+                config,
+                "agent/reverse_forward_started",
+                &json!({
+                    "remotePort": forward.remote_port,
+                    "localPort": forward.local_port,
+                }),
+            );
+        }
+
+        Ok(AgentChildGuard::new(child, self.shutdown_signal.clone()))
+    }
+}
+
 pub(super) fn build_remote_agent_command(
     remote_workspace_root: &str,
     command: &Path,
@@ -826,6 +921,27 @@ pub(super) fn build_remote_ssh_forward_args(
         "-N".to_string(),
         "-L".to_string(),
         format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+    ]);
+    if let Some(ssh_port) = ssh_port {
+        args.push("-p".to_string());
+        args.push(ssh_port.to_string());
+    }
+    args.push(ssh_target.to_string());
+    args
+}
+
+pub(super) fn build_remote_ssh_reverse_forward_args(
+    ssh_target: &str,
+    ssh_port: Option<u16>,
+    remote_port: u16,
+    local_port: u16,
+    has_password: bool,
+) -> Vec<String> {
+    let mut args = remote_ssh_base_args(has_password, false);
+    args.extend([
+        "-N".to_string(),
+        "-R".to_string(),
+        format!("127.0.0.1:{remote_port}:127.0.0.1:{local_port}"),
     ]);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());

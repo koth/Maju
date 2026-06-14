@@ -1,7 +1,7 @@
 use super::agent_process::{
     RemoteSshAgentProcess, build_remote_agent_command, build_remote_ssh_args,
-    build_remote_ssh_command_args, connect_loopback_tcp_with_retry, connect_tcp_stream,
-    kill_child_handle,
+    build_remote_ssh_command_args, build_remote_ssh_reverse_forward_args,
+    connect_loopback_tcp_with_retry, connect_tcp_stream, kill_child_handle,
 };
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::prompt_content::prompt_title_text;
@@ -193,6 +193,7 @@ fn remote_ssh_agent_process_waits_for_forward_and_finishes_after_tcp_close() {
             remote_workspace_root: "/srv/project".into(),
             local_port,
             remote_port,
+            reverse_forwards: Vec::new(),
             ssh_command: Some(fake_ssh.display().to_string()),
             ssh_password: None,
         }),
@@ -218,6 +219,19 @@ fn remote_ssh_agent_process_waits_for_forward_and_finishes_after_tcp_close() {
         }
         Err(_) => panic!("remote SSH agent process did not finish"),
     }
+}
+
+#[test]
+fn remote_ssh_reverse_forward_args_bind_remote_loopback_to_local_proxy() {
+    let args =
+        build_remote_ssh_reverse_forward_args("root@example.com", Some(2222), 17851, 17852, false);
+
+    assert!(args.contains(&"-R".to_string()));
+    assert!(args.contains(&"127.0.0.1:17851:127.0.0.1:17852".to_string()));
+    assert!(args.contains(&"-N".to_string()));
+    assert!(args.contains(&"-p".to_string()));
+    assert!(args.contains(&"2222".to_string()));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
 }
 
 #[test]

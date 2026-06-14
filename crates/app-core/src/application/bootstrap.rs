@@ -1,4 +1,7 @@
 use super::*;
+use crate::remote_ssh::{RemoteSshCommand, RemoteSshCommandRunner, SystemRemoteSshCommandRunner};
+use acp_core::RemoteSshReverseForward;
+use std::collections::BTreeSet;
 
 impl Application {
     pub fn bootstrap(
@@ -267,7 +270,7 @@ impl Application {
             agent_command,
             remote_key,
             local_port,
-            remote_ssh,
+            mut remote_ssh,
         } = prepared;
 
         crate::startup_perf::mark(
@@ -311,6 +314,9 @@ impl Application {
             }
         });
         let skip_replay = resume_session_id.is_some();
+        let remote_runtime = prepare_remote_agent_runtime(&agent_command, &app_paths, &remote_ssh)?;
+        remote_ssh.reverse_forwards = remote_runtime.reverse_forwards.clone();
+
         let session = crate::startup_perf::measure(
             "app/bootstrap_remote/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
@@ -320,7 +326,7 @@ impl Application {
                     app_data_root: app_paths.root().display().to_string(),
                     model: ui.session.model.clone(),
                     agent_command: agent_command.clone(),
-                    agent_env: Vec::new(),
+                    agent_env: remote_runtime.agent_env.clone(),
                     resume_session_id,
                     log_id: make_log_id(),
                     acp_port: local_port,
@@ -490,6 +496,7 @@ fn prepare_remote_linux_workspace(
         remote_workspace_root: remote.remote_path.clone(),
         local_port,
         remote_port,
+        reverse_forwards: Vec::new(),
         ssh_command: None,
         ssh_password: remote
             .ssh_password
@@ -519,6 +526,138 @@ fn normalize_workspace_root(workspace_root: &Path) -> std::path::PathBuf {
 fn find_available_loopback_port() -> anyhow::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
+}
+
+#[derive(Debug, Clone, Default)]
+struct RemoteAgentRuntime {
+    agent_env: Vec<(String, String)>,
+    reverse_forwards: Vec<RemoteSshReverseForward>,
+}
+
+fn prepare_remote_agent_runtime(
+    agent_command: &str,
+    app_paths: &AppPaths,
+    remote_ssh: &RemoteSshSessionConfig,
+) -> anyhow::Result<RemoteAgentRuntime> {
+    crate::settings::ensure_agent_ready_for_command(agent_command, app_paths)?;
+
+    let is_codex = crate::settings::is_codex_acp_command(agent_command);
+    let mut agent_env =
+        crate::settings::remote_agent_env_for_command(agent_command, app_paths, None);
+    let codex_config = if is_codex {
+        crate::settings::remote_codex_proxy_config(app_paths)?
+    } else {
+        None
+    };
+
+    if let Some(config) = codex_config.as_deref() {
+        let remote_home = resolve_remote_home(remote_ssh)?;
+        agent_env = crate::settings::remote_agent_env_for_command(
+            agent_command,
+            app_paths,
+            Some(&remote_home),
+        );
+        write_remote_codex_config(remote_ssh, config)?;
+    }
+
+    let reverse_forwards = remote_proxy_reverse_forwards(&agent_env, codex_config.as_deref());
+    Ok(RemoteAgentRuntime {
+        agent_env,
+        reverse_forwards,
+    })
+}
+
+fn resolve_remote_home(remote_ssh: &RemoteSshSessionConfig) -> anyhow::Result<String> {
+    let runner = SystemRemoteSshCommandRunner;
+    let output = runner.run_ssh_command(&RemoteSshCommand::new(
+        remote_ssh.ssh_target.clone(),
+        remote_ssh.ssh_port,
+        "printf '%s\\n' \"$HOME\"",
+        remote_ssh.ssh_password.as_deref(),
+        Duration::from_secs(8),
+    ));
+    if output.success {
+        let home = output.stdout.trim();
+        if !home.is_empty() {
+            return Ok(home.to_string());
+        }
+    }
+    anyhow::bail!(
+        "{}",
+        first_remote_ssh_message("远程 HOME 解析失败", &output)
+    )
+}
+
+fn write_remote_codex_config(
+    remote_ssh: &RemoteSshSessionConfig,
+    config: &str,
+) -> anyhow::Result<()> {
+    let runner = SystemRemoteSshCommandRunner;
+    let output = runner.run_ssh_command(
+        &RemoteSshCommand::new(
+            remote_ssh.ssh_target.clone(),
+            remote_ssh.ssh_port,
+            "mkdir -p \"$HOME/.kodex\" && cat > \"$HOME/.kodex/config.toml\"",
+            remote_ssh.ssh_password.as_deref(),
+            Duration::from_secs(12),
+        )
+        .with_stdin(config.as_bytes().to_vec()),
+    );
+    if output.success {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{}",
+        first_remote_ssh_message("远程 Codex 配置写入失败", &output)
+    )
+}
+
+fn remote_proxy_reverse_forwards(
+    agent_env: &[(String, String)],
+    codex_config: Option<&str>,
+) -> Vec<RemoteSshReverseForward> {
+    let mut ports = BTreeSet::new();
+    for (_, value) in agent_env {
+        collect_loopback_proxy_ports(value, &mut ports);
+    }
+    if let Some(config) = codex_config {
+        collect_loopback_proxy_ports(config, &mut ports);
+    }
+    ports
+        .into_iter()
+        .map(|port| RemoteSshReverseForward {
+            remote_port: port,
+            local_port: port,
+        })
+        .collect()
+}
+
+fn collect_loopback_proxy_ports(value: &str, ports: &mut BTreeSet<u16>) {
+    for marker in ["http://127.0.0.1:", "http://localhost:"] {
+        let mut rest = value;
+        while let Some(index) = rest.find(marker) {
+            let after = &rest[index + marker.len()..];
+            let digits = after
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>();
+            if let Ok(port) = digits.parse::<u16>()
+                && port > 0
+            {
+                ports.insert(port);
+            }
+            rest = after;
+        }
+    }
+}
+
+fn first_remote_ssh_message(prefix: &str, output: &crate::remote_ssh::RemoteSshOutput) -> String {
+    if output.timed_out {
+        return format!("{prefix}：SSH 命令超时");
+    }
+    let message = crate::remote_ssh::first_nonempty(&output.stderr, &output.stdout)
+        .unwrap_or_else(|| "SSH 命令失败但没有输出".into());
+    format!("{prefix}：{message}")
 }
 
 #[cfg(test)]
@@ -605,6 +744,41 @@ mod remote_tests {
                 .unwrap_err(),
             "Remote workspaces do not support local filesystem commands yet"
         );
+    }
+
+    #[test]
+    fn remote_proxy_reverse_forwards_extract_loopback_ports_from_env_and_config() {
+        let forwards = remote_proxy_reverse_forwards(
+            &[
+                (
+                    "ANTHROPIC_BASE_URL".into(),
+                    "http://127.0.0.1:17852/v1/providers/timiai".into(),
+                ),
+                ("OTHER".into(), "nothing".into()),
+            ],
+            Some(r#"base_url = "http://localhost:17853/v1""#),
+        );
+
+        assert_eq!(
+            forwards,
+            vec![
+                RemoteSshReverseForward {
+                    remote_port: 17852,
+                    local_port: 17852,
+                },
+                RemoteSshReverseForward {
+                    remote_port: 17853,
+                    local_port: 17853,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_proxy_reverse_forwards_ignore_non_proxy_env() {
+        let forwards = remote_proxy_reverse_forwards(&[("TOKEN".into(), "secret".into())], None);
+
+        assert!(forwards.is_empty());
     }
 
     #[test]

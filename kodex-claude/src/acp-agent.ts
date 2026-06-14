@@ -253,6 +253,12 @@ export type ClaudeAcpAgentOptions = {
   woa?: WoaConfig;
 };
 
+export type RunAcpOptions = {
+  woa?: WoaConfig;
+  input?: WritableStream<Uint8Array>;
+  output?: ReadableStream<Uint8Array>;
+};
+
 function isLogger(value: Logger | ClaudeAcpAgentOptions | undefined): value is Logger {
   return (
     !!value &&
@@ -4057,9 +4063,9 @@ export function streamEventToAcpNotifications(
   }
 }
 
-export function runAcp(options?: { woa?: WoaConfig }) {
-  const input = nodeToWebWritable(process.stdout);
-  const output = nodeToWebReadable(process.stdin);
+export function runAcp(options?: RunAcpOptions) {
+  const input = options?.input ?? nodeToWebWritable(process.stdout);
+  const output = options?.output ?? nodeToWebReadable(process.stdin);
 
   const stream = ndJsonStream(input, output);
   let agent!: ClaudeAcpAgent;

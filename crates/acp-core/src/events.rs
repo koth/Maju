@@ -65,10 +65,18 @@ pub struct RemoteSshSessionConfig {
     pub remote_workspace_root: String,
     pub local_port: u16,
     pub remote_port: u16,
+    #[serde(default)]
+    pub reverse_forwards: Vec<RemoteSshReverseForward>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub ssh_command: Option<String>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub ssh_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteSshReverseForward {
+    pub remote_port: u16,
+    pub local_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

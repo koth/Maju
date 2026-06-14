@@ -902,6 +902,7 @@ mod tests {
             remote_workspace_root: "/srv/project".into(),
             local_port: 4000,
             remote_port: 4000,
+            reverse_forwards: Vec::new(),
             ssh_command: None,
             ssh_password: Some("secret".into()),
         }

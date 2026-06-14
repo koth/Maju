@@ -795,7 +795,7 @@ const REMOTE_SETTINGS_FILES: &[&str] = &[
     "config/settings.json",
     "config/provider-secrets.json",
     "config/provider-models.json",
-    "config/config.toml",
+    "config.toml",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -990,8 +990,7 @@ fn settings_snapshot_from_remote_mirror(mirror: &RemoteSettingsMirror) -> AgentS
     let mut snapshot = settings_snapshot(&mirror.paths);
     snapshot.agents = remote_agent_statuses(&mirror.export, snapshot.settings.selected_agent);
     snapshot.env_override = mirror.export.env_override.clone();
-    snapshot.codex_acp.config_path =
-        remote_settings_path(&mirror.export.home, "config/config.toml");
+    snapshot.codex_acp.config_path = remote_settings_path(&mirror.export.home, "config.toml");
     snapshot
 }
 
@@ -1122,7 +1121,7 @@ const cp = require('child_process');
 const os = require('os');
 const home = process.env.HOME || os.homedir();
 const root = path.join(home, '.kodex');
-const rels = ['config/settings.json', 'config/provider-secrets.json', 'config/config.toml'];
+const rels = ['config/settings.json', 'config/provider-secrets.json', 'config/provider-models.json', 'config.toml'];
 function read(rel) {
   try { return fs.readFileSync(path.join(root, rel), 'utf8'); }
   catch (error) {
@@ -1141,6 +1140,7 @@ const agents = {
   'codex-acp': which('codex-acp'),
   'codebuddy': which('codebuddy')
 };
+if (files['config.toml'] == null) files['config.toml'] = read('config/config.toml');
 console.log(JSON.stringify({ home, files, agents, env_override: process.env.ACP_AGENT_COMMAND || null }));
 "#,
         )
@@ -1471,6 +1471,43 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
     env
 }
 
+pub fn remote_agent_env_for_command(
+    command: &str,
+    paths: &AppPaths,
+    remote_home: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut env = agent_env_for_command(command, paths);
+    if is_codex_acp_command(command)
+        && load_app_settings(paths).codex_connection_mode != CodexConnectionMode::Default
+    {
+        if let Some(home) = remote_home.map(str::trim).filter(|home| !home.is_empty()) {
+            env.push((
+                CODEX_HOME_ENV.to_string(),
+                format!("{}/.kodex", home.trim_end_matches('/')),
+            ));
+        }
+        scrub_remote_codex_provider_key_env(&mut env);
+    }
+    env
+}
+
+pub fn remote_codex_proxy_config(paths: &AppPaths) -> Result<Option<String>> {
+    if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
+        return Ok(None);
+    }
+    let path = codex_config_path(paths);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read Codex config {}", path.display()))?;
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("failed to parse Codex config {}", path.display()))?;
+    scrub_codex_config_api_keys(&mut doc);
+    Ok(Some(doc.to_string()))
+}
+
 pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result<()> {
     let settings = load_app_settings(paths);
     if !is_claude_agent_acp_command(command) {
@@ -1501,9 +1538,39 @@ pub fn is_claude_agent_acp_command(command: &str) -> bool {
     command.to_ascii_lowercase().contains("claude-agent-acp")
 }
 
-fn is_codex_acp_command(command: &str) -> bool {
+pub fn is_codex_acp_command(command: &str) -> bool {
     let command = command.to_ascii_lowercase();
     command.contains("codex-acp") || command.contains("kodex-acp")
+}
+
+fn scrub_remote_codex_provider_key_env(env: &mut [(String, String)]) {
+    for (name, value) in env {
+        if matches!(
+            name.as_str(),
+            BYOK_API_KEY_ENV
+                | TIMIAI_API_KEY_ENV
+                | COMMANDCODE_API_KEY_ENV
+                | DEEPSEEK_API_KEY_ENV
+                | KIMI_API_KEY_ENV
+                | MIMO_API_KEY_ENV
+        ) {
+            *value = "kodex-proxy".to_string();
+        }
+    }
+}
+
+fn scrub_codex_config_api_keys(doc: &mut DocumentMut) {
+    let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    for (_, provider) in providers.iter_mut() {
+        if let Some(table) = provider.as_table_like_mut() {
+            table.insert("api_key", value("kodex-proxy"));
+        }
+    }
 }
 
 fn claude_agent_configured_for_settings(paths: &AppPaths, settings: &AppSettings) -> bool {
@@ -3493,7 +3560,8 @@ mod tests {
                 "files": {
                     "config/settings.json": serde_json::to_string(settings).unwrap(),
                     "config/provider-secrets.json": null,
-                    "config/config.toml": null,
+                    "config/provider-models.json": null,
+                    "config.toml": null,
                 },
                 "agents": {
                     "claude-agent-acp": "/usr/local/bin/claude-agent-acp",
