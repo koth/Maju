@@ -15,6 +15,15 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const uiDir = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(uiDir, "../../..");
 const binaryName = process.platform === "win32" ? "codex-acp.exe" : "codex-acp";
+const expectedHost = expectedHostTriple();
+
+if (expectedHost && expectedHost !== `${process.platform}-${process.arch}`) {
+  console.error(
+    `[codex:stage] Host platform mismatch: expected ${expectedHost}, got ${process.platform}-${process.arch}.`,
+  );
+  process.exit(1);
+}
+
 const source = findSource();
 
 if (!source) {
@@ -53,12 +62,36 @@ function findSource() {
     candidates.push(process.env.KODEX_CODEX_ACP_BINARY);
   }
 
+  if (process.env.KODEX_CODEX_ACP_TARGET) {
+    candidates.push(
+      path.join(
+        repoRoot,
+        "codex-acp",
+        "target",
+        process.env.KODEX_CODEX_ACP_TARGET,
+        "release",
+        binaryName,
+      ),
+    );
+  }
+
   candidates.push(
     path.join(repoRoot, "codex-acp", "target", "release", binaryName),
     path.join(repoRoot, "target", "release", binaryName),
   );
 
   return candidates.find((candidate) => existsSync(candidate));
+}
+
+function expectedHostTriple() {
+  const platform = process.env.KODEX_EXPECTED_PLATFORM;
+  const arch = process.env.KODEX_EXPECTED_ARCH;
+
+  if (!platform && !arch) {
+    return null;
+  }
+
+  return `${platform ?? process.platform}-${arch ?? process.arch}`;
 }
 
 function stageBinary(sourcePath, destinationDir, outputName) {

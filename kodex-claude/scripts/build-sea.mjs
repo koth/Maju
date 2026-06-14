@@ -24,6 +24,8 @@ fs.rmSync(seaDir, { recursive: true, force: true });
 fs.mkdirSync(seaDir, { recursive: true });
 fs.mkdirSync(binDir, { recursive: true });
 
+verifyExpectedHost();
+
 const nativeClaude = findNativeClaudeBinary();
 console.log(`Using Claude native binary: ${nativeClaude}`);
 
@@ -102,6 +104,27 @@ function findNativeClaudeBinary() {
 
   throw new Error(
     `Claude native binary not found for ${process.platform}-${process.arch}. Run npm install in ${packageRoot}.`,
+  );
+}
+
+function verifyExpectedHost() {
+  const expectedPlatform = process.env.KODEX_EXPECTED_PLATFORM;
+  const expectedArch = process.env.KODEX_EXPECTED_ARCH;
+
+  if (!expectedPlatform && !expectedArch) {
+    return;
+  }
+
+  const actual = `${process.platform}-${process.arch}`;
+  const expected = `${expectedPlatform ?? process.platform}-${expectedArch ?? process.arch}`;
+
+  if (actual === expected) {
+    return;
+  }
+
+  throw new Error(
+    `Host platform mismatch for Claude SEA build: expected ${expected}, got ${actual}. ` +
+      "The embedded Claude native binary is selected from the host platform, so release builds must run on a matching runner.",
   );
 }
 
