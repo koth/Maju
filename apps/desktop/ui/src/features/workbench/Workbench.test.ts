@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   findPendingPermissionRequest,
   findPendingPlanApproval,
+  isTerminalDockAvailableForWorkspace,
   pendingPermissionRequestIds,
+  shouldRenderTerminalDock,
 } from "./Workbench";
-import type { ToolInvocation } from "../../types";
+import type { ToolInvocation, WorkspaceDescriptor } from "../../types";
 
 describe("findPendingPlanApproval", () => {
   it("recognizes CodeBuddy ExitPlanMode permission options", () => {
@@ -75,6 +77,24 @@ describe("findPendingPlanApproval", () => {
     expect(approval?.requestId).toBe("call-exit-plan");
     expect(approval?.planText).toContain("# Negative Terms Plan");
     expect(approval?.planText).not.toContain(".codebuddy/plans");
+  });
+});
+
+describe("terminal dock availability", () => {
+  it("renders the terminal dock for remote Linux workspaces when mounted", () => {
+    const remoteWorkspace: WorkspaceDescriptor = {
+      id: "remote",
+      name: "project",
+      root: "ssh://devbox/srv/project",
+      location: {
+        kind: "remote_linux",
+        ssh_target: "devbox",
+        remote_path: "/srv/project",
+      },
+    };
+
+    expect(isTerminalDockAvailableForWorkspace(remoteWorkspace)).toBe(true);
+    expect(shouldRenderTerminalDock(remoteWorkspace, true)).toBe(true);
   });
 });
 

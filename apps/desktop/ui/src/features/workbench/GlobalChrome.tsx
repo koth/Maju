@@ -106,10 +106,10 @@ export function GlobalChrome({
 
   const showDropdown = searchOpen && (searchLoading || searchError !== null || searchResult !== null);
   const chromeClassName = `global-chrome ${isMacOS() ? "is-macos" : ""}`;
-  const terminalTitle = remoteWorkspace
-    ? "远程工作区暂不支持本地终端"
-    : terminalDockVisible
-      ? "隐藏终端"
+  const terminalTitle = terminalDockVisible
+    ? "隐藏终端"
+    : remoteWorkspace
+      ? "打开远程终端"
       : "打开终端";
   const searchTitle = "搜索工作区";
   const gitRefreshTitle = "刷新 Git 状态";
@@ -145,12 +145,11 @@ export function GlobalChrome({
         </button>
         <button
           type="button"
-          className={`chrome-icon-btn ${!remoteWorkspace && terminalDockVisible ? "is-active" : ""}`}
+          className={`chrome-icon-btn ${terminalDockVisible ? "is-active" : ""}`}
           onClick={onToggleTerminal}
-          disabled={remoteWorkspace}
           title={terminalTitle}
           aria-label={terminalTitle}
-          aria-pressed={!remoteWorkspace && terminalDockVisible}
+          aria-pressed={terminalDockVisible}
         >
           <TerminalIcon />
         </button>

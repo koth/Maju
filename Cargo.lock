@@ -4571,6 +4571,7 @@ dependencies = [
  "anyhow",
  "portable-pty",
  "serde",
+ "shell-words",
  "tempfile",
  "uuid",
  "workspace-model",

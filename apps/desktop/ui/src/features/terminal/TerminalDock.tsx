@@ -14,6 +14,7 @@ import {
 } from "../../lib/tauri";
 import { onTerminalExit, onTerminalOutput, onTerminalStatus } from "../../lib/events";
 import type { AppTheme, TerminalSession, TerminalSessionStatus } from "../../types";
+import { sameWorkspaceRoot } from "./workspace-root";
 import "./TerminalDock.css";
 
 type GhosttyTerminal = InstanceType<typeof Terminal>;
@@ -105,14 +106,6 @@ function terminalPalette(appTheme: AppTheme) {
 function clampHeight(value: number) {
   const max = Math.max(MIN_HEIGHT, Math.floor(window.innerHeight * MAX_VIEWPORT_RATIO));
   return Math.min(max, Math.max(MIN_HEIGHT, Math.round(value)));
-}
-
-function normalizeWorkspaceRoot(value: string) {
-  return value.replace(/\\/g, "/").toLowerCase();
-}
-
-function sameWorkspaceRoot(a: string, b: string) {
-  return normalizeWorkspaceRoot(a) === normalizeWorkspaceRoot(b);
 }
 
 function trimTerminalBuffer(value: string) {

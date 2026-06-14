@@ -4,7 +4,11 @@ use std::collections::HashMap;
 use std::env;
 #[cfg(windows)]
 use std::ffi::OsString;
+#[cfg(unix)]
+use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -12,12 +16,17 @@ use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
 use workspace_model::{
-    TerminalExitEvent, TerminalOutputEvent, TerminalSession, TerminalSessionStatus,
-    TerminalStatusEvent,
+    RemoteLinuxWorkspace, TerminalExitEvent, TerminalOutputEvent, TerminalSession,
+    TerminalSessionStatus, TerminalStatusEvent,
 };
 
 pub type TerminalEventSink = Arc<dyn Fn(TerminalServiceEvent) + Send + Sync + 'static>;
 const TERMINAL_OUTPUT_BUFFER_LIMIT: usize = 1_000_000;
+const REMOTE_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
+const REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS: u64 = 15;
+const REMOTE_SSH_SERVER_ALIVE_COUNT_MAX: u64 = 4;
+const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
+const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalServiceEvent {
@@ -40,10 +49,17 @@ struct Inner {
 struct TerminalEntry {
     session: TerminalSession,
     workspace_key: String,
+    launch: TerminalLaunch,
     master: Box<dyn MasterPty + Send>,
     input_tx: mpsc::Sender<String>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     output_buffer: Arc<Mutex<String>>,
+}
+
+#[derive(Clone)]
+enum TerminalLaunch {
+    Local { workspace_root: PathBuf },
+    Remote { workspace: RemoteLinuxWorkspace },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +120,62 @@ impl TerminalService {
         self.spawn_workspace_terminal(workspace_root, workspace_key, cols, rows)
     }
 
+    pub fn open_remote_workspace(
+        &self,
+        workspace: &RemoteLinuxWorkspace,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<TerminalSession> {
+        let workspace = normalize_remote_terminal_workspace(workspace)?;
+        let workspace_key = remote_terminal_workspace_key(&workspace);
+        let cols = sanitize_cols(cols);
+        let rows = sanitize_rows(rows);
+
+        if let Some(existing) = self.live_terminal_for_workspace(&workspace_key)? {
+            return Ok(existing);
+        }
+
+        self.remove_exited_for_workspace(&workspace_key)?;
+
+        self.spawn_remote_workspace_terminal(workspace, workspace_key, cols, rows, "ssh")
+    }
+
+    pub fn open_remote_workspace_new(
+        &self,
+        workspace: &RemoteLinuxWorkspace,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<TerminalSession> {
+        let workspace = normalize_remote_terminal_workspace(workspace)?;
+        let workspace_key = remote_terminal_workspace_key(&workspace);
+        let cols = sanitize_cols(cols);
+        let rows = sanitize_rows(rows);
+
+        self.spawn_remote_workspace_terminal(workspace, workspace_key, cols, rows, "ssh")
+    }
+
+    #[cfg(test)]
+    fn open_remote_workspace_with_ssh_command(
+        &self,
+        workspace: &RemoteLinuxWorkspace,
+        cols: u16,
+        rows: u16,
+        ssh_command: &str,
+    ) -> anyhow::Result<TerminalSession> {
+        let workspace = normalize_remote_terminal_workspace(workspace)?;
+        let workspace_key = remote_terminal_workspace_key(&workspace);
+        let cols = sanitize_cols(cols);
+        let rows = sanitize_rows(rows);
+
+        if let Some(existing) = self.live_terminal_for_workspace(&workspace_key)? {
+            return Ok(existing);
+        }
+
+        self.remove_exited_for_workspace(&workspace_key)?;
+
+        self.spawn_remote_workspace_terminal(workspace, workspace_key, cols, rows, ssh_command)
+    }
+
     fn spawn_workspace_terminal(
         &self,
         workspace_root: PathBuf,
@@ -112,26 +184,82 @@ impl TerminalService {
         rows: u16,
     ) -> anyhow::Result<TerminalSession> {
         let shell = default_shell_profile();
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to open PTY")?;
-
         let mut command = CommandBuilder::new(&shell.command);
         for arg in &shell.args {
             command.arg(arg);
         }
         configure_workspace_command(&mut command, &workspace_root);
 
+        let session = TerminalSession {
+            terminal_id: Uuid::new_v4().to_string(),
+            workspace_root: workspace_key,
+            cwd: workspace_root.display().to_string(),
+            shell: shell.display_name,
+            status: TerminalSessionStatus::Running,
+            exit_code: None,
+            cols,
+            rows,
+        };
+        let launch = TerminalLaunch::Local { workspace_root };
+        self.spawn_terminal(
+            command,
+            session,
+            launch,
+            format!("failed to start shell {}", shell.command),
+        )
+    }
+
+    fn spawn_remote_workspace_terminal(
+        &self,
+        workspace: RemoteLinuxWorkspace,
+        workspace_key: String,
+        cols: u16,
+        rows: u16,
+        ssh_command: &str,
+    ) -> anyhow::Result<TerminalSession> {
+        let remote_path = sanitize_remote_workspace_root(&workspace.remote_path)?;
+        let command = build_remote_terminal_command(&workspace, &remote_path, ssh_command)?;
+
+        let session = TerminalSession {
+            terminal_id: Uuid::new_v4().to_string(),
+            workspace_root: workspace_key,
+            cwd: remote_path,
+            shell: remote_terminal_shell_label(&workspace),
+            status: TerminalSessionStatus::Running,
+            exit_code: None,
+            cols,
+            rows,
+        };
+        let launch = TerminalLaunch::Remote { workspace };
+        self.spawn_terminal(
+            command,
+            session,
+            launch,
+            "failed to start remote terminal over SSH".to_string(),
+        )
+    }
+
+    fn spawn_terminal(
+        &self,
+        command: CommandBuilder,
+        session: TerminalSession,
+        launch: TerminalLaunch,
+        spawn_error_context: String,
+    ) -> anyhow::Result<TerminalSession> {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: session.rows,
+                cols: session.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("failed to open PTY")?;
+
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("failed to start shell {}", shell.command))?;
+            .with_context(|| spawn_error_context.clone())?;
         let killer = child.clone_killer();
         drop(pair.slave);
 
@@ -144,17 +272,8 @@ impl TerminalService {
             .take_writer()
             .context("failed to take PTY writer")?;
 
-        let terminal_id = Uuid::new_v4().to_string();
-        let session = TerminalSession {
-            terminal_id: terminal_id.clone(),
-            workspace_root: workspace_key.clone(),
-            cwd: workspace_root.display().to_string(),
-            shell: shell.display_name,
-            status: TerminalSessionStatus::Running,
-            exit_code: None,
-            cols,
-            rows,
-        };
+        let terminal_id = session.terminal_id.clone();
+        let workspace_key = session.workspace_root.clone();
 
         let seq = Arc::new(AtomicU64::new(0));
         let output_buffer = Arc::new(Mutex::new(String::new()));
@@ -208,6 +327,7 @@ impl TerminalService {
         let entry = TerminalEntry {
             session: session.clone(),
             workspace_key,
+            launch,
             master: pair.master,
             input_tx,
             killer,
@@ -310,10 +430,17 @@ impl TerminalService {
                 .remove(terminal_id)
                 .ok_or_else(|| anyhow!("terminal not found"))?
         };
-        let workspace_root = PathBuf::from(entry.session.workspace_root.clone());
+        let launch = entry.launch.clone();
         emit_closed_async(self.event_sink(), entry.session.clone(), None);
         kill_entries_async(vec![entry]);
-        self.open_workspace_new(workspace_root, cols, rows)
+        match launch {
+            TerminalLaunch::Local { workspace_root } => {
+                self.open_workspace_new(workspace_root, cols, rows)
+            }
+            TerminalLaunch::Remote { workspace } => {
+                self.open_remote_workspace_new(&workspace, cols, rows)
+            }
+        }
     }
 
     pub fn list_workspace(
@@ -321,6 +448,18 @@ impl TerminalService {
         workspace_root: impl AsRef<Path>,
     ) -> anyhow::Result<Vec<TerminalSession>> {
         let workspace_key = normalize_path_key(&canonical_workspace_root(workspace_root.as_ref())?);
+        self.list_workspace_key(&workspace_key)
+    }
+
+    pub fn list_remote_workspace(
+        &self,
+        workspace: &RemoteLinuxWorkspace,
+    ) -> anyhow::Result<Vec<TerminalSession>> {
+        let workspace = normalize_remote_terminal_workspace(workspace)?;
+        self.list_workspace_key(&remote_terminal_workspace_key(&workspace))
+    }
+
+    pub fn list_workspace_key(&self, workspace_key: &str) -> anyhow::Result<Vec<TerminalSession>> {
         let inner = self.inner.lock().map_err(|e| anyhow!(e.to_string()))?;
         Ok(inner
             .sessions
@@ -335,6 +474,10 @@ impl TerminalService {
             return;
         };
         let workspace_key = normalize_path_key(&workspace_root);
+        self.shutdown_workspace_key(&workspace_key);
+    }
+
+    pub fn shutdown_workspace_key(&self, workspace_key: &str) {
         let entries = {
             let Ok(mut inner) = self.inner.lock() else {
                 return;
@@ -588,6 +731,178 @@ fn normalize_path_key(path: &Path) -> String {
     }
 }
 
+fn normalize_remote_terminal_workspace(
+    workspace: &RemoteLinuxWorkspace,
+) -> anyhow::Result<RemoteLinuxWorkspace> {
+    let ssh_target = workspace.ssh_target.trim();
+    if ssh_target.is_empty() {
+        bail!("SSH target cannot be empty");
+    }
+    if workspace.ssh_port == Some(0) {
+        bail!("SSH port must be between 1 and 65535");
+    }
+    let remote_path = sanitize_remote_workspace_root(&workspace.remote_path)?;
+
+    let mut normalized = workspace.clone();
+    normalized.ssh_target = ssh_target.to_string();
+    normalized.remote_path = remote_path;
+    Ok(normalized)
+}
+
+fn sanitize_remote_workspace_root(path: &str) -> anyhow::Result<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        bail!("Remote workspace path cannot be empty");
+    }
+    if !path.starts_with('/') {
+        bail!("Remote workspace path must be absolute");
+    }
+    if path.contains('\0') {
+        bail!("Remote workspace path cannot contain NUL bytes");
+    }
+    Ok(path.to_string())
+}
+
+fn remote_terminal_workspace_key(workspace: &RemoteLinuxWorkspace) -> String {
+    workspace.key()
+}
+
+fn remote_terminal_shell_label(workspace: &RemoteLinuxWorkspace) -> String {
+    format!("ssh {}", workspace.ssh_target.trim())
+}
+
+fn build_remote_terminal_command(
+    workspace: &RemoteLinuxWorkspace,
+    remote_path: &str,
+    ssh_command: &str,
+) -> anyhow::Result<CommandBuilder> {
+    let remote_command = remote_terminal_shell_command(remote_path)?;
+    let has_password = workspace
+        .ssh_password
+        .as_deref()
+        .is_some_and(|password| !password.is_empty());
+    let args = build_remote_terminal_ssh_args(workspace, remote_command, has_password);
+    let mut command = CommandBuilder::new(ssh_command);
+    for arg in args {
+        command.arg(arg);
+    }
+    if let Some(password) = workspace
+        .ssh_password
+        .as_deref()
+        .filter(|password| !password.is_empty())
+    {
+        configure_ssh_askpass(&mut command, password)?;
+    }
+    Ok(command)
+}
+
+fn build_remote_terminal_ssh_args(
+    workspace: &RemoteLinuxWorkspace,
+    remote_command: String,
+    has_password: bool,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if has_password {
+        args.extend(["-o".to_string(), "NumberOfPasswordPrompts=1".to_string()]);
+    }
+    args.extend([
+        "-o".to_string(),
+        format!("ConnectTimeout={REMOTE_SSH_CONNECT_TIMEOUT_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveInterval={REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveCountMax={REMOTE_SSH_SERVER_ALIVE_COUNT_MAX}"),
+    ]);
+    args.extend(ssh_multiplex_args());
+    args.push("-tt".to_string());
+    if let Some(port) = workspace.ssh_port {
+        args.push("-p".to_string());
+        args.push(port.to_string());
+    }
+    args.push(workspace.ssh_target.trim().to_string());
+    args.push(remote_command);
+    args
+}
+
+fn remote_terminal_shell_command(remote_path: &str) -> anyhow::Result<String> {
+    let remote_path = sanitize_remote_workspace_root(remote_path)?;
+    Ok(format!(
+        "cd {} || exit $?; if [ -n \"${{SHELL:-}}\" ] && [ -x \"${{SHELL:-}}\" ]; then exec \"$SHELL\" -l; else exec /bin/sh -l; fi",
+        shell_quote(&remote_path)
+    ))
+}
+
+fn configure_ssh_askpass(command: &mut CommandBuilder, password: &str) -> anyhow::Result<()> {
+    let askpass = env::current_exe()?;
+    command.env("SSH_ASKPASS", askpass.as_os_str());
+    command.env("SSH_ASKPASS_REQUIRE", "force");
+    command.env("DISPLAY", "kodex");
+    command.env(KODEX_SSH_ASKPASS_ENV, "1");
+    command.env(KODEX_SSH_ASKPASS_PASSWORD_ENV, password);
+    Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    shell_words::quote(value).into_owned()
+}
+
+#[cfg(unix)]
+fn ssh_multiplex_args() -> Vec<String> {
+    let Some(control_path) = ssh_control_path_template() else {
+        return Vec::new();
+    };
+    vec![
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=300".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={control_path}"),
+    ]
+}
+
+#[cfg(not(unix))]
+fn ssh_multiplex_args() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn ssh_control_path_template() -> Option<String> {
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        let dir = PathBuf::from(home).join(".kodex").join("ssh-control");
+        if fs::create_dir_all(&dir).is_ok() {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            let path = dir.join("%C");
+            let path = path.to_string_lossy().into_owned();
+            if path.len() < 95 {
+                return Some(path);
+            }
+        }
+    }
+
+    let user = env::var("USER")
+        .ok()
+        .map(|value| sanitize_control_path_part(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "user".into());
+    Some(format!("/tmp/kodex-ssh-{user}-%C"))
+}
+
+#[cfg(unix)]
+fn sanitize_control_path_part(value: &str) -> String {
+    value
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                Some(ch)
+            } else {
+                None
+            }
+        })
+        .take(32)
+        .collect()
+}
+
 fn clean_canonical_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
@@ -699,6 +1014,10 @@ fn resolve_command_on_path(command: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -742,6 +1061,98 @@ mod tests {
 
         assert_eq!(command.get_cwd(), Some(&expected_cwd));
         assert_eq!(command.get_env("PWD"), Some(dir.path().as_os_str()));
+    }
+
+    #[test]
+    fn remote_terminal_ssh_args_request_tty_and_target_workspace() {
+        let remote = remote_fixture();
+        let remote_command = remote_terminal_shell_command(&remote.remote_path).unwrap();
+
+        let args = build_remote_terminal_ssh_args(&remote, remote_command.clone(), false);
+
+        assert!(args.contains(&"-tt".to_string()));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "2222"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ConnectTimeout=5"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveInterval=15"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveCountMax=4"])
+        );
+        assert_eq!(args[args.len() - 2], "alice@devbox");
+        assert_eq!(args.last(), Some(&remote_command));
+        assert!(!args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
+    }
+
+    #[test]
+    fn remote_terminal_shell_command_quotes_workspace_root() {
+        let command = remote_terminal_shell_command("/srv/Kodex Project's").unwrap();
+
+        assert!(command.starts_with(&format!(
+            "cd {} || exit $?",
+            shell_quote("/srv/Kodex Project's")
+        )));
+        assert!(command.contains("exec \"$SHELL\" -l"));
+        assert!(command.contains("exec /bin/sh -l"));
+    }
+
+    #[test]
+    fn remote_terminal_command_uses_askpass_for_one_time_password() {
+        let mut remote = remote_fixture();
+        remote.ssh_password = Some("secret".into());
+
+        let command = build_remote_terminal_command(&remote, &remote.remote_path, "ssh").unwrap();
+
+        assert_eq!(
+            command.get_env("SSH_ASKPASS_REQUIRE"),
+            Some(OsStr::new("force"))
+        );
+        assert_eq!(command.get_env("DISPLAY"), Some(OsStr::new("kodex")));
+        assert_eq!(
+            command.get_env(KODEX_SSH_ASKPASS_ENV),
+            Some(OsStr::new("1"))
+        );
+        assert_eq!(
+            command.get_env(KODEX_SSH_ASKPASS_PASSWORD_ENV),
+            Some(OsStr::new("secret"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_workspace_terminal_uses_remote_metadata_and_reuses_live_session() {
+        let dir = tempdir().unwrap();
+        let fake_ssh = dir.path().join("fake-ssh");
+        fs::write(
+            &fake_ssh,
+            "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nwhile true; do sleep 1; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let service = TerminalService::new();
+        let remote = remote_fixture();
+        let first = service
+            .open_remote_workspace_with_ssh_command(&remote, 80, 24, fake_ssh.to_str().unwrap())
+            .unwrap();
+
+        assert_eq!(first.workspace_root, remote.key());
+        assert_eq!(first.cwd, "/srv/Kodex Project");
+        assert_eq!(first.shell, "ssh alice@devbox");
+
+        let second = service
+            .open_remote_workspace_with_ssh_command(&remote, 100, 30, fake_ssh.to_str().unwrap())
+            .unwrap();
+        assert_eq!(first.terminal_id, second.terminal_id);
+        assert_eq!(service.list_remote_workspace(&remote).unwrap().len(), 1);
+
+        service.shutdown_workspace_key(&remote.key());
+        assert!(service.list_remote_workspace(&remote).unwrap().is_empty());
     }
 
     #[test]
@@ -822,5 +1233,19 @@ mod tests {
         service.shutdown_workspace(dir.path());
         assert!(service.list_workspace(dir.path()).unwrap().is_empty());
         let _ = service.terminate(&session.terminal_id);
+    }
+
+    fn remote_fixture() -> RemoteLinuxWorkspace {
+        RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "alice@devbox".into(),
+            ssh_port: Some(2222),
+            remote_path: "/srv/Kodex Project".into(),
+            ssh_password: None,
+            agent_cli: None,
+            agent_command: None,
+            local_port: None,
+            remote_port: None,
+        }
     }
 }

@@ -35,6 +35,11 @@ struct WorkspaceMetadata {
     sessions: Vec<SessionListItem>,
 }
 
+enum ResolvedTerminalWorkspace {
+    Local(PathBuf),
+    Remote(RemoteLinuxWorkspace),
+}
+
 impl AppState {
     pub fn new() -> Self {
         app_core::startup_perf::mark("state/new", "");
@@ -172,10 +177,11 @@ impl AppState {
             .map(entry_is_remote)
             .unwrap_or(false);
         let closing_root = guard.workspaces.get(&active_key).and_then(entry_path);
+        let closing_remote_key = closing_entry_remote.then(|| active_key.clone());
         guard.workspaces.remove(&active_key);
-        if let Some(root) = closing_root
-            && !closing_entry_remote
-        {
+        if let Some(remote_key) = closing_remote_key {
+            self.terminal_service.shutdown_workspace_key(&remote_key);
+        } else if let Some(root) = closing_root {
             self.lsp_service.shutdown_workspace(&root);
             self.terminal_service.shutdown_workspace(&root);
         }
@@ -209,15 +215,29 @@ impl AppState {
     }
 
     pub fn terminal_open(&self, request: TerminalOpenRequest) -> Result<TerminalSession, String> {
-        let path = self.resolve_terminal_workspace(request.workspace_root)?;
-        if request.force_new {
-            self.terminal_service
-                .open_workspace_new(path, request.cols, request.rows)
-                .map_err(|e| e.to_string())
-        } else {
-            self.terminal_service
-                .open_workspace(path, request.cols, request.rows)
-                .map_err(|e| e.to_string())
+        match self.resolve_terminal_workspace(request.workspace_root)? {
+            ResolvedTerminalWorkspace::Local(path) => {
+                if request.force_new {
+                    self.terminal_service
+                        .open_workspace_new(path, request.cols, request.rows)
+                        .map_err(|e| e.to_string())
+                } else {
+                    self.terminal_service
+                        .open_workspace(path, request.cols, request.rows)
+                        .map_err(|e| e.to_string())
+                }
+            }
+            ResolvedTerminalWorkspace::Remote(remote) => {
+                if request.force_new {
+                    self.terminal_service
+                        .open_remote_workspace_new(&remote, request.cols, request.rows)
+                        .map_err(|e| e.to_string())
+                } else {
+                    self.terminal_service
+                        .open_remote_workspace(&remote, request.cols, request.rows)
+                        .map_err(|e| e.to_string())
+                }
+            }
         }
     }
 
@@ -261,20 +281,30 @@ impl AppState {
         &self,
         workspace_root: Option<String>,
     ) -> Result<Vec<TerminalSession>, String> {
-        let path = self.resolve_terminal_workspace(workspace_root)?;
-        self.terminal_service
-            .list_workspace(path)
-            .map_err(|e| e.to_string())
+        match self.resolve_terminal_workspace(workspace_root)? {
+            ResolvedTerminalWorkspace::Local(path) => self
+                .terminal_service
+                .list_workspace(path)
+                .map_err(|e| e.to_string()),
+            ResolvedTerminalWorkspace::Remote(remote) => self
+                .terminal_service
+                .list_remote_workspace(&remote)
+                .map_err(|e| e.to_string()),
+        }
     }
 
     fn resolve_terminal_workspace(
         &self,
         workspace_root: Option<String>,
-    ) -> Result<PathBuf, String> {
-        if let Some(path) = workspace_root {
-            return Ok(PathBuf::from(path));
-        }
+    ) -> Result<ResolvedTerminalWorkspace, String> {
         let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if let Some(path) = workspace_root {
+            if let Some(key) = workspace_key_for_identifier(&guard, &path) {
+                let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+                return terminal_workspace_from_entry(entry);
+            }
+            return Ok(ResolvedTerminalWorkspace::Local(PathBuf::from(path)));
+        }
         let active_key = guard
             .active_workspace
             .as_deref()
@@ -283,10 +313,7 @@ impl AppState {
             .workspaces
             .get(active_key)
             .ok_or("Workspace is not open")?;
-        if entry_is_remote(entry) {
-            return Err("Remote workspaces do not support the local terminal dock yet".into());
-        }
-        entry_path(entry).ok_or_else(|| "Workspace is not open".into())
+        terminal_workspace_from_entry(entry)
     }
 
     pub fn list_open_workspaces(&self) -> Result<Vec<OpenWorkspaceItem>, String> {
@@ -837,6 +864,17 @@ fn entry_remote(entry: &WorkspaceEntry) -> Option<RemoteLinuxWorkspace> {
     }
 }
 
+fn terminal_workspace_from_entry(
+    entry: &WorkspaceEntry,
+) -> Result<ResolvedTerminalWorkspace, String> {
+    if let Some(remote) = entry_remote(entry) {
+        return Ok(ResolvedTerminalWorkspace::Remote(remote));
+    }
+    entry_path(entry)
+        .map(ResolvedTerminalWorkspace::Local)
+        .ok_or_else(|| "Workspace is not open".into())
+}
+
 fn workspace_key_for_identifier(guard: &WorkspaceRegistry, identifier: &str) -> Option<String> {
     let normalized = normalize_tracked_path(identifier);
     if guard.workspaces.contains_key(&normalized) {
@@ -902,6 +940,14 @@ fn remote_workspace_key(remote: &RemoteLinuxWorkspace) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn dormant_workspace_session_list_exposes_names_without_connection() {
@@ -1191,6 +1237,106 @@ mod tests {
     }
 
     #[test]
+    fn active_remote_workspace_lists_terminal_sessions_by_remote_key() {
+        let state = AppState::new();
+        let remote = remote_terminal_fixture();
+        state
+            .restore_active_dormant_remote_workspace(remote.clone())
+            .unwrap();
+
+        let sessions = state.terminal_list(None).unwrap();
+        let explicit_sessions = state.terminal_list(Some(remote.key())).unwrap();
+
+        assert!(sessions.is_empty());
+        assert!(explicit_sessions.is_empty());
+    }
+
+    #[test]
+    fn explicit_terminal_workspace_resolves_remote_key_before_local_fallback() {
+        let state = AppState::new();
+        let remote = remote_terminal_fixture();
+        state
+            .restore_dormant_remote_workspace(remote.clone())
+            .unwrap();
+
+        match state
+            .resolve_terminal_workspace(Some(remote.key()))
+            .expect("remote key resolves")
+        {
+            ResolvedTerminalWorkspace::Remote(resolved) => assert_eq!(resolved, remote),
+            ResolvedTerminalWorkspace::Local(path) => {
+                panic!(
+                    "expected remote workspace, got local path {}",
+                    path.display()
+                )
+            }
+        }
+
+        match state
+            .resolve_terminal_workspace(Some("__missing_terminal_workspace__".into()))
+            .expect("unknown explicit workspace falls back to local compatibility")
+        {
+            ResolvedTerminalWorkspace::Local(path) => {
+                assert_eq!(path, PathBuf::from("__missing_terminal_workspace__"));
+            }
+            ResolvedTerminalWorkspace::Remote(_) => panic!("unexpected remote workspace"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_terminal_open_and_close_workspace_use_remote_terminal_key() {
+        let _lock = ssh_path_lock().lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("kodex-fake-ssh-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let fake_ssh = dir.join("ssh");
+        fs::write(
+            &fake_ssh,
+            "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nwhile true; do sleep 1; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_ssh, fs::Permissions::from_mode(0o700)).unwrap();
+        let _path_guard = prepend_path_for_test(&dir);
+
+        let state = AppState::new();
+        let remote = remote_terminal_fixture();
+        state
+            .restore_active_dormant_remote_workspace(remote.clone())
+            .unwrap();
+
+        let session = state
+            .terminal_open(TerminalOpenRequest {
+                workspace_root: None,
+                force_new: false,
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+
+        assert_eq!(session.workspace_root, remote.key());
+        assert_eq!(session.cwd, remote.remote_path);
+        assert_eq!(
+            state
+                .terminal_service
+                .list_workspace_key(&remote.key())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        state.close_workspace().unwrap();
+        assert!(
+            state
+                .terminal_service
+                .list_workspace_key(&remote.key())
+                .unwrap()
+                .is_empty()
+        );
+        state.shutdown_all();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn active_dormant_workspace_lists_files_after_connecting() {
         let path = std::env::temp_dir().join(format!(
             "kodex-dormant-list-files-test-{}",
@@ -1223,5 +1369,58 @@ mod tests {
         drop(guard);
         state.shutdown_all();
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    fn remote_terminal_fixture() -> RemoteLinuxWorkspace {
+        RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(2222),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        }
+    }
+
+    #[cfg(unix)]
+    fn ssh_path_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    struct PathOverride {
+        previous: Option<OsString>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for PathOverride {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => unsafe {
+                    std::env::set_var("PATH", previous);
+                },
+                None => unsafe {
+                    std::env::remove_var("PATH");
+                },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn prepend_path_for_test(path: &Path) -> PathOverride {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        if let Some(previous) = previous.as_ref() {
+            paths.extend(std::env::split_paths(previous));
+        }
+        let next = std::env::join_paths(paths).unwrap();
+        unsafe {
+            std::env::set_var("PATH", next);
+        }
+        PathOverride { previous }
     }
 }

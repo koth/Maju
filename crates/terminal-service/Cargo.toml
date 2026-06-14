@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 portable-pty.workspace = true
 serde.workspace = true
+shell-words.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
 

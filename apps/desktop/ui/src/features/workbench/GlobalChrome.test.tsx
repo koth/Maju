@@ -66,7 +66,7 @@ describe("GlobalChrome", () => {
     vi.clearAllMocks();
   });
 
-  it("disables local-only terminal for remote workspaces but keeps search and git available", () => {
+  it("enables remote terminal for remote workspaces and keeps search and git available", () => {
     const onToggleTerminal = vi.fn();
     const onRefreshGit = vi.fn();
 
@@ -77,11 +77,11 @@ describe("GlobalChrome", () => {
       onRefreshGit,
     });
 
-    const terminal = screen.getByRole("button", { name: "远程工作区暂不支持本地终端" });
+    const terminal = screen.getByRole("button", { name: "打开远程终端" });
     const search = screen.getByRole("button", { name: "搜索工作区" });
     const git = screen.getByRole("button", { name: "刷新 Git 状态" });
 
-    expect(terminal).toBeDisabled();
+    expect(terminal).not.toBeDisabled();
     expect(search).not.toBeDisabled();
     expect(git).not.toBeDisabled();
 
@@ -89,7 +89,7 @@ describe("GlobalChrome", () => {
     fireEvent.click(search);
     fireEvent.click(git);
 
-    expect(onToggleTerminal).not.toHaveBeenCalled();
+    expect(onToggleTerminal).toHaveBeenCalledOnce();
     expect(onRefreshGit).toHaveBeenCalledOnce();
     expect(screen.getByPlaceholderText("搜索文件...")).toBeInTheDocument();
     expect(fsSearch).not.toHaveBeenCalled();

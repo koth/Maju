@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse } from "../../types";
+import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
 import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
@@ -477,7 +477,7 @@ export function Workbench() {
   }
 
   const isRemoteWorkspace = snapshot.workspace.location?.kind === "remote_linux";
-  const terminalDockAvailable = !isRemoteWorkspace;
+  const terminalDockAvailable = isTerminalDockAvailableForWorkspace(snapshot.workspace);
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentLabel = snapshot.session.agent_cli || "智能体";
   const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
@@ -686,7 +686,7 @@ export function Workbench() {
             </aside>
           )}
         </div>
-        {terminalDockAvailable && terminalDockMounted && (
+        {shouldRenderTerminalDock(snapshot.workspace, terminalDockMounted) && (
           <TerminalDock
             key={snapshot.workspace.root}
             workspaceRoot={snapshot.workspace.root}
@@ -806,6 +806,14 @@ export function findPendingPermissionRequests(tools: ToolInvocation[]): PendingP
 
 export function pendingPermissionRequestIds(tools: ToolInvocation[]) {
   return tools.filter(isPendingPermissionTool).map((tool) => tool.call_id);
+}
+
+export function isTerminalDockAvailableForWorkspace(_workspace: WorkspaceDescriptor) {
+  return true;
+}
+
+export function shouldRenderTerminalDock(workspace: WorkspaceDescriptor, mounted: boolean) {
+  return mounted && isTerminalDockAvailableForWorkspace(workspace);
 }
 
 function isPendingPermissionTool(tool: ToolInvocation) {
