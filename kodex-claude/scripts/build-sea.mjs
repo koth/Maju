@@ -106,7 +106,10 @@ function findNativeClaudeBinary() {
 }
 
 function linuxClaudeNativePackageCandidates(arch) {
-  const libc = process.env.KODEX_CLAUDE_NATIVE_LIBC ?? "auto";
+  // Default Linux artifacts to glibc because Kodex remote assets target
+  // mainstream Linux distributions such as Ubuntu/Debian/CentOS. Alpine/musl
+  // builds must opt in explicitly.
+  const libc = process.env.KODEX_CLAUDE_NATIVE_LIBC ?? "glibc";
   if (libc === "glibc") {
     return [`@anthropic-ai/claude-agent-sdk-linux-${arch}`];
   }
