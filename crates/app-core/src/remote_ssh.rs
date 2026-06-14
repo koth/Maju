@@ -13,6 +13,8 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 
 pub const DEFAULT_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
+const SSH_SERVER_ALIVE_INTERVAL_SECS: u64 = 15;
+const SSH_SERVER_ALIVE_COUNT_MAX: u64 = 4;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
@@ -187,6 +189,10 @@ pub fn build_ssh_args(request: &RemoteSshCommand) -> Vec<String> {
     args.extend([
         "-o".to_string(),
         format!("ConnectTimeout={}", request.connect_timeout_secs),
+        "-o".to_string(),
+        format!("ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}"),
     ]);
     args.extend(ssh_multiplex_args());
     if let Some(port) = request.ssh_port {

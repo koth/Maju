@@ -157,6 +157,29 @@ describe("findPendingPermissionRequest", () => {
     expect(request?.title).toBe("Bash: D:/work/ArtAssets/packages/backend/src/app/index.ts");
   });
 
+  it("hides internal ACP decision choices from permission request details", () => {
+    const request = findPendingPermissionRequest([
+      tool({
+        call_id: "permission-read",
+        name: "Read jni_bridge.cc",
+        detail_text:
+          "Proposed Amendment: cat\napp/src/main/cpp/jni_bridge.cc\nAvailable Decisions: Approved\nApprovedExecpolicyAmendment\nAbort\n\nPath: app/src/main/cpp/jni_bridge.cc",
+        permission_options: [
+          { id: "allow", label: "Yes, proceed", kind: "AllowOnce" },
+          { id: "allow_always", label: "Yes, don't ask again", kind: "AllowAlways" },
+          { id: "reject", label: "拒绝并补充说明", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(request?.details).toContain("Proposed Amendment: cat");
+    expect(request?.details).toContain("Path: app/src/main/cpp/jni_bridge.cc");
+    expect(request?.details).not.toContain("Available Decisions");
+    expect(request?.details).not.toContain("ApprovedExecpolicyAmendment");
+    expect(request?.details).not.toContain("Abort");
+    expect(request?.title).toBe("Read jni_bridge.cc: app/src/main/cpp/jni_bridge.cc");
+  });
+
   it("passes structured user-input questions through pending permission requests", () => {
     const request = findPendingPermissionRequest([
       tool({

@@ -17,7 +17,7 @@ use anyhow::anyhow;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use workspace_model::PromptInputCapabilities;
+use workspace_model::{PromptInputCapabilities, SessionConfigState};
 
 pub(super) struct StartedSession {
     pub(super) session: ActiveSession<'static, Agent>,
@@ -71,43 +71,23 @@ pub(super) async fn start_session(
     )?;
     let (mut session, initial_session_config) =
         if supports_load_session && config.resume_session_id.is_some() {
-            let session_id_str = config.resume_session_id.as_ref().unwrap();
-            let session_id: SessionId = session_id_str.clone().into();
-
-            let load_req =
-                LoadSessionRequest::new(session_id.clone(), PathBuf::from(&config.workspace_root));
-            let load_response = connection
-                .send_request(load_req)
-                .block_task()
-                .await
-                .map_err(|err| anyhow!(err.to_string()))?;
-            let initial_session_config = session_config_from_parts(
-                load_response.config_options,
-                load_response.modes.as_ref(),
-                load_response.models.as_ref(),
-            );
-
-            let fake_response = NewSessionResponse::new(session_id);
-            let session = connection
-                .attach_session(fake_response, Default::default())
-                .map_err(|err| anyhow!(err.to_string()))?;
-            (session, initial_session_config)
+            match load_existing_session(connection, config).await {
+                Ok(loaded) => loaded,
+                Err(error) if should_fallback_from_session_load_error(&error) => {
+                    let _ = append_runtime_event_log(
+                        config,
+                        "session/load_missing_fallback",
+                        &json!({
+                            "resumeSessionId": config.resume_session_id.as_deref(),
+                            "error": error.to_string(),
+                        }),
+                    );
+                    start_new_session(connection, config).await?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
-            let new_request = NewSessionRequest::new(PathBuf::from(&config.workspace_root));
-            let new_response = connection
-                .send_request_to(Agent, new_request)
-                .block_task()
-                .await
-                .map_err(|err| anyhow!(err.to_string()))?;
-            let initial_session_config = session_config_from_parts(
-                new_response.config_options.clone(),
-                new_response.modes.as_ref(),
-                new_response.models.as_ref(),
-            );
-            let session = connection
-                .attach_session(new_response, Default::default())
-                .map_err(|err| anyhow!(err.to_string()))?;
-            (session, initial_session_config)
+            start_new_session(connection, config).await?
         };
 
     drain_initial_session_updates(&mut session, tx_events, config).await;
@@ -154,6 +134,68 @@ fn should_advertise_client_fs_read_text_file(config: &SessionConfig) -> bool {
         .agent_command
         .to_ascii_lowercase()
         .contains("codebuddy")
+}
+
+async fn load_existing_session(
+    connection: &ConnectionTo<Agent>,
+    config: &SessionConfig,
+) -> anyhow::Result<(ActiveSession<'static, Agent>, SessionConfigState)> {
+    let session_id_str = config
+        .resume_session_id
+        .as_ref()
+        .ok_or_else(|| anyhow!("missing ACP session id for session/load"))?;
+    let session_id: SessionId = session_id_str.clone().into();
+
+    let load_req =
+        LoadSessionRequest::new(session_id.clone(), PathBuf::from(&config.workspace_root));
+    let load_response = connection
+        .send_request(load_req)
+        .block_task()
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+    let initial_session_config = session_config_from_parts(
+        load_response.config_options,
+        load_response.modes.as_ref(),
+        load_response.models.as_ref(),
+    );
+
+    let fake_response = NewSessionResponse::new(session_id);
+    let session = connection
+        .attach_session(fake_response, Default::default())
+        .map_err(|err| anyhow!(err.to_string()))?;
+    Ok((session, initial_session_config))
+}
+
+async fn start_new_session(
+    connection: &ConnectionTo<Agent>,
+    config: &SessionConfig,
+) -> anyhow::Result<(ActiveSession<'static, Agent>, SessionConfigState)> {
+    let new_request = NewSessionRequest::new(PathBuf::from(&config.workspace_root));
+    let new_response = connection
+        .send_request_to(Agent, new_request)
+        .block_task()
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+    let initial_session_config = session_config_from_parts(
+        new_response.config_options.clone(),
+        new_response.modes.as_ref(),
+        new_response.models.as_ref(),
+    );
+    let session = connection
+        .attach_session(new_response, Default::default())
+        .map_err(|err| anyhow!(err.to_string()))?;
+    Ok((session, initial_session_config))
+}
+
+fn should_fallback_from_session_load_error(error: &anyhow::Error) -> bool {
+    is_missing_session_resource_error(&error.to_string())
+}
+
+fn is_missing_session_resource_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("resource not found")
+        || normalized.contains("session not found")
+        || (normalized.contains("session") && normalized.contains("not found"))
 }
 
 #[cfg(test)]
@@ -211,6 +253,26 @@ mod tests {
             "codex-acp --acp",
             true,
         )));
+    }
+
+    #[test]
+    fn missing_session_resource_errors_can_fallback_to_new_session() {
+        assert!(is_missing_session_resource_error(
+            r#"Internal error: "Resource not found""#
+        ));
+        assert!(is_missing_session_resource_error(
+            "failed to load session: session not found"
+        ));
+    }
+
+    #[test]
+    fn unrelated_session_load_errors_do_not_fallback() {
+        assert!(!is_missing_session_resource_error(
+            "failed to load config: No such file or directory"
+        ));
+        assert!(!is_missing_session_resource_error(
+            "streamable-http ACP request failed with status 409 Conflict"
+        ));
     }
 }
 

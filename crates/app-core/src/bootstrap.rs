@@ -138,6 +138,8 @@ fn is_initial_agent_notice(body: &str) -> bool {
     matches!(
         body.trim(),
         "CodeBuddy 将保持空闲，直到您从下方编辑器提交提示。"
+            | "Codex 将保持空闲，直到您从下方编辑器提交提示。"
+            | "Claude 将保持空闲，直到您从下方编辑器提交提示。"
             | "智能体 将保持空闲，直到您从下方编辑器提交提示。"
     )
 }
@@ -182,6 +184,30 @@ mod tests {
             ui.messages
                 .iter()
                 .all(|message| !message.body.contains("CodeBuddy 将保持空闲"))
+        );
+    }
+
+    #[test]
+    fn initial_agent_notice_replaces_previous_agent_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = build_initial_ui(dir.path()).unwrap();
+        ui.messages
+            .iter_mut()
+            .filter(|message| message.role == MessageRole::System)
+            .for_each(|message| {
+                message.body = "Codex 将保持空闲，直到您从下方编辑器提交提示。".into();
+            });
+
+        update_initial_agent_notice(&mut ui, "Claude");
+
+        assert!(ui.messages.iter().any(|message| {
+            message.role == MessageRole::System
+                && message.body == "Claude 将保持空闲，直到您从下方编辑器提交提示。"
+        }));
+        assert!(
+            ui.messages
+                .iter()
+                .all(|message| !message.body.contains("Codex 将保持空闲"))
         );
     }
 }

@@ -90,6 +90,8 @@ struct SessionRuntime {
     ui: workspace_model::UiSnapshot,
     session: SessionHandle,
     agent_command: String,
+    acp_port: u16,
+    remote_ssh: Option<RemoteSshSessionConfig>,
     in_flight_prompt: Option<InFlightPrompt>,
     seq_counter: i64,
     needs_title: bool,
@@ -374,6 +376,26 @@ fn is_codebuddy_agent_label(label: &str) -> bool {
     normalized == "codebuddy" || normalized == "codebuddy-acp"
 }
 
+fn active_agent_label_for_command(agent_command: &str, persisted_label: Option<String>) -> String {
+    let current_label = crate::settings::agent_label_for_command(agent_command);
+    persisted_label
+        .filter(|label| agent_label_matches_command(label, agent_command))
+        .unwrap_or(current_label)
+}
+
+fn agent_label_matches_command(label: &str, agent_command: &str) -> bool {
+    if is_codex_agent_label(label) {
+        return crate::settings::is_codex_acp_command(agent_command);
+    }
+    if is_claude_agent_label(label) {
+        return crate::settings::is_claude_agent_acp_command(agent_command);
+    }
+    if is_codebuddy_agent_label(label) {
+        return agent_command.to_ascii_lowercase().contains("codebuddy");
+    }
+    false
+}
+
 fn normalize_title_for_prompt_compare(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -412,6 +434,8 @@ impl Application {
         std::mem::swap(&mut self.ui, &mut runtime.ui);
         std::mem::swap(&mut self.session, &mut runtime.session);
         std::mem::swap(&mut self.agent_command, &mut runtime.agent_command);
+        std::mem::swap(&mut self.acp_port, &mut runtime.acp_port);
+        std::mem::swap(&mut self.remote_ssh, &mut runtime.remote_ssh);
         std::mem::swap(&mut self.in_flight_prompt, &mut runtime.in_flight_prompt);
         std::mem::swap(&mut self.seq_counter, &mut runtime.seq_counter);
         std::mem::swap(&mut self.needs_title, &mut runtime.needs_title);

@@ -1363,7 +1363,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
     }
 
     #[test]
-    fn bootstrap_preserves_persisted_session_agent_label() {
+    fn bootstrap_replaces_stale_persisted_session_agent_label() {
         let dir = tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -1381,13 +1381,13 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                 .unwrap();
 
         assert_eq!(app.ui.session.id.to_string(), session_id);
-        assert_eq!(app.ui.session.agent_cli.as_deref(), Some("goose"));
+        assert_eq!(app.ui.session.agent_cli.as_deref(), Some("CodeBuddy"));
         assert!(!app.agent_command.to_lowercase().contains("goose"));
         assert!(app.agent_command.to_lowercase().contains("codebuddy"));
 
         let reopened_store = SessionStore::open(app_paths.root(), &workspace).unwrap();
         let sessions = reopened_store.list_sessions().unwrap();
-        assert_eq!(sessions[0].agent_cli.as_deref(), Some("goose"));
+        assert_eq!(sessions[0].agent_cli.as_deref(), Some("CodeBuddy"));
     }
 
     #[test]

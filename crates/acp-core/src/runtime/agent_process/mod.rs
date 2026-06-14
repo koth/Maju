@@ -29,12 +29,15 @@ use process_lifecycle::{
 };
 #[cfg(test)]
 pub(super) use remote_ssh::REMOTE_AGENT_READY_MARKER;
+use remote_ssh::{
+    REMOTE_SSH_CONNECT_TIMEOUT_SECS, configure_ssh_askpass, read_remote_ssh_stderr,
+    wait_remote_agent_ready,
+};
 pub(super) use remote_ssh::{
     build_remote_agent_command, build_remote_ssh_args, build_remote_ssh_command_args,
     build_remote_ssh_forward_args, build_remote_ssh_reverse_forward_args,
     build_remote_streamable_agent_command,
 };
-use remote_ssh::{configure_ssh_askpass, read_remote_ssh_stderr, wait_remote_agent_ready};
 use streamable_http::{STREAMABLE_HTTP_PATH, connect_streamable_http_endpoint};
 
 pub(super) struct HiddenAgentProcess {
@@ -516,6 +519,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
             )
         };
         let has_password = self.ssh_password.is_some();
+        let uses_multiplex = is_streamable_http;
         let args = if is_streamable_http {
             build_remote_ssh_command_args(
                 &self.ssh_target,
@@ -538,6 +542,28 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
+        let env_keys = self
+            .agent_env
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let _ = append_runtime_event_log(
+            &self.log_config,
+            "agent/remote_ssh_agent_start",
+            &json!({
+                "target": self.ssh_target,
+                "sshPort": self.ssh_port,
+                "transport": format!("{:?}", self.acp_transport),
+                "localPort": self.local_port,
+                "remotePort": self.remote_port,
+                "hasPassword": has_password,
+                "reverseForwards": self.reverse_forwards.len(),
+                "usesMultiplex": uses_multiplex,
+                "connectTimeoutSecs": REMOTE_SSH_CONNECT_TIMEOUT_SECS,
+                "envKeys": env_keys,
+                "codexHomeConfigured": self.agent_env.iter().any(|(name, _)| name == "CODEX_HOME"),
+            }),
+        );
         if let Some(password) = self.ssh_password.as_deref() {
             configure_ssh_askpass(&mut command, password).map_err(|error| {
                 agent_client_protocol::util::internal_error(format!(
@@ -634,6 +660,19 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::piped());
+                let _ = append_runtime_event_log(
+                    &log_config,
+                    "agent/remote_ssh_forward_start",
+                    &json!({
+                        "target": self.ssh_target,
+                        "sshPort": self.ssh_port,
+                        "localPort": self.local_port,
+                        "remotePort": remote_port,
+                        "hasPassword": has_password,
+                        "usesMultiplex": false,
+                        "connectTimeoutSecs": REMOTE_SSH_CONNECT_TIMEOUT_SECS,
+                    }),
+                );
                 if let Some(password) = self.ssh_password.as_deref() {
                     configure_ssh_askpass(&mut forward_command, password).map_err(|error| {
                         agent_client_protocol::util::internal_error(format!(
@@ -744,6 +783,21 @@ impl RemoteSshAgentProcess {
         }
         hide_console_window(&mut command);
 
+        if let Some(config) = log_config {
+            let _ = append_runtime_event_log(
+                config,
+                "agent/reverse_forward_start",
+                &json!({
+                    "target": self.ssh_target,
+                    "sshPort": self.ssh_port,
+                    "remotePort": forward.remote_port,
+                    "localPort": forward.local_port,
+                    "hasPassword": has_password,
+                    "usesMultiplex": false,
+                    "connectTimeoutSecs": REMOTE_SSH_CONNECT_TIMEOUT_SECS,
+                }),
+            );
+        }
         let mut child = command.spawn()?;
         let child_stderr = child
             .stderr

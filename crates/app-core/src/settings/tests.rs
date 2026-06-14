@@ -452,6 +452,16 @@ fn remote_linux_command_for_agent_uses_remote_binary_names() {
 }
 
 #[test]
+fn remote_codex_home_derives_managed_home_from_remote_home() {
+    assert_eq!(
+        remote_codex_home(" /home/koth/ "),
+        Some("/home/koth/.kodex".to_string())
+    );
+    assert_eq!(remote_codex_home("/"), Some("/.kodex".to_string()));
+    assert_eq!(remote_codex_home("   "), None);
+}
+
+#[test]
 fn command_for_agent_label_resolves_persisted_labels() {
     let codebuddy = command_for_agent_label("CodeBuddy").unwrap();
     let codex_acp = command_for_agent_label("codex-acp").unwrap();
@@ -685,6 +695,143 @@ fn codex_acp_timiai_source_creates_byok_config_file() {
     let status = codex_acp_settings_status(&paths);
     assert_eq!(status.provider, BYOK_PROVIDER_ID);
     assert!(!status.deepseek_key_configured);
+}
+
+#[test]
+fn remote_codex_proxy_config_strips_local_only_paths() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_app_settings(
+        &paths,
+        &AppSettings {
+            selected_agent: AgentCliId::CodexAcp,
+            acp_port: 0,
+            theme: AppTheme::KodexDark,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(TIMIAI_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            claude: ClaudeProviderSettings::default(),
+        },
+    )
+    .unwrap();
+    write_codex_acp_provider_config(&paths, TIMIAI_PROVIDER_ID, "timiai-secret").unwrap();
+
+    let config_path = codex_config_path(&paths);
+    let mut doc = std::fs::read_to_string(&config_path)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    doc["model_catalog_json"] = value("/Users/kothchen/.kodex/model_catalog.json");
+    doc["model_instructions_file"] = value("/Users/kothchen/.kodex/instructions.md");
+    doc["experimental_instructions_file"] = value("/Users/kothchen/.kodex/legacy.md");
+    doc["profiles"]["default"]["model_instructions_file"] =
+        value("/Users/kothchen/.kodex/profile-instructions.md");
+    std::fs::write(&config_path, doc.to_string()).unwrap();
+
+    let remote_config = remote_codex_proxy_config(&paths, Some("/home/koth/.kodex"))
+        .unwrap()
+        .unwrap();
+    let remote_doc = remote_config.parse::<DocumentMut>().unwrap();
+
+    assert_eq!(
+        remote_doc["model_catalog_json"].as_str(),
+        Some("/home/koth/.kodex/model_catalog.json")
+    );
+    assert!(remote_doc.get("model_instructions_file").is_none());
+    assert!(remote_doc.get("experimental_instructions_file").is_none());
+    assert_eq!(
+        remote_doc["model_providers"][TIMIAI_PROVIDER_ID]["api_key"].as_str(),
+        Some("kodex-proxy")
+    );
+    assert!(
+        remote_doc["profiles"]["default"]
+            .as_table_like()
+            .is_none_or(|profile| profile.get("model_instructions_file").is_none())
+    );
+}
+
+#[test]
+fn remote_codex_model_catalog_content_includes_byok_provider_models() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_app_settings(
+        &paths,
+        &AppSettings {
+            selected_agent: AgentCliId::CodexAcp,
+            acp_port: 0,
+            theme: AppTheme::KodexDark,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            claude: ClaudeProviderSettings::default(),
+        },
+    )
+    .unwrap();
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        KIMI_PROVIDER_ID,
+        "kimi-secret",
+    )
+    .unwrap();
+    write_codex_acp_provider_config(&paths, BYOK_PROVIDER_ID, "byok").unwrap();
+
+    let catalog = remote_codex_model_catalog_content(&paths).unwrap().unwrap();
+    let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+
+    assert!(catalog["models"].as_array().unwrap().iter().any(|model| {
+        model["slug"].as_str()
+            == Some(byok_encoded_model_slug(KIMI_MODEL, KIMI_PROVIDER_ID).as_str())
+            && model["provider"].as_str() == Some(KIMI_PROVIDER_ID)
+            && model["_meta"]["provider"].as_str() == Some(KIMI_PROVIDER_ID)
+    }));
+}
+
+#[test]
+fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_app_settings(
+        &paths,
+        &AppSettings {
+            selected_agent: AgentCliId::CodexAcp,
+            acp_port: 0,
+            theme: AppTheme::KodexDark,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            claude: ClaudeProviderSettings::default(),
+        },
+    )
+    .unwrap();
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Codex,
+        KIMI_PROVIDER_ID,
+        "kimi-secret",
+    )
+    .unwrap();
+    write_codex_acp_provider_config(&paths, BYOK_PROVIDER_ID, "byok").unwrap();
+
+    let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+    let env = remote_agent_env_for_command(&command, &paths, Some("/home/koth"));
+
+    assert!(env.contains(&(KIMI_API_KEY_ENV.to_string(), "kodex-proxy".to_string())));
+    assert!(!env.iter().any(|(_, value)| value == "kimi-secret"));
+    let base_url = acp_core::codex_api_proxy_base_url();
+    let port = base_url
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|port| port.parse::<u16>().ok())
+        .expect("proxy base URL should include a local port");
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(500),
+    )
+    .expect("remote env preparation should start the local proxy");
 }
 
 #[test]

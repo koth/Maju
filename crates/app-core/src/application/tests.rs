@@ -13,15 +13,15 @@ use super::{
     Application, ModelSelection, current_timestamp, humanize_acp_disconnect_reason,
     normalize_tracked_path, turn_finished_notice,
 };
-use acp_core::{ClientEvent, diff_to_hunks};
+use acp_core::{ClientEvent, RemoteSshSessionConfig, diff_to_hunks};
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 use workspace_model::{
-    ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind, DiffQuality,
-    FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
-    MessageRole, SessionAttentionState, SessionConfigCategory, SessionConfigChoice,
-    SessionConfigControl, SessionConfigSource, SessionConfigState, SessionFileChange,
-    SessionListItem, SessionRuntimeStatus, TimelineItem, ToolDiffPreview, ToolInvocation,
-    ToolStatus, TurnFileChanges, WorkspaceLocation,
+    AgentCliId, ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind,
+    DiffQuality, FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
+    ListChangeSetsRequest, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
+    SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
+    SessionConfigState, SessionFileChange, SessionListItem, SessionRuntimeStatus, TimelineItem,
+    ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges, WorkspaceLocation,
 };
 
 mod change_set_tests;
@@ -74,6 +74,110 @@ fn mock_agent_command() -> String {
         shell_words::quote(&cargo),
         shell_words::quote(&manifest)
     )
+}
+
+fn remote_workspace_fixture() -> RemoteLinuxWorkspace {
+    RemoteLinuxWorkspace {
+        profile_id: None,
+        ssh_target: "alice@devbox".into(),
+        ssh_port: Some(2222),
+        remote_path: "/srv/project".into(),
+        ssh_password: None,
+        agent_cli: None,
+        agent_command: None,
+        local_port: Some(41000),
+        remote_port: Some(41001),
+    }
+}
+
+#[test]
+fn active_agent_label_prefers_current_command_over_stale_persisted_label() {
+    assert_eq!(
+        super::active_agent_label_for_command("codex-acp", Some("CodeBuddy".into())),
+        "Codex"
+    );
+    assert_eq!(
+        super::active_agent_label_for_command("codebuddy --acp", Some("Codex".into())),
+        "CodeBuddy"
+    );
+    assert_eq!(
+        super::active_agent_label_for_command("codex-acp", Some("Codex".into())),
+        "Codex"
+    );
+}
+
+#[test]
+fn remote_workspace_new_session_uses_remote_agent_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let remote = remote_workspace_fixture();
+    app.ui.workspace.location = WorkspaceLocation::RemoteLinux(remote);
+
+    assert_eq!(
+        app.agent_command_for_new_session(Some(AgentCliId::CodexAcp)),
+        "codex-acp"
+    );
+    assert_eq!(
+        app.agent_command_for_new_session(Some(AgentCliId::ClaudeAgentAcp)),
+        "claude-agent-acp"
+    );
+    assert_eq!(
+        app.command_for_agent_label_in_current_workspace("Codex")
+            .as_deref(),
+        Some("codex-acp")
+    );
+    assert!(
+        !app.agent_command_for_new_session(Some(AgentCliId::CodexAcp))
+            .contains("/"),
+        "remote agent command must not use a local absolute binary path"
+    );
+}
+
+#[test]
+fn remote_workspace_new_session_reuses_bootstrapped_current_agent_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let mut remote = remote_workspace_fixture();
+    remote.agent_cli = Some(AgentCliId::ClaudeAgentAcp);
+    remote.agent_command =
+        Some("/root/.kodex/remote-agents/claude-agent-acp/current/bin/claude-agent-acp".into());
+    app.agent_command =
+        "/root/.kodex/remote-agents/claude-agent-acp/current/bin/claude-agent-acp".into();
+    app.ui.session.agent_cli = Some("Claude".into());
+    app.ui.workspace.location = WorkspaceLocation::RemoteLinux(remote);
+
+    assert_eq!(
+        app.agent_command_for_new_session(Some(AgentCliId::ClaudeAgentAcp)),
+        "/root/.kodex/remote-agents/claude-agent-acp/current/bin/claude-agent-acp"
+    );
+}
+
+#[test]
+fn remote_session_config_workspace_root_uses_remote_path_not_workspace_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let remote = remote_workspace_fixture();
+    app.ui.workspace.root = PathBuf::from(remote.key());
+    app.ui.workspace.location = WorkspaceLocation::RemoteLinux(remote.clone());
+    let remote_ssh = RemoteSshSessionConfig {
+        ssh_target: remote.ssh_target,
+        ssh_port: remote.ssh_port,
+        remote_workspace_root: remote.remote_path.clone(),
+        local_port: 41000,
+        remote_port: 41001,
+        reverse_forwards: Vec::new(),
+        ssh_command: None,
+        ssh_password: None,
+    };
+
+    assert_eq!(
+        app.session_config_workspace_root(Some(&remote_ssh)),
+        remote.remote_path
+    );
+    assert_ne!(
+        app.session_config_workspace_root(Some(&remote_ssh)),
+        app.ui.workspace.root.display().to_string()
+    );
 }
 
 #[test]

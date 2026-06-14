@@ -16,7 +16,9 @@ pub(in crate::runtime) const REMOTE_AGENT_READY_MARKER: &str = "__KODEX_ACP_REMO
 const REMOTE_STREAMABLE_HTTP_ENDPOINT_MARKER: &str = "ACP streamable-http endpoint:";
 const REMOTE_AGENT_LISTEN_ATTEMPTS: u16 = 150;
 const REMOTE_AGENT_READY_TIMEOUT: Duration = Duration::from_secs(35);
-const REMOTE_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
+pub(in crate::runtime) const REMOTE_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
+const REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS: u64 = 15;
+const REMOTE_SSH_SERVER_ALIVE_COUNT_MAX: u64 = 4;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
@@ -28,7 +30,6 @@ pub(in crate::runtime) fn build_remote_agent_command(
     remote_port: u16,
 ) -> String {
     let port_hex = format!("{remote_port:04X}");
-    let agent_invocation = build_remote_agent_invocation(command, args, env, remote_port);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote_single(remote_workspace_root));
@@ -37,15 +38,19 @@ pub(in crate::runtime) fn build_remote_agent_command(
         "KODEX_REMOTE_ACP_PORT_HEX={};",
         shell_quote_single(&port_hex)
     ));
-    parts.push(format!("{agent_invocation} &"));
-    parts.push("kodex_agent_pid=$!;".to_string());
-    parts.push("trap 'kill \"$kodex_agent_pid\" 2>/dev/null' EXIT HUP INT TERM;".to_string());
+    parts.push(build_remote_agent_start_shell(
+        command,
+        args,
+        env,
+        remote_port,
+    ));
+    parts.push(remote_agent_lifecycle_shell());
     parts.push("kodex_i=0;".to_string());
     parts.push("while ! awk -v port=\"$KODEX_REMOTE_ACP_PORT_HEX\" '$4==\"0A\" && toupper($2) ~ \":\" port \"$\" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; do".to_string());
     parts.push("if ! kill -0 \"$kodex_agent_pid\" 2>/dev/null; then wait \"$kodex_agent_pid\"; exit $?; fi;".to_string());
     parts.push("kodex_i=$((kodex_i + 1));".to_string());
     parts.push(format!(
-        "if [ \"$kodex_i\" -ge {REMOTE_AGENT_LISTEN_ATTEMPTS} ]; then echo {} >&2; kill \"$kodex_agent_pid\" 2>/dev/null; wait \"$kodex_agent_pid\"; exit 124; fi;",
+        "if [ \"$kodex_i\" -ge {REMOTE_AGENT_LISTEN_ATTEMPTS} ]; then echo {} >&2; kodex_cleanup_agent; wait \"$kodex_agent_pid\" 2>/dev/null; exit 124; fi;",
         shell_quote_single(&format!(
             "remote ACP agent did not listen on 127.0.0.1:{remote_port}"
         ))
@@ -57,7 +62,7 @@ pub(in crate::runtime) fn build_remote_agent_command(
         "echo {} >&2;",
         shell_quote_single(REMOTE_AGENT_READY_MARKER)
     ));
-    parts.push("wait \"$kodex_agent_pid\"".to_string());
+    parts.push(remote_agent_wait_shell());
     parts.join(" ")
 }
 
@@ -68,16 +73,32 @@ pub(in crate::runtime) fn build_remote_streamable_agent_command(
     env: &[(String, String)],
     remote_port: u16,
 ) -> String {
-    let agent_invocation = build_remote_agent_invocation(command, args, env, remote_port);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote_single(remote_workspace_root));
     parts.push("|| exit $?;".to_string());
-    parts.push(format!("{agent_invocation} &"));
-    parts.push("kodex_agent_pid=$!;".to_string());
-    parts.push("trap 'kill \"$kodex_agent_pid\" 2>/dev/null' EXIT HUP INT TERM;".to_string());
-    parts.push("wait \"$kodex_agent_pid\"".to_string());
+    parts.push(build_remote_agent_start_shell(
+        command,
+        args,
+        env,
+        remote_port,
+    ));
+    parts.push(remote_agent_lifecycle_shell());
+    parts.push(remote_agent_wait_shell());
     parts.join(" ")
+}
+
+fn build_remote_agent_start_shell(
+    command: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    remote_port: u16,
+) -> String {
+    let with_setsid = build_remote_agent_invocation(command, args, env, remote_port, true);
+    let without_setsid = build_remote_agent_invocation(command, args, env, remote_port, false);
+    format!(
+        "if command -v setsid >/dev/null 2>&1; then {with_setsid} & else {without_setsid} & fi;"
+    )
 }
 
 fn build_remote_agent_invocation(
@@ -85,16 +106,52 @@ fn build_remote_agent_invocation(
     args: &[String],
     env: &[(String, String)],
     remote_port: u16,
+    prefer_process_group: bool,
 ) -> String {
     let mut parts = Vec::new();
-    for (name, value) in env {
-        parts.push(format!("{name}={}", shell_quote_single(value)));
+    if !env.is_empty() || prefer_process_group {
+        parts.push("env".to_string());
+        for (name, value) in env {
+            parts.push(shell_quote_single(&format!("{name}={value}")));
+        }
+    } else {
+        for (name, value) in env {
+            parts.push(format!("{name}={}", shell_quote_single(value)));
+        }
+    }
+    if prefer_process_group {
+        parts.push("setsid".to_string());
     }
     parts.push(shell_quote_single(&command.to_string_lossy()));
     parts.extend(args.iter().map(|arg| shell_quote_single(arg)));
     parts.push("--port".to_string());
     parts.push(remote_port.to_string());
     parts.join(" ")
+}
+
+fn remote_agent_lifecycle_shell() -> String {
+    [
+        "kodex_agent_pid=$!;",
+        "kodex_cleanup_agent() {",
+        "if [ -n \"${kodex_agent_pid:-}\" ]; then",
+        "kill -TERM \"-$kodex_agent_pid\" 2>/dev/null || kill -TERM \"$kodex_agent_pid\" 2>/dev/null;",
+        "sleep 0.2;",
+        "kill -KILL \"-$kodex_agent_pid\" 2>/dev/null || kill -KILL \"$kodex_agent_pid\" 2>/dev/null;",
+        "fi;",
+        "};",
+        "trap 'kodex_cleanup_agent' EXIT HUP INT TERM;",
+    ]
+    .join(" ")
+}
+
+fn remote_agent_wait_shell() -> String {
+    [
+        "wait \"$kodex_agent_pid\";",
+        "kodex_agent_status=$?;",
+        "kodex_agent_pid=;",
+        "exit \"$kodex_agent_status\"",
+    ]
+    .join(" ")
 }
 
 pub(in crate::runtime) fn build_remote_ssh_args(
@@ -124,7 +181,7 @@ pub(in crate::runtime) fn build_remote_ssh_command_args(
     remote_command: String,
     has_password: bool,
 ) -> Vec<String> {
-    let mut args = remote_ssh_base_args(has_password, false);
+    let mut args = remote_ssh_base_args(has_password, true);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());
         args.push(ssh_port.to_string());
@@ -189,6 +246,10 @@ fn remote_ssh_base_args(has_password: bool, use_multiplex: bool) -> Vec<String> 
     args.extend([
         "-o".to_string(),
         format!("ConnectTimeout={REMOTE_SSH_CONNECT_TIMEOUT_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveInterval={REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveCountMax={REMOTE_SSH_SERVER_ALIVE_COUNT_MAX}"),
     ]);
     if use_multiplex {
         args.extend(ssh_multiplex_args());

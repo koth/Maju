@@ -317,6 +317,46 @@ describe("Composer", () => {
     expect(screen.queryByRole("button", { name: /Provider.*CommandCode/ })).toBeNull();
   });
 
+  it("does not expose generic BYOK as a remote model provider group", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kimi-for-coding",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kimi-for-coding",
+            current_value_label: "kimi-for-coding",
+            enabled: true,
+            choices: [
+              { id: "qwen/qwen3-coder", label: "qwen/qwen3-coder", description: null, provider: "commandcode" },
+              { id: "kimi-for-coding", label: "kimi-for-coding", description: null, provider: "byok" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Provider.*byok/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider.*Kimi Code/ }));
+
+    expect(screen.getByRole("option", { name: "CommandCode" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Kimi Code" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /byok/i })).toBeNull();
+  });
+
   it("splits encoded provider model ids without duplicating the provider request", async () => {
     vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
     const snapshot = makeSnapshot({

@@ -4,11 +4,13 @@ mod lsp;
 mod remote;
 
 pub use agent_cli::{
-    agent_env_for_command, agent_label_for_command, command_for_agent, command_for_agent_label,
-    command_for_agent_label_with_paths, command_for_agent_with_paths, default_agent_for_new_work,
-    detect_agent, detect_agent_with_paths, ensure_agent_ready_for_command,
-    is_claude_agent_acp_command, is_codex_acp_command, remote_agent_env_for_command,
-    remote_codex_proxy_config, remote_linux_command_for_agent, resolve_agent_command_with_settings,
+    agent_env_for_command, agent_id_for_label, agent_label_for_command, agent_label_for_id,
+    command_for_agent, command_for_agent_label, command_for_agent_label_with_paths,
+    command_for_agent_with_paths, default_agent_for_new_work, detect_agent,
+    detect_agent_with_paths, ensure_agent_ready_for_command, is_claude_agent_acp_command,
+    is_codex_acp_command, remote_agent_env_for_command, remote_codex_home,
+    remote_codex_proxy_config, remote_linux_command_for_agent,
+    remote_linux_command_for_agent_label, resolve_agent_command_with_settings,
 };
 
 use agent_cli::{agent_statuses, binary_name};
@@ -1821,8 +1823,25 @@ fn refresh_codex_model_catalog_after_provider_models_change(paths: &AppPaths) ->
     write_codex_acp_model_catalog(paths, &provider)
 }
 
+pub fn remote_codex_model_catalog_content(paths: &AppPaths) -> Result<Option<String>> {
+    if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
+        return Ok(None);
+    }
+    let provider = codex_selected_catalog_provider(paths);
+    if provider == CODEX_DEFAULT_PROVIDER_ID {
+        return Ok(None);
+    }
+    codex_acp_model_catalog_content(paths, &provider).map(Some)
+}
+
 fn write_codex_acp_model_catalog(paths: &AppPaths, provider: &str) -> Result<()> {
     let path = codex_model_catalog_path(paths);
+    let content = codex_acp_model_catalog_content(paths, provider)?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("failed to write Codex model catalog {}", path.display()))
+}
+
+fn codex_acp_model_catalog_content(paths: &AppPaths, provider: &str) -> Result<String> {
     let catalog_models = catalog_models_for_provider_with_paths(paths, provider);
     let encode_provider_models = provider == BYOK_PROVIDER_ID;
     let models = catalog_models
@@ -1835,9 +1854,7 @@ fn write_codex_acp_model_catalog(paths: &AppPaths, provider: &str) -> Result<()>
     let catalog = json!({
         "models": models
     });
-    let content = serde_json::to_string_pretty(&catalog)?;
-    std::fs::write(&path, content)
-        .with_context(|| format!("failed to write Codex model catalog {}", path.display()))
+    serde_json::to_string_pretty(&catalog).map_err(Into::into)
 }
 
 fn catalog_models_for_provider_with_paths(

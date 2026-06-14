@@ -199,15 +199,35 @@ pub(in crate::runtime) fn kill_child_handle(
     match child.try_wait() {
         Ok(Some(_)) => {}
         Ok(None) => {
-            let _ = child.kill();
+            terminate_child(&mut child);
             let _ = child.wait();
         }
         Err(_) => {
-            let _ = child.kill();
+            terminate_child(&mut child);
             let _ = child.wait();
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut Child) {
+    let pid = child.id().to_string();
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status();
+    for _ in 0..10 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
 }
 
 pub(in crate::runtime::agent_process) async fn monitor_hidden_agent_child(

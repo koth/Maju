@@ -39,6 +39,8 @@
     "test:integration": "RUN_INTEGRATION_TESTS=true vitest run",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "build:binary:linux-glibc": "KODEX_CLAUDE_NATIVE_LIBC=glibc node scripts/build-sea.mjs",
+    "build:binary:linux-musl": "KODEX_CLAUDE_NATIVE_LIBC=musl node scripts/build-sea.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

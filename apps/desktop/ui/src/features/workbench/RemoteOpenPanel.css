@@ -150,6 +150,13 @@
   text-align: left;
 }
 
+.remote-open-machine-option:disabled,
+.remote-open-agent-option:disabled,
+.remote-open-field input:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
 .remote-open-machine-option strong,
 .remote-open-machine-option small {
   min-width: 0;
@@ -170,7 +177,7 @@
   font-size: 10px;
 }
 
-.remote-open-machine-option:hover {
+.remote-open-machine-option:hover:not(:disabled) {
   border-color: var(--border-strong);
   background: var(--interactive-hover);
 }
@@ -222,7 +229,7 @@
   font-size: 10px;
 }
 
-.remote-open-agent-option:hover {
+.remote-open-agent-option:hover:not(:disabled) {
   border-color: var(--border-strong);
   background: var(--interactive-hover);
 }
@@ -293,6 +300,88 @@
   background: var(--success-soft, rgba(106, 168, 159, 0.14));
 }
 
+.remote-open-wait {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--interactive-selected-border);
+  border-radius: 8px;
+  background: rgba(108, 142, 174, 0.1);
+  overflow: hidden;
+}
+
+.remote-open-wait::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--interactive-selected-border),
+    transparent
+  );
+  transform: translateX(-100%);
+  content: "";
+}
+
+.remote-open-wait.is-active::after {
+  animation: remote-open-wait-sweep 1.35s ease-in-out infinite;
+}
+
+.remote-open-wait-spinner,
+.remote-open-button-spinner {
+  display: inline-block;
+  border-style: solid;
+  border-color: rgba(215, 225, 223, 0.24);
+  border-top-color: var(--accent-hover);
+  border-radius: 999px;
+  animation: remote-open-spin 0.82s linear infinite;
+}
+
+.remote-open-wait-spinner {
+  width: 22px;
+  height: 22px;
+  border-width: 2px;
+}
+
+.remote-open-button-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.remote-open-button-spinner {
+  width: 13px;
+  height: 13px;
+  border-width: 2px;
+}
+
+.remote-open-wait-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.remote-open-wait-copy strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.remote-open-wait-copy span {
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .remote-open-validation {
   display: flex;
   flex-wrap: wrap;
@@ -336,6 +425,10 @@
   background: rgba(215, 225, 223, 0.08);
 }
 
+.remote-open-progress-item.is-pending {
+  opacity: 0.64;
+}
+
 .remote-open-progress-item small {
   width: 100%;
   color: var(--text-muted);
@@ -351,6 +444,7 @@
 .remote-open-progress-item.is-running .remote-open-progress-dot {
   border-color: var(--interactive-selected-border);
   background: var(--interactive-selected);
+  animation: remote-open-pulse 1s ease-in-out infinite;
 }
 
 .remote-open-progress-item.is-succeeded .remote-open-progress-dot {
@@ -365,6 +459,29 @@
 .remote-open-progress-item.is-failed .remote-open-progress-dot {
   border-color: var(--danger);
   background: var(--danger);
+}
+
+@keyframes remote-open-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes remote-open-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(143, 202, 255, 0);
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px rgba(143, 202, 255, 0.14);
+  }
+}
+
+@keyframes remote-open-wait-sweep {
+  to {
+    transform: translateX(100%);
+  }
 }
 
 @media (max-width: 760px) {

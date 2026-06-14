@@ -1,5 +1,26 @@
 use super::*;
 
+struct PreparedSessionRuntime {
+    workspace_root: String,
+    agent_env: Vec<(String, String)>,
+    acp_port: u16,
+    remote_ssh: Option<RemoteSshSessionConfig>,
+}
+
+fn remote_machine_profile_from_workspace(
+    remote: &RemoteLinuxWorkspace,
+) -> workspace_model::RemoteMachineProfile {
+    workspace_model::RemoteMachineProfile {
+        id: remote.profile_id.unwrap_or_else(uuid::Uuid::new_v4),
+        display_name: remote.display_name(),
+        ssh_target: remote.ssh_target.clone(),
+        ssh_port: remote.ssh_port,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        last_validation: None,
+    }
+}
+
 impl Application {
     pub(super) fn should_auto_reconnect_after_clean_exit(&self) -> bool {
         false
@@ -33,6 +54,191 @@ impl Application {
                 let command = self.agent_command.to_ascii_lowercase();
                 command.contains("codex-acp") || command.contains("kodex-acp")
             })
+    }
+
+    #[cfg(test)]
+    pub(super) fn agent_command_for_new_session(&self, agent: Option<AgentCliId>) -> String {
+        match agent {
+            Some(agent) if self.remote_agent_selection_matches_current(agent) => {
+                self.agent_command.clone()
+            }
+            Some(agent) => self
+                .command_for_agent_in_current_workspace(agent)
+                .unwrap_or_else(|| {
+                    crate::settings::resolve_agent_command_with_settings(&self.app_paths)
+                }),
+            None => self.agent_command.clone(),
+        }
+    }
+
+    fn prepare_agent_command_for_new_session(
+        &self,
+        agent: Option<AgentCliId>,
+    ) -> Result<String, String> {
+        match agent {
+            Some(agent) if self.remote_agent_selection_matches_current(agent) => {
+                Ok(self.agent_command.clone())
+            }
+            Some(agent) if self.is_remote_workspace() => self.bootstrap_remote_agent_command(agent),
+            Some(agent) => Ok(self
+                .command_for_agent_in_current_workspace(agent)
+                .unwrap_or_else(|| {
+                    crate::settings::resolve_agent_command_with_settings(&self.app_paths)
+                })),
+            None => Ok(self.agent_command.clone()),
+        }
+    }
+
+    fn prepare_agent_command_for_stored_label(
+        &self,
+        label: &str,
+    ) -> Result<Option<String>, String> {
+        if !self.is_remote_workspace() {
+            return Ok(self.command_for_agent_label_in_current_workspace(label));
+        }
+        let Some(agent) = crate::settings::agent_id_for_label(label) else {
+            return Ok(None);
+        };
+        if self.remote_agent_selection_matches_current(agent) {
+            return Ok(Some(self.agent_command.clone()));
+        }
+        self.bootstrap_remote_agent_command(agent).map(Some)
+    }
+
+    fn bootstrap_remote_agent_command(&self, agent: AgentCliId) -> Result<String, String> {
+        let remote = self.current_remote_workspace().ok_or_else(|| {
+            "Remote workspace is missing metadata; reopen the remote directory first".to_string()
+        })?;
+        let profile = remote
+            .profile_id
+            .and_then(|profile_id| {
+                crate::remote_profiles::get_remote_machine_profile(&self.app_paths, profile_id).ok()
+            })
+            .unwrap_or_else(|| remote_machine_profile_from_workspace(&remote));
+        let ssh_password = remote.ssh_password.as_deref().or_else(|| {
+            self.remote_ssh
+                .as_ref()
+                .and_then(|ssh| ssh.ssh_password.as_deref())
+        });
+
+        crate::remote_bootstrap::bootstrap_remote_agent(
+            crate::remote_bootstrap::RemoteAgentBootstrapRequest {
+                request_id: uuid::Uuid::new_v4(),
+                profile: &profile,
+                remote_path: &remote.remote_path,
+                ssh_password,
+                agent_cli: agent,
+            },
+            &crate::remote_ssh::SystemRemoteSshCommandRunner,
+            |_| {},
+        )
+        .map(|bootstrap| bootstrap.agent_command)
+        .map_err(|e| e.to_string())
+    }
+
+    fn current_remote_workspace(&self) -> Option<RemoteLinuxWorkspace> {
+        match &self.ui.workspace.location {
+            workspace_model::WorkspaceLocation::RemoteLinux(remote) => Some(remote.clone()),
+            workspace_model::WorkspaceLocation::Local => None,
+        }
+    }
+
+    fn remote_agent_selection_matches_current(&self, agent: AgentCliId) -> bool {
+        if !self.is_remote_workspace() {
+            return false;
+        }
+        if matches!(
+            &self.ui.workspace.location,
+            workspace_model::WorkspaceLocation::RemoteLinux(remote)
+                if remote.agent_cli == Some(agent)
+        ) {
+            return true;
+        }
+        crate::settings::agent_label_for_id(agent)
+            .is_some_and(|label| self.ui.session.agent_cli.as_deref() == Some(label))
+    }
+
+    pub(super) fn command_for_agent_in_current_workspace(
+        &self,
+        agent: AgentCliId,
+    ) -> Option<String> {
+        if self.is_remote_workspace() {
+            crate::settings::remote_linux_command_for_agent(agent)
+        } else {
+            crate::settings::command_for_agent_with_paths(agent, &self.app_paths)
+        }
+    }
+
+    pub(super) fn command_for_agent_label_in_current_workspace(
+        &self,
+        label: &str,
+    ) -> Option<String> {
+        if self.is_remote_workspace() {
+            crate::settings::remote_linux_command_for_agent_label(label)
+        } else {
+            crate::settings::command_for_agent_label_with_paths(label, &self.app_paths)
+        }
+    }
+
+    fn prepare_session_runtime(
+        &self,
+        agent_command: &str,
+    ) -> Result<PreparedSessionRuntime, String> {
+        if self.is_remote_workspace() {
+            return self.prepare_remote_session_runtime(agent_command);
+        }
+
+        crate::settings::ensure_agent_ready_for_command(agent_command, &self.app_paths)
+            .map_err(|e| e.to_string())?;
+        Ok(PreparedSessionRuntime {
+            workspace_root: self.session_config_workspace_root(None),
+            agent_env: crate::settings::agent_env_for_command(agent_command, &self.app_paths),
+            acp_port: self.acp_port,
+            remote_ssh: None,
+        })
+    }
+
+    fn prepare_remote_session_runtime(
+        &self,
+        agent_command: &str,
+    ) -> Result<PreparedSessionRuntime, String> {
+        let mut remote_ssh = self.remote_ssh.clone().ok_or_else(|| {
+            "Remote workspace is not connected; reopen the remote directory first".to_string()
+        })?;
+        let local_port =
+            super::bootstrap::find_available_loopback_port().map_err(|e| e.to_string())?;
+        let mut agent_ports = std::collections::BTreeSet::from([local_port]);
+        let port_map = super::bootstrap::remote_proxy_port_map(&remote_ssh, &mut agent_ports)
+            .map_err(|e| e.to_string())?;
+        let remote_port = port_map.get(&local_port).copied().unwrap_or(local_port);
+        remote_ssh.local_port = local_port;
+        remote_ssh.remote_port = remote_port;
+        remote_ssh.reverse_forwards.clear();
+        let workspace_root = self.session_config_workspace_root(Some(&remote_ssh));
+
+        let remote_runtime = super::bootstrap::prepare_remote_agent_runtime(
+            agent_command,
+            &self.app_paths,
+            &remote_ssh,
+        )
+        .map_err(|e| e.to_string())?;
+        remote_ssh.reverse_forwards = remote_runtime.reverse_forwards;
+
+        Ok(PreparedSessionRuntime {
+            workspace_root,
+            agent_env: remote_runtime.agent_env,
+            acp_port: local_port,
+            remote_ssh: Some(remote_ssh),
+        })
+    }
+
+    pub(super) fn session_config_workspace_root(
+        &self,
+        remote_ssh: Option<&RemoteSshSessionConfig>,
+    ) -> String {
+        remote_ssh
+            .map(|config| config.remote_workspace_root.clone())
+            .unwrap_or_else(|| self.ui.workspace.root.display().to_string())
     }
 
     // ── Session management ──
@@ -144,18 +350,18 @@ impl Application {
 
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
-        crate::settings::ensure_agent_ready_for_command(&self.agent_command, &self.app_paths)
-            .map_err(|e| e.to_string())?;
+        let agent_command = self.agent_command.clone();
+        let prepared_runtime = self.prepare_session_runtime(&agent_command)?;
         let mut session = SessionHandle::start(SessionConfig {
-            workspace_root: self.ui.workspace.root.display().to_string(),
+            workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
             model: self.ui.session.model.clone(),
-            agent_command: self.agent_command.clone(),
-            agent_env: crate::settings::agent_env_for_command(&self.agent_command, &self.app_paths),
+            agent_command: agent_command.clone(),
+            agent_env: prepared_runtime.agent_env,
             resume_session_id: resume_id,
             log_id: make_log_id(),
-            acp_port: self.acp_port,
-            remote_ssh: self.remote_ssh_session_config(),
+            acp_port: prepared_runtime.acp_port,
+            remote_ssh: prepared_runtime.remote_ssh.clone(),
         })
         .map_err(|e| e.to_string())?;
         if let Some(acp_id) = resume_id_for_handle {
@@ -163,6 +369,9 @@ impl Application {
         }
 
         self.session = session;
+        self.agent_command = agent_command;
+        self.acp_port = prepared_runtime.acp_port;
+        self.remote_ssh = prepared_runtime.remote_ssh;
         self.ui.session.status = SessionStatus::Idle;
         self.ui.prompt_capabilities = Default::default();
         self.ui.available_commands.clear();
@@ -237,32 +446,26 @@ impl Application {
         let current_agent_label = self.ui.session.agent_cli.as_deref();
         let session_agent_command = if stored_agent_cli.as_deref() == current_agent_label {
             self.agent_command.clone()
-        } else {
-            stored_agent_cli
-                .as_deref()
-                .and_then(|label| {
-                    crate::settings::command_for_agent_label_with_paths(label, &self.app_paths)
-                })
+        } else if let Some(label) = stored_agent_cli.as_deref() {
+            self.prepare_agent_command_for_stored_label(label)?
                 .unwrap_or_else(|| self.agent_command.clone())
+        } else {
+            self.agent_command.clone()
         };
-        crate::settings::ensure_agent_ready_for_command(&session_agent_command, &self.app_paths)
-            .map_err(|e| e.to_string())?;
+        let prepared_runtime = self.prepare_session_runtime(&session_agent_command)?;
 
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
         let session = SessionHandle::start(SessionConfig {
-            workspace_root: self.ui.workspace.root.display().to_string(),
+            workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
             model: model.clone(),
             agent_command: session_agent_command.clone(),
-            agent_env: crate::settings::agent_env_for_command(
-                &session_agent_command,
-                &self.app_paths,
-            ),
+            agent_env: prepared_runtime.agent_env,
             resume_session_id: resume_acp_id,
             log_id: make_log_id(),
-            acp_port: self.acp_port,
-            remote_ssh: self.remote_ssh_session_config(),
+            acp_port: prepared_runtime.acp_port,
+            remote_ssh: prepared_runtime.remote_ssh.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
@@ -273,11 +476,10 @@ impl Application {
         ui.session.id = uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4());
         ui.session.model = model;
         ui.session.mode = mode;
-        ui.session.agent_cli = stored_agent_cli.or_else(|| {
-            Some(crate::settings::agent_label_for_command(
-                &session_agent_command,
-            ))
-        });
+        ui.session.agent_cli = Some(active_agent_label_for_command(
+            &session_agent_command,
+            stored_agent_cli,
+        ));
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();
         ui.available_commands.clear();
@@ -315,6 +517,8 @@ impl Application {
             ui,
             session,
             agent_command: session_agent_command,
+            acp_port: prepared_runtime.acp_port,
+            remote_ssh: prepared_runtime.remote_ssh,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -346,26 +550,19 @@ impl Application {
             .create_session(&new_id.to_string(), &initial_model)
             .map_err(|e| e.to_string())?;
 
-        let agent_command = match agent {
-            Some(agent) => crate::settings::command_for_agent_with_paths(agent, &self.app_paths)
-                .unwrap_or_else(|| {
-                    crate::settings::resolve_agent_command_with_settings(&self.app_paths)
-                }),
-            None => self.agent_command.clone(),
-        };
-        crate::settings::ensure_agent_ready_for_command(&agent_command, &self.app_paths)
-            .map_err(|e| e.to_string())?;
+        let agent_command = self.prepare_agent_command_for_new_session(agent)?;
+        let prepared_runtime = self.prepare_session_runtime(&agent_command)?;
 
         let session = SessionHandle::start(SessionConfig {
-            workspace_root: self.ui.workspace.root.display().to_string(),
+            workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
             model: initial_model.clone(),
             agent_command: agent_command.clone(),
-            agent_env: crate::settings::agent_env_for_command(&agent_command, &self.app_paths),
+            agent_env: prepared_runtime.agent_env,
             resume_session_id: None,
             log_id: make_log_id(),
-            acp_port: self.acp_port,
-            remote_ssh: self.remote_ssh_session_config(),
+            acp_port: prepared_runtime.acp_port,
+            remote_ssh: prepared_runtime.remote_ssh.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");
@@ -377,6 +574,14 @@ impl Application {
         ui.session.model = initial_model;
         ui.session.mode = Some("Build".into());
         ui.session.agent_cli = Some(agent_cli_label.clone());
+        if let Some(agent) = agent {
+            if let workspace_model::WorkspaceLocation::RemoteLinux(remote) =
+                &mut ui.workspace.location
+            {
+                remote.agent_cli = Some(agent);
+                remote.agent_command = Some(agent_command.clone());
+            }
+        }
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();
         ui.session.status = SessionStatus::Idle;
@@ -409,6 +614,8 @@ impl Application {
             ui,
             session,
             agent_command,
+            acp_port: prepared_runtime.acp_port,
+            remote_ssh: prepared_runtime.remote_ssh,
             in_flight_prompt: None,
             seq_counter: 1,
             needs_title: true,

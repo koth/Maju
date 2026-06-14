@@ -299,13 +299,15 @@ impl AppState {
         let active_path = items
             .iter()
             .find(|item| item.is_active)
-            .map(|item| item.workspace.root.display().to_string());
+            .map(open_workspace_record_path);
         let workspaces = items
             .into_iter()
             .map(|item| OpenWorkspaceRecord {
-                path: item.workspace.root.display().to_string(),
+                path: open_workspace_record_path(&item),
                 remote: match item.workspace.location {
-                    WorkspaceLocation::RemoteLinux(remote) => Some(remote),
+                    WorkspaceLocation::RemoteLinux(remote) => {
+                        Some(remote_workspace_for_storage(remote))
+                    }
                     WorkspaceLocation::Local => None,
                 },
             })
@@ -334,15 +336,23 @@ impl AppState {
 
     pub fn set_active_workspace(&self, path: String) -> Result<UiSnapshot, String> {
         app_core::startup_perf::mark("state/set_active_workspace/start", &path);
-        let key = normalize_tracked_path(&path);
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let remote = guard.workspaces.get(&key).and_then(entry_remote);
-        if let Some(remote) = remote {
-            let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+        if let Some(key) = workspace_key_for_identifier(&guard, &path) {
+            let (remote, local_path) = {
+                let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+                (entry_remote(entry), entry_path(entry))
+            };
+            let snapshot = if let Some(remote) = remote {
+                connect_remote_workspace_locked(&mut guard, key.clone(), remote)?
+            } else {
+                let local_path = local_path.ok_or("Workspace is not open")?;
+                connect_workspace_locked(&mut guard, key.clone(), local_path, None)?
+            };
             guard.active_workspace = Some(key);
             app_core::startup_perf::mark("state/set_active_workspace/end", "");
             return Ok(snapshot);
         }
+
         let path = PathBuf::from(path);
         let key = workspace_key(&path);
         let snapshot =
@@ -491,7 +501,8 @@ impl AppState {
     {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let key = match path {
-            Some(path) => normalize_tracked_path(&path),
+            Some(path) => workspace_key_for_identifier(&guard, &path)
+                .unwrap_or_else(|| normalize_tracked_path(&path)),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
         let (remote, path) = {
@@ -515,7 +526,8 @@ impl AppState {
     pub fn delete_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let key = match workspace_root {
-            Some(path) => normalize_tracked_path(&path),
+            Some(path) => workspace_key_for_identifier(&guard, &path)
+                .unwrap_or_else(|| normalize_tracked_path(&path)),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
         let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
@@ -558,7 +570,8 @@ impl AppState {
     pub fn archive_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let key = match workspace_root {
-            Some(path) => normalize_tracked_path(&path),
+            Some(path) => workspace_key_for_identifier(&guard, &path)
+                .unwrap_or_else(|| normalize_tracked_path(&path)),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
         let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
@@ -730,6 +743,20 @@ fn workspace_session_list(
     .map_err(|e| format!("{key}: {e}"))
 }
 
+fn open_workspace_record_path(item: &OpenWorkspaceItem) -> String {
+    match &item.workspace.location {
+        WorkspaceLocation::RemoteLinux(remote) => remote.key(),
+        WorkspaceLocation::Local => item.workspace.root.display().to_string(),
+    }
+}
+
+fn remote_workspace_for_storage(mut remote: RemoteLinuxWorkspace) -> RemoteLinuxWorkspace {
+    remote.local_port = None;
+    remote.remote_port = None;
+    remote.ssh_password = None;
+    remote
+}
+
 fn load_lightweight_sessions(path: &Path) -> Result<Vec<SessionListItem>, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     SessionStore::open(paths.root(), path)
@@ -786,6 +813,9 @@ fn active_session_id(sessions: &[SessionListItem]) -> uuid::Uuid {
 }
 
 fn entry_path(entry: &WorkspaceEntry) -> Option<PathBuf> {
+    if entry_is_remote(entry) {
+        return None;
+    }
     Some(match entry {
         WorkspaceEntry::Connected(app) => app.ui.workspace.root.clone(),
         WorkspaceEntry::Dormant(metadata) => metadata.workspace.root.clone(),
@@ -805,6 +835,29 @@ fn entry_remote(entry: &WorkspaceEntry) -> Option<RemoteLinuxWorkspace> {
         WorkspaceLocation::RemoteLinux(remote) => Some(remote.clone()),
         WorkspaceLocation::Local => None,
     }
+}
+
+fn workspace_key_for_identifier(guard: &WorkspaceRegistry, identifier: &str) -> Option<String> {
+    let normalized = normalize_tracked_path(identifier);
+    if guard.workspaces.contains_key(&normalized) {
+        return Some(normalized);
+    }
+
+    guard.workspaces.iter().find_map(|(key, entry)| {
+        let entry_root =
+            entry_path(entry).map(|path| normalize_tracked_path(&path.display().to_string()));
+        if entry_root.as_deref() == Some(normalized.as_str()) {
+            return Some(key.clone());
+        }
+
+        let remote = entry_remote(entry)?;
+        if normalize_tracked_path(&remote.remote_path) == normalized
+            || normalize_tracked_path(&remote.key()) == normalized
+        {
+            return Some(key.clone());
+        }
+        None
+    })
 }
 
 fn workspace_descriptor(workspace_root: &Path) -> WorkspaceDescriptor {
@@ -909,6 +962,91 @@ mod tests {
         assert!(list.is_active);
         assert_eq!(list.workspace.root, PathBuf::from(remote.key()));
         assert_eq!(entry_remote(&entry), Some(remote));
+    }
+
+    #[test]
+    fn remote_workspace_entry_path_is_not_treated_as_local_path() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: None,
+            remote_port: None,
+        };
+        let entry = WorkspaceEntry::Dormant(WorkspaceMetadata {
+            workspace: remote_workspace_descriptor(remote.clone()),
+            sessions: Vec::new(),
+        });
+
+        assert_eq!(entry_remote(&entry), Some(remote));
+        assert!(entry_path(&entry).is_none());
+    }
+
+    #[test]
+    fn open_workspace_state_persists_remote_key_without_runtime_ports() {
+        let state = AppState::new();
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: Some("secret".into()),
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        };
+
+        state
+            .restore_active_dormant_remote_workspace(remote.clone())
+            .unwrap();
+
+        let open = state.open_workspace_state().unwrap();
+        assert_eq!(open.active_path.as_deref(), Some(remote.key().as_str()));
+        assert_eq!(open.workspaces.len(), 1);
+        assert_eq!(open.workspaces[0].path, remote.key());
+        let stored_remote = open.workspaces[0].remote.as_ref().unwrap();
+        assert_eq!(stored_remote.remote_path, "/srv/kodex");
+        assert_eq!(stored_remote.local_port, None);
+        assert_eq!(stored_remote.remote_port, None);
+        assert_eq!(stored_remote.ssh_password, None);
+    }
+
+    #[test]
+    fn workspace_identifier_resolves_remote_path_to_remote_workspace_key() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        };
+        let key = remote_workspace_key(&remote);
+        let mut guard = WorkspaceRegistry::default();
+        guard.workspaces.insert(
+            key.clone(),
+            WorkspaceEntry::Dormant(WorkspaceMetadata {
+                workspace: remote_workspace_descriptor(remote.clone()),
+                sessions: Vec::new(),
+            }),
+        );
+
+        assert_eq!(
+            workspace_key_for_identifier(&guard, "/srv/kodex").as_deref(),
+            Some(key.as_str())
+        );
+        assert_eq!(
+            workspace_key_for_identifier(&guard, &remote.key()).as_deref(),
+            Some(key.as_str())
+        );
     }
 
     #[test]

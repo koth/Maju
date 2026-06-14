@@ -46,6 +46,8 @@ export function SessionList({
   const [selectedAgent, setSelectedAgent] = useState<AgentCliId | null>(null);
   const [pendingWorkspaceRoot, setPendingWorkspaceRoot] = useState<string | null>(null);
   const [pendingWorkspacePath, setPendingWorkspacePath] = useState<string | null>(null);
+  const [pendingRemoteAgent, setPendingRemoteAgent] = useState<AgentCliId | null>(null);
+  const [pendingRemoteWorkspace, setPendingRemoteWorkspace] = useState(false);
   const [modalMode, setModalMode] = useState<AgentModalMode | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -134,13 +136,13 @@ export function SessionList({
     };
   }, [workspaceMenuOpen]);
 
-  const openAgentModal = useCallback(async (mode: AgentModalMode) => {
+  const openAgentModal = useCallback(async (mode: AgentModalMode, preferredAgent: AgentCliId | null = null) => {
     setModalError(null);
     setAgentDropdownOpen(false);
     setWorkspaceMenuOpen(false);
     const snapshot = await settingsGetAgentSnapshot();
     setAgentSnapshot(snapshot);
-    setSelectedAgent(defaultAgentForNewWork(snapshot));
+    setSelectedAgent(preferredAgent ?? defaultAgentForNewWork(snapshot));
     setModalMode(mode);
     setAgentDropdownOpen(false);
   }, []);
@@ -149,6 +151,8 @@ export function SessionList({
     try {
       setPendingWorkspacePath(null);
       setPendingWorkspaceRoot(null);
+      setPendingRemoteAgent(null);
+      setPendingRemoteWorkspace(false);
       await openAgentModal("workspace");
     } catch (error) {
       setModalError(String(error));
@@ -222,11 +226,13 @@ export function SessionList({
   );
 
   const handleOpenAgentPicker = useCallback(
-    async (workspaceRoot: string) => {
+    async (workspaceRoot: string, remoteAgent: AgentCliId | null = null, isRemoteWorkspace = false) => {
       try {
         setPendingWorkspaceRoot(workspaceRoot);
         setPendingWorkspacePath(null);
-        await openAgentModal("session");
+        setPendingRemoteAgent(remoteAgent);
+        setPendingRemoteWorkspace(isRemoteWorkspace);
+        await openAgentModal("session", remoteAgent);
       } catch (error) {
         setModalError(String(error));
       }
@@ -238,6 +244,8 @@ export function SessionList({
     if (isSubmitting) return;
     setPendingWorkspaceRoot(null);
     setPendingWorkspacePath(null);
+    setPendingRemoteAgent(null);
+    setPendingRemoteWorkspace(false);
     setAgentSnapshot(null);
     setSelectedAgent(null);
     setModalMode(null);
@@ -261,6 +269,8 @@ export function SessionList({
       }
       setPendingWorkspaceRoot(null);
       setPendingWorkspacePath(null);
+      setPendingRemoteAgent(null);
+      setPendingRemoteWorkspace(false);
       setAgentSnapshot(null);
       setSelectedAgent(null);
       setModalMode(null);
@@ -318,6 +328,8 @@ export function SessionList({
   const modalButtonText = modalMode === "workspace" ? "创建工作区" : "创建会话";
   const loadingText = modalMode === "workspace" ? "正在创建工作区..." : "正在创建会话...";
   const selectedAgentStatus = agentSnapshot?.agents.find((agent) => agent.id === selectedAgent) ?? null;
+  const selectedAgentDisabled =
+    selectedAgentStatus ? agentDisabledForModal(selectedAgentStatus, pendingRemoteWorkspace) : false;
   const selectedClaudeProfile = agentSnapshot?.claude.profiles.find(
     (profile) => profile.id === agentSnapshot.claude.selected_profile_id,
   );
@@ -513,19 +525,25 @@ export function SessionList({
             {modalMode === "session" && (
               <div className="sl-agent-options">
                 {agentSnapshot.agents.map((agent) => (
-                  <label className={`sl-agent-option ${selectedAgent === agent.id ? "is-selected" : ""} ${!agent.installed ? "is-disabled" : ""}`} key={agent.id}>
+                  <label className={`sl-agent-option ${selectedAgent === agent.id ? "is-selected" : ""} ${agentDisabledForModal(agent, pendingRemoteWorkspace) ? "is-disabled" : ""}`} key={agent.id}>
                     <input
                       type="radio"
                       name="agent"
                       value={agent.id}
                       checked={selectedAgent === agent.id}
-                      disabled={!agent.installed || isSubmitting}
+                      disabled={agentDisabledForModal(agent, pendingRemoteWorkspace) || isSubmitting}
                       onChange={() => handleSelectModalAgent(agent.id)}
                     />
                     <span className="sl-agent-label">{agent.label}</span>
                     <span className="sl-agent-meta">
-                      {agent.id === agentSnapshot.settings.selected_agent ? "Settings 默认" : agent.binary}
-                      {!agent.installed ? " · 未安装" : ""}
+                      {pendingRemoteWorkspace
+                        ? agent.id === pendingRemoteAgent
+                          ? "远程项目当前 Agent"
+                          : "将为此会话准备远程 Agent"
+                        : agent.id === agentSnapshot.settings.selected_agent
+                          ? "Settings 默认"
+                          : agent.binary}
+                      {!pendingRemoteWorkspace && !agent.installed ? " · 未安装" : ""}
                     </span>
                   </label>
                 ))}
@@ -540,7 +558,7 @@ export function SessionList({
             {modalError && <div className="sl-agent-error">{modalError}</div>}
             <div className="sl-agent-actions">
               <button type="button" className="sl-agent-cancel" onClick={closeAgentPicker} disabled={isSubmitting}>取消</button>
-              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || !!selectedClaudeSetupMessage || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
+              <button type="button" className="sl-agent-create" onClick={handleConfirmAgentModal} disabled={!selectedAgent || selectedAgentDisabled || !!selectedClaudeSetupMessage || (modalMode === "workspace" && !pendingWorkspacePath) || isSubmitting}>
                 {isSubmitting && <span className="sl-agent-spinner" aria-hidden="true" />}
                 {isSubmitting ? loadingText : modalButtonText}
               </button>
@@ -581,6 +599,16 @@ function defaultAgentForNewWork(snapshot: AgentSettingsSnapshot): AgentCliId {
     : snapshot.agents.find((agent) => agent.installed)?.id ?? defaultAgent;
 }
 
+function agentDisabledForModal(
+  agent: AgentSettingsSnapshot["agents"][number],
+  pendingRemoteWorkspace: boolean,
+) {
+  if (pendingRemoteWorkspace) {
+    return false;
+  }
+  return !agent.installed;
+}
+
 function codexAgentReady(snapshot: AgentSettingsSnapshot) {
   const selectedProfile = snapshot.codex_acp.profiles.find(
     (profile) => profile.id === snapshot.codex_acp.selected_profile_id,
@@ -610,7 +638,7 @@ function WorkspaceSection({
   activeSessionId: string;
   onActivateWorkspace: (workspaceRoot: string) => void;
   onReconnectRemoteWorkspace: (remote: RemoteLinuxWorkspace) => void;
-  onCreateSession: (workspaceRoot: string) => void;
+  onCreateSession: (workspaceRoot: string, remoteAgent: AgentCliId | null, isRemoteWorkspace: boolean) => void;
   onSwitch: (id: string, workspaceRoot: string) => void;
   onArchive: (id: string, workspaceRoot: string) => void;
 }) {
@@ -619,6 +647,8 @@ function WorkspaceSection({
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
   const isDormantRemoteWorkspace = isRemoteWorkspace && !item.connected;
   const remoteWorkspace = item.workspace.location?.kind === "remote_linux" ? item.workspace.location : null;
+  const workspaceActionRoot = remoteWorkspace ? remoteWorkspaceKey(remoteWorkspace) : workspaceRoot;
+  const remoteAgent = remoteAgentForWorkspace(remoteWorkspace);
   const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
   const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
   const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
@@ -632,7 +662,7 @@ function WorkspaceSection({
           aria-current={item.is_active ? "true" : undefined}
           onClick={() => {
             if (!isDormantRemoteWorkspace) {
-              onActivateWorkspace(workspaceRoot);
+              onActivateWorkspace(workspaceActionRoot);
             }
           }}
           onDoubleClick={() => {
@@ -651,7 +681,7 @@ function WorkspaceSection({
         <button
           className="sl-workspace-edit"
           type="button"
-          onClick={() => onCreateSession(workspaceRoot)}
+          onClick={() => onCreateSession(workspaceActionRoot, remoteAgent, isRemoteWorkspace)}
           title={isDormantRemoteWorkspace ? "先双击连接远程工作区" : "新建会话"}
           aria-label={`在 ${item.workspace.name} 中新建会话`}
           disabled={isDormantRemoteWorkspace}
@@ -676,14 +706,31 @@ function WorkspaceSection({
               active={session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace}
               connected={session.id === activeSessionId && item.is_active && item.connected}
               disabled={isDormantRemoteWorkspace}
-              onSwitch={(id) => onSwitch(id, workspaceRoot)}
-              onArchive={(id) => onArchive(id, workspaceRoot)}
+              onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
+              onArchive={(id) => onArchive(id, workspaceActionRoot)}
             />
           ))}
         </div>
       </div>
     </section>
   );
+}
+
+function remoteWorkspaceKey(remote: RemoteLinuxWorkspace): string {
+  const port = remote.ssh_port ? `:${remote.ssh_port}` : "";
+  const remotePath = remote.remote_path.trim();
+  const normalizedPath = remotePath.startsWith("/") ? remotePath : `/${remotePath}`;
+  return `ssh://${remote.ssh_target.trim()}${port}${normalizedPath}`;
+}
+
+function remoteAgentForWorkspace(remote: RemoteLinuxWorkspace | null): AgentCliId | null {
+  if (!remote) return null;
+  if (remote.agent_cli) return remote.agent_cli;
+  const command = remote.agent_command?.toLowerCase() ?? "";
+  if (command.includes("claude-agent-acp")) return "claude-agent-acp";
+  if (command.includes("codex-acp") || command.includes("kodex-acp")) return "codex-acp";
+  if (command.includes("codebuddy")) return "codebuddy";
+  return null;
 }
 
 function ThreadRow({

@@ -158,6 +158,14 @@ fn definition(agent: AgentCliId) -> Option<&'static AgentCliDefinition> {
     AGENTS.iter().find(|definition| definition.id == agent)
 }
 
+pub fn agent_label_for_id(agent: AgentCliId) -> Option<&'static str> {
+    definition(agent).map(|definition| definition.label)
+}
+
+pub fn agent_id_for_label(label: &str) -> Option<AgentCliId> {
+    definition_for_label(label).map(|definition| definition.id)
+}
+
 /// Given an agent command string, derive a human-friendly label.
 pub fn agent_label_for_command(command: &str) -> String {
     let lower = command.to_lowercase();
@@ -171,23 +179,22 @@ pub fn agent_label_for_command(command: &str) -> String {
 
 /// Resolve a previously persisted human-friendly agent label back to an ACP command.
 pub fn command_for_agent_label(label: &str) -> Option<String> {
-    let normalized = label.trim().to_lowercase();
-    AGENTS
-        .iter()
-        .find(|agent| {
-            normalized == agent.label.to_lowercase() || normalized == agent.binary.to_lowercase()
-        })
-        .and_then(|agent| command_for_agent(agent.id))
+    definition_for_label(label).and_then(|agent| command_for_agent(agent.id))
 }
 
 pub fn command_for_agent_label_with_paths(label: &str, paths: &AppPaths) -> Option<String> {
+    definition_for_label(label).and_then(|agent| command_for_agent_with_paths(agent.id, paths))
+}
+
+pub fn remote_linux_command_for_agent_label(label: &str) -> Option<String> {
+    definition_for_label(label).and_then(|agent| remote_linux_command_for_agent(agent.id))
+}
+
+fn definition_for_label(label: &str) -> Option<&'static AgentCliDefinition> {
     let normalized = label.trim().to_lowercase();
-    AGENTS
-        .iter()
-        .find(|agent| {
-            normalized == agent.label.to_lowercase() || normalized == agent.binary.to_lowercase()
-        })
-        .and_then(|agent| command_for_agent_with_paths(agent.id, paths))
+    AGENTS.iter().find(|agent| {
+        normalized == agent.label.to_lowercase() || normalized == agent.binary.to_lowercase()
+    })
 }
 
 pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, String)> {
@@ -229,18 +236,24 @@ pub fn remote_agent_env_for_command(
     if is_codex_acp_command(command)
         && load_app_settings(paths).codex_connection_mode != CodexConnectionMode::Default
     {
-        if let Some(home) = remote_home.map(str::trim).filter(|home| !home.is_empty()) {
-            env.push((
-                CODEX_HOME_ENV.to_string(),
-                format!("{}/.kodex", home.trim_end_matches('/')),
-            ));
+        ensure_codex_proxy_from_provider_key_env(&env);
+        if let Some(codex_home) = remote_home.and_then(remote_codex_home) {
+            env.push((CODEX_HOME_ENV.to_string(), codex_home));
         }
         scrub_remote_codex_provider_key_env(&mut env);
     }
     env
 }
 
-pub fn remote_codex_proxy_config(paths: &AppPaths) -> Result<Option<String>> {
+pub fn remote_codex_home(remote_home: &str) -> Option<String> {
+    let home = remote_home.trim();
+    (!home.is_empty()).then(|| format!("{}/.kodex", home.trim_end_matches('/')))
+}
+
+pub fn remote_codex_proxy_config(
+    paths: &AppPaths,
+    remote_codex_home: Option<&str>,
+) -> Result<Option<String>> {
     if load_app_settings(paths).codex_connection_mode == CodexConnectionMode::Default {
         return Ok(None);
     }
@@ -254,6 +267,13 @@ pub fn remote_codex_proxy_config(paths: &AppPaths) -> Result<Option<String>> {
         .parse::<DocumentMut>()
         .with_context(|| format!("failed to parse Codex config {}", path.display()))?;
     scrub_codex_config_api_keys(&mut doc);
+    scrub_remote_codex_local_paths(&mut doc);
+    if let Some(remote_codex_home) = remote_codex_home {
+        doc["model_catalog_json"] = value(format!(
+            "{}/model_catalog.json",
+            remote_codex_home.trim_end_matches('/')
+        ));
+    }
     Ok(Some(doc.to_string()))
 }
 
@@ -308,6 +328,25 @@ fn scrub_remote_codex_provider_key_env(env: &mut [(String, String)]) {
     }
 }
 
+fn ensure_codex_proxy_from_provider_key_env(env: &[(String, String)]) {
+    for (env_key, provider) in [
+        (TIMIAI_API_KEY_ENV, TIMIAI_PROVIDER_ID),
+        (COMMANDCODE_API_KEY_ENV, COMMANDCODE_PROVIDER_ID),
+        (DEEPSEEK_API_KEY_ENV, DEEPSEEK_PROVIDER_ID),
+        (KIMI_API_KEY_ENV, KIMI_PROVIDER_ID),
+        (MIMO_API_KEY_ENV, MIMO_PROVIDER_ID),
+    ] {
+        let Some((_, api_key)) = env.iter().find(|(name, _)| name == env_key) else {
+            continue;
+        };
+        let api_key = api_key.trim();
+        if api_key.is_empty() || api_key == "kodex-proxy" {
+            continue;
+        }
+        acp_core::ensure_codex_api_proxy(provider, api_key);
+    }
+}
+
 fn scrub_codex_config_api_keys(doc: &mut DocumentMut) {
     let Some(providers) = doc
         .get_mut("model_providers")
@@ -318,6 +357,26 @@ fn scrub_codex_config_api_keys(doc: &mut DocumentMut) {
     for (_, provider) in providers.iter_mut() {
         if let Some(table) = provider.as_table_like_mut() {
             table.insert("api_key", value("kodex-proxy"));
+        }
+    }
+}
+
+fn scrub_remote_codex_local_paths(doc: &mut DocumentMut) {
+    for key in [
+        "model_catalog_json",
+        "model_instructions_file",
+        "experimental_instructions_file",
+    ] {
+        doc.remove(key);
+    }
+
+    let Some(profiles) = doc.get_mut("profiles").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    for (_, profile) in profiles.iter_mut() {
+        if let Some(table) = profile.as_table_like_mut() {
+            table.remove("model_instructions_file");
+            table.remove("experimental_instructions_file");
         }
     }
 }

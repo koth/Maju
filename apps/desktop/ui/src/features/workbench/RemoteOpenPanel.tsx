@@ -51,6 +51,14 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
     () => snapshot.profiles.find((profile) => profile.id === selectedProfileId) ?? snapshot.profiles[0] ?? null,
     [selectedProfileId, snapshot.profiles],
   );
+  const isOpening = busy === "open";
+  const progressByPhase = useMemo(() => {
+    return new Map(progressEvents.map((event) => [event.phase, event]));
+  }, [progressEvents]);
+  const latestProgress = progressEvents.length > 0 ? progressEvents[progressEvents.length - 1] : null;
+  const showOpeningProgress = isOpening || progressEvents.length > 0;
+  const openingStatusMessage =
+    latestProgress?.message || "正在建立连接并准备远程工作区";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -234,6 +242,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
                     role="radio"
                     aria-checked={selected}
                     className={`remote-open-machine-option ${selected ? "is-selected" : ""}`}
+                    disabled={isOpening}
                     onClick={() => setSelectedProfileId(profile.id)}
                   >
                     <strong>{profile.display_name}</strong>
@@ -250,6 +259,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
               type="password"
               autoComplete="off"
               value={sshPassword}
+              disabled={isOpening}
               onChange={(event) => setSshPassword(event.currentTarget.value)}
               placeholder="本次使用，不保存"
             />
@@ -277,6 +287,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
             <input
               aria-label="remote_open_path"
               value={remotePath}
+              disabled={isOpening}
               onChange={(event) => setRemotePath(event.currentTarget.value)}
               placeholder="/home/user/project"
             />
@@ -295,6 +306,7 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
                   role="radio"
                   aria-checked={selectedAgent === agent.id}
                   className={`remote-open-agent-option ${selectedAgent === agent.id ? "is-selected" : ""}`}
+                  disabled={isOpening}
                   onClick={() => setSelectedAgent(agent.id)}
                 >
                   <strong>{agent.label}</strong>
@@ -306,12 +318,27 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
           <p className="remote-open-note">验证可使用默认用户目录；打开项目需要远程绝对路径。</p>
         </section>
       </div>
-      {progressEvents.length > 0 && (
+      {showOpeningProgress && (
+        <div
+          className={`remote-open-wait ${isOpening ? "is-active" : ""}`}
+          role="status"
+          aria-live="polite"
+          aria-label="远程工作区准备状态"
+        >
+          <span className="remote-open-wait-spinner" aria-hidden="true" />
+          <div className="remote-open-wait-copy">
+            <strong>{isOpening ? "正在准备远程工作区" : "远程准备已结束"}</strong>
+            <span>{openingStatusMessage}</span>
+          </div>
+        </div>
+      )}
+      {showOpeningProgress && (
         <div className="remote-open-progress" aria-label="remote_open_progress">
           {REMOTE_OPEN_PHASES.map((phase) => {
-            const event = progressEvents.find((item) => item.phase === phase.id);
+            const event = progressByPhase.get(phase.id);
+            const statusClass = event ? `is-${event.status}` : "is-pending";
             return (
-              <div key={phase.id} className={`remote-open-progress-item ${event ? `is-${event.status}` : ""}`}>
+              <div key={phase.id} className={`remote-open-progress-item ${statusClass}`}>
                 <span className="remote-open-progress-dot" />
                 <span>{phase.label}</span>
                 {event?.message && <small>{event.message}</small>}
@@ -322,18 +349,21 @@ export function RemoteOpenPanel({ onWorkspaceOpened, onOpenSettings, onCancel, i
       )}
       <div className="remote-open-actions">
         {onCancel && (
-          <button type="button" className="remote-open-secondary" onClick={onCancel}>
+          <button type="button" className="remote-open-secondary" disabled={isOpening} onClick={onCancel}>
             取消
           </button>
         )}
-        <button type="button" className="remote-open-secondary" onClick={onOpenSettings}>
+        <button type="button" className="remote-open-secondary" disabled={isOpening} onClick={onOpenSettings}>
           管理远程机器
         </button>
         <button type="button" className="remote-open-secondary" disabled={busy !== null} onClick={handleValidate}>
           {busy === "validate" ? "验证中..." : "验证目录"}
         </button>
         <button type="button" className="remote-open-primary" disabled={busy !== null || !remotePath.trim()} onClick={handleOpen}>
-          {busy === "open" ? "打开中..." : "打开目录"}
+          <span className="remote-open-button-content">
+            {isOpening && <span className="remote-open-button-spinner" aria-hidden="true" />}
+            {isOpening ? "打开中..." : "打开目录"}
+          </span>
         </button>
       </div>
     </div>

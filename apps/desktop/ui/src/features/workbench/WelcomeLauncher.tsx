@@ -6,7 +6,6 @@ import {
   settingsSelectAgentProviderProfile,
   startupPerfMark,
   workspaceOpen,
-  workspaceOpenRemoteLinux,
   workspaceGetRecent,
   workspaceRemoveRecent,
   workspaceRestoreOpen,
@@ -36,6 +35,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
   const [setupBusy, setSetupBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [remoteExpanded, setRemoteExpanded] = useState(false);
+  const [remoteInitial, setRemoteInitial] = useState<RecentWorkspace["remote"] | null>(null);
 
   const [autoOpened, setAutoOpened] = useState(false);
 
@@ -172,9 +172,13 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         setLoading(true);
         setError(null);
         const recent = recents.find((item) => item.path === path);
-        const snapshot = recent?.remote
-          ? await workspaceOpenRemoteLinux(recent.remote)
-          : await workspaceOpen(path);
+        if (recent?.remote) {
+          setRemoteInitial(recent.remote);
+          setRemoteExpanded(true);
+          setLoading(false);
+          return;
+        }
+        const snapshot = await workspaceOpen(path);
         onWorkspaceOpened(snapshot);
       } catch (e) {
         const message = String(e);
@@ -187,6 +191,22 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     },
     [agentSettings, onOpenSettings, onWorkspaceOpened, recents]
   );
+
+  const handleRemoteWorkspaceOpened = useCallback((snapshot: UiSnapshot) => {
+    setRemoteExpanded(false);
+    setRemoteInitial(null);
+    onWorkspaceOpened(snapshot);
+  }, [onWorkspaceOpened]);
+
+  const handleOpenRemotePanel = useCallback(() => {
+    setRemoteInitial(null);
+    setRemoteExpanded((expanded) => !expanded);
+  }, []);
+
+  const handleCancelRemotePanel = useCallback(() => {
+    setRemoteExpanded(false);
+    setRemoteInitial(null);
+  }, []);
 
   const handleRemoveRecent = useCallback(async (path: string) => {
     await workspaceRemoveRecent(path);
@@ -261,7 +281,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
             <button
               type="button"
               className={`welcome-remote-entry ${remoteExpanded ? "is-active" : ""}`}
-              onClick={() => setRemoteExpanded((expanded) => !expanded)}
+              onClick={handleOpenRemotePanel}
               aria-expanded={remoteExpanded}
             >
               <span className="welcome-action-icon"><RemoteHostIcon /></span>
@@ -273,9 +293,10 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         {remoteExpanded && (
           <section className="welcome-remote-panel" aria-label="打开远程目录">
             <RemoteOpenPanel
-              onWorkspaceOpened={onWorkspaceOpened}
+              initialRemote={remoteInitial}
+              onWorkspaceOpened={handleRemoteWorkspaceOpened}
               onOpenSettings={() => onOpenSettings()}
-              onCancel={() => setRemoteExpanded(false)}
+              onCancel={handleCancelRemotePanel}
             />
           </section>
         )}

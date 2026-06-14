@@ -347,6 +347,8 @@ describe("SessionList agent picker", () => {
             ssh_target: "root@9.134.121.208",
             ssh_port: 36000,
             remote_path: "/data/workspace/CodeTrans",
+            agent_cli: "codex-acp",
+            agent_command: "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp",
           },
         },
         sessions: [],
@@ -403,6 +405,8 @@ describe("SessionList agent picker", () => {
             ssh_target: "root@9.134.121.208",
             ssh_port: 36000,
             remote_path: "/data/workspace/CodeTrans",
+            agent_cli: "codex-acp",
+            agent_command: "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp",
           },
         },
         sessions: [sessionItem({ id: "remote-session-1", title: "继续任务" })],
@@ -432,6 +436,153 @@ describe("SessionList agent picker", () => {
     expect(sessionSwitch).not.toHaveBeenCalled();
 
     expect(screen.getByRole("button", { name: "归档会话 继续任务" })).toBeDisabled();
+  });
+
+  it("creates sessions from a connected remote workspace row using the remote workspace root", async () => {
+    const onSessionChanged = vi.fn();
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        workspace: {
+          id: "remote-workspace-1",
+          root: "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+          name: "CodeTrans",
+          location: {
+            kind: "remote_linux",
+            profile_id: "remote-1",
+            ssh_target: "root@9.134.121.208",
+            ssh_port: 36000,
+            remote_path: "/data/workspace/CodeTrans",
+            agent_cli: "codex-acp",
+            agent_command: "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp",
+          },
+        },
+        sessions: [],
+        active_session_id: "",
+        is_active: true,
+        connected: true,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="ssh://root@9.134.121.208:36000/data/workspace/CodeTrans"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={onSessionChanged}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 CodeTrans 中新建会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => {
+      expect(sessionCreate).toHaveBeenCalledWith(
+        "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+        "codex-acp",
+      );
+      expect(onSessionChanged).toHaveBeenCalled();
+    });
+  });
+
+  it("allows choosing a different agent for a connected remote workspace session", async () => {
+    const onSessionChanged = vi.fn();
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        workspace: {
+          id: "remote-workspace-1",
+          root: "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+          name: "CodeTrans",
+          location: {
+            kind: "remote_linux",
+            profile_id: "remote-1",
+            ssh_target: "root@9.134.121.208",
+            ssh_port: 36000,
+            remote_path: "/data/workspace/CodeTrans",
+            agent_cli: "codex-acp",
+            agent_command: "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp",
+          },
+        },
+        sessions: [],
+        active_session_id: "",
+        is_active: true,
+        connected: true,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="ssh://root@9.134.121.208:36000/data/workspace/CodeTrans"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={onSessionChanged}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 CodeTrans 中新建会话" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Claude/ }));
+    expect(screen.queryByText("重新打开远程目录后可切换")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => {
+      expect(sessionCreate).toHaveBeenCalledWith(
+        "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+        "claude-agent-acp",
+      );
+      expect(onSessionChanged).toHaveBeenCalled();
+    });
+  });
+
+  it("creates sessions from remote metadata even when the workspace root is the remote path", async () => {
+    const onSessionChanged = vi.fn();
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        workspace: {
+          id: "remote-workspace-1",
+          root: "/data/workspace/CodeTrans",
+          name: "CodeTrans",
+          location: {
+            kind: "remote_linux",
+            profile_id: "remote-1",
+            ssh_target: "root@9.134.121.208",
+            ssh_port: 36000,
+            remote_path: "/data/workspace/CodeTrans",
+          },
+        },
+        sessions: [],
+        active_session_id: "",
+        is_active: true,
+        connected: true,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/data/workspace/CodeTrans"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={onSessionChanged}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "在 CodeTrans 中新建会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => {
+      expect(sessionCreate).toHaveBeenCalledWith(
+        "ssh://root@9.134.121.208:36000/data/workspace/CodeTrans",
+        "claude-agent-acp",
+      );
+      expect(onSessionChanged).toHaveBeenCalled();
+    });
   });
 
   it("opens a remote workspace from the sidebar new workspace menu", async () => {

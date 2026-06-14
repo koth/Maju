@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 const REMOTE_FS_READ_TIMEOUT: Duration = Duration::from_secs(45);
 const REMOTE_FS_WRITE_TIMEOUT: Duration = Duration::from_secs(45);
 const REMOTE_SSH_CONNECT_TIMEOUT_SECS: u64 = 5;
+const REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS: u64 = 15;
+const REMOTE_SSH_SERVER_ALIVE_COUNT_MAX: u64 = 4;
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
@@ -473,6 +475,10 @@ fn remote_ssh_program_and_args(
     args.extend([
         "-o".to_string(),
         format!("ConnectTimeout={REMOTE_SSH_CONNECT_TIMEOUT_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveInterval={REMOTE_SSH_SERVER_ALIVE_INTERVAL_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveCountMax={REMOTE_SSH_SERVER_ALIVE_COUNT_MAX}"),
     ]);
     args.extend(ssh_multiplex_args());
     if let Some(port) = config.ssh_port {

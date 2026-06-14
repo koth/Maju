@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WelcomeLauncher } from "./WelcomeLauncher";
 import { onRemoteOpenProgress } from "../../lib/events";
@@ -10,13 +10,10 @@ import {
   startupPerfMark,
   workspaceGetRecent,
   workspaceOpen,
-  workspaceOpenRemoteLinux,
   workspaceOpenRemoteProfile,
   workspaceRestoreOpen,
 } from "../../lib/tauri";
-import type { AgentProviderProfile, AgentSettingsSnapshot, RemoteMachineProfilesSnapshot, RemoteOpenProgressEvent } from "../../types";
-
-let remoteOpenProgressCallback: ((progress: RemoteOpenProgressEvent) => void) | null = null;
+import type { AgentProviderProfile, AgentSettingsSnapshot, RemoteMachineProfilesSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
@@ -29,7 +26,6 @@ vi.mock("../../lib/tauri", async () => {
     startupPerfMark: vi.fn(),
     workspaceGetRecent: vi.fn(),
     workspaceOpen: vi.fn(),
-    workspaceOpenRemoteLinux: vi.fn(),
     workspaceOpenRemoteProfile: vi.fn(),
     workspaceRemoveRecent: vi.fn(),
     workspaceRestoreOpen: vi.fn(),
@@ -41,8 +37,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 vi.mock("../../lib/events", () => ({
-  onRemoteOpenProgress: vi.fn(async (callback: (progress: RemoteOpenProgressEvent) => void) => {
-    remoteOpenProgressCallback = callback;
+  onRemoteOpenProgress: vi.fn(async () => {
     return vi.fn();
   }),
 }));
@@ -132,9 +127,18 @@ function remoteProfilesSnapshot(): RemoteMachineProfilesSnapshot {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("WelcomeLauncher BYOK onboarding", () => {
   beforeEach(() => {
-    remoteOpenProgressCallback = null;
     vi.mocked(startupPerfMark).mockResolvedValue(undefined);
     vi.mocked(workspaceGetRecent).mockResolvedValue([
       { path: "D:\\work\\kodex", exists: true },
@@ -145,7 +149,6 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     vi.mocked(settingsSelectAgentProviderProfile).mockResolvedValue(agentSnapshot());
     vi.mocked(workspaceRestoreOpen).mockResolvedValue(null);
     vi.mocked(workspaceOpen).mockResolvedValue({} as never);
-    vi.mocked(workspaceOpenRemoteLinux).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
 
@@ -270,19 +273,81 @@ describe("WelcomeLauncher BYOK onboarding", () => {
         agent_cli: "claude-agent-acp",
       })),
     );
-    const requestId = vi.mocked(workspaceOpenRemoteProfile).mock.calls[0][0].request_id!;
-    act(() => {
-      remoteOpenProgressCallback?.({
-        request_id: requestId,
-        phase: "platform",
-        status: "running",
-        elapsed_ms: 0,
-        message: "正在检测远程平台",
-      });
-    });
-    expect(await screen.findByLabelText("remote_open_progress")).toBeInTheDocument();
-    expect(screen.getByText("正在检测远程平台")).toBeInTheDocument();
-    expect(workspaceOpenRemoteLinux).not.toHaveBeenCalled();
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+  });
+
+  it("shows an immediate waiting state while opening a remote workspace", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([]);
+    const snapshot = agentSnapshot();
+    snapshot.codex_acp.profiles = [
+      profile("codex", "default", false, true, false),
+      profile("codex", "timiai", true, true, true),
+    ];
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
+    const pendingOpen = deferred<never>();
+    vi.mocked(workspaceOpenRemoteProfile).mockReturnValueOnce(pendingOpen.promise);
+    const onWorkspaceOpened = vi.fn();
+
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "打开远程目录" }));
+    const panel = await screen.findByRole("region", { name: "打开远程目录" });
+    fireEvent.change(within(panel).getByLabelText("remote_open_path"), { target: { value: "/srv/project" } });
+    fireEvent.change(within(panel).getByLabelText("remote_open_password"), { target: { value: "ssh-secret" } });
+
+    const openRemote = within(panel).getByRole("button", { name: "打开目录" });
+    fireEvent.click(openRemote);
+
+    const status = await within(panel).findByRole("status", { name: "远程工作区准备状态" });
+    expect(within(status).getByText("正在准备远程工作区")).toBeInTheDocument();
+    expect(within(status).getByText("正在建立连接并准备远程工作区")).toBeInTheDocument();
+    expect(within(panel).getByLabelText("remote_open_progress")).toBeInTheDocument();
+    expect(openRemote).toBeDisabled();
+    expect(within(panel).getByLabelText("remote_open_path")).toBeDisabled();
+
+    pendingOpen.resolve({} as never);
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+  });
+
+  it("reopens recent remote workspaces through the password flow", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([
+      {
+        path: "ssh://root@devbox:36000/srv/project",
+        exists: true,
+        remote: {
+          profile_id: "remote-1",
+          ssh_target: "root@devbox",
+          ssh_port: 36000,
+          remote_path: "/srv/project",
+          agent_cli: "codex-acp",
+          agent_command: "codex-acp",
+          local_port: null,
+          remote_port: null,
+        },
+      },
+    ]);
+    const onWorkspaceOpened = vi.fn();
+
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /project/ }));
+    const panel = await screen.findByRole("region", { name: "打开远程目录" });
+    expect(within(panel).getByLabelText("remote_open_path")).toHaveValue("/srv/project");
+    fireEvent.change(within(panel).getByLabelText("remote_open_password"), { target: { value: "ssh-secret" } });
+
+    const openRemote = within(panel).getByRole("button", { name: "打开目录" });
+    await waitFor(() => expect(openRemote).not.toBeDisabled());
+    fireEvent.click(openRemote);
+
+    await waitFor(() =>
+      expect(workspaceOpenRemoteProfile).toHaveBeenCalledWith(expect.objectContaining({
+        profile_id: "remote-1",
+        remote_path: "/srv/project",
+        ssh_password: "ssh-secret",
+        agent_cli: "codex-acp",
+      })),
+    );
+    expect(workspaceOpen).not.toHaveBeenCalled();
     await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
   });
 });

@@ -44,14 +44,18 @@ fn remote_agent_command_quotes_workspace_args_and_env() {
     );
 
     assert!(command.contains("cd '/home/alice/project with space' || exit $?;"));
-    assert!(
-        command.contains(
-            "TOKEN='a'\\''b' 'codex-acp' '--config' 'profile='\\''dev'\\''' --port 4567 &"
-        )
-    );
+    assert!(command.contains("if command -v setsid >/dev/null 2>&1; then"));
+    assert!(command.contains(
+        "env 'TOKEN=a'\\''b' setsid 'codex-acp' '--config' 'profile='\\''dev'\\''' --port 4567 &"
+    ));
+    assert!(command.contains(
+        "else env 'TOKEN=a'\\''b' 'codex-acp' '--config' 'profile='\\''dev'\\''' --port 4567 & fi;"
+    ));
     assert!(command.contains("KODEX_REMOTE_ACP_PORT_HEX='11D7';"));
     assert!(command.contains("if [ \"$kodex_i\" -ge 150 ];"));
     assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
+    assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
+    assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
     assert!(command.contains("wait \"$kodex_agent_pid\""));
 }
 
@@ -67,9 +71,10 @@ fn remote_agent_command_accepts_bootstrapped_absolute_agent_path() {
 
     assert!(command.contains("cd '/srv/project' || exit $?;"));
     assert!(command.contains(
-        "'/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy' '--acp' --port 4567 &"
+        "setsid '/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy' '--acp' --port 4567 &"
     ));
-    assert!(command.contains("trap 'kill \"$kodex_agent_pid\" 2>/dev/null'"));
+    assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
+    assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
     assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
 }
 
@@ -138,7 +143,7 @@ fn remote_ssh_args_allow_one_password_prompt_when_password_is_supplied() {
 
 #[cfg(unix)]
 #[test]
-fn remote_ssh_args_do_not_multiplex_long_lived_agent_forward() {
+fn remote_ssh_args_disable_multiplex_for_long_lived_agent_forward() {
     let args = build_remote_ssh_args(
         "alice@devbox",
         None,
@@ -148,6 +153,8 @@ fn remote_ssh_args_do_not_multiplex_long_lived_agent_forward() {
         false,
     );
 
+    assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+    assert!(args.contains(&"ServerAliveCountMax=4".to_string()));
     assert!(!args.contains(&"ControlMaster=auto".to_string()));
     assert!(!args.contains(&"ControlPersist=300".to_string()));
     assert!(args.contains(&"ControlMaster=no".to_string()));
@@ -157,7 +164,7 @@ fn remote_ssh_args_do_not_multiplex_long_lived_agent_forward() {
 
 #[cfg(unix)]
 #[test]
-fn remote_ssh_command_args_do_not_multiplex_long_lived_agent_command() {
+fn remote_ssh_command_args_multiplex_long_lived_agent_command() {
     let args = build_remote_ssh_command_args(
         "alice@devbox",
         None,
@@ -165,11 +172,13 @@ fn remote_ssh_command_args_do_not_multiplex_long_lived_agent_command() {
         false,
     );
 
-    assert!(!args.contains(&"ControlMaster=auto".to_string()));
-    assert!(!args.contains(&"ControlPersist=300".to_string()));
-    assert!(args.contains(&"ControlMaster=no".to_string()));
-    assert!(args.contains(&"ControlPath=none".to_string()));
-    assert!(args.contains(&"ControlPersist=no".to_string()));
+    assert!(args.contains(&"ControlMaster=auto".to_string()));
+    assert!(args.contains(&"ControlPersist=300".to_string()));
+    assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+    assert!(args.contains(&"ServerAliveCountMax=4".to_string()));
+    assert!(!args.contains(&"ControlMaster=no".to_string()));
+    assert!(!args.contains(&"ControlPath=none".to_string()));
+    assert!(!args.contains(&"ControlPersist=no".to_string()));
 }
 
 #[test]
@@ -231,7 +240,13 @@ fn remote_ssh_reverse_forward_args_bind_remote_loopback_to_local_proxy() {
     assert!(args.contains(&"-N".to_string()));
     assert!(args.contains(&"-p".to_string()));
     assert!(args.contains(&"2222".to_string()));
+    assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+    assert!(args.contains(&"ServerAliveCountMax=4".to_string()));
+    assert!(!args.contains(&"ControlMaster=auto".to_string()));
+    assert!(!args.contains(&"ControlPersist=300".to_string()));
     assert!(args.contains(&"ControlMaster=no".to_string()));
+    assert!(args.contains(&"ControlPath=none".to_string()));
+    assert!(args.contains(&"ControlPersist=no".to_string()));
 }
 
 #[test]

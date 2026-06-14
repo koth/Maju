@@ -114,7 +114,7 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
     if let Some(active_path) = preferred_active {
         let active_record = workspaces
             .iter()
-            .find(|workspace| workspace.path == active_path)
+            .find(|workspace| open_workspace_record_matches(workspace, &active_path))
             .cloned();
         if let Some(remote) = active_record
             .as_ref()
@@ -144,6 +144,11 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
 
     if snapshot.is_none() {
         for workspace in &workspaces {
+            if let Some(remote) = workspace.remote.clone() {
+                snapshot = Some(state.restore_active_dormant_remote_workspace(remote)?);
+                opened_active_path = Some(workspace.path.clone());
+                break;
+            }
             let dir = PathBuf::from(&workspace.path);
             let exists = app_core::startup_perf::measure(
                 "workspace_restore_open/fallback_is_dir",
@@ -189,6 +194,20 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
         ),
     );
     Ok(snapshot)
+}
+
+fn open_workspace_record_matches(
+    record: &crate::open_workspaces::OpenWorkspaceRecord,
+    path: &str,
+) -> bool {
+    if record.path == path {
+        return true;
+    }
+    record.remote.as_ref().is_some_and(|remote| {
+        remote.key() == path
+            || app_core::normalize_tracked_path(&remote.remote_path)
+                == app_core::normalize_tracked_path(path)
+    })
 }
 
 #[tauri::command]
@@ -346,6 +365,31 @@ mod tests {
             timed_out: false,
             elapsed_ms: 1,
         }
+    }
+
+    #[test]
+    fn open_workspace_record_matches_legacy_remote_path() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: Some(3456),
+            remote_port: Some(4567),
+        };
+        let record = crate::open_workspaces::OpenWorkspaceRecord {
+            path: remote.key(),
+            remote: Some(remote),
+        };
+
+        assert!(open_workspace_record_matches(&record, "/srv/kodex"));
+        assert!(open_workspace_record_matches(
+            &record,
+            "ssh://devbox:22/srv/kodex"
+        ));
     }
 
     #[test]

@@ -153,6 +153,8 @@ jobs:
             --root dist/codex-sandbox-${{ matrix.asset_suffix }}
 
       - name: Build kodex-claude
+        env:
+          KODEX_CLAUDE_NATIVE_LIBC: glibc
         run: npm --prefix kodex-claude run build:binary
 
       - name: Package remote agent assets

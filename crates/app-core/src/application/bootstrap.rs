@@ -1,7 +1,7 @@
 use super::*;
 use crate::remote_ssh::{RemoteSshCommand, RemoteSshCommandRunner, SystemRemoteSshCommandRunner};
 use acp_core::RemoteSshReverseForward;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Application {
     pub fn bootstrap(
@@ -58,17 +58,6 @@ impl Application {
             existing_sessions.len().to_string(),
         );
         let most_recent_session = existing_sessions.first();
-        let requested_agent_label =
-            crate::startup_perf::measure("app/bootstrap/agent_label_for_command", "", || {
-                crate::settings::agent_label_for_command(&agent_command)
-            });
-        let persisted_agent_command = most_recent_session
-            .and_then(|session| session.agent_cli.as_deref())
-            .filter(|label| *label != requested_agent_label)
-            .and_then(|label| {
-                crate::settings::command_for_agent_label_with_paths(label, &app_paths)
-            });
-        let agent_command = persisted_agent_command.unwrap_or(agent_command);
         crate::settings::ensure_agent_ready_for_command(&agent_command, &app_paths)?;
 
         // Check for an existing local session and its agent-side ACP session ID
@@ -184,11 +173,13 @@ impl Application {
         // settings default.
         let agent_cli_label =
             crate::startup_perf::measure("app/bootstrap/resolve_session_agent_label", "", || {
-                store
-                    .get_session_agent_cli(&ui.session.id.to_string())
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| crate::settings::agent_label_for_command(&agent_command))
+                active_agent_label_for_command(
+                    &agent_command,
+                    store
+                        .get_session_agent_cli(&ui.session.id.to_string())
+                        .ok()
+                        .flatten(),
+                )
             });
         ui.session.agent_cli = Some(agent_cli_label.clone());
         update_initial_agent_notice(&mut ui, &agent_cli_label);
@@ -388,11 +379,13 @@ impl Application {
         if ui.session.mode.is_none() {
             ui.session.mode = Some("Build".into());
         }
-        let agent_cli_label = store
-            .get_session_agent_cli(&ui.session.id.to_string())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| crate::settings::agent_label_for_command(&agent_command));
+        let agent_cli_label = active_agent_label_for_command(
+            &agent_command,
+            store
+                .get_session_agent_cli(&ui.session.id.to_string())
+                .ok()
+                .flatten(),
+        );
         ui.session.agent_cli = Some(agent_cli_label.clone());
         update_initial_agent_notice(&mut ui, &agent_cli_label);
         let _ = store.update_session_agent_cli(&ui.session.id.to_string(), &agent_cli_label);
@@ -523,18 +516,18 @@ fn normalize_workspace_root(workspace_root: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| workspace_root.to_path_buf())
 }
 
-fn find_available_loopback_port() -> anyhow::Result<u16> {
+pub(super) fn find_available_loopback_port() -> anyhow::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
 }
 
 #[derive(Debug, Clone, Default)]
-struct RemoteAgentRuntime {
-    agent_env: Vec<(String, String)>,
-    reverse_forwards: Vec<RemoteSshReverseForward>,
+pub(super) struct RemoteAgentRuntime {
+    pub(super) agent_env: Vec<(String, String)>,
+    pub(super) reverse_forwards: Vec<RemoteSshReverseForward>,
 }
 
-fn prepare_remote_agent_runtime(
+pub(super) fn prepare_remote_agent_runtime(
     agent_command: &str,
     app_paths: &AppPaths,
     remote_ssh: &RemoteSshSessionConfig,
@@ -544,23 +537,64 @@ fn prepare_remote_agent_runtime(
     let is_codex = crate::settings::is_codex_acp_command(agent_command);
     let mut agent_env =
         crate::settings::remote_agent_env_for_command(agent_command, app_paths, None);
-    let codex_config = if is_codex {
-        crate::settings::remote_codex_proxy_config(app_paths)?
+    let mut codex_config = if is_codex {
+        crate::settings::remote_codex_proxy_config(app_paths, None)?
     } else {
         None
     };
+    let mut codex_model_catalog = None;
+    let mut remote_codex_home = None;
 
-    if let Some(config) = codex_config.as_deref() {
+    if codex_config.is_some() {
         let remote_home = resolve_remote_home(remote_ssh)?;
+        let resolved_remote_codex_home = crate::settings::remote_codex_home(&remote_home)
+            .ok_or_else(|| anyhow::anyhow!("远程 HOME 解析为空"))?;
         agent_env = crate::settings::remote_agent_env_for_command(
             agent_command,
             app_paths,
             Some(&remote_home),
         );
-        write_remote_codex_config(remote_ssh, config)?;
+        codex_config = crate::settings::remote_codex_proxy_config(
+            app_paths,
+            Some(&resolved_remote_codex_home),
+        )?;
+        codex_model_catalog = crate::settings::remote_codex_model_catalog_content(app_paths)?;
+        remote_codex_home = Some(resolved_remote_codex_home);
     }
 
-    let reverse_forwards = remote_proxy_reverse_forwards(&agent_env, codex_config.as_deref());
+    let mut proxy_ports = collect_remote_proxy_ports(&agent_env, codex_config.as_deref());
+    ensure_local_proxy_ports_reachable(&proxy_ports)?;
+    let proxy_port_map = if proxy_ports.is_empty() {
+        BTreeMap::new()
+    } else {
+        remote_proxy_port_map(remote_ssh, &mut proxy_ports)?
+    };
+    if !proxy_port_map.is_empty() {
+        rewrite_loopback_proxy_ports_in_env(&mut agent_env, &proxy_port_map);
+        if let Some(config) = codex_config.as_mut() {
+            rewrite_loopback_proxy_ports(config, &proxy_port_map);
+        }
+    }
+
+    if codex_config.is_some() {
+        let remote_codex_home =
+            remote_codex_home.ok_or_else(|| anyhow::anyhow!("远程 HOME 解析为空"))?;
+        let config = codex_config
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("远程 Codex 配置为空"))?;
+        write_remote_codex_config(remote_ssh, &remote_codex_home, config)?;
+        if let Some(catalog) = codex_model_catalog.as_deref() {
+            write_remote_codex_model_catalog(remote_ssh, &remote_codex_home, catalog)?;
+        }
+    }
+
+    let reverse_forwards = proxy_port_map
+        .into_iter()
+        .map(|(local_port, remote_port)| RemoteSshReverseForward {
+            remote_port,
+            local_port,
+        })
+        .collect();
     Ok(RemoteAgentRuntime {
         agent_env,
         reverse_forwards,
@@ -590,32 +624,82 @@ fn resolve_remote_home(remote_ssh: &RemoteSshSessionConfig) -> anyhow::Result<St
 
 fn write_remote_codex_config(
     remote_ssh: &RemoteSshSessionConfig,
+    remote_codex_home: &str,
     config: &str,
 ) -> anyhow::Result<()> {
+    let config_path = format!("{}/config.toml", remote_codex_home.trim_end_matches('/'));
+    write_remote_text_file(
+        remote_ssh,
+        remote_codex_home,
+        &config_path,
+        config,
+        "远程 Codex 配置写入失败",
+    )
+}
+
+fn write_remote_codex_model_catalog(
+    remote_ssh: &RemoteSshSessionConfig,
+    remote_codex_home: &str,
+    catalog: &str,
+) -> anyhow::Result<()> {
+    let catalog_path = format!(
+        "{}/model_catalog.json",
+        remote_codex_home.trim_end_matches('/')
+    );
+    write_remote_text_file(
+        remote_ssh,
+        remote_codex_home,
+        &catalog_path,
+        catalog,
+        "远程 Codex 模型目录写入失败",
+    )
+}
+
+fn write_remote_text_file(
+    remote_ssh: &RemoteSshSessionConfig,
+    remote_dir: &str,
+    remote_path: &str,
+    content: &str,
+    error_prefix: &str,
+) -> anyhow::Result<()> {
     let runner = SystemRemoteSshCommandRunner;
+    let remote_dir = shell_words::quote(remote_dir);
+    let remote_path = shell_words::quote(remote_path);
+    let command = format!("mkdir -p {remote_dir} && cat > {remote_path} && test -f {remote_path}");
     let output = runner.run_ssh_command(
         &RemoteSshCommand::new(
             remote_ssh.ssh_target.clone(),
             remote_ssh.ssh_port,
-            "mkdir -p \"$HOME/.kodex\" && cat > \"$HOME/.kodex/config.toml\"",
+            command,
             remote_ssh.ssh_password.as_deref(),
             Duration::from_secs(12),
         )
-        .with_stdin(config.as_bytes().to_vec()),
+        .with_stdin(content.as_bytes().to_vec()),
     );
     if output.success {
         return Ok(());
     }
-    anyhow::bail!(
-        "{}",
-        first_remote_ssh_message("远程 Codex 配置写入失败", &output)
-    )
+    anyhow::bail!("{}", first_remote_ssh_message(error_prefix, &output))
 }
 
+#[cfg(test)]
 fn remote_proxy_reverse_forwards(
     agent_env: &[(String, String)],
     codex_config: Option<&str>,
 ) -> Vec<RemoteSshReverseForward> {
+    collect_remote_proxy_ports(agent_env, codex_config)
+        .into_iter()
+        .map(|port| RemoteSshReverseForward {
+            remote_port: port,
+            local_port: port,
+        })
+        .collect()
+}
+
+fn collect_remote_proxy_ports(
+    agent_env: &[(String, String)],
+    codex_config: Option<&str>,
+) -> BTreeSet<u16> {
     let mut ports = BTreeSet::new();
     for (_, value) in agent_env {
         collect_loopback_proxy_ports(value, &mut ports);
@@ -624,12 +708,6 @@ fn remote_proxy_reverse_forwards(
         collect_loopback_proxy_ports(config, &mut ports);
     }
     ports
-        .into_iter()
-        .map(|port| RemoteSshReverseForward {
-            remote_port: port,
-            local_port: port,
-        })
-        .collect()
 }
 
 fn collect_loopback_proxy_ports(value: &str, ports: &mut BTreeSet<u16>) {
@@ -647,6 +725,129 @@ fn collect_loopback_proxy_ports(value: &str, ports: &mut BTreeSet<u16>) {
                 ports.insert(port);
             }
             rest = after;
+        }
+    }
+}
+
+pub(super) fn remote_proxy_port_map(
+    remote_ssh: &RemoteSshSessionConfig,
+    local_ports: &mut BTreeSet<u16>,
+) -> anyhow::Result<BTreeMap<u16, u16>> {
+    if local_ports.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let runner = SystemRemoteSshCommandRunner;
+    let ports = local_ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let output = runner.run_ssh_command(&RemoteSshCommand::new(
+        remote_ssh.ssh_target.clone(),
+        remote_ssh.ssh_port,
+        format!(
+            "python3 - {ports} <<'PY'\n{}\nPY",
+            REMOTE_PROXY_PORT_PROBE_SCRIPT
+        ),
+        remote_ssh.ssh_password.as_deref(),
+        Duration::from_secs(8),
+    ));
+    if !output.success {
+        anyhow::bail!(
+            "{}",
+            first_remote_ssh_message("远程 proxy 端口探测失败", &output)
+        );
+    }
+
+    let mut port_map = BTreeMap::new();
+    for line in output.stdout.lines() {
+        let Some((local, remote)) = line.trim().split_once('=') else {
+            continue;
+        };
+        let local_port = local.parse::<u16>().ok();
+        let remote_port = remote.parse::<u16>().ok();
+        if let (Some(local_port), Some(remote_port)) = (local_port, remote_port)
+            && local_ports.contains(&local_port)
+            && remote_port > 0
+        {
+            port_map.insert(local_port, remote_port);
+        }
+    }
+
+    for local_port in local_ports.iter() {
+        port_map.entry(*local_port).or_insert(*local_port);
+    }
+    Ok(port_map)
+}
+
+fn ensure_local_proxy_ports_reachable(local_ports: &BTreeSet<u16>) -> anyhow::Result<()> {
+    for port in local_ports {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *port));
+        let stream =
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(
+                |error| {
+                    anyhow::anyhow!(
+                        "本地 Codex API proxy 未监听 127.0.0.1:{}，远程模型请求无法通过 SSH 反向隧道转发：{}",
+                        port,
+                        error
+                    )
+                },
+            )?;
+        drop(stream);
+    }
+    Ok(())
+}
+
+const REMOTE_PROXY_PORT_PROBE_SCRIPT: &str = r#"
+import socket
+import sys
+
+def reserve(preferred, used):
+    attempts = []
+    if preferred > 0:
+        attempts.append(preferred)
+    attempts.append(0)
+    for port in attempts:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+            actual = sock.getsockname()[1]
+            if actual not in used:
+                return sock, actual
+        except OSError:
+            sock.close()
+            continue
+    raise SystemExit(1)
+
+sockets = []
+used = set()
+for arg in sys.argv[1:]:
+    local = int(arg)
+    sock, remote = reserve(local, used)
+    sockets.append(sock)
+    used.add(remote)
+    print(f"{local}={remote}", flush=True)
+"#;
+
+fn rewrite_loopback_proxy_ports_in_env(
+    agent_env: &mut [(String, String)],
+    port_map: &BTreeMap<u16, u16>,
+) {
+    for (_, value) in agent_env {
+        rewrite_loopback_proxy_ports(value, port_map);
+    }
+}
+
+fn rewrite_loopback_proxy_ports(value: &mut String, port_map: &BTreeMap<u16, u16>) {
+    for (local_port, remote_port) in port_map {
+        if local_port == remote_port {
+            continue;
+        }
+        for host in ["127.0.0.1", "localhost"] {
+            let from = format!("http://{host}:{local_port}");
+            let to = format!("http://{host}:{remote_port}");
+            *value = value.replace(&from, &to);
         }
     }
 }
@@ -779,6 +980,37 @@ mod remote_tests {
         let forwards = remote_proxy_reverse_forwards(&[("TOKEN".into(), "secret".into())], None);
 
         assert!(forwards.is_empty());
+    }
+
+    #[test]
+    fn remote_proxy_port_rewrite_updates_env_and_config_urls() {
+        let mut env = vec![(
+            "ANTHROPIC_BASE_URL".into(),
+            "http://127.0.0.1:17851/v1/providers/kimi_code".into(),
+        )];
+        let mut config = r#"
+[model_providers.byok]
+base_url = "http://localhost:17851/v1"
+"#
+        .to_string();
+        let port_map = BTreeMap::from([(17851, 24001)]);
+
+        rewrite_loopback_proxy_ports_in_env(&mut env, &port_map);
+        rewrite_loopback_proxy_ports(&mut config, &port_map);
+
+        assert_eq!(env[0].1, "http://127.0.0.1:24001/v1/providers/kimi_code");
+        assert!(config.contains(r#"base_url = "http://localhost:24001/v1""#));
+        assert!(!config.contains(":17851"));
+    }
+
+    #[test]
+    fn remote_proxy_port_rewrite_keeps_same_port_mapping_unchanged() {
+        let mut value = "http://127.0.0.1:17851/v1".to_string();
+        let port_map = BTreeMap::from([(17851, 17851)]);
+
+        rewrite_loopback_proxy_ports(&mut value, &port_map);
+
+        assert_eq!(value, "http://127.0.0.1:17851/v1");
     }
 
     #[test]

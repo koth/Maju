@@ -25,6 +25,7 @@ fs.mkdirSync(seaDir, { recursive: true });
 fs.mkdirSync(binDir, { recursive: true });
 
 const nativeClaude = findNativeClaudeBinary();
+console.log(`Using Claude native binary: ${nativeClaude}`);
 
 await build({
   entryPoints: [path.join(packageRoot, "src", "index.ts")],
@@ -84,15 +85,7 @@ function findNativeClaudeBinary() {
   const ext = process.platform === "win32" ? ".exe" : "";
   const candidates =
     process.platform === "linux"
-      ? isMuslLibc()
-        ? [
-            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl`,
-            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}`,
-          ]
-        : [
-            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}`,
-            `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl`,
-          ]
+      ? linuxClaudeNativePackageCandidates(process.arch)
       : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`];
 
   for (const packageName of candidates) {
@@ -110,6 +103,30 @@ function findNativeClaudeBinary() {
   throw new Error(
     `Claude native binary not found for ${process.platform}-${process.arch}. Run npm install in ${packageRoot}.`,
   );
+}
+
+function linuxClaudeNativePackageCandidates(arch) {
+  const libc = process.env.KODEX_CLAUDE_NATIVE_LIBC ?? "auto";
+  if (libc === "glibc") {
+    return [`@anthropic-ai/claude-agent-sdk-linux-${arch}`];
+  }
+  if (libc === "musl") {
+    return [`@anthropic-ai/claude-agent-sdk-linux-${arch}-musl`];
+  }
+  if (libc !== "auto") {
+    throw new Error(
+      `Invalid KODEX_CLAUDE_NATIVE_LIBC=${JSON.stringify(libc)}. Expected glibc, musl, or auto.`,
+    );
+  }
+  return isMuslLibc()
+    ? [
+        `@anthropic-ai/claude-agent-sdk-linux-${arch}-musl`,
+        `@anthropic-ai/claude-agent-sdk-linux-${arch}`,
+      ]
+    : [
+        `@anthropic-ai/claude-agent-sdk-linux-${arch}`,
+        `@anthropic-ai/claude-agent-sdk-linux-${arch}-musl`,
+      ];
 }
 
 function isMuslLibc() {
@@ -203,7 +220,7 @@ function writeIfChanged(target, bytes, mode) {
 
 (async () => {
   const buildId = textAsset("build-id");
-  const root = path.join(os.tmpdir(), "kodex-claude-agent-acp", buildId);
+  const root = path.join(resolveExtractRoot(), buildId);
   fs.mkdirSync(root, { recursive: true });
 
   const appPath = path.join(root, "app.mjs");
@@ -219,5 +236,39 @@ function writeIfChanged(target, bytes, mode) {
   console.error(error instanceof Error ? error.stack || error.message : error);
   process.exit(1);
 });
+
+function resolveExtractRoot() {
+  const candidates = [];
+  if (process.env.KODEX_CLAUDE_AGENT_ACP_EXTRACT_DIR) {
+    candidates.push(process.env.KODEX_CLAUDE_AGENT_ACP_EXTRACT_DIR);
+  }
+  if (process.env.XDG_CACHE_HOME) {
+    candidates.push(path.join(process.env.XDG_CACHE_HOME, "kodex", "claude-agent-acp"));
+  }
+  if (process.env.HOME) {
+    candidates.push(path.join(process.env.HOME, ".cache", "kodex", "claude-agent-acp"));
+  }
+  candidates.push(path.join(os.tmpdir(), "kodex-claude-agent-acp"));
+
+  for (const candidate of candidates) {
+    if (canUseDirectory(candidate)) {
+      return candidate;
+    }
+  }
+
+  return path.join(os.tmpdir(), "kodex-claude-agent-acp");
+}
+
+function canUseDirectory(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, ".write-test-" + process.pid);
+    fs.writeFileSync(probe, "");
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
 `;
 }

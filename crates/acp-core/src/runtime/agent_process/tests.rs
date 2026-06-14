@@ -61,6 +61,9 @@ fn streamable_remote_command_does_not_wait_on_requested_port_probe() {
         4567,
     );
     assert!(command.contains("--port 4567"));
+    assert!(command.contains("if command -v setsid >/dev/null 2>&1; then"));
+    assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
+    assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
     assert!(!command.contains("/proc/net/tcp"));
     assert!(!command.contains(REMOTE_AGENT_READY_MARKER));
 }
@@ -71,6 +74,8 @@ fn remote_ssh_forward_args_use_discovered_remote_port() {
     assert!(args.contains(&"-N".to_string()));
     assert!(args.contains(&"127.0.0.1:3456:127.0.0.1:45913".to_string()));
     assert!(args.contains(&"BatchMode=yes".to_string()));
+    assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+    assert!(args.contains(&"ServerAliveCountMax=4".to_string()));
     assert!(!args.contains(&"ControlMaster=auto".to_string()));
     assert!(!args.contains(&"ControlPersist=300".to_string()));
     assert!(args.contains(&"ControlMaster=no".to_string()));

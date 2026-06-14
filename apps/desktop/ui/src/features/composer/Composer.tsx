@@ -637,6 +637,7 @@ const MODEL_PROVIDER_LABELS: Record<string, string> = {
 };
 
 const MODEL_PROVIDER_ORDER = ["timiai", "commandcode", "deepseek", "kimi_code", "xiaomi_mimo"];
+const GENERIC_MODEL_PROVIDER_IDS = new Set(["byok", "codex", "default", "kodex", "kodex_proxy", "kodex-proxy"]);
 
 function byokModelProviderGroupsForControl(control: SessionConfigControl): ModelProviderGroup[] {
   const groups = new Map<string, SessionConfigControl["choices"]>();
@@ -751,7 +752,8 @@ function decodeProviderModelChoice(
   choice: SessionConfigControl["choices"][number];
 } {
   const encoded = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
-  const provider = encoded?.provider ?? choice.provider ?? null;
+  const modelName = encoded?.model ?? displayModelChoiceLabel(choice);
+  const provider = concreteModelProviderForModel(encoded?.provider ?? choice.provider, modelName);
   if (!provider) {
     return { provider: null, choice };
   }
@@ -778,8 +780,12 @@ function configControlRequestProvider(
 }
 
 function currentProviderModelForControl(control: SessionConfigControl) {
-  return decodeProviderModelValue(control.current_value_id) ??
+  const current =
+    decodeProviderModelValue(control.current_value_id) ??
     decodeProviderModelValue(control.current_value_label);
+  if (!current) return null;
+  const provider = concreteModelProviderForModel(current.provider, current.model);
+  return provider ? { ...current, provider } : null;
 }
 
 function currentModelNameForControl(control: SessionConfigControl) {
@@ -809,10 +815,13 @@ function modelChoiceMatchesProviderModel(
 ) {
   const choiceModel = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
   if (choiceModel) {
-    return choiceModel.provider === model.provider && choiceModel.model === model.model;
+    const choiceProvider = concreteModelProviderForModel(choiceModel.provider, choiceModel.model);
+    return choiceProvider === model.provider && choiceModel.model === model.model;
   }
 
-  const choiceProvider = choice.provider ?? groupProvider;
+  const choiceProvider =
+    concreteModelProviderForModel(choice.provider, displayModelChoiceLabel(choice)) ??
+    groupProvider;
   return (
     choiceProvider === model.provider &&
     (choice.id === model.model || choice.label === model.model)
@@ -828,25 +837,7 @@ function modelChoiceMatchesModelName(
 }
 
 function inferredProviderForModelName(modelName: string, groups: ModelProviderGroup[]) {
-  const normalized = modelName.trim().toLowerCase();
-  let provider: string | null = null;
-  if (
-    normalized.startsWith("qwen/") ||
-    normalized.startsWith("minimaxai/") ||
-    normalized.startsWith("moonshotai/") ||
-    normalized.startsWith("zai-org/") ||
-    normalized.startsWith("stepfun/") ||
-    normalized.startsWith("google/")
-  ) {
-    provider = "commandcode";
-  } else if (normalized.includes("deepseek")) {
-    provider = "deepseek";
-  } else if (normalized.includes("kimi")) {
-    provider = "kimi_code";
-  } else if (normalized.includes("mimo") || normalized.includes("xiaomi")) {
-    provider = "xiaomi_mimo";
-  }
-
+  const provider = inferredProviderIdForModelName(modelName);
   if (!provider) return null;
   const group = groups.find((candidate) => candidate.id === provider);
   if (!group) return null;
@@ -855,15 +846,66 @@ function inferredProviderForModelName(modelName: string, groups: ModelProviderGr
     : null;
 }
 
+function inferredProviderIdForModelName(modelName: string) {
+  const normalized = modelName.trim().toLowerCase();
+  if (
+    normalized.startsWith("qwen/") ||
+    normalized.startsWith("minimaxai/") ||
+    normalized.startsWith("moonshotai/") ||
+    normalized.startsWith("zai-org/") ||
+    normalized.startsWith("stepfun/") ||
+    normalized.startsWith("google/") ||
+    normalized.startsWith("openai/")
+  ) {
+    return "commandcode";
+  }
+  if (normalized.includes("deepseek")) return "deepseek";
+  if (normalized.includes("kimi")) return "kimi_code";
+  if (normalized.includes("mimo") || normalized.includes("xiaomi")) return "xiaomi_mimo";
+  return null;
+}
+
+function concreteModelProviderForModel(
+  provider: string | null | undefined,
+  modelName: string,
+) {
+  const normalized = normalizeModelProviderId(provider);
+  if (!normalized) return null;
+  if (!GENERIC_MODEL_PROVIDER_IDS.has(normalized)) return normalized;
+  return inferredProviderIdForModelName(modelName);
+}
+
+function normalizeModelProviderId(provider: string | null | undefined) {
+  const normalized = provider?.trim().toLowerCase();
+  if (!normalized) return null;
+  switch (normalized) {
+    case "timi":
+    case "timi-ai":
+    case "timi_ai":
+      return "timiai";
+    case "command-code":
+    case "command_code":
+      return "commandcode";
+    case "kimi":
+    case "kimi-code":
+      return "kimi_code";
+    case "mimo":
+    case "xiaomi-mimo":
+      return "xiaomi_mimo";
+    default:
+      return normalized;
+  }
+}
+
 function decodeProviderModelValue(value: string) {
   const slashMatch = value.match(/^kodex-provider\/([^/]+)\/(.+)$/i);
   if (slashMatch) {
-    return { provider: slashMatch[1], model: slashMatch[2] };
+    return { provider: normalizeModelProviderId(slashMatch[1]) ?? slashMatch[1], model: slashMatch[2] };
   }
 
   const colonMatch = value.match(/^kodex-provider:([^:]+):(.+)$/i);
   if (colonMatch) {
-    return { provider: colonMatch[1], model: colonMatch[2] };
+    return { provider: normalizeModelProviderId(colonMatch[1]) ?? colonMatch[1], model: colonMatch[2] };
   }
 
   return null;

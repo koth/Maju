@@ -827,17 +827,111 @@ function permissionRequestTitle(tool: ToolInvocation, details: string | null) {
 }
 
 function permissionRequestDetails(tool: ToolInvocation, planText: string | null) {
-  const detailText = tool.detail_text.trim();
+  const detailText = normalizedPermissionDetailText(tool.detail_text, tool.permission_options);
   if (detailText && detailText !== planText) {
     return detailText;
   }
 
-  const rawInput = tool.raw_input?.trim();
+  const rawInput = normalizedPermissionDetailText(tool.raw_input, tool.permission_options);
   if (rawInput && rawInput !== planText && !looksLikeJsonPayload(rawInput)) {
     return rawInput;
   }
 
   return null;
+}
+
+function normalizedPermissionDetailText(
+  value: string | null | undefined,
+  options: ToolInvocation["permission_options"],
+) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const cleaned = stripInternalPermissionDecisionBlock(trimmed, options)
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return cleaned || null;
+}
+
+function stripInternalPermissionDecisionBlock(
+  value: string,
+  options: ToolInvocation["permission_options"],
+) {
+  const optionKeys = new Set(
+    options
+      .flatMap((option) => [option.id, option.label, option.kind])
+      .map(normalizedPermissionDecisionToken)
+      .filter(Boolean),
+  );
+  const knownDecisionKeys = [
+    "approved",
+    "approve",
+    "approvedexecpolicyamendment",
+    "approvedexecpolicy",
+    "abort",
+    "allow",
+    "allowonce",
+    "allowalways",
+    "deny",
+    "denied",
+    "reject",
+    "rejected",
+    "rejectonce",
+    "cancel",
+    "cancelled",
+  ];
+  for (const key of knownDecisionKeys) {
+    optionKeys.add(key);
+  }
+
+  const lines = value.split(/\r?\n/);
+  const visibleLines: string[] = [];
+  let skippingDecisionChoices = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^Available\s+(?:Decisions?|Options?)\s*:/i.test(trimmed)) {
+      skippingDecisionChoices = true;
+      continue;
+    }
+
+    if (skippingDecisionChoices) {
+      if (!trimmed) {
+        skippingDecisionChoices = false;
+        continue;
+      }
+
+      if (looksLikePermissionDecisionChoice(trimmed, optionKeys)) {
+        continue;
+      }
+
+      skippingDecisionChoices = false;
+    }
+
+    visibleLines.push(line);
+  }
+
+  return visibleLines.join("\n");
+}
+
+function looksLikePermissionDecisionChoice(line: string, optionKeys: Set<string>) {
+  const key = normalizedPermissionDecisionToken(line);
+  if (key && optionKeys.has(key)) {
+    return true;
+  }
+
+  return (
+    /^[A-Za-z][A-Za-z0-9_ -]*$/.test(line) &&
+    /(approved|approve|allow|abort|cancel|deny|reject|decision|policy|amendment)/i.test(line)
+  );
+}
+
+function normalizedPermissionDecisionToken(value: string | null | undefined) {
+  return value?.toLowerCase().replace(/[^a-z0-9]/g, "") ?? "";
 }
 
 function permissionRequestTitlePath(details: string | null) {
