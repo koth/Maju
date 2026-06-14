@@ -81,6 +81,7 @@ function agentSnapshot(): AgentSettingsSnapshot {
       selected_claude_provider_profile_id: "byok",
       claude: {
         available_models: ["claude-opus-4-7[1m]"],
+        fast_model: null,
       },
     },
     agents: [
@@ -107,6 +108,8 @@ function agentSnapshot(): AgentSettingsSnapshot {
       profiles: [
         profile("claude", "byok", true, false, true),
       ],
+      fast_model: null,
+      fast_model_options: [],
     },
   };
 }

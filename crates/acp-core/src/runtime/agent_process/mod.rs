@@ -1,7 +1,7 @@
-use super::ShutdownSignal;
 use super::process::{
     agent_spawn_command, apply_process_cwd_and_pwd, hide_console_window, parse_env_assignment,
 };
+use super::shutdown::{ShutdownCleanupHook, ShutdownSignal};
 use crate::codex_api_proxy::{
     configure_codex_api_proxy_model_provider_map, ensure_codex_api_proxy,
 };
@@ -12,6 +12,8 @@ use anyhow::anyhow;
 use futures::channel::mpsc as futures_mpsc;
 use serde_json::json;
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -34,7 +36,8 @@ use remote_ssh::{
     wait_remote_agent_ready,
 };
 pub(super) use remote_ssh::{
-    build_remote_agent_command, build_remote_ssh_args, build_remote_ssh_command_args,
+    build_remote_agent_cleanup_command, build_remote_agent_command,
+    build_remote_ssh_agent_command_args, build_remote_ssh_args, build_remote_ssh_command_args,
     build_remote_ssh_forward_args, build_remote_ssh_reverse_forward_args,
     build_remote_streamable_agent_command,
 };
@@ -294,6 +297,7 @@ pub(super) struct RemoteSshAgentProcess {
     agent_command: PathBuf,
     agent_args: Vec<String>,
     agent_env: Vec<(String, String)>,
+    remote_agent_pid_file: String,
     local_port: u16,
     remote_port: u16,
     reverse_forwards: Vec<RemoteSshReverseForward>,
@@ -312,6 +316,22 @@ pub(super) enum RemoteAcpTransport {
 #[derive(Clone, Debug, Default)]
 struct RemoteAgentReady {
     endpoint_port: Option<u16>,
+}
+
+struct RemoteAgentCleanupGuard {
+    cleanup: Arc<RemoteAgentCleanup>,
+    _shutdown_hook: Arc<ShutdownCleanupHook>,
+}
+
+#[derive(Debug)]
+struct RemoteAgentCleanup {
+    ssh_command: PathBuf,
+    ssh_target: String,
+    ssh_port: Option<u16>,
+    ssh_password: Option<String>,
+    remote_agent_pid_file: String,
+    log_config: SessionConfig,
+    did_run: AtomicBool,
 }
 
 impl RemoteSshAgentProcess {
@@ -339,6 +359,10 @@ impl RemoteSshAgentProcess {
             acp_transport: detect_remote_acp_transport(&parsed.args),
             agent_args: parsed.args,
             agent_env,
+            remote_agent_pid_file: format!(
+                "/tmp/kodex-acp-agent-{}.pid",
+                uuid::Uuid::new_v4().simple()
+            ),
             local_port: remote.local_port,
             remote_port: remote.remote_port,
             reverse_forwards: remote.reverse_forwards,
@@ -499,6 +523,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 ))
             })?;
         let _reverse_forward_guards = reverse_forward_guards;
+        let _remote_cleanup_guard = self.remote_cleanup_guard();
 
         let is_streamable_http = self.acp_transport != RemoteAcpTransport::Tcp;
         let remote_command = if is_streamable_http {
@@ -507,6 +532,7 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 &self.agent_command,
                 &self.agent_args,
                 &self.agent_env,
+                &self.remote_agent_pid_file,
                 self.remote_port,
             )
         } else {
@@ -515,13 +541,14 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
                 &self.agent_command,
                 &self.agent_args,
                 &self.agent_env,
+                &self.remote_agent_pid_file,
                 self.remote_port,
             )
         };
         let has_password = self.ssh_password.is_some();
-        let uses_multiplex = is_streamable_http;
+        let uses_multiplex = false;
         let args = if is_streamable_http {
-            build_remote_ssh_command_args(
+            build_remote_ssh_agent_command_args(
                 &self.ssh_target,
                 self.ssh_port,
                 remote_command,
@@ -748,6 +775,29 @@ impl ConnectTo<Client> for RemoteSshAgentProcess {
 }
 
 impl RemoteSshAgentProcess {
+    fn remote_cleanup_guard(&self) -> RemoteAgentCleanupGuard {
+        let cleanup = Arc::new(RemoteAgentCleanup {
+            ssh_command: self.ssh_command.clone(),
+            ssh_target: self.ssh_target.clone(),
+            ssh_port: self.ssh_port,
+            ssh_password: self.ssh_password.clone(),
+            remote_agent_pid_file: self.remote_agent_pid_file.clone(),
+            log_config: self.log_config.clone(),
+            did_run: AtomicBool::new(false),
+        });
+        let hook_cleanup = cleanup.clone();
+        let shutdown_hook: Arc<ShutdownCleanupHook> = Arc::new(move || hook_cleanup.run_once());
+        self.shutdown_signal.register_cleanup_hook(&shutdown_hook);
+        if self.shutdown_signal.is_requested() {
+            cleanup.run_once();
+        }
+
+        RemoteAgentCleanupGuard {
+            cleanup,
+            _shutdown_hook: shutdown_hook,
+        }
+    }
+
     fn spawn_reverse_forwards(
         &self,
         log_config: Option<&SessionConfig>,
@@ -843,6 +893,74 @@ impl RemoteSshAgentProcess {
         }
 
         Ok(AgentChildGuard::new(child, self.shutdown_signal.clone()))
+    }
+}
+
+impl Drop for RemoteAgentCleanupGuard {
+    fn drop(&mut self) {
+        self.cleanup.run_once();
+    }
+}
+
+impl RemoteAgentCleanup {
+    fn run_once(&self) {
+        if self.did_run.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let has_password = self.ssh_password.is_some();
+        let remote_command = build_remote_agent_cleanup_command(&self.remote_agent_pid_file);
+        let args = build_remote_ssh_agent_command_args(
+            &self.ssh_target,
+            self.ssh_port,
+            remote_command,
+            has_password,
+        );
+        let _ = append_runtime_event_log(
+            &self.log_config,
+            "agent/remote_cleanup_start",
+            &json!({
+                "target": self.ssh_target,
+                "sshPort": self.ssh_port,
+                "pidFile": self.remote_agent_pid_file,
+                "hasPassword": has_password,
+            }),
+        );
+
+        let mut command = agent_spawn_command(&self.ssh_command, &args);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(password) = self.ssh_password.as_deref() {
+            if let Err(error) = configure_ssh_askpass(&mut command, password) {
+                let _ = append_runtime_event_log(
+                    &self.log_config,
+                    "agent/remote_cleanup_error",
+                    &json!({ "error": error.to_string() }),
+                );
+                return;
+            }
+        }
+        hide_console_window(&mut command);
+
+        let result = command.status();
+        match result {
+            Ok(status) => {
+                let _ = append_runtime_event_log(
+                    &self.log_config,
+                    "agent/remote_cleanup_exit",
+                    &json!({ "status": status.to_string(), "success": status.success() }),
+                );
+            }
+            Err(error) => {
+                let _ = append_runtime_event_log(
+                    &self.log_config,
+                    "agent/remote_cleanup_error",
+                    &json!({ "error": error.to_string() }),
+                );
+            }
+        }
     }
 }
 

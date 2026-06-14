@@ -27,6 +27,7 @@ pub(in crate::runtime) fn build_remote_agent_command(
     command: &Path,
     args: &[String],
     env: &[(String, String)],
+    remote_agent_pid_file: &str,
     remote_port: u16,
 ) -> String {
     let port_hex = format!("{remote_port:04X}");
@@ -44,7 +45,7 @@ pub(in crate::runtime) fn build_remote_agent_command(
         env,
         remote_port,
     ));
-    parts.push(remote_agent_lifecycle_shell());
+    parts.push(remote_agent_lifecycle_shell(remote_agent_pid_file));
     parts.push("kodex_i=0;".to_string());
     parts.push("while ! awk -v port=\"$KODEX_REMOTE_ACP_PORT_HEX\" '$4==\"0A\" && toupper($2) ~ \":\" port \"$\" { found=1 } END { exit found ? 0 : 1 }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; do".to_string());
     parts.push("if ! kill -0 \"$kodex_agent_pid\" 2>/dev/null; then wait \"$kodex_agent_pid\"; exit $?; fi;".to_string());
@@ -71,6 +72,7 @@ pub(in crate::runtime) fn build_remote_streamable_agent_command(
     command: &Path,
     args: &[String],
     env: &[(String, String)],
+    remote_agent_pid_file: &str,
     remote_port: u16,
 ) -> String {
     let mut parts = Vec::new();
@@ -83,7 +85,7 @@ pub(in crate::runtime) fn build_remote_streamable_agent_command(
         env,
         remote_port,
     ));
-    parts.push(remote_agent_lifecycle_shell());
+    parts.push(remote_agent_lifecycle_shell(remote_agent_pid_file));
     parts.push(remote_agent_wait_shell());
     parts.join(" ")
 }
@@ -129,17 +131,23 @@ fn build_remote_agent_invocation(
     parts.join(" ")
 }
 
-fn remote_agent_lifecycle_shell() -> String {
-    [
-        "kodex_agent_pid=$!;",
-        "kodex_cleanup_agent() {",
-        "if [ -n \"${kodex_agent_pid:-}\" ]; then",
-        "kill -TERM \"-$kodex_agent_pid\" 2>/dev/null || kill -TERM \"$kodex_agent_pid\" 2>/dev/null;",
-        "sleep 0.2;",
-        "kill -KILL \"-$kodex_agent_pid\" 2>/dev/null || kill -KILL \"$kodex_agent_pid\" 2>/dev/null;",
-        "fi;",
-        "};",
-        "trap 'kodex_cleanup_agent' EXIT HUP INT TERM;",
+fn remote_agent_lifecycle_shell(remote_agent_pid_file: &str) -> String {
+    vec![
+        "kodex_agent_pid=$!;".to_string(),
+        format!(
+            "kodex_agent_pid_file={};",
+            shell_quote_single(remote_agent_pid_file)
+        ),
+        "printf '%s\\n' \"$kodex_agent_pid\" > \"$kodex_agent_pid_file\" 2>/dev/null || true;".to_string(),
+        "kodex_cleanup_agent() {".to_string(),
+        "if [ -n \"${kodex_agent_pid:-}\" ]; then".to_string(),
+        "kill -TERM \"-$kodex_agent_pid\" 2>/dev/null || kill -TERM \"$kodex_agent_pid\" 2>/dev/null;".to_string(),
+        "sleep 0.2;".to_string(),
+        "kill -KILL \"-$kodex_agent_pid\" 2>/dev/null || kill -KILL \"$kodex_agent_pid\" 2>/dev/null;".to_string(),
+        "fi;".to_string(),
+        "if [ -n \"${kodex_agent_pid_file:-}\" ]; then rm -f \"$kodex_agent_pid_file\" 2>/dev/null || true; fi;".to_string(),
+        "};".to_string(),
+        "trap 'kodex_cleanup_agent' EXIT HUP INT TERM;".to_string(),
     ]
     .join(" ")
 }
@@ -148,8 +156,29 @@ fn remote_agent_wait_shell() -> String {
     [
         "wait \"$kodex_agent_pid\";",
         "kodex_agent_status=$?;",
+        "rm -f \"$kodex_agent_pid_file\" 2>/dev/null || true;",
         "kodex_agent_pid=;",
         "exit \"$kodex_agent_status\"",
+    ]
+    .join(" ")
+}
+
+pub(in crate::runtime) fn build_remote_agent_cleanup_command(
+    remote_agent_pid_file: &str,
+) -> String {
+    [
+        format!(
+            "kodex_agent_pid_file={};",
+            shell_quote_single(remote_agent_pid_file)
+        ),
+        "if [ -f \"$kodex_agent_pid_file\" ]; then".to_string(),
+        "kodex_agent_pid=$(cat \"$kodex_agent_pid_file\" 2>/dev/null || true);".to_string(),
+        "case \"$kodex_agent_pid\" in ''|*[!0-9]*) rm -f \"$kodex_agent_pid_file\" 2>/dev/null || true; exit 0;; esac;".to_string(),
+        "kill -TERM \"-$kodex_agent_pid\" 2>/dev/null || kill -TERM \"$kodex_agent_pid\" 2>/dev/null || true;".to_string(),
+        "sleep 0.3;".to_string(),
+        "kill -KILL \"-$kodex_agent_pid\" 2>/dev/null || kill -KILL \"$kodex_agent_pid\" 2>/dev/null || true;".to_string(),
+        "rm -f \"$kodex_agent_pid_file\" 2>/dev/null || true;".to_string(),
+        "fi".to_string(),
     ]
     .join(" ")
 }
@@ -182,6 +211,21 @@ pub(in crate::runtime) fn build_remote_ssh_command_args(
     has_password: bool,
 ) -> Vec<String> {
     let mut args = remote_ssh_base_args(has_password, true);
+    if let Some(ssh_port) = ssh_port {
+        args.push("-p".to_string());
+        args.push(ssh_port.to_string());
+    }
+    args.extend([ssh_target.to_string(), remote_command]);
+    args
+}
+
+pub(in crate::runtime) fn build_remote_ssh_agent_command_args(
+    ssh_target: &str,
+    ssh_port: Option<u16>,
+    remote_command: String,
+    has_password: bool,
+) -> Vec<String> {
+    let mut args = remote_ssh_base_args(has_password, false);
     if let Some(ssh_port) = ssh_port {
         args.push("-p".to_string());
         args.push(ssh_port.to_string());

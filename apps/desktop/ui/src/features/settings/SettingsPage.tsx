@@ -25,6 +25,7 @@ import {
   settingsSaveAgentProviderSecret,
   settingsResetProviderModels,
   settingsSaveProviderModels,
+  settingsSelectClaudeFastModel,
   settingsSaveLspServer,
   settingsSaveRemoteProfile,
   settingsSelectAgentProviderProfile,
@@ -144,8 +145,9 @@ export function SettingsPage({
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
   const [providerModelsDraft, setProviderModelsDraft] = useState("");
   const [busyProviderModels, setBusyProviderModels] = useState(false);
+  const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
-  const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok" | "models">("channel");
+  const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok" | "models" | "claude-fast">("channel");
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -481,6 +483,23 @@ export function SettingsPage({
     setCodexAcpMessageTarget("byok");
   }, []);
 
+  const handleSelectClaudeFastModel = useCallback(async (modelId: string) => {
+    setError(null);
+    setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("claude-fast");
+    setBusyClaudeFastModel(true);
+    try {
+      const nextSnapshot = await settingsSelectClaudeFastModel(modelId || null, settingsRemoteProfileId);
+      setSnapshot(nextSnapshot);
+      setCodexAcpMessageTarget("claude-fast");
+      setCodexAcpMessage("Claude 快速模型已更新，后续新建会话生效");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyClaudeFastModel(false);
+    }
+  }, [settingsRemoteProfileId]);
+
   const handleSelectCodexChannel = useCallback(async (channel: "default" | "byok") => {
     const byokProfiles = snapshot?.codex_acp.profiles.filter((profile) => profile.requires_credential) ?? [];
     const selectedByokProfileId = byokProfiles.find((profile) => profile.id === byokProfileId)?.id
@@ -699,6 +718,34 @@ export function SettingsPage({
           )}
         </div>
       </div>
+    );
+  };
+
+  const renderClaudeFastModelControl = () => {
+    if (!snapshot) return null;
+    const options = snapshot.claude.fast_model_options;
+    const selected = snapshot.claude.fast_model ?? "";
+    return (
+      <label className="settings-field settings-provider-key-field">
+        <span>快速模型</span>
+        <select
+          aria-label="claude_fast_model"
+          className="settings-provider-native-select"
+          value={selected}
+          disabled={busyClaudeFastModel || options.length === 0}
+          onChange={(event) => handleSelectClaudeFastModel(event.currentTarget.value)}
+        >
+          <option value="">自动</option>
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label} · {option.provider_label}
+            </option>
+          ))}
+        </select>
+        {codexAcpMessageTarget === "claude-fast" && codexAcpMessage && (
+          <span className="settings-provider-config-message">{codexAcpMessage}</span>
+        )}
+      </label>
     );
   };
 
@@ -1282,6 +1329,7 @@ export function SettingsPage({
                         </span>
                       </div>
                       {renderAgentRuntime("claude-agent-acp")}
+                      {renderClaudeFastModelControl()}
                     </div>
                     {renderByokPool()}
                   </>

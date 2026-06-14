@@ -431,8 +431,10 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
     let settings = load_app_settings(paths);
     let selected_profile_id = selected_claude_provider_profile_id(&settings);
     let selected_profile = profile_definition(AgentProviderFamily::Claude, &selected_profile_id);
-    let available_models = if selected_profile_id == BYOK_PROVIDER_ID {
-        configured_claude_byok_models(paths)
+    let byok_model_entries = (selected_profile_id == BYOK_PROVIDER_ID)
+        .then(|| configured_claude_byok_model_entries(paths));
+    let available_models = if let Some(entries) = &byok_model_entries {
+        entries.iter().map(|(model, _)| model.clone()).collect()
     } else {
         selected_profile
             .map(|profile| {
@@ -445,9 +447,14 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
             .unwrap_or_default()
     };
     let mut env = Vec::new();
+    let fast_model_slug = byok_model_entries
+        .as_ref()
+        .and_then(|entries| selected_claude_fast_model_slug(&settings, entries));
     if available_models.is_empty() {
     } else {
-        let model_config = if selected_profile_id == TIMIAI_PROVIDER_ID {
+        let model_config = if let Some(entries) = &byok_model_entries {
+            claude_model_config_for_byok_entries(entries, fast_model_slug.as_deref())
+        } else if selected_profile_id == TIMIAI_PROVIDER_ID {
             claude_model_config_for_provider(&available_models, TIMIAI_PROVIDER_ID)
         } else {
             claude_model_config(&available_models)
@@ -471,6 +478,9 @@ fn claude_agent_acp_env(paths: &AppPaths) -> Vec<(String, String)> {
         }
         if let Some(default_model) = default_claude_byok_model(&available_models) {
             env.push(("ANTHROPIC_MODEL".to_string(), default_model.to_string()));
+        }
+        if let Some(fast_model_slug) = fast_model_slug {
+            env.push(("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), fast_model_slug));
         }
         env.push(("ANTHROPIC_API_KEY".to_string(), "byok".to_string()));
         env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), "byok".to_string()));

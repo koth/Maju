@@ -1,7 +1,7 @@
 use super::*;
 use agent_client_protocol::schema::{
-    PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId, ToolCallUpdate,
-    ToolCallUpdateFields,
+    PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId, ToolCallLocation,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::json;
 use std::fs;
@@ -52,6 +52,23 @@ fn execute_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
                 .kind(ToolKind::Execute)
                 .title("Shell".to_string())
                 .raw_input(raw_input),
+        ),
+        vec![
+            PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+        ],
+    )
+}
+
+fn read_request(path: &str) -> RequestPermissionRequest {
+    RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            "read",
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Read)
+                .title("Read file".to_string())
+                .locations(vec![ToolCallLocation::new(path)]),
         ),
         vec![
             PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
@@ -385,6 +402,16 @@ fn build_permission_allows_shell_reads_and_apply_patch_wrappers() {
     }));
     assert_eq!(
         decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &patch_request),
+        PermissionDecision::Select("allow".to_string()),
+    );
+}
+
+#[test]
+fn build_permission_allows_remote_workspace_read_paths() {
+    let request = read_request("/g/kknovel/text_chunker/convert_to_onnx.py");
+
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::Build, "/g/kknovel", &request),
         PermissionDecision::Select("allow".to_string()),
     );
 }

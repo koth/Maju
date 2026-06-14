@@ -25,7 +25,7 @@ pub use remote::{
     remote_lsp_settings_snapshot, remote_probe_lsp_server, remote_reset_lsp_server_config,
     remote_reset_provider_models, remote_save_agent_provider_secret, remote_save_lsp_server_config,
     remote_save_provider_models, remote_select_agent, remote_select_agent_provider_profile,
-    remote_select_theme, remote_settings_snapshot,
+    remote_select_claude_fast_model, remote_select_theme, remote_settings_snapshot,
 };
 
 #[cfg(test)]
@@ -41,8 +41,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
-    AgentCliId, AgentProviderFamily, AgentProviderProfile, AgentProviderProxyKind,
-    AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeProviderSettings,
+    AgentCliId, AgentModelOption, AgentProviderFamily, AgentProviderProfile,
+    AgentProviderProxyKind, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeProviderSettings,
     ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
 };
 
@@ -102,6 +102,8 @@ const TIMIAI_CATALOG_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
     "gemini-3.5-flash",
 ];
+const CLAUDE_FAST_MODEL_ALIASES: &[&str] =
+    &["haiku", "claude-haiku-4-5", "claude-haiku-4-5-20251001"];
 const DEFAULT_MODEL_CONTEXT_WINDOW: i64 = 200_000;
 const DEFAULT_MODEL_MAX_OUTPUT_TOKENS: i64 = 128_000;
 const KIMI_MODEL_CONTEXT_WINDOW: i64 = 262_144;
@@ -777,9 +779,18 @@ pub fn claude_agent_acp_package_dir(paths: &AppPaths) -> PathBuf {
 pub fn claude_provider_settings_status(paths: &AppPaths) -> ClaudeProviderSettingsStatus {
     let settings = load_app_settings(paths);
     let selected_profile_id = selected_claude_provider_profile_id(&settings);
+    let fast_model_options = claude_fast_model_options(paths);
+    let fast_model = settings
+        .claude
+        .fast_model
+        .as_ref()
+        .filter(|model| fast_model_options.iter().any(|option| &option.id == *model))
+        .cloned();
     ClaudeProviderSettingsStatus {
         selected_profile_id: selected_profile_id.clone(),
         profiles: provider_profiles(paths, AgentProviderFamily::Claude, &selected_profile_id),
+        fast_model,
+        fast_model_options,
     }
 }
 
@@ -1020,6 +1031,27 @@ pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSe
     catalog.version = PROVIDER_MODELS_VERSION;
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn select_claude_fast_model(
+    paths: &AppPaths,
+    model_id: Option<String>,
+) -> Result<AgentSettingsSnapshot> {
+    let model_id = model_id.and_then(|model| {
+        let trimmed = model.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    if let Some(model_id) = &model_id {
+        let options = claude_fast_model_options(paths);
+        if !options.iter().any(|option| &option.id == model_id) {
+            anyhow::bail!("Unsupported Claude fast model: {model_id}");
+        }
+    }
+
+    let mut settings = load_app_settings(paths);
+    settings.claude.fast_model = model_id;
+    save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
 }
 
@@ -2199,6 +2231,13 @@ fn provider_field_eq(doc: &DocumentMut, provider: &str, field: &str, expected: &
 }
 
 fn configured_claude_byok_models(paths: &AppPaths) -> Vec<String> {
+    configured_claude_byok_model_entries(paths)
+        .into_iter()
+        .map(|(model, _)| model)
+        .collect()
+}
+
+fn configured_claude_byok_model_entries(paths: &AppPaths) -> Vec<(String, &'static str)> {
     let mut models = Vec::new();
     for provider in BYOK_SOURCE_PROVIDER_IDS {
         if byok_source_secret(paths, AgentProviderFamily::Claude, provider).is_none() {
@@ -2206,12 +2245,64 @@ fn configured_claude_byok_models(paths: &AppPaths) -> Vec<String> {
         }
         for model in effective_catalog_models_for_provider(paths, provider) {
             let display_name = byok_display_model_name(&model, provider);
-            if !models.contains(&display_name) {
-                models.push(display_name);
+            if !models.iter().any(|(existing, _)| existing == &display_name) {
+                models.push((display_name, *provider));
             }
         }
     }
     models
+}
+
+fn claude_fast_model_options(paths: &AppPaths) -> Vec<AgentModelOption> {
+    configured_claude_byok_model_entries(paths)
+        .into_iter()
+        .map(|(model, provider)| AgentModelOption {
+            id: byok_encoded_model_slug(&model, provider),
+            label: model,
+            provider_id: provider.to_string(),
+            provider_label: provider_label(provider).to_string(),
+        })
+        .collect()
+}
+
+fn selected_claude_fast_model_slug(
+    settings: &AppSettings,
+    model_entries: &[(String, &'static str)],
+) -> Option<String> {
+    if let Some(model_id) = settings
+        .claude
+        .fast_model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        if let Some((model, provider)) = model_entries.iter().find(|(model, provider)| {
+            byok_encoded_model_slug(model, provider) == model_id || model == model_id
+        }) {
+            return Some(byok_encoded_model_slug(model, provider));
+        }
+    }
+
+    default_claude_fast_model_entry(model_entries)
+        .map(|(model, provider)| byok_encoded_model_slug(model, provider))
+}
+
+fn default_claude_fast_model_entry<'a>(
+    model_entries: &'a [(String, &'static str)],
+) -> Option<&'a (String, &'static str)> {
+    model_entries
+        .iter()
+        .find(|(model, _)| model.to_ascii_lowercase().contains("haiku"))
+        .or_else(|| {
+            model_entries
+                .iter()
+                .find(|(model, _)| model.to_ascii_lowercase().contains("sonnet"))
+        })
+        .or_else(|| {
+            model_entries
+                .iter()
+                .find(|(model, _)| model.to_ascii_lowercase().contains("claude"))
+        })
+        .or_else(|| model_entries.first())
 }
 
 fn configured_claude_byok_source_keys(paths: &AppPaths) -> Vec<(&'static str, String)> {
@@ -2236,6 +2327,33 @@ fn claude_model_config(available_models: &[String]) -> serde_json::Value {
     claude_model_config_for_provider(available_models, BYOK_PROVIDER_ID)
 }
 
+fn claude_model_config_for_byok_entries(
+    model_entries: &[(String, &'static str)],
+    fast_model_slug: Option<&str>,
+) -> serde_json::Value {
+    let available_models = model_entries
+        .iter()
+        .map(|(model, _)| model.clone())
+        .collect::<Vec<_>>();
+    let model_overrides = model_entries
+        .iter()
+        .filter_map(|(model, provider)| {
+            let slug = byok_encoded_model_slug(model, provider);
+            (slug != model.as_str()).then(|| (model.clone(), serde_json::Value::String(slug)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let mut model_overrides = model_overrides;
+    if let Some(fast_model_slug) = fast_model_slug {
+        for alias in CLAUDE_FAST_MODEL_ALIASES {
+            model_overrides.insert(
+                (*alias).to_string(),
+                serde_json::Value::String(fast_model_slug.to_string()),
+            );
+        }
+    }
+    claude_model_config_with_overrides(available_models, model_overrides)
+}
+
 fn claude_model_config_for_provider(
     available_models: &[String],
     provider: &str,
@@ -2251,6 +2369,13 @@ fn claude_model_config_for_provider(
             (slug != model.as_str()).then(|| (model.clone(), serde_json::Value::String(slug)))
         })
         .collect::<serde_json::Map<_, _>>();
+    claude_model_config_with_overrides(available_models.to_vec(), model_overrides)
+}
+
+fn claude_model_config_with_overrides(
+    available_models: Vec<String>,
+    model_overrides: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
     let mut config = serde_json::Map::new();
     config.insert("availableModels".to_string(), json!(available_models));
     config.insert("preserveDefaultModel".to_string(), json!(false));

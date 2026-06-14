@@ -130,6 +130,7 @@ fn main() {
             commands::settings::settings_save_agent_provider_secret,
             commands::settings::settings_save_provider_models,
             commands::settings::settings_reset_provider_models,
+            commands::settings::settings_select_claude_fast_model,
             commands::settings::settings_install_agent,
             commands::settings::settings_get_lsp_snapshot,
             commands::settings::settings_save_lsp_server,

@@ -99,6 +99,19 @@ pub fn remote_reset_provider_models(
     )
 }
 
+pub fn remote_select_claude_fast_model(
+    profile: &RemoteMachineProfile,
+    ssh_password: Option<&str>,
+    model_id: Option<String>,
+) -> Result<AgentSettingsSnapshot> {
+    remote_update_settings_with_runner(
+        profile,
+        ssh_password,
+        &SystemRemoteSshCommandRunner,
+        |paths| select_claude_fast_model(paths, model_id),
+    )
+}
+
 pub fn remote_lsp_settings_snapshot(
     profile: &RemoteMachineProfile,
     ssh_password: Option<&str>,

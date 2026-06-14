@@ -314,6 +314,13 @@ export async function settingsResetProviderModels(
   return invoke<AgentSettingsSnapshot>("settings_reset_provider_models", { provider, remoteProfileId: remoteProfileId ?? null });
 }
 
+export async function settingsSelectClaudeFastModel(
+  modelId: string | null,
+  remoteProfileId?: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_select_claude_fast_model", { modelId, remoteProfileId: remoteProfileId ?? null });
+}
+
 export async function settingsInstallAgent(agent: AgentCliId): Promise<AgentInstallResult> {
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
 }

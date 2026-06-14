@@ -1096,10 +1096,20 @@ pub struct AgentProviderProfile {
     pub help_text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentModelOption {
+    pub id: String,
+    pub label: String,
+    pub provider_id: String,
+    pub provider_label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ClaudeProviderSettings {
     #[serde(default)]
     pub available_models: Vec<String>,
+    #[serde(default)]
+    pub fast_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1211,6 +1221,10 @@ pub struct ClaudeProviderSettingsStatus {
     pub selected_profile_id: String,
     #[serde(default)]
     pub profiles: Vec<AgentProviderProfile>,
+    #[serde(default)]
+    pub fast_model: Option<String>,
+    #[serde(default)]
+    pub fast_model_options: Vec<AgentModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

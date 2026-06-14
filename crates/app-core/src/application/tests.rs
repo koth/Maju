@@ -107,6 +107,31 @@ fn active_agent_label_prefers_current_command_over_stale_persisted_label() {
 }
 
 #[test]
+fn bootstrap_session_selection_uses_matching_agent_history() {
+    let recent_codebuddy = session_list_item("recent-codebuddy", Some("CodeBuddy"));
+    let older_codex = session_list_item("older-codex", Some("Codex"));
+    let unlabelled = session_list_item("legacy-unlabelled", None);
+    let sessions = vec![
+        recent_codebuddy.clone(),
+        older_codex.clone(),
+        unlabelled.clone(),
+    ];
+
+    let selected = super::select_session_for_agent_command(&sessions, "codex-acp")
+        .expect("codex history should be selected");
+    assert_eq!(selected.id, older_codex.id);
+
+    let selected = super::select_session_for_agent_command(&sessions, "codebuddy --acp")
+        .expect("codebuddy history should be selected");
+    assert_eq!(selected.id, recent_codebuddy.id);
+
+    assert!(
+        super::select_session_for_agent_command(&[unlabelled], "claude-agent-acp").is_none(),
+        "unlabelled legacy history should not be claimed by a different selected agent"
+    );
+}
+
+#[test]
 fn remote_workspace_new_session_uses_remote_agent_commands() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -131,6 +156,21 @@ fn remote_workspace_new_session_uses_remote_agent_commands() {
             .contains("/"),
         "remote agent command must not use a local absolute binary path"
     );
+}
+
+fn session_list_item(id: &str, agent_cli: Option<&str>) -> SessionListItem {
+    SessionListItem {
+        id: id.into(),
+        title: id.into(),
+        status: "active".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        message_count: 0,
+        acp_session_id: None,
+        agent_cli: agent_cli.map(str::to_string),
+        runtime_status: Default::default(),
+        attention_state: Default::default(),
+    }
 }
 
 #[test]

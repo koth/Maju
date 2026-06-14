@@ -1368,7 +1368,20 @@ fn claude_commandcode_source_key_contributes_to_byok_proxy_model_map() {
     let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
     let available_models = model_config["availableModels"].as_array().unwrap();
     assert!(available_models.contains(&serde_json::Value::String(COMMANDCODE_MODEL.to_string())));
+    assert!(available_models.contains(&serde_json::Value::String(
+        "claude-haiku-4-5-20251001".to_string()
+    )));
     assert!(available_models.contains(&serde_json::Value::String("Qwen/Qwen3.7-Max".to_string())));
+    assert_eq!(
+        model_config["modelOverrides"][COMMANDCODE_MODEL].as_str(),
+        Some(byok_encoded_model_slug(COMMANDCODE_MODEL, COMMANDCODE_PROVIDER_ID).as_str())
+    );
+    assert_eq!(
+        model_config["modelOverrides"]["claude-haiku-4-5-20251001"].as_str(),
+        Some(
+            byok_encoded_model_slug("claude-haiku-4-5-20251001", COMMANDCODE_PROVIDER_ID).as_str()
+        )
+    );
     let (_, provider_map) = env
         .iter()
         .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
@@ -1378,6 +1391,54 @@ fn claude_commandcode_source_key_contributes_to_byok_proxy_model_map() {
         entry["display_name"].as_str() == Some("Qwen/Qwen3.7-Max")
             && entry["provider"].as_str() == Some(COMMANDCODE_PROVIDER_ID)
     }));
+}
+
+#[test]
+fn claude_fast_model_routes_internal_haiku_to_selected_byok_model() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    save_agent_provider_secret(
+        &paths,
+        AgentProviderFamily::Claude,
+        COMMANDCODE_PROVIDER_ID,
+        "commandcode-secret",
+    )
+    .unwrap();
+    let fast_model = byok_encoded_model_slug("Qwen/Qwen3.7-Max", COMMANDCODE_PROVIDER_ID);
+    let snapshot = select_claude_fast_model(&paths, Some(fast_model.clone())).unwrap();
+
+    assert_eq!(
+        snapshot.claude.fast_model.as_deref(),
+        Some(fast_model.as_str())
+    );
+    assert!(snapshot.claude.fast_model_options.iter().any(|option| {
+        option.id == fast_model
+            && option.label == "Qwen/Qwen3.7-Max"
+            && option.provider_id == COMMANDCODE_PROVIDER_ID
+    }));
+
+    let command = command_for_agent_with_paths(AgentCliId::ClaudeAgentAcp, &paths).unwrap();
+    ensure_agent_ready_for_command(&command, &paths).unwrap();
+    let env = agent_env_for_command(&command, &paths);
+
+    assert!(env.contains(&(
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+        fast_model.clone()
+    )));
+    let (_, model_config) = env
+        .iter()
+        .find(|(name, _)| name == "CLAUDE_MODEL_CONFIG")
+        .unwrap();
+    let model_config: serde_json::Value = serde_json::from_str(model_config).unwrap();
+    assert_eq!(
+        model_config["modelOverrides"]["claude-haiku-4-5-20251001"].as_str(),
+        Some(fast_model.as_str())
+    );
+    assert_eq!(
+        model_config["modelOverrides"]["haiku"].as_str(),
+        Some(fast_model.as_str())
+    );
 }
 
 #[test]

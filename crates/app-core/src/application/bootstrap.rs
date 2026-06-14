@@ -295,8 +295,8 @@ impl Application {
             crate::startup_perf::measure("app/bootstrap_remote/list_sessions", "", || {
                 store.list_sessions().unwrap_or_default()
             });
-        let most_recent_session = existing_sessions.first();
-        let resume_session_id = most_recent_session.and_then(|session| {
+        let selected_session = select_session_for_agent_command(&existing_sessions, &agent_command);
+        let resume_session_id = selected_session.and_then(|session| {
             if store.session_has_activity(&session.id).unwrap_or(false) {
                 session.acp_session_id.clone()
             } else {
@@ -326,8 +326,8 @@ impl Application {
             },
         )?;
 
-        let (needs_title, seq_counter, pending_model_restore) = match existing_sessions.as_slice() {
-            [recent, ..] => {
+        let (needs_title, seq_counter, pending_model_restore) = match selected_session {
+            Some(recent) => {
                 let session_id = &recent.id;
                 if let Ok((messages, tools, timeline)) = store.load_session(session_id) {
                     ui.session.id = uuid::Uuid::parse_str(session_id).unwrap_or(ui.session.id);
@@ -369,7 +369,7 @@ impl Application {
                     (true, 1, None)
                 }
             }
-            _ => {
+            None => {
                 let session_id = ui.session.id.to_string();
                 store.create_session(&session_id, &ui.session.model)?;
                 (true, 1, None)

@@ -86,6 +86,7 @@ function agentSnapshot(
       selected_claude_provider_profile_id: selectedClaudeProfile,
       claude: {
         available_models: [],
+        fast_model: null,
       },
     },
     agents: [
@@ -120,6 +121,8 @@ function agentSnapshot(
       profiles: [
         providerProfile("xiaomi_mimo", "Xiaomi Token Plan", selectedClaudeProfile === "xiaomi_mimo", xiaomiConfigured, true),
       ],
+      fast_model: null,
+      fast_model_options: [],
     },
   };
 }

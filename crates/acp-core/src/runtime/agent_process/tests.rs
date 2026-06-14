@@ -58,10 +58,12 @@ fn streamable_remote_command_does_not_wait_on_requested_port_probe() {
             "streamable-http".to_string(),
         ],
         &[],
+        "/tmp/kodex-streamable-agent.pid",
         4567,
     );
     assert!(command.contains("--port 4567"));
     assert!(command.contains("if command -v setsid >/dev/null 2>&1; then"));
+    assert!(command.contains("kodex_agent_pid_file='/tmp/kodex-streamable-agent.pid';"));
     assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
     assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
     assert!(!command.contains("/proc/net/tcp"));

@@ -266,6 +266,24 @@ pub fn settings_reset_provider_models(
     app_core::settings::reset_provider_models(&paths, &provider).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn settings_select_claude_fast_model(
+    state: State<'_, AppState>,
+    model_id: Option<String>,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_select_claude_fast_model(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            model_id,
+        )
+        .map_err(|e| e.to_string());
+    }
+    app_core::settings::select_claude_fast_model(&paths, model_id).map_err(|e| e.to_string())
+}
+
 fn codex_secret_updates_active_channel(profile_id: &str) -> bool {
     profile_id != "default"
 }

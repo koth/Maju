@@ -383,6 +383,18 @@ fn active_agent_label_for_command(agent_command: &str, persisted_label: Option<S
         .unwrap_or(current_label)
 }
 
+fn select_session_for_agent_command<'a>(
+    sessions: &'a [SessionListItem],
+    agent_command: &str,
+) -> Option<&'a SessionListItem> {
+    sessions.iter().find(|session| {
+        session
+            .agent_cli
+            .as_deref()
+            .is_some_and(|label| agent_label_matches_command(label, agent_command))
+    })
+}
+
 fn agent_label_matches_command(label: &str, agent_command: &str) -> bool {
     if is_codex_agent_label(label) {
         return crate::settings::is_codex_acp_command(agent_command);

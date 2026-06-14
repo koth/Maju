@@ -633,6 +633,13 @@ export interface AgentProviderProfile {
   help_text: string;
 }
 
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  provider_id: string;
+  provider_label: string;
+}
+
 export interface AppSettings {
   selected_agent: AgentCliId;
   acp_port: number;
@@ -646,6 +653,7 @@ export interface AppSettings {
 
 export interface ClaudeProviderSettings {
   available_models: string[];
+  fast_model: string | null;
 }
 
 export interface LspServerSettings {
@@ -715,6 +723,8 @@ export interface CodexAcpSettingsStatus {
 export interface ClaudeProviderSettingsStatus {
   selected_profile_id: string;
   profiles: AgentProviderProfile[];
+  fast_model: string | null;
+  fast_model_options: AgentModelOption[];
 }
 
 export interface AgentInstallResult {

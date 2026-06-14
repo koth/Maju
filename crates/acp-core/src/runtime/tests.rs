@@ -1,7 +1,8 @@
 use super::agent_process::{
-    RemoteSshAgentProcess, build_remote_agent_command, build_remote_ssh_args,
-    build_remote_ssh_command_args, build_remote_ssh_reverse_forward_args,
-    connect_loopback_tcp_with_retry, connect_tcp_stream, kill_child_handle,
+    RemoteSshAgentProcess, build_remote_agent_cleanup_command, build_remote_agent_command,
+    build_remote_ssh_agent_command_args, build_remote_ssh_args, build_remote_ssh_command_args,
+    build_remote_ssh_reverse_forward_args, connect_loopback_tcp_with_retry, connect_tcp_stream,
+    kill_child_handle,
 };
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::prompt_content::prompt_title_text;
@@ -40,6 +41,7 @@ fn remote_agent_command_quotes_workspace_args_and_env() {
         Path::new("codex-acp"),
         &["--config".into(), "profile='dev'".into()],
         &[("TOKEN".into(), "a'b".into())],
+        "/tmp/kodex-test-agent.pid",
         4567,
     );
 
@@ -52,10 +54,13 @@ fn remote_agent_command_quotes_workspace_args_and_env() {
         "else env 'TOKEN=a'\\''b' 'codex-acp' '--config' 'profile='\\''dev'\\''' --port 4567 & fi;"
     ));
     assert!(command.contains("KODEX_REMOTE_ACP_PORT_HEX='11D7';"));
+    assert!(command.contains("kodex_agent_pid_file='/tmp/kodex-test-agent.pid';"));
+    assert!(command.contains("printf '%s\\n' \"$kodex_agent_pid\" > \"$kodex_agent_pid_file\""));
     assert!(command.contains("if [ \"$kodex_i\" -ge 150 ];"));
     assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
     assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
     assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
+    assert!(command.contains("rm -f \"$kodex_agent_pid_file\""));
     assert!(command.contains("wait \"$kodex_agent_pid\""));
 }
 
@@ -66,6 +71,7 @@ fn remote_agent_command_accepts_bootstrapped_absolute_agent_path() {
         Path::new("/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy"),
         &["--acp".into()],
         &[],
+        "/tmp/kodex-bootstrapped-agent.pid",
         4567,
     );
 
@@ -73,9 +79,21 @@ fn remote_agent_command_accepts_bootstrapped_absolute_agent_path() {
     assert!(command.contains(
         "setsid '/root/.kodex/remote-agents/codebuddy/current/bin/codebuddy' '--acp' --port 4567 &"
     ));
+    assert!(command.contains("kodex_agent_pid_file='/tmp/kodex-bootstrapped-agent.pid';"));
     assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
     assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
     assert!(command.contains("__KODEX_ACP_REMOTE_AGENT_READY__"));
+}
+
+#[test]
+fn remote_agent_cleanup_command_kills_pid_file_process_group() {
+    let command = build_remote_agent_cleanup_command("/tmp/kodex-agent-cleanup.pid");
+
+    assert!(command.contains("kodex_agent_pid_file='/tmp/kodex-agent-cleanup.pid';"));
+    assert!(command.contains("kodex_agent_pid=$(cat \"$kodex_agent_pid_file\""));
+    assert!(command.contains("kill -TERM \"-$kodex_agent_pid\""));
+    assert!(command.contains("kill -KILL \"-$kodex_agent_pid\""));
+    assert!(command.contains("rm -f \"$kodex_agent_pid_file\""));
 }
 
 #[test]
@@ -179,6 +197,25 @@ fn remote_ssh_command_args_multiplex_long_lived_agent_command() {
     assert!(!args.contains(&"ControlMaster=no".to_string()));
     assert!(!args.contains(&"ControlPath=none".to_string()));
     assert!(!args.contains(&"ControlPersist=no".to_string()));
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_ssh_agent_command_args_disable_multiplex_for_agent_lifecycle() {
+    let args = build_remote_ssh_agent_command_args(
+        "alice@devbox",
+        None,
+        "cd '/srv/project' && exec 'codebuddy' --acp".into(),
+        false,
+    );
+
+    assert!(args.contains(&"ServerAliveInterval=15".to_string()));
+    assert!(args.contains(&"ServerAliveCountMax=4".to_string()));
+    assert!(!args.contains(&"ControlMaster=auto".to_string()));
+    assert!(!args.contains(&"ControlPersist=300".to_string()));
+    assert!(args.contains(&"ControlMaster=no".to_string()));
+    assert!(args.contains(&"ControlPath=none".to_string()));
+    assert!(args.contains(&"ControlPersist=no".to_string()));
 }
 
 #[test]

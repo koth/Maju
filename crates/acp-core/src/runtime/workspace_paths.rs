@@ -110,8 +110,9 @@ pub(super) fn paths_are_inside_workspace(workspace_root: &str, paths: &[PathBuf]
         return false;
     }
 
-    let Ok(root) = PathBuf::from(workspace_root).canonicalize() else {
-        return false;
+    let workspace_root_path = PathBuf::from(workspace_root);
+    let Ok(root) = workspace_root_path.canonicalize() else {
+        return paths_are_lexically_inside_workspace(workspace_root, paths);
     };
 
     paths.iter().all(|path| {
@@ -125,6 +126,77 @@ pub(super) fn paths_are_inside_workspace(workspace_root: &str, paths: &[PathBuf]
             .map(|resolved| resolved.starts_with(&root))
             .unwrap_or(false)
     })
+}
+
+fn paths_are_lexically_inside_workspace(workspace_root: &str, paths: &[PathBuf]) -> bool {
+    let root = normalize_lexical_workspace_path(workspace_root);
+    if root.is_empty() {
+        return false;
+    }
+
+    paths.iter().all(|path| {
+        let raw = path.to_string_lossy().replace('\\', "/");
+        let candidate = if path_is_absolute_like(&raw) {
+            raw
+        } else if root == "/" {
+            format!("/{raw}")
+        } else {
+            format!("{}/{}", root.trim_end_matches('/'), raw)
+        };
+        let candidate = normalize_lexical_workspace_path(&candidate);
+        lexical_path_is_inside(&root, &candidate)
+    })
+}
+
+fn path_is_absolute_like(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with("//") || looks_windows_drive_path(path)
+}
+
+fn looks_windows_drive_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    let Some(drive) = chars.next() else {
+        return false;
+    };
+    drive.is_ascii_alphabetic() && chars.next() == Some(':')
+}
+
+fn normalize_lexical_workspace_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    let mut prefix = String::new();
+    let mut rest = normalized.as_str();
+    if looks_windows_drive_path(rest) {
+        prefix = rest[..2].to_ascii_lowercase();
+        rest = rest[2..].trim_start_matches('/');
+    } else if rest.starts_with('/') {
+        prefix = "/".into();
+        rest = rest.trim_start_matches('/');
+    }
+
+    let mut parts = Vec::new();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                let _ = parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+
+    match prefix.as_str() {
+        "/" if parts.is_empty() => "/".into(),
+        "/" => format!("/{}", parts.join("/")),
+        "" => parts.join("/"),
+        _ if parts.is_empty() => prefix,
+        _ => format!("{prefix}/{}", parts.join("/")),
+    }
+}
+
+fn lexical_path_is_inside(root: &str, path: &str) -> bool {
+    if root == "/" {
+        return path.starts_with('/');
+    }
+    path == root || path.starts_with(&format!("{}/", root.trim_end_matches('/')))
 }
 
 fn list_workspace_directory(path: &PathBuf) -> anyhow::Result<String> {
@@ -740,6 +812,26 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn path_permission_check_allows_remote_absolute_paths_inside_workspace() {
+        assert!(paths_are_inside_workspace(
+            "/g/kknovel",
+            &[PathBuf::from("/g/kknovel/text_chunker/convert_to_onnx.py")]
+        ));
+    }
+
+    #[test]
+    fn path_permission_check_rejects_remote_absolute_paths_outside_workspace() {
+        assert!(!paths_are_inside_workspace(
+            "/g/kknovel",
+            &[PathBuf::from("/etc/passwd")]
+        ));
+        assert!(!paths_are_inside_workspace(
+            "/g/kknovel",
+            &[PathBuf::from("../secret")]
+        ));
     }
 
     #[test]

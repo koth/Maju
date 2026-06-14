@@ -15,6 +15,7 @@ import {
   settingsDeleteRemoteProfile,
   settingsValidateRemoteProfile,
   settingsSelectAgentProviderProfile,
+  settingsSelectClaudeFastModel,
 } from "../../lib/tauri";
 import {
   checkForAppUpdate,
@@ -44,6 +45,7 @@ vi.mock("../../lib/tauri", async () => {
     settingsSelectCodexAcpProvider: vi.fn(),
     settingsSelectCodexDefaultMode: vi.fn(),
     settingsSelectAgentProviderProfile: vi.fn(),
+    settingsSelectClaudeFastModel: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
@@ -144,6 +146,7 @@ const agentSnapshot: AgentSettingsSnapshot = {
     selected_claude_provider_profile_id: "byok",
     claude: {
       available_models: ["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"],
+      fast_model: null,
     },
   },
   agents: [
@@ -184,6 +187,21 @@ const agentSnapshot: AgentSettingsSnapshot = {
   claude: {
     selected_profile_id: "byok",
     profiles: claudeProfiles("byok"),
+    fast_model: null,
+    fast_model_options: [
+      {
+        id: "kodex-provider/commandcode/claude-haiku-4-5-20251001",
+        label: "claude-haiku-4-5-20251001",
+        provider_id: "commandcode",
+        provider_label: "CommandCode",
+      },
+      {
+        id: "kodex-provider/commandcode/Qwen/Qwen3.7-Max",
+        label: "Qwen/Qwen3.7-Max",
+        provider_id: "commandcode",
+        provider_label: "CommandCode",
+      },
+    ],
   },
 };
 
@@ -321,6 +339,20 @@ describe("SettingsPage LSP settings", () => {
       },
     }));
     vi.mocked(settingsResetProviderModels).mockResolvedValue(agentSnapshot);
+    vi.mocked(settingsSelectClaudeFastModel).mockImplementation(async (modelId) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        claude: {
+          ...agentSnapshot.settings.claude,
+          fast_model: modelId,
+        },
+      },
+      claude: {
+        ...agentSnapshot.claude,
+        fast_model: modelId,
+      },
+    }));
     vi.mocked(settingsSaveAgentProviderSecret).mockImplementation(async (family, profileId) => {
       if (family === "codex") {
         const selectedProfileId = profileId === "default" ? "default" : "byok";
@@ -854,6 +886,24 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.getAllByText(/BYOK/).length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("codex_provider_profile")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("claude_provider_profile")).not.toBeInTheDocument();
+  });
+
+  it("saves the Claude fast model selection", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Claude");
+    const fastModel = await screen.findByLabelText("claude_fast_model");
+    fireEvent.change(fastModel, {
+      target: { value: "kodex-provider/commandcode/Qwen/Qwen3.7-Max" },
+    });
+
+    await waitFor(() =>
+      expect(settingsSelectClaudeFastModel).toHaveBeenCalledWith(
+        "kodex-provider/commandcode/Qwen/Qwen3.7-Max",
+        null,
+      ),
+    );
+    await screen.findByText("Claude 快速模型已更新，后续新建会话生效");
   });
 
   it("does not render Venus as a provider option", async () => {
