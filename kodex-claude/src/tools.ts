@@ -55,7 +55,7 @@ import {
   BetaWebSearchToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/beta.mjs";
 import path from "node:path";
-import { Logger } from "./acp-agent.js";
+import type { Logger } from "./logger.js";
 
 /**
  * Union of all possible content types that can appear in tool results from the Anthropic SDK.

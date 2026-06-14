@@ -3,13 +3,13 @@ export {
   ClaudeAcpAgent,
   isLocalCommandMetadata,
   stripLocalCommandMetadata,
-  runAcp,
   toAcpNotifications,
   streamEventToAcpNotifications,
   type ToolUpdateMeta,
   type NewSessionMeta,
   type SDKMessageFilter,
 } from "./acp-agent.js";
+export { runAcp, type RunAcpOptions } from "./acp-runner.js";
 export { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
 export {
   toolInfoFromToolUse,
