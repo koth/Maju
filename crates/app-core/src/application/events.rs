@@ -223,7 +223,14 @@ impl Application {
         state: &workspace_model::SessionConfigState,
     ) -> workspace_model::SessionConfigState {
         let mut state = state.clone();
-        if self.pending_model_restore.is_some() {
+        if let Some(saved_model) = self.pending_model_restore.as_ref() {
+            for control in &mut state.controls {
+                if control.category != workspace_model::SessionConfigCategory::Model {
+                    continue;
+                }
+
+                super::config::apply_model_selection_to_control(control, saved_model);
+            }
             return state;
         }
 
@@ -243,18 +250,7 @@ impl Application {
                 continue;
             }
 
-            if let Some(choice) = control.choices.iter().find(|choice| {
-                super::config::choice_matches_model_selection(choice, selected_model)
-            }) {
-                control.current_value_id = super::config::provider_qualified_model_value(
-                    &choice.id,
-                    selected_model
-                        .provider
-                        .as_deref()
-                        .or_else(|| choice.provider.as_deref()),
-                );
-                control.current_value_label = choice.label.clone();
-            }
+            super::config::apply_model_selection_to_control(control, selected_model);
         }
 
         state

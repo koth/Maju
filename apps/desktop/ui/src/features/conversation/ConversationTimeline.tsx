@@ -321,10 +321,10 @@ function fileUrlToPath(src: string): string | null {
 }
 
 function placeTurnChangeSetsAfterFinalAssistant(
-  snapshot: UiSnapshot,
+  timeline: UiSnapshot["timeline"],
+  messagesById: Map<string, UiSnapshot["messages"][number]>,
   turnChangeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
 ): Record<string, TimelineTurnChangeSet> {
-  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
   const result: Record<string, TimelineTurnChangeSet> = {};
   let assistantIds: string[] = [];
   let changeSets: TimelineTurnChangeSet[] = [];
@@ -340,7 +340,7 @@ function placeTurnChangeSetsAfterFinalAssistant(
     changeSets = [];
   };
 
-  for (const item of snapshot.timeline) {
+  for (const item of timeline) {
     if (typeof item !== "object" || !("Message" in item)) continue;
     const message = messagesById.get(item.Message);
     if (!message) continue;
@@ -538,8 +538,13 @@ export function ConversationTimeline({
   }, [snapshot.messages, visibleMessageIds]);
 
   const displayTurnChangeSetsByMessageId = useMemo(
-    () => placeTurnChangeSetsAfterFinalAssistant(snapshot, turnChangeSetsByMessageId),
-    [snapshot, turnChangeSetsByMessageId],
+    () =>
+      placeTurnChangeSetsAfterFinalAssistant(
+        visibleTimeline,
+        messagesById,
+        turnChangeSetsByMessageId,
+      ),
+    [messagesById, turnChangeSetsByMessageId, visibleTimeline],
   );
 
   const { toolsById, childToolsByParent } = useMemo(() => {

@@ -92,6 +92,35 @@ function timelineTurnChangeSetsSignature(
   return entries.sort().join("|");
 }
 
+function snapshotTurnChangesSignature(snapshot: UiSnapshot | null) {
+  if (!snapshot) return "";
+  return snapshot.turn_changes
+    .map((turn) =>
+      [
+        turn.message_id,
+        ...turn.changes.map((change) =>
+          [
+            change.path,
+            change.change_type,
+            change.added_lines,
+            change.removed_lines,
+            change.timestamp,
+          ].join(":"),
+        ),
+      ].join(":"),
+    )
+    .join("|");
+}
+
+function changeSetFileCacheSignature(summary: ChangeSetSummary) {
+  return [
+    summary.id,
+    summary.status,
+    summary.updated_at,
+    summary.file_count,
+  ].join(":");
+}
+
 function latestPendingAgentTurnSummary(
   summaries: ChangeSetSummary[],
   activeTurnOwnerKey: string | null,
@@ -168,12 +197,18 @@ export function useTimelineChangeSets({
     workspaceRoot: string;
     signature: string;
   } | null>(null);
+  const fileCacheScopeRef = useRef<string | null>(null);
+  const fileCacheRef = useRef<
+    Map<string, { signature: string; files: FileChangeSummary[] }>
+  >(new Map());
 
   const clearChangeSets = useCallback(() => {
     setTimelineTurnChangeSets({});
     setLiveTurnChangeSet(null);
     setAgentConversationChangeCount(0);
     changeSetRefreshRef.current = null;
+    fileCacheScopeRef.current = null;
+    fileCacheRef.current.clear();
   }, []);
 
   const currentAgentTurnChangesSignature = useMemo(
@@ -183,7 +218,14 @@ export function useTimelineChangeSets({
   const activeAgentTurn =
     snapshot?.session.status === "Streaming" ||
     snapshot?.session.status === "WaitingForTool";
-  const activeAgentTurnOwnerKey = useMemo(() => activeTurnOwnerKey(snapshot), [snapshot]);
+  const activeAgentTurnOwnerKey = useMemo(
+    () => activeTurnOwnerKey(snapshot),
+    [snapshot?.messages, snapshot?.session.status, snapshot?.timeline],
+  );
+  const persistedTurnChangesSignature = useMemo(
+    () => snapshotTurnChangesSignature(snapshot),
+    [snapshot?.turn_changes],
+  );
 
   useEffect(() => {
     const sessionId = snapshot?.session.id;
@@ -196,6 +238,11 @@ export function useTimelineChangeSets({
     }
 
     let cancelled = false;
+    const cacheScope = `${workspaceRoot}:${sessionId}`;
+    if (fileCacheScopeRef.current !== cacheScope) {
+      fileCacheScopeRef.current = cacheScope;
+      fileCacheRef.current.clear();
+    }
     Promise.all([
       sessionListChangeSets({
         source: "AgentTurn",
@@ -221,11 +268,26 @@ export function useTimelineChangeSets({
         const summariesToLoad = pendingTurnSummary
           ? [...turnSummaries, pendingTurnSummary]
           : turnSummaries;
+        const summaryIds = new Set(summariesToLoad.map((summary) => summary.id));
+        for (const cachedId of fileCacheRef.current.keys()) {
+          if (!summaryIds.has(cachedId)) {
+            fileCacheRef.current.delete(cachedId);
+          }
+        }
         const fileEntries = await Promise.all(
           summariesToLoad.map(async (summary) => {
+            const cacheSignature = changeSetFileCacheSignature(summary);
+            const cached = fileCacheRef.current.get(summary.id);
+            if (cached?.signature === cacheSignature) {
+              return [summary.id, cached.files] as const;
+            }
             try {
               const response = await sessionListChangeSetFiles({
                 change_set_id: summary.id,
+              });
+              fileCacheRef.current.set(summary.id, {
+                signature: cacheSignature,
+                files: response.files,
               });
               return [summary.id, response.files] as const;
             } catch {
@@ -264,8 +326,9 @@ export function useTimelineChangeSets({
   }, [
     activeAgentTurn,
     activeAgentTurnOwnerKey,
-    snapshot?.revision,
+    persistedTurnChangesSignature,
     snapshot?.session.id,
+    snapshot?.timeline.length,
     snapshot?.workspace.root,
     workspaceReady,
   ]);

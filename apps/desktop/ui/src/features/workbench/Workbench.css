@@ -419,6 +419,7 @@ body.is-resizing-left-sidebar {
   --conversation-column-width: 83.333%;
   --conversation-column-min: min(100%, 720px);
   --conversation-column-max: 1180px;
+  --conversation-composer-max: 920px;
   --expanded-review-side-tree-width: clamp(230px, 24vw, 300px);
   --expanded-review-composer-height: 58px;
 
@@ -729,9 +730,9 @@ body.is-resizing-left-sidebar {
 
 .expanded-review-composer-layer > .composer-plan-slot,
 .expanded-review-composer-layer > .composer {
-  width: min(960px, calc(100% - 2 * var(--center-panel-gutter)));
+  width: min(var(--conversation-composer-max), calc(100% - 2 * var(--center-panel-gutter)));
   min-width: 0;
-  max-width: 960px;
+  max-width: var(--conversation-composer-max);
   pointer-events: auto;
 }
 
@@ -1013,6 +1014,7 @@ body.is-resizing-left-sidebar {
     --conversation-column-width: 100%;
     --conversation-column-min: 0;
     --conversation-column-max: none;
+    --conversation-composer-max: 100%;
   }
 
   .center-tab-bar-shell {

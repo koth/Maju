@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from "react";
+import { memo, useState, useMemo, useCallback, useEffect, useRef } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
@@ -8,6 +8,7 @@ import { fsListDir, gitStage, sessionListChangeSets, sessionListChangeSetFiles, 
 import { DiffTab } from "../editor/DiffTab";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
+import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import "./ReviewPanel.css";
 
 export type ReviewPanelTab = "Review" | "Diff" | "Files";
@@ -40,7 +41,11 @@ interface TreeNode {
 }
 
 const MAX_REVIEW_FILES = 300;
+const REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LIMIT = 4;
+const REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LINE_LIMIT = 320;
+const REVIEW_INLINE_DIFF_AUTO_OPEN_TOTAL_LINE_LIMIT = 520;
 const REVIEW_DIFF_MAX_MATRIX_CELLS = 250_000;
+const REVIEW_DIFF_SCROLL_TARGET_SELECTOR = "[data-code], pre, [data-diff], [data-content]";
 const REVIEW_DIFF_OPTIONS_BASE = {
   disableFileHeader: true,
   hunkSeparators: "line-info",
@@ -904,7 +909,7 @@ function ReviewChangesView({
     : [];
   const activeChangeSetId = selectedChangeSet?.id;
   const sorted = useMemo(
-    () => [...scopedFiles].sort((a, b) => a.path.localeCompare(b.path)),
+    () => [...scopedFiles].sort(compareReviewFiles),
     [scopedFiles],
   );
   const totals = useMemo(
@@ -918,6 +923,21 @@ function ReviewChangesView({
       ),
     [sorted],
   );
+  const autoExpandedPaths = useMemo(() => {
+    const paths = new Set<string>();
+    let openedFiles = 0;
+    let openedLines = 0;
+    for (const change of sorted) {
+      if (openedFiles >= REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LIMIT) break;
+      const changedLines = change.added_lines + change.removed_lines;
+      if (changedLines > REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LINE_LIMIT) continue;
+      if (openedLines + changedLines > REVIEW_INLINE_DIFF_AUTO_OPEN_TOTAL_LINE_LIMIT) continue;
+      paths.add(change.path);
+      openedFiles += 1;
+      openedLines += changedLines;
+    }
+    return paths;
+  }, [sorted]);
 
   return (
     <div className="review-session-changes">
@@ -974,10 +994,11 @@ function ReviewChangesView({
         <div className="review-session-list">
           {sorted.map((change) => (
             <ReviewChangeCard
-              key={change.path}
+              key={`${activeChangeSetId ?? change.change_set_id}:${change.path}`}
               change={change}
               changeSetId={activeChangeSetId ?? change.change_set_id}
               appTheme={appTheme}
+              initialCollapsed={!autoExpandedPaths.has(change.path)}
             />
           ))}
         </div>
@@ -986,26 +1007,107 @@ function ReviewChangesView({
   );
 }
 
-function ReviewChangeCard({
+function resolveReviewDiffHorizontalScrollTarget(root: HTMLDivElement) {
+  const candidates = collectReviewDiffScrollTargets(root).filter(isHorizontallyScrollable);
+  if (candidates.length === 0) return root;
+
+  const activeElement = typeof document !== "undefined" ? document.activeElement : null;
+  if (activeElement) {
+    const activeCandidate = candidates.find((candidate) =>
+      candidateContainsActiveElement(candidate, activeElement),
+    );
+    if (activeCandidate) return activeCandidate;
+  }
+
+  const hoveredCandidate = candidates.find(isHoveredElement);
+  return hoveredCandidate ?? candidates[0] ?? root;
+}
+
+function collectReviewDiffScrollTargets(root: HTMLDivElement) {
+  const targets: HTMLElement[] = [];
+  const seenTargets = new Set<HTMLElement>();
+  const seenScopes = new Set<Document | DocumentFragment | Element>();
+
+  const addTarget = (target: HTMLElement) => {
+    if (seenTargets.has(target)) return;
+    seenTargets.add(target);
+    targets.push(target);
+  };
+
+  const collectFromScope = (scope: Document | DocumentFragment | Element) => {
+    if (seenScopes.has(scope)) return;
+    seenScopes.add(scope);
+
+    if (
+      scope instanceof HTMLElement &&
+      scope.matches(REVIEW_DIFF_SCROLL_TARGET_SELECTOR)
+    ) {
+      addTarget(scope);
+    }
+
+    for (const element of Array.from(
+      scope.querySelectorAll<HTMLElement>(REVIEW_DIFF_SCROLL_TARGET_SELECTOR),
+    )) {
+      addTarget(element);
+    }
+
+    for (const element of Array.from(scope.querySelectorAll<HTMLElement>("*"))) {
+      if (element.shadowRoot) collectFromScope(element.shadowRoot);
+    }
+  };
+
+  collectFromScope(root);
+  addTarget(root);
+  return targets;
+}
+
+function isHorizontallyScrollable(element: HTMLElement) {
+  return element.scrollWidth > element.clientWidth + 1;
+}
+
+function isHoveredElement(element: HTMLElement) {
+  try {
+    return element.matches(":hover");
+  } catch {
+    return false;
+  }
+}
+
+function candidateContainsActiveElement(candidate: HTMLElement, activeElement: Element) {
+  if (candidate === activeElement || candidate.contains(activeElement)) return true;
+
+  const candidateRoot = candidate.getRootNode();
+  return Boolean(
+    typeof ShadowRoot !== "undefined" &&
+      candidateRoot instanceof ShadowRoot &&
+      candidateRoot.host === activeElement,
+  );
+}
+
+const ReviewChangeCard = memo(function ReviewChangeCard({
   change,
   changeSetId,
   appTheme,
+  initialCollapsed,
 }: {
   change: FileChangeSummary;
   changeSetId: string;
   appTheme: AppTheme;
+  initialCollapsed: boolean;
 }) {
   const [hydratedChange, setHydratedChange] = useState<FileChangeRecord | null>(null);
   const [hydrationFailed, setHydrationFailed] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
   const displayChange = hydratedChange ?? change;
   const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
   const diffPreview = useMemo(
     () =>
-      hydrationFailed
+      collapsed
+        ? null
+        : hydrationFailed
         ? { kind: "message" as const, text: "这个差异记录暂时无法加载" }
         : buildReviewDiff(displayChange),
-    [displayChange, hydrationFailed],
+    [collapsed, displayChange, hydrationFailed],
   );
   const diffOptions = useMemo(
     () => ({
@@ -1016,8 +1118,18 @@ function ReviewChangeCard({
     } as const),
     [appTheme],
   );
+  const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>({
+    resolveScrollTarget: resolveReviewDiffHorizontalScrollTarget,
+  });
 
   useEffect(() => {
+    setCollapsed(initialCollapsed);
+    setHydratedChange(null);
+    setHydrationFailed(false);
+  }, [change.path, change.updated_at, changeSetId, initialCollapsed]);
+
+  useEffect(() => {
+    if (collapsed) return;
     if (!needsHydration) {
       setHydratedChange(null);
       setHydrationFailed(false);
@@ -1042,6 +1154,7 @@ function ReviewChangeCard({
     };
   }, [
     change.added_lines,
+    collapsed,
     change.path,
     change.removed_lines,
     change.updated_at,
@@ -1071,10 +1184,11 @@ function ReviewChangeCard({
       </button>
       {!collapsed && (
         <div
+          {...horizontalScroll.scrollControlProps}
           className="review-inline-diff"
           aria-label={`${change.path} 差异预览`}
         >
-          {diffPreview.kind === "patch" ? (
+          {diffPreview?.kind === "patch" ? (
             <MultiFileDiff
               oldFile={diffPreview.oldFile}
               newFile={diffPreview.newFile}
@@ -1083,13 +1197,13 @@ function ReviewChangeCard({
               disableWorkerPool
             />
           ) : (
-            <div className="review-inline-message">{diffPreview.text}</div>
+            <div className="review-inline-message">{diffPreview?.text ?? "正在准备差异..."}</div>
           )}
         </div>
       )}
     </article>
   );
-}
+});
 
 function selectReviewChangeSet(
   summaries: ChangeSetSummary[],
@@ -1146,6 +1260,12 @@ function compareChangeSetSummaries(
   if (orderDelta !== 0) return orderDelta;
 
   return b.id.localeCompare(a.id);
+}
+
+function compareReviewFiles(a: FileChangeSummary, b: FileChangeSummary) {
+  const updatedDelta = timestampValue(b.updated_at) - timestampValue(a.updated_at);
+  if (updatedDelta !== 0) return updatedDelta;
+  return a.path.localeCompare(b.path);
 }
 
 function activeTurnOwnerKey(

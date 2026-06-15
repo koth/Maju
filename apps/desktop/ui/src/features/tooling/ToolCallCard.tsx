@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
 import { PatchDiff } from "@pierre/diffs/react";
 import type { DiffHunk, ToolDiffPreview, ToolInvocation } from "../../types";
+import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import { deriveToolPresentation, type ToolPresentation } from "./tool-presentation";
 import { getDiffStats, previewToCompactPatch } from "./compact-patch";
 import {
@@ -304,15 +305,7 @@ function ToolCallCardImpl({
           {diffPreviews.length > 0 && (
             <div className="tc-diff-list">
               {diffPreviews.map((preview) => (
-                <div className="tc-diff-preview" key={preview.path}>
-                  <div className="tc-diff-path">{preview.path}</div>
-                  <PatchDiff
-                    patch={previewToCompactPatch(preview)}
-                    className="tc-pierre-diff"
-                    options={DIFF_OPTIONS}
-                    disableWorkerPool
-                  />
-                </div>
+                <ToolDiffPreviewCard key={preview.path} preview={preview} />
               ))}
             </div>
           )}
@@ -419,6 +412,27 @@ function ShellToolPanel({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function ToolDiffPreviewCard({ preview }: { preview: ToolDiffPreview }) {
+  const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>();
+
+  return (
+    <div className="tc-diff-preview">
+      <div className="tc-diff-path">{preview.path}</div>
+      <div
+        {...horizontalScroll.scrollControlProps}
+        className="tc-pierre-diff-scroll"
+      >
+        <PatchDiff
+          patch={previewToCompactPatch(preview)}
+          className="tc-pierre-diff"
+          options={DIFF_OPTIONS}
+          disableWorkerPool
+        />
+      </div>
     </div>
   );
 }

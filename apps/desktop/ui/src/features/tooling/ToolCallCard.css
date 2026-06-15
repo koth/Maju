@@ -429,14 +429,24 @@
   white-space: nowrap;
 }
 
+.tc-pierre-diff-scroll {
+  display: block;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--surface-muted-bg);
+  color: var(--text-strong);
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable;
+}
+
 .tc-pierre-diff {
   --diffs-addition-color-override: var(--success);
   --diffs-fg-number-addition-override: var(--success);
   --diffs-bg-addition-number-override: var(--success);
   --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--success) 28%, transparent);
   display: block;
-  max-height: 360px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   background: var(--surface-muted-bg);
   color: var(--text-strong);
   font-size: 11.5px;

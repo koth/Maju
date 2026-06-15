@@ -3,11 +3,14 @@ import type { SessionFileChange, FileChangeRecord, FileChangeType, AppTheme, Dif
 import { monacoThemeForAppTheme, registerKodexThemes } from "./monaco-theme";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
 import { languageForPath } from "./languages";
+import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import "./DiffTab.css";
 
 const MonacoDiffEditor = lazy(() =>
   import("@monaco-editor/react").then((mod) => ({ default: mod.DiffEditor })),
 );
+
+const DIFF_HORIZONTAL_SCROLL_STEP = 80;
 
 let textmateInitStarted = false;
 
@@ -40,6 +43,16 @@ export function DiffTab({
   const quality = "quality" in change ? change.quality : "Exact";
   const unavailableReason = diffUnavailableReason(quality);
   const modifiedText = change.new_text ?? "";
+  const scrollDiffHorizontally = useCallback((delta: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    for (const pane of [editor.getOriginalEditor(), editor.getModifiedEditor()]) {
+      pane.setScrollLeft(Math.max(0, pane.getScrollLeft() + delta));
+    }
+  }, []);
+  const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>({
+    onScrollBy: scrollDiffHorizontally,
+  });
 
   const handleBeforeMount = useCallback(
     (monaco: typeof import("monaco-editor")) => {
@@ -54,11 +67,22 @@ export function DiffTab({
   );
 
   const handleMount = useCallback(
-    (editor: import("monaco-editor").editor.IStandaloneDiffEditor) => {
+    (
+      editor: import("monaco-editor").editor.IStandaloneDiffEditor,
+      monaco: typeof import("monaco-editor"),
+    ) => {
       editorRef.current = editor;
       editor.updateOptions({ renderSideBySide: true });
+      for (const pane of [editor.getOriginalEditor(), editor.getModifiedEditor()]) {
+        pane.addCommand(monaco.KeyCode.LeftArrow, () => {
+          scrollDiffHorizontally(-DIFF_HORIZONTAL_SCROLL_STEP);
+        });
+        pane.addCommand(monaco.KeyCode.RightArrow, () => {
+          scrollDiffHorizontally(DIFF_HORIZONTAL_SCROLL_STEP);
+        });
+      }
     },
-    [],
+    [scrollDiffHorizontally],
   );
 
   const toggleSideBySide = useCallback(() => {
@@ -118,7 +142,10 @@ export function DiffTab({
           )}
         </div>
       </div>
-      <div className="dt-editor">
+      <div
+        className="dt-editor"
+        {...horizontalScroll.scrollControlProps}
+      >
         {unavailableReason ? (
           <div className="dt-unavailable">{unavailableReason}</div>
         ) : (

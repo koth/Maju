@@ -74,6 +74,17 @@ impl Application {
 
         // If resuming an existing session, skip replay events from session/load
         let skip_replay = resume_session_id.is_some();
+        let startup_model = most_recent_session
+            .and_then(|session| {
+                store
+                    .get_session_model_provider_mode(&session.id)
+                    .ok()
+                    .flatten()
+            })
+            .map(|(model, provider, _)| {
+                super::config::provider_qualified_model_value(&model, provider.as_deref())
+            })
+            .unwrap_or_else(|| ui.session.model.clone());
 
         let session = crate::startup_perf::measure(
             "app/bootstrap/session_handle_start",
@@ -82,7 +93,7 @@ impl Application {
                 SessionHandle::start(SessionConfig {
                     workspace_root: ui.workspace.root.display().to_string(),
                     app_data_root: app_paths.root().display().to_string(),
-                    model: ui.session.model.clone(),
+                    model: startup_model.clone(),
                     agent_command: agent_command.clone(),
                     agent_env: crate::settings::agent_env_for_command(&agent_command, &app_paths),
                     resume_session_id,
@@ -305,6 +316,17 @@ impl Application {
             }
         });
         let skip_replay = resume_session_id.is_some();
+        let startup_model = selected_session
+            .and_then(|session| {
+                store
+                    .get_session_model_provider_mode(&session.id)
+                    .ok()
+                    .flatten()
+            })
+            .map(|(model, provider, _)| {
+                super::config::provider_qualified_model_value(&model, provider.as_deref())
+            })
+            .unwrap_or_else(|| ui.session.model.clone());
         let remote_runtime = prepare_remote_agent_runtime(&agent_command, &app_paths, &remote_ssh)?;
         remote_ssh.reverse_forwards = remote_runtime.reverse_forwards.clone();
 
@@ -315,7 +337,7 @@ impl Application {
                 SessionHandle::start(SessionConfig {
                     workspace_root: remote.remote_path.clone(),
                     app_data_root: app_paths.root().display().to_string(),
-                    model: ui.session.model.clone(),
+                    model: startup_model.clone(),
                     agent_command: agent_command.clone(),
                     agent_env: remote_runtime.agent_env.clone(),
                     resume_session_id,

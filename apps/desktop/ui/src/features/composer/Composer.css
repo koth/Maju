@@ -1,8 +1,8 @@
 .composer {
   flex-shrink: 0;
-  width: min(var(--conversation-column-width), 920px);
+  width: min(var(--conversation-column-width), var(--conversation-composer-max));
   min-width: min(var(--conversation-column-min), 100%);
-  max-width: min(var(--conversation-column-max), 920px);
+  max-width: var(--conversation-composer-max);
   margin: 0 auto;
   padding: 10px 0 12px;
 }
@@ -51,9 +51,9 @@
 
 .composer-plan-slot {
   flex-shrink: 0;
-  width: min(var(--conversation-column-width), 920px);
+  width: min(var(--conversation-column-width), var(--conversation-composer-max));
   min-width: min(var(--conversation-column-min), 100%);
-  max-width: min(var(--conversation-column-max), 920px);
+  max-width: var(--conversation-composer-max);
   margin: 0 auto;
   padding: 0 0 8px;
 }

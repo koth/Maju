@@ -117,7 +117,11 @@ function makeChangeSet(
   };
 }
 
-function makeSummary(changeSetId: string, path: string): FileChangeSummary {
+function makeSummary(
+  changeSetId: string,
+  path: string,
+  updatedAt = "2026-05-12T00:00:00Z",
+): FileChangeSummary {
   return {
     change_set_id: changeSetId,
     path,
@@ -125,7 +129,7 @@ function makeSummary(changeSetId: string, path: string): FileChangeSummary {
     added_lines: 1,
     removed_lines: 0,
     quality: "Exact",
-    updated_at: "2026-05-12T00:00:00Z",
+    updated_at: updatedAt,
   };
 }
 
@@ -377,6 +381,126 @@ describe("ReviewPanel scoped change sets", () => {
 
     expect(header).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByLabelText("src/turn.ts 差异预览")).toBeNull();
+  });
+
+  it("scrolls inline diffs horizontally with arrow keys without blocking pointer selection", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "turn-1",
+      files: [makeSummary("turn-1", "src/turn.ts")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [{ id: "turn-1-message", role: "Assistant", body: "done" }],
+          timeline: [{ Message: "turn-1-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    const diff = await screen.findByLabelText("src/turn.ts 差异预览");
+    const code = document.createElement("div");
+    code.setAttribute("data-code", "");
+    Object.defineProperty(code, "clientWidth", { configurable: true, value: 120 });
+    Object.defineProperty(code, "scrollWidth", { configurable: true, value: 360 });
+    diff.appendChild(code);
+    diff.scrollLeft = 0;
+    code.scrollLeft = 0;
+
+    fireEvent.mouseEnter(diff);
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(diff.scrollLeft).toBe(0);
+    expect(code.scrollLeft).toBe(80);
+
+    fireEvent.keyDown(diff, { key: "ArrowRight" });
+    expect(diff.scrollLeft).toBe(0);
+    expect(code.scrollLeft).toBe(160);
+
+    fireEvent.keyDown(diff, { key: "ArrowLeft" });
+    expect(diff.scrollLeft).toBe(0);
+    expect(code.scrollLeft).toBe(80);
+
+    expect(fireEvent.pointerDown(diff, { pointerId: 1, button: 0, clientX: 160 })).toBe(true);
+    expect(fireEvent.pointerMove(diff, { pointerId: 1, clientX: 100 })).toBe(true);
+  });
+
+  it("shows newest review files first and auto-expands recent files within budget", async () => {
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      {
+        ...makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
+        file_count: 4,
+      },
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "turn-1",
+      files: [
+        makeSummary("turn-1", "src/a.ts", "2026-05-12T01:00:00Z"),
+        makeSummary("turn-1", "src/z.ts", "2026-05-12T03:00:00Z"),
+        {
+          ...makeSummary("turn-1", "src/huge.ts", "2026-05-12T02:30:00Z"),
+          added_lines: 800,
+        },
+        makeSummary("turn-1", "src/m.ts", "2026-05-12T02:00:00Z"),
+      ],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [{ id: "turn-1-message", role: "Assistant", body: "done" }],
+          timeline: [{ Message: "turn-1-message" }],
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    const headers = await screen.findAllByRole("button", { name: /^src\/.*\.ts$/ });
+    expect(headers.map((header) => header.getAttribute("aria-label"))).toEqual([
+      "src/z.ts",
+      "src/huge.ts",
+      "src/m.ts",
+      "src/a.ts",
+    ]);
+    expect(headers[0]).toHaveAttribute("aria-expanded", "true");
+    expect(headers[1]).toHaveAttribute("aria-expanded", "false");
+    expect(headers[2]).toHaveAttribute("aria-expanded", "true");
+    expect(headers[3]).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("src/z.ts 差异预览")).toBeTruthy();
+    expect(screen.queryByLabelText("src/huge.ts 差异预览")).toBeNull();
+    expect(screen.getByLabelText("src/m.ts 差异预览")).toBeTruthy();
+    expect(screen.getByLabelText("src/a.ts 差异预览")).toBeTruthy();
+    await waitFor(() =>
+      expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
+        change_set_id: "turn-1",
+        path: "src/z.ts",
+      }),
+    );
+    await waitFor(() => {
+      expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
+        change_set_id: "turn-1",
+        path: "src/m.ts",
+      });
+      expect(sessionGetChangeSetFileDiff).toHaveBeenCalledWith({
+        change_set_id: "turn-1",
+        path: "src/a.ts",
+      });
+    });
+    expect(sessionGetChangeSetFileDiff).not.toHaveBeenCalledWith({
+      change_set_id: "turn-1",
+      path: "src/huge.ts",
+    });
   });
 
   it("falls back to the latest agent turn with files when the latest assistant turn has no files", async () => {

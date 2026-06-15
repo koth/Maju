@@ -276,25 +276,23 @@ impl Application {
             return;
         };
 
-        if control_current_matches_model_selection(&model_control, &saved_model) {
-            self.pending_model_restore = None;
-            return;
-        }
-
         let Some(choice) = model_control
             .choices
             .iter()
             .find(|choice| choice_matches_model_selection(choice, &saved_model))
             .cloned()
         else {
-            self.pending_model_restore = None;
             return;
         };
 
         let control_id = model_control.id.clone();
         let value_id = choice.id.clone();
         let value_label = choice.label.clone();
-        let value_provider = choice_provider(&choice);
+        let value_provider = saved_model
+            .provider
+            .clone()
+            .or_else(|| provider_from_model_value(&saved_model.value).map(str::to_string))
+            .or_else(|| choice_provider(&choice));
         let result = match model_control.source {
             SessionConfigSource::ConfigOption => self.session.set_config_option(
                 control_id.clone(),
@@ -334,6 +332,13 @@ impl Application {
         {
             return Some(provider);
         }
+        if let Some(provider) = self
+            .authoritative_model_selection
+            .as_ref()
+            .and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string))
+        {
+            return Some(provider);
+        }
 
         let model_control =
             self.ui.session_config.controls.iter().find(|control| {
@@ -348,21 +353,60 @@ pub(super) fn choice_matches_model_selection(
     choice: &workspace_model::SessionConfigChoice,
     selection: &ModelSelection,
 ) -> bool {
+    let selection_value = model_from_provider_value(&selection.value).unwrap_or(&selection.value);
     let choice_id = model_from_provider_value(&choice.id).unwrap_or(&choice.id);
     let choice_label = model_from_provider_value(&choice.label).unwrap_or(&choice.label);
     if choice.id != selection.value
         && choice.label != selection.value
+        && choice.id != selection_value
+        && choice.label != selection_value
         && choice_id != selection.value
         && choice_label != selection.value
+        && choice_id != selection_value
+        && choice_label != selection_value
     {
         return false;
     }
 
-    let Some(provider) = selection.provider.as_deref() else {
+    let Some(provider) = selection
+        .provider
+        .as_deref()
+        .or_else(|| provider_from_model_value(&selection.value))
+    else {
         return true;
     };
 
     choice_provider(choice).is_some_and(|candidate| candidate == provider)
+}
+
+pub(super) fn apply_model_selection_to_control(
+    control: &mut workspace_model::SessionConfigControl,
+    selection: &ModelSelection,
+) {
+    if let Some(choice) = control
+        .choices
+        .iter()
+        .find(|choice| choice_matches_model_selection(choice, selection))
+    {
+        let provider = selection
+            .provider
+            .as_deref()
+            .or_else(|| provider_from_model_value(&selection.value))
+            .or_else(|| choice.provider.as_deref());
+        control.current_value_id = provider_qualified_model_value(&choice.id, provider);
+        control.current_value_label = choice.label.clone();
+        return;
+    }
+
+    let selection_label = model_from_provider_value(&selection.value).unwrap_or(&selection.value);
+    control.current_value_id = provider_qualified_model_value(
+        selection_label,
+        selection
+            .provider
+            .as_deref()
+            .or_else(|| provider_from_model_value(&selection.value)),
+    );
+    control.current_value_label = selection_label.to_string();
 }
 
 pub(super) fn choice_provider(choice: &workspace_model::SessionConfigChoice) -> Option<String> {
@@ -457,27 +501,6 @@ fn inferred_provider_for_model_name(model: &str) -> Option<&'static str> {
     } else {
         None
     }
-}
-
-fn control_current_matches_model_selection(
-    control: &workspace_model::SessionConfigControl,
-    selection: &ModelSelection,
-) -> bool {
-    let current_id =
-        model_from_provider_value(&control.current_value_id).unwrap_or(&control.current_value_id);
-    let current_label = model_from_provider_value(&control.current_value_label)
-        .unwrap_or(&control.current_value_label);
-    if current_id != selection.value && current_label != selection.value {
-        return false;
-    }
-
-    let Some(expected_provider) = selection.provider.as_deref() else {
-        return true;
-    };
-
-    provider_from_model_value(&control.current_value_id)
-        .or_else(|| provider_from_model_value(&control.current_value_label))
-        .is_some_and(|provider| provider == expected_provider)
 }
 
 pub(super) fn provider_from_model_value(value: &str) -> Option<&str> {

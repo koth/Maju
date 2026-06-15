@@ -403,6 +403,74 @@ fn provider_model_config_refresh_preserves_selected_provider_for_duplicate_model
 }
 
 #[test]
+fn pending_model_restore_keeps_provider_model_visible_before_agent_ack() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.ui.session_config = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "kodex-provider/timiai/claude-opus-4.8",
+        &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
+    );
+    app.ui.session.model = "Minimax M3".into();
+    app.pending_model_restore = Some(ModelSelection::new("Minimax M3", Some("timiai".into())));
+
+    let prepared = app.prepare_session_config_update(&provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "kodex-provider/timiai/claude-opus-4.8",
+        &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
+    ));
+
+    let model_control = prepared
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/timiai/Minimax M3"
+    );
+    assert_eq!(model_control.current_value_label, "Minimax M3");
+}
+
+#[test]
+fn provider_model_config_refresh_preserves_timiai_minimax_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.ui.session_config = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "kodex-provider/timiai/Minimax M3",
+        &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
+    );
+    app.ui.session.model = "Minimax M3".into();
+    app.authoritative_model_selection =
+        Some(ModelSelection::new("Minimax M3", Some("timiai".into())));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: provider_model_config_state(
+            SessionConfigSource::ConfigOption,
+            "kodex-provider/timiai/claude-opus-4.8",
+            &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
+        ),
+    });
+
+    assert_eq!(app.ui.session.model, "Minimax M3");
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/timiai/Minimax M3"
+    );
+    assert_eq!(model_control.current_value_label, "Minimax M3");
+}
+
+#[test]
 fn new_session_model_config_hydrate_infers_provider_for_duplicate_kimi_model_id() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

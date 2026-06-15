@@ -126,12 +126,7 @@ jobs:
     container: ${{ matrix.container }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
+      - name: Install checkout and build dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -151,6 +146,11 @@ jobs:
             pkg-config \
             python3 \
             xz-utils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Resolve release tag
         id: release_meta
