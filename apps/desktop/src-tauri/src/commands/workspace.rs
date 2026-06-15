@@ -3,7 +3,7 @@ use crate::open_workspaces::OpenWorkspaces;
 use crate::recent_workspaces::{RecentEntry, RecentWorkspaces};
 use crate::state::AppState;
 use std::path::PathBuf;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, OpenWorkspaceItem, RemoteLinuxWorkspace, RemoteOpenPhaseKind,
     RemoteOpenPhaseStatus, RemoteOpenProgressEvent, RemoteOpenRequest, UiSnapshot,
@@ -48,24 +48,33 @@ pub fn workspace_open(
 }
 
 #[tauri::command]
-pub fn workspace_open_remote_linux(
-    state: State<'_, AppState>,
+pub async fn workspace_open_remote_linux(
+    app: AppHandle,
     remote: RemoteLinuxWorkspace,
 ) -> Result<UiSnapshot, String> {
-    let snapshot = state.open_remote_linux_workspace(remote.clone())?;
-    recent_store()?.add_remote(remote);
-    save_open_workspace_state(&state)?;
-    Ok(snapshot)
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let snapshot = state.open_remote_linux_workspace(remote.clone())?;
+        recent_store()?.add_remote(remote);
+        save_open_workspace_state(state.inner())?;
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|e| format!("Remote workspace open task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn workspace_open_remote_profile(
+pub async fn workspace_open_remote_profile(
     app: AppHandle,
-    state: State<'_, AppState>,
     request: RemoteOpenRequest,
 ) -> Result<UiSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    open_remote_profile_with_paths(state.inner(), &paths, request, Some(&app))
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        open_remote_profile_with_paths(state.inner(), &paths, request, Some(&app))
+    })
+    .await
+    .map_err(|e| format!("Remote profile open task failed: {e}"))?
 }
 
 #[tauri::command]

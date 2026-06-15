@@ -114,17 +114,43 @@ jobs:
       matrix:
         include:
           - asset_suffix: linux-x64
-            platform: ubuntu-latest
+            platform: ubuntu-24.04
+            container: debian:10
             rust_target: x86_64-unknown-linux-gnu
+            max_glibc_minor: "28"
           - asset_suffix: linux-arm64
             platform: ubuntu-24.04-arm
+            container: ubuntu:24.04
             rust_target: aarch64-unknown-linux-gnu
+            max_glibc_minor: ""
+    container: ${{ matrix.container }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          if [ -f /etc/os-release ] && grep -q '^VERSION_CODENAME=buster$' /etc/os-release; then
+            sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g; s|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list
+            printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99archive
+          fi
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libssl-dev \
+            pkg-config \
+            python3 \
+            xz-utils
 
       - name: Resolve release tag
         id: release_meta
@@ -177,6 +203,27 @@ jobs:
         env:
           KODEX_CLAUDE_NATIVE_LIBC: glibc
         run: npm --prefix kodex-claude run build:binary
+
+      - name: Verify remote agent glibc floor
+        if: ${{ matrix.max_glibc_minor != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_minor="${{ matrix.max_glibc_minor }}"
+          binaries=(
+            "codex-acp/target/${{ matrix.rust_target }}/release/codex-acp"
+            "dist/codex-sandbox-${{ matrix.asset_suffix }}/bin/codex-linux-sandbox"
+            "kodex-claude/bin/claude-agent-acp"
+          )
+          for binary in "${binaries[@]}"; do
+            test -x "${binary}"
+            echo "Required GLIBC versions for ${binary}:"
+            strings "${binary}" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu || true
+            if strings "${binary}" | grep -o 'GLIBC_2\.[0-9][0-9]*' | sed 's/GLIBC_2\.//' | awk -v max="${max_minor}" '$1 > max { found=1 } END { exit found ? 0 : 1 }'; then
+              echo "${binary} requires a GLIBC version newer than 2.${max_minor}" >&2
+              exit 1
+            fi
+          done
 
       - name: Package remote agent assets
         shell: bash

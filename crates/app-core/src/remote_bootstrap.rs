@@ -54,6 +54,8 @@ enum AgentInstallStrategy {
         url_env: &'static str,
         linux_x64_asset_glob: &'static str,
         linux_arm64_asset_glob: &'static str,
+        linux_x64_default_url: Option<&'static str>,
+        linux_arm64_default_url: Option<&'static str>,
     },
     NpmPackage {
         package: &'static str,
@@ -69,6 +71,12 @@ const AGENT_STRATEGIES: &[AgentBootstrapStrategy] = &[
             url_env: "KODEX_REMOTE_CODEX_ACP_ARCHIVE_URL",
             linux_x64_asset_glob: "codex-acp-linux-x64.tar.gz",
             linux_arm64_asset_glob: "codex-acp-linux-arm64.tar.gz",
+            linux_x64_default_url: Some(
+                "https://github.com/koth/Kodex/releases/latest/download/codex-acp-linux-x64.tar.gz",
+            ),
+            linux_arm64_default_url: Some(
+                "https://github.com/koth/Kodex/releases/latest/download/codex-acp-linux-arm64.tar.gz",
+            ),
         },
         args: &[],
     },
@@ -80,6 +88,12 @@ const AGENT_STRATEGIES: &[AgentBootstrapStrategy] = &[
             url_env: "KODEX_REMOTE_CLAUDE_AGENT_ACP_ARCHIVE_URL",
             linux_x64_asset_glob: "kodex-claude-linux-x64.tar.gz",
             linux_arm64_asset_glob: "kodex-claude-linux-arm64.tar.gz",
+            linux_x64_default_url: Some(
+                "https://github.com/koth/Kodex/releases/latest/download/kodex-claude-linux-x64.tar.gz",
+            ),
+            linux_arm64_default_url: Some(
+                "https://github.com/koth/Kodex/releases/latest/download/kodex-claude-linux-arm64.tar.gz",
+            ),
         },
         args: &[],
     },
@@ -551,7 +565,7 @@ fn output_error(prefix: &str, output: &crate::remote_ssh::RemoteSshOutput) -> St
 fn platform_detection_command(strategy: AgentBootstrapStrategy) -> String {
     let required: Vec<&str> = match strategy.install {
         AgentInstallStrategy::GithubReleaseArchive { .. } => {
-            vec!["uname", "mkdir", "rm", "mv", "tar", "chmod"]
+            vec!["uname", "mkdir", "rm", "mv", "tar", "chmod", "find"]
         }
         AgentInstallStrategy::NpmPackage { .. } => {
             vec!["uname", "mkdir", "rm", "mv", "node", "npm"]
@@ -629,11 +643,15 @@ fn install_or_reuse_command(
             url_env,
             linux_x64_asset_glob,
             linux_arm64_asset_glob,
+            linux_x64_default_url,
+            linux_arm64_default_url,
         } => {
-            let asset_glob = linux_archive_asset_glob(
+            let (asset_glob, default_url) = linux_archive_asset(
                 &platform.arch,
                 linux_x64_asset_glob,
                 linux_arm64_asset_glob,
+                linux_x64_default_url,
+                linux_arm64_default_url,
             )?;
             Ok(github_archive_install_command(
                 strategy,
@@ -641,6 +659,7 @@ fn install_or_reuse_command(
                 repo,
                 url_env,
                 asset_glob,
+                default_url,
             ))
         }
         AgentInstallStrategy::NpmPackage { package } => Ok(npm_install_or_reuse_command(
@@ -657,11 +676,13 @@ fn github_archive_install_command(
     repo: &str,
     url_env: &str,
     asset_glob: &str,
+    default_url: Option<&str>,
 ) -> String {
     let base = shell_quote(runtime_base);
     let repo = shell_quote(repo);
     let url_env = shell_quote(url_env);
     let asset_glob = shell_quote(asset_glob);
+    let default_url = shell_quote(default_url.unwrap_or(""));
     format!(
         "kodex_base={base}; \
          kodex_current=\"$kodex_base/current\"; \
@@ -671,6 +692,7 @@ fn github_archive_install_command(
            kodex_repo={repo}; \
            kodex_url_env={url_env}; \
            kodex_asset_glob={asset_glob}; \
+           kodex_default_archive_url={default_url}; \
            eval \"kodex_archive_url=\\${{$kodex_url_env:-}}\"; \
            kodex_fetch() {{ \
              if command -v curl >/dev/null 2>&1; then curl -fsSL \"$1\"; \
@@ -682,6 +704,7 @@ fn github_archive_install_command(
              elif command -v wget >/dev/null 2>&1; then wget -q -O \"$2\" \"$1\"; \
              else echo 'missing curl or wget for remote Agent download' >&2; return 127; fi; \
            }}; \
+           if [ -z \"$kodex_archive_url\" ] && [ -n \"$kodex_default_archive_url\" ]; then kodex_archive_url=\"$kodex_default_archive_url\"; fi; \
            if [ -z \"$kodex_archive_url\" ]; then \
              kodex_release_api=\"https://api.github.com/repos/$kodex_repo/releases/latest\"; \
              kodex_archive_url=\"$(kodex_fetch \"$kodex_release_api\" | while IFS= read -r kodex_line; do \
@@ -706,6 +729,10 @@ fn github_archive_install_command(
            tar -xzf \"$kodex_archive\" -C \"$kodex_tmp\"; \
            rm -f \"$kodex_archive\"; \
            if [ -x \"$kodex_tmp/{binary_name}\" ]; then mv \"$kodex_tmp/{binary_name}\" \"$kodex_tmp/bin/{binary_name}\"; fi; \
+           if [ ! -f \"$kodex_tmp/bin/{binary_name}\" ]; then \
+             kodex_found=\"$(find \"$kodex_tmp\" -type f -name {binary_name_quoted} -print -quit 2>/dev/null || true)\"; \
+             if [ -n \"$kodex_found\" ]; then mv \"$kodex_found\" \"$kodex_tmp/bin/{binary_name}\"; fi; \
+           fi; \
            test -x \"$kodex_tmp/bin/{binary_name}\"; \
            chmod +x \"$kodex_tmp/bin/{binary_name}\"; \
            rm -rf \"$kodex_base/current.previous\"; \
@@ -714,7 +741,8 @@ fn github_archive_install_command(
            rm -rf \"$kodex_base/current.previous\"; \
            printf 'installed\\n'; \
          fi",
-        binary_name = strategy.binary
+        binary_name = strategy.binary,
+        binary_name_quoted = shell_quote(strategy.binary)
     )
 }
 
@@ -747,14 +775,16 @@ fn npm_install_or_reuse_command(
     )
 }
 
-fn linux_archive_asset_glob<'a>(
+fn linux_archive_asset<'a>(
     arch: &str,
     linux_x64_asset_glob: &'a str,
     linux_arm64_asset_glob: &'a str,
-) -> Result<&'a str> {
+    linux_x64_default_url: Option<&'a str>,
+    linux_arm64_default_url: Option<&'a str>,
+) -> Result<(&'a str, Option<&'a str>)> {
     match arch.trim().to_ascii_lowercase().as_str() {
-        "x86_64" | "amd64" => Ok(linux_x64_asset_glob),
-        "aarch64" | "arm64" => Ok(linux_arm64_asset_glob),
+        "x86_64" | "amd64" => Ok((linux_x64_asset_glob, linux_x64_default_url)),
+        "aarch64" | "arm64" => Ok((linux_arm64_asset_glob, linux_arm64_default_url)),
         other => Err(anyhow!(
             "远程 Agent bootstrap 不支持当前 Linux CPU 架构：{}",
             other
@@ -914,6 +944,11 @@ mod tests {
         assert!(
             commands[4]
                 .remote_command
+                .contains("releases/latest/download/codex-acp-linux-x64.tar.gz")
+        );
+        assert!(
+            commands[4]
+                .remote_command
                 .contains("api.github.com/repos/$kodex_repo/releases/latest")
         );
         assert!(
@@ -921,6 +956,9 @@ mod tests {
                 .remote_command
                 .contains("codex-acp-linux-x64.tar.gz")
         );
+        assert!(commands[4].remote_command.contains("find \"$kodex_tmp\""));
+        assert!(commands[4].remote_command.contains("-type f"));
+        assert!(commands[4].remote_command.contains("-name codex-acp"));
         assert!(!commands[4].remote_command.contains("npm install --global"));
         assert!(build_ssh_args(&commands[0]).contains(&"NumberOfPasswordPrompts=1".to_string()));
     }
@@ -979,6 +1017,11 @@ mod tests {
             commands[4]
                 .remote_command
                 .contains("KODEX_REMOTE_CLAUDE_AGENT_ACP_ARCHIVE_URL")
+        );
+        assert!(
+            commands[4]
+                .remote_command
+                .contains("releases/latest/download/kodex-claude-linux-arm64.tar.gz")
         );
     }
 

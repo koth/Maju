@@ -90,8 +90,25 @@ impl AppState {
             return Err("Remote workspace path must be absolute".into());
         }
         let key = remote_workspace_key(&remote);
+        {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
+                let snapshot = application.lightweight_ui_snapshot();
+                guard.active_workspace = Some(key);
+                return Ok(snapshot);
+            }
+        }
+
+        let (application, snapshot) = build_remote_workspace_application(key.as_str(), remote)?;
         let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        let snapshot = connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+        if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
+            let snapshot = application.lightweight_ui_snapshot();
+            guard.active_workspace = Some(key);
+            return Ok(snapshot);
+        }
+        guard
+            .workspaces
+            .insert(key.clone(), WorkspaceEntry::Connected(application));
         guard.active_workspace = Some(key);
         Ok(snapshot)
     }
@@ -363,18 +380,45 @@ impl AppState {
 
     pub fn set_active_workspace(&self, path: String) -> Result<UiSnapshot, String> {
         app_core::startup_perf::mark("state/set_active_workspace/start", &path);
-        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        if let Some(key) = workspace_key_for_identifier(&guard, &path) {
-            let (remote, local_path) = {
-                let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
-                (entry_remote(entry), entry_path(entry))
-            };
-            let snapshot = if let Some(remote) = remote {
-                connect_remote_workspace_locked(&mut guard, key.clone(), remote)?
+        let existing = {
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            if let Some(key) = workspace_key_for_identifier(&guard, &path) {
+                match guard.workspaces.get(&key).ok_or("Workspace is not open")? {
+                    WorkspaceEntry::Connected(application) => {
+                        let snapshot = application.lightweight_ui_snapshot();
+                        guard.active_workspace = Some(key);
+                        app_core::startup_perf::mark("state/set_active_workspace/end", "");
+                        return Ok(snapshot);
+                    }
+                    entry => Some((key, entry_remote(entry), entry_path(entry))),
+                }
             } else {
-                let local_path = local_path.ok_or("Workspace is not open")?;
-                connect_workspace_locked(&mut guard, key.clone(), local_path, None)?
-            };
+                None
+            }
+        };
+
+        if let Some((key, remote, local_path)) = existing {
+            if let Some(remote) = remote {
+                let (application, snapshot) =
+                    build_remote_workspace_application(key.as_str(), remote)?;
+                let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+                if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
+                    let snapshot = application.lightweight_ui_snapshot();
+                    guard.active_workspace = Some(key);
+                    app_core::startup_perf::mark("state/set_active_workspace/end", "");
+                    return Ok(snapshot);
+                }
+                guard
+                    .workspaces
+                    .insert(key.clone(), WorkspaceEntry::Connected(application));
+                guard.active_workspace = Some(key);
+                app_core::startup_perf::mark("state/set_active_workspace/end", "");
+                return Ok(snapshot);
+            }
+
+            let local_path = local_path.ok_or("Workspace is not open")?;
+            let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+            let snapshot = connect_workspace_locked(&mut guard, key.clone(), local_path, None)?;
             guard.active_workspace = Some(key);
             app_core::startup_perf::mark("state/set_active_workspace/end", "");
             return Ok(snapshot);
@@ -382,6 +426,7 @@ impl AppState {
 
         let path = PathBuf::from(path);
         let key = workspace_key(&path);
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let snapshot =
             app_core::startup_perf::measure("state/set_active_workspace/connect", &key, || {
                 connect_workspace_locked(&mut guard, key.clone(), path, None)
@@ -691,11 +736,22 @@ fn connect_remote_workspace_locked(
     key: String,
     remote: RemoteLinuxWorkspace,
 ) -> Result<UiSnapshot, String> {
-    app_core::startup_perf::mark("state/connect_remote_workspace/start", &key);
     if let Some(WorkspaceEntry::Connected(application)) = guard.workspaces.get(&key) {
         return Ok(application.lightweight_ui_snapshot());
     }
 
+    let (application, snapshot) = build_remote_workspace_application(key.as_str(), remote)?;
+    guard
+        .workspaces
+        .insert(key, WorkspaceEntry::Connected(application));
+    Ok(snapshot)
+}
+
+fn build_remote_workspace_application(
+    key: &str,
+    remote: RemoteLinuxWorkspace,
+) -> Result<(Application, UiSnapshot), String> {
+    app_core::startup_perf::mark("state/connect_remote_workspace/start", key);
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     let agent_command = remote
         .agent_command
@@ -712,11 +768,8 @@ fn connect_remote_workspace_locked(
         Application::bootstrap_remote_linux_with_app_paths(remote, agent_command, paths)
             .map_err(|e| e.to_string())?;
     let snapshot = application.lightweight_ui_snapshot();
-    guard
-        .workspaces
-        .insert(key, WorkspaceEntry::Connected(application));
     app_core::startup_perf::mark("state/connect_remote_workspace/end", "");
-    Ok(snapshot)
+    Ok((application, snapshot))
 }
 
 fn ensure_workspace_connected_locked(
