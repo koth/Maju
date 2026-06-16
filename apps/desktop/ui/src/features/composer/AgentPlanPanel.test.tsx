@@ -5,7 +5,8 @@ import {
   PermissionRequestPanel,
   PlanApprovalModal,
   findPlanAcceptOption,
-  findPlanRejectOption,
+  findPlanReplanOption,
+  findPlanTerminateOption,
   shouldShowAgentPlanNearComposer,
 } from "./AgentPlanPanel";
 import type { AgentPlanEntry, UiSnapshot } from "../../types";
@@ -132,6 +133,7 @@ describe("PlanApprovalModal", () => {
           options: [
             { id: "default", label: "Yes, and manually approve edits", kind: "AllowOnce" },
             { id: "plan", label: "No, keep planning", kind: "RejectOnce" },
+            { id: "rejectAndExitPlan", label: "Stop planning", kind: "RejectOnce" },
           ],
         }}
         onPermissionSelect={onPermissionSelect}
@@ -144,6 +146,7 @@ describe("PlanApprovalModal", () => {
     expect(screen.getByText("修改交互").className).toContain("md-inline-code");
     expect(screen.getByText(/修改交互/)).toBeTruthy();
     expect(screen.getByLabelText("调整要求")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "终止" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "接受计划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "default");
@@ -153,9 +156,12 @@ describe("PlanApprovalModal", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "继续规划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "plan", "先缩小范围再规划");
+
+    fireEvent.click(screen.getByRole("button", { name: "终止" }));
+    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "rejectAndExitPlan");
   });
 
-  it("prefers one-shot CodeBuddy plan options over allow always", () => {
+  it("prefers one-shot CodeBuddy plan options over allow always and separates termination", () => {
     const options = [
       { id: "allow_always", label: "Always Allow", kind: "AllowAlways" },
       { id: "allow", label: "Allow", kind: "AllowOnce" },
@@ -164,17 +170,19 @@ describe("PlanApprovalModal", () => {
     ];
 
     expect(findPlanAcceptOption(options)?.id).toBe("allow");
-    expect(findPlanRejectOption(options)?.id).toBe("reject");
+    expect(findPlanReplanOption(options)?.id).toBe("reject");
+    expect(findPlanTerminateOption(options)?.id).toBe("reject_and_exit_plan");
   });
 
-  it("recognizes CodeBuddy interruption plan reject option", () => {
+  it("recognizes CodeBuddy interruption plan termination option", () => {
     const options = [
       { id: "allow", label: "allow", kind: "CodeBuddy" },
-      { id: "rejectAndExitPlan", label: "rejectAndExitPlan", kind: "CodeBuddy" },
+      { id: "rejectAndExitPlan", label: "rejectAndExitPlan", kind: "RejectOnce" },
     ];
 
     expect(findPlanAcceptOption(options)?.id).toBe("allow");
-    expect(findPlanRejectOption(options)?.id).toBe("rejectAndExitPlan");
+    expect(findPlanReplanOption(options)).toBeUndefined();
+    expect(findPlanTerminateOption(options)?.id).toBe("rejectAndExitPlan");
   });
 });
 
@@ -330,6 +338,7 @@ describe("PermissionRequestPanel", () => {
           options: [
             { id: "default", label: "Default", kind: "AllowOnce" },
             { id: "plan", label: "Plan", kind: "RejectOnce" },
+            { id: "rejectAndExitPlan", label: "Stop planning", kind: "RejectOnce" },
           ],
           isPlanApproval: true,
         }}
@@ -341,6 +350,7 @@ describe("PermissionRequestPanel", () => {
     expect(screen.getByLabelText("调整要求")).toBeTruthy();
     expect(screen.getByRole("button", { name: "接受计划" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "继续规划" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "终止" })).toBeTruthy();
   });
 
   it("deduplicates plan approval actions from CodeBuddy permission options", () => {
@@ -368,12 +378,16 @@ describe("PermissionRequestPanel", () => {
     expect(screen.queryByRole("button", { name: "Always Allow" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "接受计划" })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: "继续规划" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "终止" })).toHaveLength(1);
 
     fireEvent.change(screen.getByLabelText("调整要求"), {
       target: { value: "补充风险和验证步骤" },
     });
     fireEvent.click(screen.getByRole("button", { name: "继续规划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "reject", "补充风险和验证步骤");
+
+    fireEvent.click(screen.getByRole("button", { name: "终止" }));
+    expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "reject_and_exit_plan");
 
     fireEvent.click(screen.getByRole("button", { name: "接受计划" }));
     expect(onPermissionSelect).toHaveBeenLastCalledWith("exit-plan", "allow");

@@ -383,16 +383,36 @@ fn active_agent_label_for_command(agent_command: &str, persisted_label: Option<S
         .unwrap_or(current_label)
 }
 
-fn select_session_for_agent_command<'a>(
-    sessions: &'a [SessionListItem],
-    agent_command: &str,
-) -> Option<&'a SessionListItem> {
-    sessions.iter().find(|session| {
-        session
-            .agent_cli
-            .as_deref()
-            .is_some_and(|label| agent_label_matches_command(label, agent_command))
-    })
+fn agent_command_for_restored_session(
+    session: Option<&SessionListItem>,
+    fallback_agent_command: String,
+    app_paths: &AppPaths,
+    remote: bool,
+) -> String {
+    let fallback_agent_command = fallback_agent_command.trim().to_string();
+    if !is_known_agent_command(&fallback_agent_command) {
+        return fallback_agent_command;
+    }
+
+    let restored = session
+        .and_then(|session| session.agent_cli.as_deref())
+        .and_then(|label| {
+            if remote {
+                crate::settings::remote_linux_command_for_agent_label(label)
+            } else {
+                crate::settings::command_for_agent_label_with_paths(label, app_paths)
+            }
+        })
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty());
+
+    restored.unwrap_or(fallback_agent_command)
+}
+
+fn agent_id_for_restored_session(session: Option<&SessionListItem>) -> Option<AgentCliId> {
+    session
+        .and_then(|session| session.agent_cli.as_deref())
+        .and_then(crate::settings::agent_id_for_label)
 }
 
 fn agent_label_matches_command(label: &str, agent_command: &str) -> bool {
@@ -406,6 +426,12 @@ fn agent_label_matches_command(label: &str, agent_command: &str) -> bool {
         return agent_command.to_ascii_lowercase().contains("codebuddy");
     }
     false
+}
+
+fn is_known_agent_command(agent_command: &str) -> bool {
+    crate::settings::is_codex_acp_command(agent_command)
+        || crate::settings::is_claude_agent_acp_command(agent_command)
+        || agent_command.to_ascii_lowercase().contains("codebuddy")
 }
 
 fn normalize_title_for_prompt_compare(value: &str) -> String {

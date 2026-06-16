@@ -340,7 +340,7 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).toContain("pnpm test");
   });
 
-  it("collapses tool context while the final assistant response is streaming", async () => {
+  it("keeps active streaming turn context expanded until the turn finishes", async () => {
     const shellTool = makePermissionTool({
       id: "tool-stream-shell",
       call_id: "stream-shell-1",
@@ -378,13 +378,13 @@ describe("ThinkingIndicator", () => {
       tools: [shellTool],
     });
 
-    const { container } = render(
+    const { container, queryByRole } = render(
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.textContent).toContain("已运行 00:00:30");
     expect(container.textContent).toContain("live final");
-    expect(container.textContent).not.toContain("cargo test");
+    expect(container.textContent).toContain("cargo test");
+    expect(queryByRole("button", { name: "展开已运行上下文" })).toBeNull();
     await waitFor(() => {
       expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
         "live",

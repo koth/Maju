@@ -108,27 +108,55 @@ fn active_agent_label_prefers_current_command_over_stale_persisted_label() {
 }
 
 #[test]
-fn bootstrap_session_selection_uses_matching_agent_history() {
+fn restored_session_agent_command_prefers_recent_session_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
     let recent_codebuddy = session_list_item("recent-codebuddy", Some("CodeBuddy"));
-    let older_codex = session_list_item("older-codex", Some("Codex"));
     let unlabelled = session_list_item("legacy-unlabelled", None);
-    let sessions = vec![
-        recent_codebuddy.clone(),
-        older_codex.clone(),
-        unlabelled.clone(),
-    ];
+    let stale = session_list_item("stale-agent", Some("goose"));
 
-    let selected = super::select_session_for_agent_command(&sessions, "codex-acp")
-        .expect("codex history should be selected");
-    assert_eq!(selected.id, older_codex.id);
-
-    let selected = super::select_session_for_agent_command(&sessions, "codebuddy --acp")
-        .expect("codebuddy history should be selected");
-    assert_eq!(selected.id, recent_codebuddy.id);
-
+    let restored = super::agent_command_for_restored_session(
+        Some(&recent_codebuddy),
+        "claude-agent-acp".into(),
+        &app_paths,
+        false,
+    );
     assert!(
-        super::select_session_for_agent_command(&[unlabelled], "claude-agent-acp").is_none(),
-        "unlabelled legacy history should not be claimed by a different selected agent"
+        restored.to_ascii_lowercase().contains("codebuddy"),
+        "recent CodeBuddy session should restore with CodeBuddy command, got {restored}"
+    );
+    assert!(!restored.to_ascii_lowercase().contains("claude-agent-acp"));
+
+    let remote_restored = super::agent_command_for_restored_session(
+        Some(&recent_codebuddy),
+        "claude-agent-acp".into(),
+        &app_paths,
+        true,
+    );
+    assert!(remote_restored.to_ascii_lowercase().contains("codebuddy"));
+    assert_eq!(
+        super::agent_id_for_restored_session(Some(&recent_codebuddy)),
+        Some(AgentCliId::Codebuddy)
+    );
+
+    assert_eq!(
+        super::agent_command_for_restored_session(
+            Some(&unlabelled),
+            "claude-agent-acp".into(),
+            &app_paths,
+            false,
+        ),
+        "claude-agent-acp"
+    );
+    assert_eq!(
+        super::agent_command_for_restored_session(
+            Some(&stale),
+            "claude-agent-acp".into(),
+            &app_paths,
+            false,
+        ),
+        "claude-agent-acp",
+        "unknown legacy labels should not override the requested default"
     );
 }
 

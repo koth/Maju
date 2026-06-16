@@ -546,20 +546,16 @@ function buildTimelineCollapseState({
   messagesById,
   toolsById,
   hiddenPermissionRequestIds,
-  sessionStatus,
   turnIsActive,
   activeTurnStartIndex,
-  fullTimelineLength,
 }: {
   timeline: UiSnapshot["timeline"];
   timelineStart: number;
   messagesById: Map<string, TimelineMessage>;
   toolsById: Map<string, TimelineTool>;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
-  sessionStatus: UiSnapshot["session"]["status"];
   turnIsActive: boolean;
   activeTurnStartIndex: number;
-  fullTimelineLength: number;
 }): TimelineCollapseState {
   const groupsBySummaryIndex = new Map<number, TimelineCollapseGroup>();
   const hiddenIndexes = new Set<number>();
@@ -589,16 +585,9 @@ function buildTimelineCollapseState({
       turnIsActive &&
       (activeTurnStartIndex < 0 || finalAssistant.index > activeTurnStartIndex);
     if (isCurrentTurn) {
-      if (sessionStatus !== "Streaming") {
-        turnItems = [];
-        turnStartMessage = null;
-        return;
-      }
-      if (finalAssistant.index !== fullTimelineLength - 1) {
-        turnItems = [];
-        turnStartMessage = null;
-        return;
-      }
+      turnItems = [];
+      turnStartMessage = null;
+      return;
     }
 
     const groupHiddenIndexes = new Set(itemsToCollapse.map((candidate) => candidate.index));
@@ -910,17 +899,13 @@ export function ConversationTimeline({
         messagesById,
         toolsById,
         hiddenPermissionRequestIds,
-        sessionStatus: snapshot.session.status,
         turnIsActive,
         activeTurnStartIndex,
-        fullTimelineLength: snapshot.timeline.length,
       }),
     [
       activeTurnStartIndex,
       hiddenPermissionRequestIds,
       messagesById,
-      snapshot.session.status,
-      snapshot.timeline.length,
       timelineStart,
       toolsById,
       turnIsActive,

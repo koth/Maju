@@ -18,13 +18,13 @@ impl Application {
     ) -> anyhow::Result<Self> {
         let workspace_root = normalize_workspace_root(workspace_root.as_ref());
         let workspace_root = workspace_root.as_path();
-        let agent_command = agent_command.into();
+        let requested_agent_command = agent_command.into();
         crate::startup_perf::mark(
             "app/bootstrap/start",
             format!(
                 "workspace={} agent_command_len={}",
                 workspace_root.display(),
-                agent_command.len()
+                requested_agent_command.len()
             ),
         );
         crate::startup_perf::measure("app/bootstrap/ensure_dirs", "", || {
@@ -58,6 +58,12 @@ impl Application {
             existing_sessions.len().to_string(),
         );
         let most_recent_session = existing_sessions.first();
+        let agent_command = agent_command_for_restored_session(
+            most_recent_session,
+            requested_agent_command,
+            &app_paths,
+            false,
+        );
         crate::settings::ensure_agent_ready_for_command(&agent_command, &app_paths)?;
 
         // Check for an existing local session and its agent-side ACP session ID
@@ -268,7 +274,7 @@ impl Application {
     ) -> anyhow::Result<Self> {
         let prepared = prepare_remote_linux_workspace(remote, agent_command.into())?;
         let PreparedRemoteLinuxWorkspace {
-            remote,
+            mut remote,
             agent_command,
             remote_key,
             local_port,
@@ -306,7 +312,19 @@ impl Application {
             crate::startup_perf::measure("app/bootstrap_remote/list_sessions", "", || {
                 store.list_sessions().unwrap_or_default()
             });
-        let selected_session = select_session_for_agent_command(&existing_sessions, &agent_command);
+        let selected_session = existing_sessions.first();
+        let agent_command =
+            agent_command_for_restored_session(selected_session, agent_command, &app_paths, true);
+        if let Some(agent) = agent_id_for_restored_session(selected_session) {
+            remote.agent_cli = Some(agent);
+            remote.agent_command = Some(agent_command.clone());
+            if let workspace_model::WorkspaceLocation::RemoteLinux(ui_remote) =
+                &mut ui.workspace.location
+            {
+                ui_remote.agent_cli = Some(agent);
+                ui_remote.agent_command = Some(agent_command.clone());
+            }
+        }
         let resume_session_id = selected_session.and_then(|session| {
             if store.session_has_activity(&session.id).unwrap_or(false) {
                 session.acp_session_id.clone()

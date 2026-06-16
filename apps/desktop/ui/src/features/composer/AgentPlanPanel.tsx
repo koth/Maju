@@ -121,12 +121,10 @@ export function PermissionRequestPanel({
   const showEntries = request.isPlanApproval && entries.length > 0;
   const visibleEntries = sortAgentPlanEntries(entries);
   const details = request.details?.trim();
-  const planApprovalActions = request.isPlanApproval
-    ? [findPlanRejectOption(request.options), findPlanAcceptOption(request.options)].filter(
-        (option): option is PermissionOption => !!option,
-      )
-    : null;
+  const planApprovalActions = request.isPlanApproval ? planApprovalActionOptions(request.options) : null;
   const actionOptions = planApprovalActions ?? request.options;
+  const replanOption = request.isPlanApproval ? findPlanReplanOption(request.options) : null;
+  const terminateOption = request.isPlanApproval ? findPlanTerminateOption(request.options) : null;
   const hasInputQuestions = !request.isPlanApproval && (request.input?.questions.length ?? 0) > 0;
   const showGuidance =
     !hasInputQuestions &&
@@ -247,8 +245,10 @@ export function PermissionRequestPanel({
               className={`permission-request-action ${permissionOptionTone(option, request.isPlanApproval)}`}
               disabled={!canAct || (requiresPermissionGuidance(option) && !guidanceText)}
               onClick={() => {
-                if (request.isPlanApproval && option.id === findPlanRejectOption(request.options)?.id) {
+                if (request.isPlanApproval && option.id === replanOption?.id) {
                   onPermissionSelect?.(request.requestId, option.id, guidanceText || null);
+                } else if (request.isPlanApproval && option.id === terminateOption?.id) {
+                  onPermissionSelect?.(request.requestId, option.id);
                 } else if (requiresPermissionGuidance(option)) {
                   onPermissionSelect?.(request.requestId, option.id, guidanceText);
                 } else {
@@ -279,7 +279,9 @@ export function PlanApprovalModal({
   if (!approval) return null;
 
   const acceptOption = findPlanAcceptOption(approval.options);
-  const rejectOption = findPlanRejectOption(approval.options);
+  const replanOption = findPlanReplanOption(approval.options);
+  const terminateOption = findPlanTerminateOption(approval.options);
+  const actionOptions = planApprovalActionOptions(approval.options);
   const canAct = !!onPermissionSelect;
   const completed = entries.filter((entry) => entry.status === "completed").length;
   const visibleEntries = sortAgentPlanEntries(entries);
@@ -333,26 +335,25 @@ export function PlanApprovalModal({
         </label>
 
         <div className="plan-approval-actions">
-          <button
-            type="button"
-            className="plan-approval-action"
-            disabled={!canAct || !rejectOption}
-            onClick={() => {
-              if (rejectOption) onPermissionSelect?.(approval.requestId, rejectOption.id, guidance.trim() || null);
-            }}
-          >
-            继续规划
-          </button>
-          <button
-            type="button"
-            className="plan-approval-action plan-approval-action-primary"
-            disabled={!canAct || !acceptOption}
-            onClick={() => {
-              if (acceptOption) onPermissionSelect?.(approval.requestId, acceptOption.id);
-            }}
-          >
-            接受计划
-          </button>
+          {actionOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`plan-approval-action ${planApprovalActionClass(option)}`}
+              disabled={!canAct}
+              onClick={() => {
+                if (option.id === replanOption?.id) {
+                  onPermissionSelect?.(approval.requestId, option.id, guidance.trim() || null);
+                } else if (option.id === terminateOption?.id) {
+                  onPermissionSelect?.(approval.requestId, option.id);
+                } else if (option.id === acceptOption?.id) {
+                  onPermissionSelect?.(approval.requestId, option.id);
+                }
+              }}
+            >
+              {permissionOptionLabel(option, true)}
+            </button>
+          ))}
         </div>
       </section>
     </div>
@@ -486,14 +487,33 @@ export function findPlanAcceptOption(options: PermissionOption[]) {
   );
 }
 
-export function findPlanRejectOption(options: PermissionOption[]) {
+export function findPlanReplanOption(options: PermissionOption[]) {
   return (
-    options.find((option) => option.id === "plan") ??
     options.find((option) => option.id === "reject") ??
     options.find((option) => option.id === "deny") ??
+    options.find((option) => option.id === "plan")
+  );
+}
+
+export function findPlanTerminateOption(options: PermissionOption[]) {
+  return (
     options.find((option) => option.id === "reject_and_exit_plan") ??
-    options.find((option) => option.id === "rejectAndExitPlan") ??
-    options.find((option) => option.kind.toLowerCase().includes("reject"))
+    options.find((option) => option.id === "rejectAndExitPlan")
+  );
+}
+
+export function findPlanRejectOption(options: PermissionOption[]) {
+  return findPlanReplanOption(options);
+}
+
+export function planApprovalActionOptions(options: PermissionOption[]) {
+  const seen = new Set<string>();
+  return [findPlanReplanOption(options), findPlanTerminateOption(options), findPlanAcceptOption(options)].filter(
+    (option): option is PermissionOption => {
+      if (!option || seen.has(option.id)) return false;
+      seen.add(option.id);
+      return true;
+    },
   );
 }
 
@@ -540,7 +560,10 @@ function permissionOptionLabel(option: PermissionOption, isPlanApproval?: boolea
     if (["default", "allow", "allow_once"].includes(id)) {
       return "接受计划";
     }
-    if (["plan", "reject", "deny", "reject_and_exit_plan", "rejectandexitplan"].includes(id)) {
+    if (["reject_and_exit_plan", "rejectandexitplan"].includes(id)) {
+      return "终止";
+    }
+    if (["plan", "reject", "deny"].includes(id)) {
       return "继续规划";
     }
   }
@@ -567,6 +590,9 @@ function permissionOptionTone(option: PermissionOption, isPlanApproval?: boolean
   if (isPlanApproval && ["default", "allow", "allow_once"].includes(option.id.toLowerCase())) {
     return "is-primary";
   }
+  if (isPlanApproval && ["reject_and_exit_plan", "rejectandexitplan"].includes(option.id.toLowerCase())) {
+    return "is-danger";
+  }
   if (isPlanApproval) {
     return "is-neutral";
   }
@@ -580,4 +606,11 @@ function permissionOptionTone(option: PermissionOption, isPlanApproval?: boolean
     return "is-danger";
   }
   return "is-neutral";
+}
+
+function planApprovalActionClass(option: PermissionOption) {
+  const tone = permissionOptionTone(option, true);
+  if (tone === "is-primary") return "plan-approval-action-primary";
+  if (tone === "is-danger") return "plan-approval-action-danger";
+  return "";
 }

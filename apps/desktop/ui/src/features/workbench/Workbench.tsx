@@ -13,7 +13,8 @@ import {
   PermissionRequestPanel,
   type PendingPermissionRequest,
   findPlanAcceptOption,
-  findPlanRejectOption,
+  findPlanReplanOption,
+  findPlanTerminateOption,
   shouldShowAgentPlanDuringTurn,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
@@ -908,7 +909,8 @@ export function findPendingPlanApproval(tools: ToolInvocation[]) {
       !tool.permission_decision &&
       isPlanApprovalPermission(tool) &&
       !!findPlanAcceptOption(tool.permission_options) &&
-      !!findPlanRejectOption(tool.permission_options),
+      (!!findPlanReplanOption(tool.permission_options) ||
+        !!findPlanTerminateOption(tool.permission_options)),
   );
 
   const tool = toolIndex >= 0 ? tools[toolIndex] : null;

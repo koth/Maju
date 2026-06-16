@@ -1498,9 +1498,17 @@ export class ClaudeAcpAgent implements Agent {
         // `bypassPermissions` is already covered by `availableModes` via
         // `buildAvailableModes`/`ALLOW_BYPASS`. The `plan` option is a
         // "keep planning" reject path; it's always present in `availableModes`.
-        const options = optionsAll.filter((o) =>
-          session.modes.availableModes.some((m) => m.id === o.optionId),
-        );
+        const stopPlanningOption: PermissionOption = {
+          kind: "reject_once",
+          name: "No, stop planning",
+          optionId: "rejectAndExitPlan",
+        };
+        const options = [
+          ...optionsAll.filter((o) =>
+            session.modes.availableModes.some((m) => m.id === o.optionId),
+          ),
+          stopPlanningOption,
+        ];
 
         const response = await this.client.requestPermission({
           options,
@@ -1522,6 +1530,18 @@ export class ClaudeAcpAgent implements Agent {
         const selectedMode =
           response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
         const selectedModeWasOffered = options.some((option) => option.optionId === selectedMode);
+        if (selectedModeWasOffered && selectedMode === "rejectAndExitPlan") {
+          throw new Error("Tool use aborted");
+        }
+        if (selectedModeWasOffered && selectedMode === "plan") {
+          const guidance = permissionGuidance(response);
+          return {
+            behavior: "deny",
+            message: guidance
+              ? `User asked to keep planning and provided guidance:\n${guidance}`
+              : "User asked to keep planning.",
+          };
+        }
         if (
           selectedModeWasOffered &&
           (selectedMode === "default" ||

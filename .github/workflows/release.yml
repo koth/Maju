@@ -47,6 +47,7 @@ jobs:
             curl \
             file \
             git \
+            libssl-dev \
             perl \
             pkg-config \
             python3 \

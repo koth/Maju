@@ -1,5 +1,5 @@
 use super::agent_process::AgentTransport;
-use super::codebuddy::send_codebuddy_interruption_resolution;
+use super::codebuddy::{send_codebuddy_interruption_resolution, send_codebuddy_plan_guidance};
 use super::permissions::{
     CodeBuddyTerminalPermissionDecision, PermissionBroker, PermissionDecision,
     PermissionPolicyMode, PermissionResolution, apply_patch_retry_guidance,
@@ -281,6 +281,34 @@ pub(super) async fn connect_agent_client(
                     outcome,
                 });
 
+                let should_forward_codebuddy_plan_guidance =
+                    codebuddy_interruption_decision.as_deref() == Some("deny")
+                        && is_codebuddy_exit_plan_permission(&request_payload)
+                        && permission_resolution
+                            .guidance
+                            .as_deref()
+                            .map(str::trim)
+                            .is_some_and(|guidance| !guidance.is_empty());
+                if should_forward_codebuddy_plan_guidance
+                    && let Some(guidance) = permission_resolution.guidance.as_deref()
+                    && let Err(error) = send_codebuddy_plan_guidance(
+                        &permission_log_config,
+                        &connection,
+                        request.session_id.0.as_ref(),
+                        guidance,
+                    )
+                {
+                    let _ = append_runtime_event_log(
+                        &permission_log_config,
+                        "codebuddy/inject_plan_guidance_error",
+                        &json!({
+                            "sessionId": request.session_id.0.as_ref(),
+                            "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+
                 let response_payload =
                     serde_json::to_value(&response).map_err(|err| anyhow!(err.to_string()))?;
                 append_runtime_event_log(
@@ -319,6 +347,7 @@ pub(super) async fn connect_agent_client(
                         request.session_id.0.as_ref(),
                         request.tool_call.tool_call_id.0.as_ref(),
                         &decision,
+                        permission_resolution.guidance.as_deref(),
                     )
                 {
                     let _ = append_runtime_event_log(
@@ -328,6 +357,7 @@ pub(super) async fn connect_agent_client(
                             "sessionId": request.session_id.0.as_ref(),
                             "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
                             "decision": decision,
+                            "guidance": permission_resolution.guidance.as_deref(),
                             "error": error.to_string(),
                         }),
                     );
@@ -1513,9 +1543,13 @@ fn codebuddy_interruption_decision_for_permission(
         return None;
     }
     codebuddy_permission_tool_name(request)?;
-    Some(normalize_codebuddy_interruption_decision(
-        selected_option_id,
-    ))
+    if is_codebuddy_exit_plan_permission(request) {
+        Some(normalize_codebuddy_exit_plan_decision(selected_option_id))
+    } else {
+        Some(normalize_codebuddy_interruption_decision(
+            selected_option_id,
+        ))
+    }
 }
 
 fn normalize_codebuddy_interruption_decision(option_id: Option<&str>) -> String {
@@ -1533,6 +1567,26 @@ fn normalize_codebuddy_interruption_decision(option_id: Option<&str>) -> String 
         "rejectonce" | "rejectalways" | "reject" | "deny" | "cancel" | "cancelled" | "canceled" => {
             "deny".into()
         }
+        _ => option_id.to_string(),
+    }
+}
+
+fn normalize_codebuddy_exit_plan_decision(option_id: Option<&str>) -> String {
+    let Some(option_id) = option_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "deny".into();
+    };
+    let normalized = option_id
+        .chars()
+        .filter(|ch| *ch != '-' && *ch != '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "allowalways" | "alwaysallow" | "allowall" => "allowAll".into(),
+        "allowonce" | "allow" | "default" => "allow".into(),
+        "plan" | "rejectonce" | "reject" | "deny" | "cancel" | "cancelled" | "canceled" => {
+            "deny".into()
+        }
+        "rejectandexitplan" | "denyandexitplan" => "rejectAndExitPlan".into(),
         _ => option_id.to_string(),
     }
 }
@@ -1619,6 +1673,55 @@ mod tests {
         assert_eq!(
             codebuddy_interruption_decision_for_permission("codex-acp", &payload, Some("allow")),
             None
+        );
+    }
+
+    #[test]
+    fn codebuddy_exit_plan_interruption_decision_uses_official_actions() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "ExitPlanMode"
+                },
+                "toolCallId": "call_exit_plan"
+            }
+        });
+
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("reject")
+            )
+            .as_deref(),
+            Some("deny")
+        );
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("reject_and_exit_plan")
+            )
+            .as_deref(),
+            Some("rejectAndExitPlan")
+        );
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("plan")
+            )
+            .as_deref(),
+            Some("deny")
+        );
+        assert_eq!(
+            codebuddy_interruption_decision_for_permission(
+                "codebuddy --acp",
+                &payload,
+                Some("deny_and_exit_plan")
+            )
+            .as_deref(),
+            Some("rejectAndExitPlan")
         );
     }
 

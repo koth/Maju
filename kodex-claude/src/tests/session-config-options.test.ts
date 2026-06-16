@@ -1138,7 +1138,9 @@ describe("session config options", () => {
       expect(capturedPermissionRequest).not.toBeNull();
       const optionIds = capturedPermissionRequest.options.map((o: any) => o.optionId);
       expect(optionIds).not.toContain("auto");
-      expect(optionIds).toEqual(expect.arrayContaining(["default", "acceptEdits", "plan"]));
+      expect(optionIds).toEqual(
+        expect.arrayContaining(["default", "acceptEdits", "plan", "rejectAndExitPlan"]),
+      );
     });
 
     it("denies a selected `auto` option if the client did not receive that option", async () => {
@@ -1165,6 +1167,39 @@ describe("session config options", () => {
       const optionIds = capturedPermissionRequest.options.map((o: any) => o.optionId);
       expect(optionIds).not.toContain("auto");
       expect(result.behavior).toBe("deny");
+      expect(sessionUpdates).toHaveLength(0);
+    });
+
+    it("returns plan guidance to Claude when the user keeps planning", async () => {
+      permissionResponse = {
+        outcome: { outcome: "selected", optionId: "plan" },
+        _meta: { "kodex.ai/permissionGuidance": "补充风险和验证步骤" },
+      };
+
+      const canUseTool = (agent as any).canUseTool(SESSION_ID);
+      const result = await canUseTool(
+        "ExitPlanMode",
+        { plan: "do stuff" },
+        { signal: new AbortController().signal, suggestions: undefined, toolUseID: "toolu_plan" },
+      );
+
+      expect(result.behavior).toBe("deny");
+      expect(result.message).toContain("keep planning");
+      expect(result.message).toContain("补充风险和验证步骤");
+      expect(sessionUpdates).toHaveLength(0);
+    });
+
+    it("aborts the current turn when the user terminates plan approval", async () => {
+      permissionResponse = { outcome: { outcome: "selected", optionId: "rejectAndExitPlan" } };
+
+      const canUseTool = (agent as any).canUseTool(SESSION_ID);
+      await expect(
+        canUseTool(
+          "ExitPlanMode",
+          { plan: "do stuff" },
+          { signal: new AbortController().signal, suggestions: undefined, toolUseID: "toolu_stop" },
+        ),
+      ).rejects.toThrow("Tool use aborted");
       expect(sessionUpdates).toHaveLength(0);
     });
 

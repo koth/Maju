@@ -469,11 +469,14 @@ fn emit_codebuddy_session_info(
             })
             .unwrap_or_default();
 
+        let details = codebuddy_interruption_request_details(interruption_request)
+            .or_else(|| Some(format!("Request:\n{}", format_json(interruption_request))));
+
         tx.send(ClientEvent::ToolPermissionRequest {
             id: tool_call_id.to_string(),
             name: tool_name.clone(),
             options,
-            details: None,
+            details,
             input: None,
         })
         .map_err(|_| anyhow!("failed to emit CodeBuddy interruption request"))?;
@@ -550,6 +553,162 @@ fn emit_codebuddy_available_commands(
 
     tx.send(ClientEvent::AvailableCommandsUpdated { commands })
         .map_err(|_| anyhow!("failed to emit CodeBuddy available commands"))
+}
+
+fn codebuddy_interruption_request_details(request: &Value) -> Option<String> {
+    let command = codebuddy_interruption_request_command(request);
+    let description = codebuddy_interruption_request_text(
+        request,
+        &["description", "reason", "message", "prompt", "purpose"],
+    )
+    .filter(|description| {
+        command
+            .as_deref()
+            .map_or(true, |command| command.trim() != description.trim())
+    });
+    let cwd = codebuddy_interruption_request_text(
+        request,
+        &["cwd", "workingDirectory", "working_directory"],
+    );
+    let paths = codebuddy_interruption_request_paths(request);
+
+    let mut parts = Vec::new();
+    if let Some(command) = command {
+        parts.push(format!("Command:\n{}", command.trim()));
+    }
+    if let Some(description) = description {
+        parts.push(format!("Description:\n{}", description.trim()));
+    }
+    if let Some(cwd) = cwd {
+        parts.push(format!("Working directory: {}", cwd.trim()));
+    }
+    match paths.as_slice() {
+        [] => {}
+        [path] => parts.push(format!("Path: {path}")),
+        _ => parts.push(format!(
+            "Paths:\n{}",
+            paths
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+    }
+
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn codebuddy_interruption_request_command(request: &Value) -> Option<String> {
+    let mut sources = Vec::new();
+    collect_codebuddy_interruption_sources(request, &mut sources, 0);
+
+    sources
+        .into_iter()
+        .find_map(|source| {
+            string_field(
+                source,
+                &[
+                    "command",
+                    "cmd",
+                    "script",
+                    "shellCommand",
+                    "shell_command",
+                    "bash",
+                ],
+            )
+        })
+        .or_else(|| {
+            request
+                .get("rawInput")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            request
+                .get("input")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn codebuddy_interruption_request_text(request: &Value, keys: &[&str]) -> Option<String> {
+    let mut sources = Vec::new();
+    collect_codebuddy_interruption_sources(request, &mut sources, 0);
+
+    sources
+        .into_iter()
+        .find_map(|source| string_field(source, keys))
+}
+
+fn codebuddy_interruption_request_paths(request: &Value) -> Vec<String> {
+    let mut sources = Vec::new();
+    collect_codebuddy_interruption_sources(request, &mut sources, 0);
+
+    let mut paths = Vec::new();
+    for source in sources {
+        for key in ["file_path", "filePath", "path"] {
+            if let Some(path) = source.get(key).and_then(Value::as_str) {
+                push_unique_trimmed(&mut paths, path);
+            }
+        }
+        for key in ["paths", "locations", "files"] {
+            let Some(items) = source.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            for item in items {
+                if let Some(path) = item.as_str() {
+                    push_unique_trimmed(&mut paths, path);
+                    continue;
+                }
+                if let Some(path) = string_field(item, &["file_path", "filePath", "path"]) {
+                    push_unique_trimmed(&mut paths, &path);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+fn collect_codebuddy_interruption_sources<'a>(
+    value: &'a Value,
+    sources: &mut Vec<&'a Value>,
+    depth: usize,
+) {
+    if depth > 3 {
+        return;
+    }
+    sources.push(value);
+
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    for key in [
+        "rawInput",
+        "input",
+        "arguments",
+        "args",
+        "params",
+        "toolCall",
+        "tool_call",
+        "request",
+        "fields",
+        "metadata",
+    ] {
+        if let Some(child) = map.get(key) {
+            collect_codebuddy_interruption_sources(child, sources, depth + 1);
+        }
+    }
+}
+
+fn push_unique_trimmed(items: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || items.iter().any(|item| item == trimmed) {
+        return;
+    }
+    items.push(trimmed.to_string());
 }
 
 fn tool_display_name(update: &Value) -> String {

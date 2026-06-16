@@ -588,6 +588,60 @@ fn codebuddy_exit_plan_mode_preserves_plan_content_in_raw_input() {
 }
 
 #[test]
+fn codebuddy_interruption_request_includes_bash_details() {
+    let (tx, rx) = mpsc::channel();
+
+    let handled = emit_codebuddy_notification(
+        &tx,
+        "",
+        &serde_json::json!({
+            "update": {
+                "sessionUpdate": "session_info_update",
+                "_meta": {
+                    "codebuddy.ai/interruptionRequest": {
+                        "toolCallId": "call-bash",
+                        "toolName": "Bash",
+                        "options": ["allow", "allowAll", "deny"],
+                        "rawInput": {
+                            "command": "pnpm test --filter @kodex/acp",
+                            "description": "Run backend tests",
+                            "path": "crates/acp-core/src/mapping/codebuddy.rs"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    assert!(handled);
+    match rx.try_recv().unwrap() {
+        ClientEvent::ToolPermissionRequest {
+            id,
+            name,
+            options,
+            details,
+            ..
+        } => {
+            assert_eq!(id, "call-bash");
+            assert_eq!(name, "Bash");
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["allow", "allowAll", "deny"]
+            );
+            let details = details.expect("permission request should include details");
+            assert!(details.contains("Command:\npnpm test --filter @kodex/acp"));
+            assert!(details.contains("Description:\nRun backend tests"));
+            assert!(details.contains("Path: crates/acp-core/src/mapping/codebuddy.rs"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
 fn codebuddy_current_mode_update_sets_local_policy_mode() {
     let (tx, rx) = mpsc::channel();
 

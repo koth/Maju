@@ -187,6 +187,7 @@ pub(super) async fn run_command_loop(
                                     &session_id,
                                     &tool_call_id,
                                     &decision,
+                                    None,
                                 );
                                 let _ = reply_tx.send(result);
                             }
@@ -336,6 +337,7 @@ pub(super) async fn run_command_loop(
                     &session_id,
                     &tool_call_id,
                     &decision,
+                    None,
                 );
                 let _ = reply_tx.send(result);
             }
