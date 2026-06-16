@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: ${{ matrix.name }}
+  bundled-agents:
+    name: Bundled agents (${{ matrix.name }})
     runs-on: ${{ matrix.platform }}
 
     strategy:
@@ -48,9 +48,7 @@ jobs:
         with:
           node-version: lts/*
           cache: npm
-          cache-dependency-path: |
-            apps/desktop/ui/package-lock.json
-            kodex-claude/package-lock.json
+          cache-dependency-path: kodex-claude/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,14 +58,10 @@ jobs:
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            codex-acp -> codex-acp/target
+          workspaces: codex-acp -> codex-acp/target
 
-      - name: Install dependencies
-        run: |
-          npm ci --prefix apps/desktop/ui
-          npm ci --prefix kodex-claude
+      - name: Install Claude agent dependencies
+        run: npm ci --prefix kodex-claude
 
       - name: Verify runner platform
         env:
@@ -85,6 +79,96 @@ jobs:
           npm --prefix apps/desktop/ui run claude:binary
           cargo build --manifest-path codex-acp/Cargo.toml --release --target ${{ matrix.target }}
           npm --prefix apps/desktop/ui run codex:stage
+
+      - name: Package bundled agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/bundled-agents-${{ matrix.target }}.tar.gz" \
+            -C apps/desktop/src-tauri/resources \
+            codex-acp \
+            claude-agent-acp
+
+      - name: Upload bundled agents
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-agents-${{ matrix.target }}
+          path: dist/bundled-agents-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: ${{ matrix.name }}
+    needs: bundled-agents
+    runs-on: ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            node_platform: win32
+            node_arch: x64
+          - name: macOS Intel
+            platform: macos-15-intel
+            target: x86_64-apple-darwin
+            node_platform: darwin
+            node_arch: x64
+          - name: macOS Apple Silicon
+            platform: macos-15
+            target: aarch64-apple-darwin
+            node_platform: darwin
+            node_arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/desktop/ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install dependencies
+        run: npm ci --prefix apps/desktop/ui
+
+      - name: Verify runner platform
+        env:
+          KODEX_EXPECTED_PLATFORM: ${{ matrix.node_platform }}
+          KODEX_EXPECTED_ARCH: ${{ matrix.node_arch }}
+        run: |
+          node -e 'const expected = process.env.KODEX_EXPECTED_PLATFORM + "-" + process.env.KODEX_EXPECTED_ARCH; const actual = process.platform + "-" + process.arch; if (actual !== expected) { console.error("Runner architecture mismatch: expected " + expected + ", got " + actual); process.exit(1); } console.log("Runner architecture: " + actual);'
+
+      - name: Download bundled agents
+        uses: actions/download-artifact@v4
+        with:
+          name: bundled-agents-${{ matrix.target }}
+          path: dist/bundled-agents
+
+      - name: Stage bundled agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/desktop/src-tauri/resources
+          tar -xzf "dist/bundled-agents/bundled-agents-${{ matrix.target }}.tar.gz" \
+            -C apps/desktop/src-tauri/resources
+          find apps/desktop/src-tauri/resources/codex-acp apps/desktop/src-tauri/resources/claude-agent-acp -maxdepth 2 -type f -print
 
       - name: Build and upload Tauri release
         uses: tauri-apps/tauri-action@v0
