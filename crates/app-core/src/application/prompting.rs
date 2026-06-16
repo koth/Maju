@@ -47,7 +47,28 @@ impl Application {
 
     pub fn send_prompt_content_background(
         &mut self,
+        prompt: Vec<UserPromptContent>,
+    ) -> anyhow::Result<()> {
+        self.send_prompt_content_background_inner(prompt, None)
+    }
+
+    pub fn retry_user_message_background(
+        &mut self,
+        message_id: &str,
+        text: String,
+    ) -> anyhow::Result<()> {
+        let message_id = uuid::Uuid::parse_str(message_id)
+            .map_err(|_| anyhow::anyhow!("无效的消息 ID：{message_id}"))?;
+        self.send_prompt_content_background_inner(
+            vec![UserPromptContent::text(text)],
+            Some(message_id),
+        )
+    }
+
+    fn send_prompt_content_background_inner(
+        &mut self,
         mut prompt: Vec<UserPromptContent>,
+        existing_user_message_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<()> {
         if self.in_flight_prompt.is_some() {
             let error = anyhow::anyhow!("提示请求已在运行中");
@@ -80,6 +101,27 @@ impl Application {
             return Err(error);
         }
 
+        let existing_user_message_index = existing_user_message_id
+            .map(|id| self.retryable_user_message_index(id))
+            .transpose()?;
+
+        if let Some((message_id, message_index)) =
+            existing_user_message_id.zip(existing_user_message_index)
+        {
+            self.remove_retry_artifacts_after_message(message_index);
+            if let Some(message) = self
+                .ui
+                .messages
+                .iter_mut()
+                .find(|message| message.id == message_id)
+            {
+                message.body = display_body.clone();
+            }
+            let _ = self
+                .store
+                .update_message_body(&message_id.to_string(), &display_body);
+        }
+
         if !self.session.is_alive() {
             if self.session.last_error().is_none() && self.should_auto_reconnect_after_clean_exit()
             {
@@ -96,26 +138,31 @@ impl Application {
             }
         }
 
-        let message = ChatMessage {
-            id: uuid::Uuid::new_v4(),
-            role: MessageRole::User,
-            body: display_body,
-            created_at: current_timestamp(),
+        let message_id = if let Some(message_id) = existing_user_message_id {
+            message_id
+        } else {
+            let message = ChatMessage {
+                id: uuid::Uuid::new_v4(),
+                role: MessageRole::User,
+                body: display_body,
+                created_at: current_timestamp(),
+            };
+            let message_id = message.id;
+
+            // Persist user message to SQLite
+            let seq = self.next_seq();
+            let _ = self.store.insert_message(
+                &self.ui.session.id.to_string(),
+                &message.id.to_string(),
+                "User",
+                &message.body,
+                seq,
+            );
+
+            self.ui.timeline.push(TimelineItem::Message(message.id));
+            self.ui.messages.push(message);
+            message_id
         };
-        let message_id = message.id;
-
-        // Persist user message to SQLite
-        let seq = self.next_seq();
-        let _ = self.store.insert_message(
-            &self.ui.session.id.to_string(),
-            &message.id.to_string(),
-            "User",
-            &message.body,
-            seq,
-        );
-
-        self.ui.timeline.push(TimelineItem::Message(message.id));
-        self.ui.messages.push(message);
         self.ui.agent_plan.clear();
         self.ui.session.status = SessionStatus::Streaming;
         self.review_changes_started = false;
@@ -724,6 +771,80 @@ impl Application {
 
     pub fn has_in_flight_prompt(&self) -> bool {
         self.in_flight_prompt.is_some()
+    }
+
+    fn retryable_user_message_index(&self, message_id: uuid::Uuid) -> anyhow::Result<usize> {
+        let message_index = self
+            .ui
+            .timeline
+            .iter()
+            .position(|item| matches!(item, TimelineItem::Message(id) if *id == message_id))
+            .ok_or_else(|| anyhow::anyhow!("消息不存在，无法重发"))?;
+
+        let Some(message) = self
+            .ui
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+        else {
+            anyhow::bail!("消息不存在，无法重发");
+        };
+        if message.role != MessageRole::User {
+            anyhow::bail!("只能重新编辑用户消息");
+        }
+
+        for item in self.ui.timeline.iter().skip(message_index + 1) {
+            match item {
+                TimelineItem::Message(id) => {
+                    let role = self
+                        .ui
+                        .messages
+                        .iter()
+                        .find(|message| message.id == *id)
+                        .map(|message| &message.role);
+                    if !matches!(role, Some(MessageRole::System)) {
+                        anyhow::bail!("智能体已经开始回复，不能重写这条消息");
+                    }
+                }
+                TimelineItem::Tool(_) => {
+                    anyhow::bail!("智能体已经开始执行工具，不能重写这条消息");
+                }
+                TimelineItem::Thinking => {}
+            }
+        }
+
+        Ok(message_index)
+    }
+
+    fn remove_retry_artifacts_after_message(&mut self, message_index: usize) {
+        let message_ids_to_delete = self
+            .ui
+            .timeline
+            .iter()
+            .skip(message_index + 1)
+            .filter_map(|item| match item {
+                TimelineItem::Message(id) => Some(*id),
+                TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+            })
+            .collect::<Vec<_>>();
+        if message_ids_to_delete.is_empty() && self.ui.timeline.len() == message_index + 1 {
+            return;
+        }
+
+        self.ui.timeline.truncate(message_index + 1);
+        self.ui.thinking_status = None;
+
+        if message_ids_to_delete.is_empty() {
+            return;
+        }
+        self.ui
+            .messages
+            .retain(|message| !message_ids_to_delete.contains(&message.id));
+        let ids = message_ids_to_delete
+            .iter()
+            .map(uuid::Uuid::to_string)
+            .collect::<Vec<_>>();
+        let _ = self.store.delete_messages(&ids);
     }
 
     pub fn cancel_prompt(&mut self) -> Result<(), String> {

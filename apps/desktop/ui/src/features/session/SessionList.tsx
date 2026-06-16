@@ -8,6 +8,7 @@ import {
   sessionArchive,
   sessionCancel,
   settingsGetAgentSnapshot,
+  workspaceArchive,
   workspaceOpen,
   workspaceSetActive,
 } from "../../lib/tauri";
@@ -23,6 +24,7 @@ interface Props {
   onOpenSettings: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
+  onWorkspaceArchived?: (snapshot: UiSnapshot | null) => void;
 }
 
 type AgentModalMode = "workspace" | "session";
@@ -40,6 +42,7 @@ export function SessionList({
   onOpenSettings,
   onSessionChanged,
   onWorkspaceChanged,
+  onWorkspaceArchived,
 }: Props) {
   const [workspaceSessions, setWorkspaceSessions] = useState<WorkspaceSessionList[]>([]);
   const [agentSnapshot, setAgentSnapshot] = useState<AgentSettingsSnapshot | null>(null);
@@ -54,15 +57,26 @@ export function SessionList({
   const [pendingSwitch, setPendingSwitch] = useState<PendingSwitch | null>(null);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
+  const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const refreshInFlightRef = useRef(false);
 
   const refresh = useCallback(() => {
-    sessionList().then(setWorkspaceSessions).catch(() => {});
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setSessionsRefreshing(true);
+    sessionList()
+      .then(setWorkspaceSessions)
+      .catch(() => {})
+      .finally(() => {
+        refreshInFlightRef.current = false;
+        setSessionsRefreshing(false);
+      });
   }, []);
 
   useEffect(() => {
@@ -296,6 +310,21 @@ export function SessionList({
     [onSessionChanged, refresh],
   );
 
+  const handleArchiveWorkspace = useCallback(
+    async (workspaceRoot: string, isActive: boolean) => {
+      try {
+        const nextSnapshot = await workspaceArchive(workspaceRoot);
+        if (isActive) {
+          onWorkspaceArchived?.(nextSnapshot);
+        }
+        refresh();
+      } catch (error) {
+        console.error("Failed to archive workspace", error);
+      }
+    },
+    [onWorkspaceArchived, refresh],
+  );
+
   const closeSwitchConfirm = useCallback(() => {
     if (isSwitching) return;
     setPendingSwitch(null);
@@ -373,10 +402,17 @@ export function SessionList({
 
       <div className="sl-workspaces">
         {workspaceSessions.length === 0 && (
-          <div className="sl-empty">
-            <span className="sl-empty-title">暂无工作区</span>
-            <span className="sl-empty-copy">点击新建打开本地或远程工作区。</span>
-          </div>
+          sessionsRefreshing ? (
+            <div className="sl-loading" role="status" aria-live="polite">
+              <span className="sl-loading-spinner" aria-hidden="true" />
+              <span>正在载入项目</span>
+            </div>
+          ) : (
+            <div className="sl-empty">
+              <span className="sl-empty-title">暂无工作区</span>
+              <span className="sl-empty-copy">点击新建打开本地或远程工作区。</span>
+            </div>
+          )
         )}
 
         {workspaceSessions.map((workspaceItem) => (
@@ -389,6 +425,7 @@ export function SessionList({
             onCreateSession={handleOpenAgentPicker}
             onSwitch={handleSwitch}
             onArchive={handleArchive}
+            onArchiveWorkspace={handleArchiveWorkspace}
           />
         ))}
       </div>
@@ -633,6 +670,7 @@ function WorkspaceSection({
   onCreateSession,
   onSwitch,
   onArchive,
+  onArchiveWorkspace,
 }: {
   item: WorkspaceSessionList;
   activeSessionId: string;
@@ -641,6 +679,7 @@ function WorkspaceSection({
   onCreateSession: (workspaceRoot: string, remoteAgent: AgentCliId | null, isRemoteWorkspace: boolean) => void;
   onSwitch: (id: string, workspaceRoot: string) => void;
   onArchive: (id: string, workspaceRoot: string) => void;
+  onArchiveWorkspace: (workspaceRoot: string, isActive: boolean) => void;
 }) {
   const sessions = sortSessions(item.sessions);
   const workspaceRoot = item.workspace.root;
@@ -687,6 +726,15 @@ function WorkspaceSection({
           disabled={isDormantRemoteWorkspace}
         >
           <EditIcon />
+        </button>
+        <button
+          className="sl-workspace-archive"
+          type="button"
+          onClick={() => onArchiveWorkspace(workspaceActionRoot, item.is_active)}
+          title="归档项目"
+          aria-label={`归档项目 ${item.workspace.name}`}
+        >
+          <ArchiveIcon />
         </button>
       </div>
 

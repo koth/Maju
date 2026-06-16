@@ -81,6 +81,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::session::session_get_state,
             commands::session::session_send_prompt,
+            commands::session::session_retry_user_message,
             commands::session::session_set_config_control,
             commands::session::session_resolve_permission,
             commands::session::session_cancel,
@@ -144,6 +145,7 @@ fn main() {
             commands::workspace::workspace_open_remote_linux,
             commands::workspace::workspace_open_remote_profile,
             commands::workspace::workspace_close,
+            commands::workspace::workspace_archive,
             commands::workspace::workspace_list_open,
             commands::workspace::workspace_has_open,
             commands::workspace::workspace_restore_open,

@@ -42,6 +42,106 @@ fn placeholder_session_titles_are_not_meaningful_agent_titles() {
 }
 
 #[test]
+fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let session_id = app.ui.session.id.to_string();
+    let user_id = uuid::Uuid::new_v4();
+    let system_id = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.thinking_status = Some(ThinkingStatus::Active);
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "old prompt".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: system_id,
+        role: MessageRole::System,
+        body: "会话已断开：boom".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Thinking);
+    app.ui.timeline.push(TimelineItem::Message(system_id));
+    app.store
+        .insert_message(&session_id, &user_id.to_string(), "User", "old prompt", 1)
+        .unwrap();
+    app.store
+        .insert_message(
+            &session_id,
+            &system_id.to_string(),
+            "System",
+            "会话已断开：boom",
+            2,
+        )
+        .unwrap();
+
+    app.retry_user_message_background(&user_id.to_string(), "new prompt".into())
+        .unwrap();
+
+    assert!(app.has_in_flight_prompt());
+    assert_eq!(app.ui.session.status, SessionStatus::Streaming);
+    assert_eq!(app.ui.timeline, vec![TimelineItem::Message(user_id)]);
+    assert_eq!(app.ui.thinking_status, None);
+    assert_eq!(app.ui.messages.len(), 1);
+    assert_eq!(app.ui.messages[0].id, user_id);
+    assert_eq!(app.ui.messages[0].body, "new prompt");
+
+    let (messages, _tools, timeline) = app.store.load_session(&session_id).unwrap();
+    assert_eq!(timeline, vec![TimelineItem::Message(user_id)]);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, user_id);
+    assert_eq!(messages[0].body, "new prompt");
+    app.session.shutdown();
+}
+
+#[test]
+fn retry_user_message_is_rejected_after_assistant_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "old prompt".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "already replying".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+
+    let error = app
+        .retry_user_message_background(&user_id.to_string(), "new prompt".into())
+        .unwrap_err();
+
+    assert!(error.to_string().contains("已经开始回复"));
+    assert!(!app.has_in_flight_prompt());
+    assert_eq!(
+        app.ui
+            .messages
+            .iter()
+            .find(|message| message.id == user_id)
+            .unwrap()
+            .body,
+        "old prompt"
+    );
+    app.session.shutdown();
+}
+
+#[test]
 fn agent_title_matching_prompt_acknowledges_protocol_sync() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);

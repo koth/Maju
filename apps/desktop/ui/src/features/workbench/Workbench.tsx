@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
-import { startupPerfMark, sessionResolvePermission, settingsGetAgentSnapshot } from "../../lib/tauri";
+import {
+  startupPerfMark,
+  sessionResolvePermission,
+  sessionRetryUserMessage,
+  settingsGetAgentSnapshot,
+} from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
@@ -9,7 +14,7 @@ import {
   type PendingPermissionRequest,
   findPlanAcceptOption,
   findPlanRejectOption,
-  shouldShowAgentPlanNearComposer,
+  shouldShowAgentPlanDuringTurn,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "../review/ReviewPanel";
@@ -62,6 +67,7 @@ export function Workbench() {
     pollState,
     acceptSnapshot,
     clearSnapshot,
+    clearWorkspace,
   } = useWorkbenchSnapshot();
   const {
     gitRefreshing,
@@ -148,6 +154,10 @@ export function Workbench() {
   } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
+  const [remoteWorkspaceHydration, setRemoteWorkspaceHydration] = useState<{
+    workspaceRoot: string;
+    startedAt: number;
+  } | null>(null);
   const [settingsStartupNotice, setSettingsStartupNotice] = useState<SettingsStartupNotice | null>(null);
   const [settingsInitialPane, setSettingsInitialPane] = useState<SettingsPane | null>(null);
   const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab | null>(null);
@@ -213,6 +223,17 @@ export function Workbench() {
     setExpandedReviewSideTreeVisible(false);
   }, []);
 
+  const beginWorkspaceHydration = useCallback((nextSnapshot: UiSnapshot | null) => {
+    if (nextSnapshot?.workspace.location?.kind !== "remote_linux") {
+      setRemoteWorkspaceHydration(null);
+      return;
+    }
+    setRemoteWorkspaceHydration({
+      workspaceRoot: nextSnapshot.workspace.root,
+      startedAt: performance.now(),
+    });
+  }, []);
+
   useEffect(() => {
     settingsGetAgentSnapshot()
       .then((snapshot) => setAppTheme(applyAppTheme(snapshot.settings.theme)))
@@ -255,6 +276,7 @@ export function Workbench() {
   const handleWorkspaceOpened = useCallback((nextSnapshot: UiSnapshot) => {
     void startupPerfMark("workbench/handle_workspace_opened", "");
     acceptSnapshot(nextSnapshot);
+    beginWorkspaceHydration(nextSnapshot);
     setRemoteOpenVisible(false);
     clearChangeSets();
     setComposerReferenceRequests([]);
@@ -263,10 +285,11 @@ export function Workbench() {
     resetReviewPanelTabs();
     setRightPanelCollapsed(false);
     setReviewPanelExpanded(false);
-  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
+  }, [acceptSnapshot, beginWorkspaceHydration, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handleWorkspaceChanged = useCallback((nextSnapshot: UiSnapshot) => {
     acceptSnapshot(nextSnapshot);
+    beginWorkspaceHydration(nextSnapshot);
     setRemoteOpenVisible(false);
     clearChangeSets();
     setComposerReferenceRequests([]);
@@ -276,7 +299,24 @@ export function Workbench() {
     setSidebarCollapsed(false);
     setRightPanelCollapsed(false);
     setReviewPanelExpanded(false);
-  }, [acceptSnapshot, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
+  }, [acceptSnapshot, beginWorkspaceHydration, clearChangeSets, resetGitHydration, resetReviewPanelTabs, resetTabs]);
+
+  const handleWorkspaceArchived = useCallback((nextSnapshot: UiSnapshot | null) => {
+    setRemoteOpenVisible(false);
+    clearChangeSets();
+    setComposerReferenceRequests([]);
+    resetGitHydration();
+    resetTabs();
+    resetReviewPanelTabs();
+    setReviewPanelExpanded(false);
+    if (nextSnapshot) {
+      acceptSnapshot(nextSnapshot);
+      beginWorkspaceHydration(nextSnapshot);
+    } else {
+      beginWorkspaceHydration(null);
+      clearWorkspace();
+    }
+  }, [acceptSnapshot, beginWorkspaceHydration, clearChangeSets, clearWorkspace, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handlePermissionSelect = useCallback(async (
     requestId: string,
@@ -302,6 +342,44 @@ export function Workbench() {
       throw error;
     }
   }, [pollState]);
+
+  const handleRetryUserMessage = useCallback(async (messageId: string, text: string) => {
+    await sessionRetryUserMessage(messageId, text);
+    await pollState();
+  }, [pollState]);
+
+  useEffect(() => {
+    if (!remoteWorkspaceHydration) return;
+    if (!snapshot || snapshot.workspace.root !== remoteWorkspaceHydration.workspaceRoot) {
+      setRemoteWorkspaceHydration(null);
+      return;
+    }
+
+    const elapsed = performance.now() - remoteWorkspaceHydration.startedAt;
+    const minimumVisibleMs = 650;
+    const maximumVisibleMs = 2600;
+    const ready = gitHydrated || snapshot.workspace_connected === false;
+    if ((ready && elapsed >= minimumVisibleMs) || elapsed >= maximumVisibleMs) {
+      setRemoteWorkspaceHydration(null);
+      return;
+    }
+
+    const timeoutMs = ready
+      ? Math.max(0, minimumVisibleMs - elapsed)
+      : Math.max(0, maximumVisibleMs - elapsed);
+    const timeout = window.setTimeout(() => {
+      setRemoteWorkspaceHydration((current) =>
+        current?.workspaceRoot === remoteWorkspaceHydration.workspaceRoot ? null : current,
+      );
+    }, timeoutMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [
+    gitHydrated,
+    remoteWorkspaceHydration,
+    snapshot?.workspace.root,
+    snapshot?.workspace_connected,
+  ]);
 
   const handleSessionChanged = useCallback(() => {
     clearSnapshot();
@@ -477,11 +555,16 @@ export function Workbench() {
   }
 
   const isRemoteWorkspace = snapshot.workspace.location?.kind === "remote_linux";
+  const remoteHydrating =
+    isRemoteWorkspace && remoteWorkspaceHydration?.workspaceRoot === snapshot.workspace.root;
   const terminalDockAvailable = isTerminalDockAvailableForWorkspace(snapshot.workspace);
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentLabel = snapshot.session.agent_cli || "智能体";
-  const showComposerPlan = shouldShowAgentPlanNearComposer(snapshot);
-  const composerStatusSlot = pendingPermissionRequests.length > 0 || showComposerPlan ? (
+  const showAgentPlanDock =
+    activeTab.type === "conversation" &&
+    !reviewPanelExpanded &&
+    shouldShowAgentPlanDuringTurn(snapshot);
+  const composerStatusSlot = pendingPermissionRequests.length > 0 ? (
     <div className="composer-plan-slot">
       {pendingPermissionRequests.map((request) => (
         <PermissionRequestPanel
@@ -491,18 +574,18 @@ export function Workbench() {
           onPermissionSelect={handlePermissionSelect}
         />
       ))}
-      {showComposerPlan && (
-        <AgentPlanPanel entries={snapshot.agent_plan} />
-      )}
     </div>
   ) : null;
   const workbenchBodyClassName = [
     "workbench-body",
     terminalDockActive ? "has-terminal-dock" : "",
+    remoteHydrating ? "is-remote-hydrating" : "",
     reviewPanelExpanded ? "is-review-expanded" : "",
     reviewPanelExpanded && expandedReviewSideTreeVisible ? "has-expanded-review-side-tree" : "",
   ].filter(Boolean).join(" ");
-  const reviewPanel = (
+  const reviewPanel = remoteHydrating ? (
+    <RemoteWorkspaceHydrationPanel />
+  ) : (
     <ReviewPanel
       snapshot={snapshot}
       refreshing={gitRefreshing}
@@ -545,15 +628,20 @@ export function Workbench() {
 
       <div className="workbench-content" style={leftSidebarStyle}>
         <ThreadSidebarShell collapsed={sidebarCollapsed}>
-          <SessionList
-            activeSessionId={snapshot.session.id}
-            activeSessionTitle={snapshot.session.title}
-            activeWorkspaceRoot={snapshot.workspace.root}
-            currentSessionStatus={snapshot.session.status}
-            onOpenSettings={handleOpenSettings}
-            onSessionChanged={handleSessionChanged}
-            onWorkspaceChanged={handleWorkspaceChanged}
-          />
+          {remoteHydrating ? (
+            <RemoteWorkspaceHydrationSidebar workspace={snapshot.workspace} />
+          ) : (
+            <SessionList
+              activeSessionId={snapshot.session.id}
+              activeSessionTitle={snapshot.session.title}
+              activeWorkspaceRoot={snapshot.workspace.root}
+              currentSessionStatus={snapshot.session.status}
+              onOpenSettings={handleOpenSettings}
+              onSessionChanged={handleSessionChanged}
+              onWorkspaceChanged={handleWorkspaceChanged}
+              onWorkspaceArchived={handleWorkspaceArchived}
+            />
+          )}
         </ThreadSidebarShell>
         {!sidebarCollapsed && (
           <div className="sidebar-resizer">
@@ -598,7 +686,11 @@ export function Workbench() {
               </div>
             )}
 
-            {reviewPanelExpanded ? (
+            {remoteHydrating ? (
+              <div className="conversation-container is-remote-hydrating">
+                <RemoteWorkspaceHydrationMain workspace={snapshot.workspace} />
+              </div>
+            ) : reviewPanelExpanded ? (
               <div
                 className={`expanded-review-composer-layer ${
                   expandedReviewSideTreeVisible ? "has-review-side-tree" : ""
@@ -621,6 +713,11 @@ export function Workbench() {
               >
                 {activeTab.type === "conversation" ? (
                   <>
+                    {showAgentPlanDock && (
+                      <aside className="agent-plan-dock" aria-label="当前任务计划">
+                        <AgentPlanPanel entries={snapshot.agent_plan} />
+                      </aside>
+                    )}
                     <ConversationTimeline
                       snapshot={snapshot}
                       onPermissionSelect={handlePermissionSelect}
@@ -630,6 +727,7 @@ export function Workbench() {
                       }
                       onReviewChangeSetSelect={handleReviewChangeSetSelect}
                       hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+                      onRetryUserMessage={handleRetryUserMessage}
                     />
                   </>
                 ) : (
@@ -754,6 +852,52 @@ export function Workbench() {
       </div>
     </div>
   );
+}
+
+function RemoteWorkspaceHydrationMain({ workspace }: { workspace: WorkspaceDescriptor }) {
+  return (
+    <div className="remote-hydration-main" role="status" aria-live="polite">
+      <span className="remote-hydration-spinner" aria-hidden="true" />
+      <div>
+        <div className="remote-hydration-title">正在载入远程项目</div>
+        <div className="remote-hydration-copy">{workspace.name}</div>
+        <div className="remote-hydration-meta">{remoteWorkspaceLocationText(workspace)}</div>
+      </div>
+    </div>
+  );
+}
+
+function RemoteWorkspaceHydrationSidebar({ workspace }: { workspace: WorkspaceDescriptor }) {
+  return (
+    <div className="remote-hydration-sidebar" role="status" aria-live="polite">
+      <div className="remote-hydration-sidebar-kicker">项目</div>
+      <div className="remote-hydration-sidebar-card">
+        <span className="remote-hydration-spinner" aria-hidden="true" />
+        <div>
+          <div className="remote-hydration-sidebar-title">{workspace.name}</div>
+          <div className="remote-hydration-sidebar-copy">正在同步远程状态</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RemoteWorkspaceHydrationPanel() {
+  return (
+    <div className="remote-hydration-panel" role="status" aria-live="polite">
+      <span className="remote-hydration-spinner" aria-hidden="true" />
+      <span>正在准备审查面板</span>
+    </div>
+  );
+}
+
+function remoteWorkspaceLocationText(workspace: WorkspaceDescriptor) {
+  const location = workspace.location;
+  if (location?.kind !== "remote_linux") {
+    return workspace.root;
+  }
+  const port = location.ssh_port ? `:${location.ssh_port}` : "";
+  return `${location.ssh_target}${port}:${location.remote_path}`;
 }
 
 export function findPendingPlanApproval(tools: ToolInvocation[]) {

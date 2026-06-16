@@ -585,6 +585,34 @@
   line-height: 1.35;
 }
 
+.sl-loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 4px 4px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(215, 225, 223, 0.028);
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.sl-loading-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(215, 225, 223, 0.20);
+  border-top-color: var(--sidebar-accent-hover);
+  border-radius: 999px;
+  animation: sl-spin 0.8s linear infinite;
+}
+
+@keyframes sl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .sl-agent-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1008,7 +1036,7 @@
 
 .sl-workspace-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 28px;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
   align-items: center;
   gap: 2px;
   min-height: 36px;
@@ -1038,6 +1066,7 @@
 
 .sl-workspace-node:focus-visible,
 .sl-workspace-edit:focus-visible,
+.sl-workspace-archive:focus-visible,
 .sl-archive-btn:focus-visible,
 .sl-new-btn:focus-visible {
   outline: 2px solid var(--border-focus);
@@ -1101,7 +1130,7 @@
 }
 
 .sl-workspace-edit,
-.sl-archive-btn {
+.sl-workspace-archive {
   display: grid;
   place-items: center;
   width: 26px;
@@ -1113,13 +1142,16 @@
   cursor: pointer;
 }
 
-.sl-workspace-edit {
+.sl-workspace-edit,
+.sl-workspace-archive {
   opacity: 0;
   pointer-events: none;
 }
 
 .sl-workspace-row:hover .sl-workspace-edit,
-.sl-workspace-edit:focus-visible {
+.sl-workspace-row:hover .sl-workspace-archive,
+.sl-workspace-edit:focus-visible,
+.sl-workspace-archive:focus-visible {
   opacity: 1;
   pointer-events: auto;
 }
@@ -1138,6 +1170,11 @@
 .sl-workspace-edit:hover {
   background: var(--interactive-hover);
   color: var(--text-strong);
+}
+
+.sl-workspace-archive:hover {
+  background: var(--interactive-hover);
+  color: var(--sidebar-accent-hover);
 }
 
 .sl-nav-icon,

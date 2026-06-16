@@ -84,6 +84,16 @@ pub fn workspace_close(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn workspace_archive(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<UiSnapshot>, String> {
+    let snapshot = state.archive_workspace(path)?;
+    save_open_workspace_state(&state)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 pub fn workspace_list_open(state: State<'_, AppState>) -> Result<Vec<OpenWorkspaceItem>, String> {
     state.list_open_workspaces()
 }

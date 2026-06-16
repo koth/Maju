@@ -278,6 +278,120 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).not.toContain("等待权限");
   });
 
+  it("collapses earlier same-turn replies and tools before the final assistant response", () => {
+    const shellTool = makePermissionTool({
+      id: "tool-shell",
+      call_id: "shell-1",
+      kind: "execute",
+      name: "`pnpm test`",
+      summary: "pnpm test",
+      status: "Succeeded",
+      raw_input: JSON.stringify({ command: "pnpm test" }),
+      raw_output: "ok",
+      permission_options: [],
+    });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [
+        { Message: "user-1" },
+        { Message: "assistant-mid" },
+        { Tool: shellTool.id },
+        { Message: "assistant-final" },
+      ],
+      messages: [
+        {
+          id: "user-1",
+          role: "User",
+          body: "do it",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-mid",
+          role: "Assistant",
+          body: "intermediate reply",
+          created_at: "2026-05-12T00:00:05Z",
+        },
+        {
+          id: "assistant-final",
+          role: "Assistant",
+          body: "final answer",
+          created_at: "2026-05-12T00:01:05Z",
+        },
+      ],
+      tools: [shellTool],
+    });
+
+    const { container, getByRole } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.textContent).toContain("已运行 00:01:05");
+    expect(container.textContent).toContain("2 条记录");
+    expect(container.textContent).toContain("final answer");
+    expect(container.textContent).not.toContain("intermediate reply");
+    expect(container.textContent).not.toContain("pnpm test");
+
+    fireEvent.click(getByRole("button", { name: "展开已运行上下文" }));
+
+    expect(container.textContent).toContain("intermediate reply");
+    expect(container.textContent).toContain("pnpm test");
+  });
+
+  it("collapses tool context while the final assistant response is streaming", async () => {
+    const shellTool = makePermissionTool({
+      id: "tool-stream-shell",
+      call_id: "stream-shell-1",
+      kind: "execute",
+      name: "`cargo test`",
+      summary: "cargo test",
+      status: "Succeeded",
+      raw_input: JSON.stringify({ command: "cargo test" }),
+      permission_options: [],
+    });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Streaming",
+      },
+      timeline: [
+        { Message: "user-stream" },
+        { Tool: shellTool.id },
+        { Message: "assistant-streaming" },
+      ],
+      messages: [
+        {
+          id: "user-stream",
+          role: "User",
+          body: "run tests",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-streaming",
+          role: "Assistant",
+          body: "**live** final",
+          created_at: "2026-05-12T00:00:30Z",
+        },
+      ],
+      tools: [shellTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.textContent).toContain("已运行 00:00:30");
+    expect(container.textContent).toContain("live final");
+    expect(container.textContent).not.toContain("cargo test");
+    await waitFor(() => {
+      expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
+        "live",
+      );
+    });
+  });
+
   it("renders the active streaming assistant message as markdown", async () => {
     const snapshot = makeSnapshot({
       session: {
@@ -415,6 +529,63 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".msg-user .msg-user-text")?.textContent).toBe(
       "LLM 原始返回片段（前 400 字）\n这个有点不太够用啊",
     );
+  });
+
+  it("allows editing and retrying a failed user prompt before any assistant response", async () => {
+    const onRetryUserMessage = vi.fn().mockResolvedValue(undefined);
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Interrupted",
+      },
+      timeline: [{ Message: "user-1" }, "Thinking", { Message: "system-1" }],
+      messages: [
+        { id: "user-1", role: "User", body: "old prompt" },
+        { id: "system-1", role: "System", body: "会话已断开：boom" },
+      ],
+    });
+
+    const { getByRole, getByLabelText } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onRetryUserMessage={onRetryUserMessage}
+      />,
+    );
+
+    fireEvent.click(getByRole("button", { name: "编辑并重发" }));
+    const textarea = getByLabelText("编辑用户消息") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("old prompt");
+    fireEvent.change(textarea, { target: { value: "new prompt" } });
+    fireEvent.click(getByRole("button", { name: "重新发送" }));
+
+    await waitFor(() => {
+      expect(onRetryUserMessage).toHaveBeenCalledWith("user-1", "new prompt");
+    });
+  });
+
+  it("does not allow retry editing after the assistant has started replying", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [{ Message: "user-1" }, { Message: "assistant-1" }],
+      messages: [
+        { id: "user-1", role: "User", body: "old prompt" },
+        { id: "assistant-1", role: "Assistant", body: "already replying" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onRetryUserMessage={vi.fn()}
+      />,
+    );
+
+    expect(within(container).queryByRole("button", { name: "编辑并重发" })).toBeNull();
   });
 
   it("repairs compact headings without spaces across heading levels", () => {

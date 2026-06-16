@@ -412,6 +412,11 @@ export function ReviewPanel({
   }, [visibleFiles]);
 
   useEffect(() => {
+    if (!workspaceConnected || !hydrated) {
+      setChangeSetState({ summaries: [], filesById: {} });
+      return;
+    }
+
     let cancelled = false;
     sessionListChangeSets({
       session_id: snapshot.session.id,
@@ -446,7 +451,7 @@ export function ReviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [focusRequestKey, snapshot.session.id, snapshot.workspace.root, snapshot.revision]);
+  }, [focusRequestKey, hydrated, snapshot.session.id, snapshot.workspace.root, snapshot.revision, workspaceConnected]);
 
   return (
     <div ref={panelRef} className="review-panel">

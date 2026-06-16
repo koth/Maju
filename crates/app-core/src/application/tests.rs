@@ -20,8 +20,9 @@ use workspace_model::{
     DiffQuality, FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
     ListChangeSetsRequest, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
-    SessionConfigState, SessionFileChange, SessionListItem, SessionRuntimeStatus, TimelineItem,
-    ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges, WorkspaceLocation,
+    SessionConfigState, SessionFileChange, SessionListItem, SessionRuntimeStatus, SessionStatus,
+    ThinkingStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
+    WorkspaceLocation,
 };
 
 mod change_set_tests;

@@ -1,4 +1,5 @@
 import { Fragment, useRef, useEffect, useMemo, useState, memo } from "react";
+import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { FileChangeSummary, MessageRole } from "../../types";
@@ -27,6 +28,7 @@ interface Props {
   onReviewFileSelect?: (path: string, changeSetId: string) => void;
   onReviewChangeSetSelect?: (changeSetId: string) => void;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
+  onRetryUserMessage?: (messageId: string, text: string) => Promise<void> | void;
 }
 
 export interface TimelineTurnChangeSet {
@@ -41,6 +43,8 @@ interface MessageRowProps {
   role: MessageRole;
   body: string;
   streaming: boolean;
+  retryable?: boolean;
+  onRetry?: (messageId: string, text: string) => Promise<void> | void;
 }
 
 interface StreamingMarkdownProps {
@@ -55,6 +59,28 @@ interface UserMessageImage {
 }
 
 type ContextCompactionState = "pending" | "completed";
+type TimelineItem = UiSnapshot["timeline"][number];
+type TimelineMessage = UiSnapshot["messages"][number];
+type TimelineTool = UiSnapshot["tools"][number];
+
+interface TimelineCollapseCandidate {
+  index: number;
+  item: TimelineItem;
+  kind: "assistant" | "tool";
+  message?: TimelineMessage;
+}
+
+interface TimelineCollapseGroup {
+  key: string;
+  items: TimelineCollapseCandidate[];
+  itemCount: number;
+  durationLabel: string | null;
+}
+
+interface TimelineCollapseState {
+  groupsBySummaryIndex: Map<number, TimelineCollapseGroup>;
+  hiddenIndexes: Set<number>;
+}
 
 function contextCompactionState(body: string): ContextCompactionState | null {
   const normalized = body.trim();
@@ -107,6 +133,37 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: Streamin
     </div>
   );
 });
+
+function TimelineCollapseSummary({
+  group,
+  expanded,
+  onToggle,
+}: {
+  group: TimelineCollapseGroup;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`timeline-collapse-toggle ${expanded ? "is-expanded" : ""}`}
+      aria-expanded={expanded}
+      aria-label={expanded ? "收起已运行上下文" : "展开已运行上下文"}
+      onClick={onToggle}
+    >
+      <span className="timeline-collapse-prefix" aria-hidden="true">
+        {"\u2022"}
+      </span>
+      <span className="timeline-collapse-label">
+        已运行{group.durationLabel ? ` ${group.durationLabel}` : ""}
+      </span>
+      <span className="timeline-collapse-count">{group.itemCount} 条记录</span>
+      <span className="timeline-collapse-chevron" aria-hidden="true">
+        {"\u203A"}
+      </span>
+    </button>
+  );
+}
 
 const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMessageImage[] }) {
   const [previewImage, setPreviewImage] = useState<UserMessageImage | null>(null);
@@ -183,9 +240,82 @@ const UserImageStrip = memo(function UserImageStrip({ images }: { images: UserMe
   );
 });
 
-const MessageRow = memo(function MessageRow({ id, role, body, streaming }: MessageRowProps) {
+const MessageRow = memo(function MessageRow({
+  id,
+  role,
+  body,
+  streaming,
+  retryable = false,
+  onRetry,
+}: MessageRowProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(body);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(body);
+  }, [body, editing]);
+
+  const handleRetrySubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextText = draft.trim();
+    if (!nextText || !onRetry) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onRetry(id, nextText);
+      setEditing(false);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   if (role === "User") {
     const { text, images } = splitUserMessageBody(body);
+    const canRetry = retryable && images.length === 0 && !!onRetry;
+    if (editing && canRetry) {
+      const normalizedBody = normalizeUserMessageText(body).trim();
+      const normalizedDraft = normalizeUserMessageText(draft).trim();
+      return (
+        <div key={id} className="msg msg-user msg-user-editing">
+          <form className="msg-user-edit" onSubmit={handleRetrySubmit}>
+            <textarea
+              className="msg-user-edit-textarea"
+              aria-label="编辑用户消息"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              disabled={submitting}
+            />
+            {submitError && <div className="msg-user-edit-error">{submitError}</div>}
+            <div className="msg-user-edit-actions">
+              <button
+                type="button"
+                className="msg-user-edit-cancel"
+                onClick={() => {
+                  setDraft(body);
+                  setSubmitError(null);
+                  setEditing(false);
+                }}
+                disabled={submitting}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="msg-user-edit-submit"
+                disabled={submitting || normalizedDraft.length === 0 || normalizedDraft === normalizedBody}
+              >
+                重新发送
+              </button>
+            </div>
+          </form>
+        </div>
+      );
+    }
+
     if (images.length > 0) {
       return (
         <div key={id} className="msg msg-user msg-user-stacked">
@@ -202,11 +332,32 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
       );
     }
 
-    return (
+    const messageBubble = (
       <div key={id} className="msg msg-user">
         <span className="msg-prefix msg-prefix-user">{"\u203A"} </span>
         <div className="msg-content msg-content-user">
           <UserMessageText text={body} />
+        </div>
+      </div>
+    );
+
+    if (!canRetry) return messageBubble;
+
+    return (
+      <div key={id} className="msg-user-wrap">
+        {messageBubble}
+        <div className="msg-user-actions">
+          <button
+            type="button"
+            className="msg-user-edit-btn"
+            onClick={() => {
+              setDraft(body);
+              setSubmitError(null);
+              setEditing(true);
+            }}
+          >
+            编辑并重发
+          </button>
         </div>
       </div>
     );
@@ -254,6 +405,33 @@ const MessageRow = memo(function MessageRow({ id, role, body, streaming }: Messa
 
 function shouldRenderMessage(role: MessageRole, body: string) {
   return role === "User" || body.trim().length > 0;
+}
+
+function retryableUserMessageIds(snapshot: UiSnapshot) {
+  const retryableIds = new Set<string>();
+  if (snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool") {
+    return retryableIds;
+  }
+
+  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+  for (const [index, item] of snapshot.timeline.entries()) {
+    if (typeof item !== "object" || !("Message" in item)) continue;
+    const message = messagesById.get(item.Message);
+    if (message?.role !== "User") continue;
+
+    let canRetry = true;
+    for (const nextItem of snapshot.timeline.slice(index + 1)) {
+      if (nextItem === "Thinking") continue;
+      if (typeof nextItem === "object" && "Message" in nextItem) {
+        const nextMessage = messagesById.get(nextItem.Message);
+        if (nextMessage?.role === "System") continue;
+      }
+      canRetry = false;
+      break;
+    }
+    if (canRetry) retryableIds.add(message.id);
+  }
+  return retryableIds;
 }
 
 function UserMessageText({ text }: { text: string }) {
@@ -362,6 +540,144 @@ function placeTurnChangeSetsAfterFinalAssistant(
   return result;
 }
 
+function buildTimelineCollapseState({
+  timeline,
+  timelineStart,
+  messagesById,
+  toolsById,
+  hiddenPermissionRequestIds,
+  sessionStatus,
+  turnIsActive,
+  activeTurnStartIndex,
+  fullTimelineLength,
+}: {
+  timeline: UiSnapshot["timeline"];
+  timelineStart: number;
+  messagesById: Map<string, TimelineMessage>;
+  toolsById: Map<string, TimelineTool>;
+  hiddenPermissionRequestIds?: ReadonlySet<string>;
+  sessionStatus: UiSnapshot["session"]["status"];
+  turnIsActive: boolean;
+  activeTurnStartIndex: number;
+  fullTimelineLength: number;
+}): TimelineCollapseState {
+  const groupsBySummaryIndex = new Map<number, TimelineCollapseGroup>();
+  const hiddenIndexes = new Set<number>();
+  let turnStartMessage: TimelineMessage | null = null;
+  let turnItems: TimelineCollapseCandidate[] = [];
+
+  const flushTurn = () => {
+    const finalAssistant = [...turnItems]
+      .reverse()
+      .find((candidate) => candidate.kind === "assistant" && candidate.message);
+    if (!finalAssistant?.message) {
+      turnItems = [];
+      turnStartMessage = null;
+      return;
+    }
+
+    const itemsToCollapse = turnItems.filter(
+      (candidate) => candidate.index < finalAssistant.index,
+    );
+    if (itemsToCollapse.length === 0) {
+      turnItems = [];
+      turnStartMessage = null;
+      return;
+    }
+
+    const isCurrentTurn =
+      turnIsActive &&
+      (activeTurnStartIndex < 0 || finalAssistant.index > activeTurnStartIndex);
+    if (isCurrentTurn) {
+      if (sessionStatus !== "Streaming") {
+        turnItems = [];
+        turnStartMessage = null;
+        return;
+      }
+      if (finalAssistant.index !== fullTimelineLength - 1) {
+        turnItems = [];
+        turnStartMessage = null;
+        return;
+      }
+    }
+
+    const groupHiddenIndexes = new Set(itemsToCollapse.map((candidate) => candidate.index));
+    for (const index of groupHiddenIndexes) {
+      hiddenIndexes.add(index);
+    }
+
+    const key = `${turnStartMessage?.id ?? "turn"}:${finalAssistant.message.id}`;
+    groupsBySummaryIndex.set(finalAssistant.index, {
+      key,
+      items: itemsToCollapse,
+      itemCount: itemsToCollapse.length,
+      durationLabel: elapsedLabelForTurn(turnStartMessage, finalAssistant.message, itemsToCollapse),
+    });
+
+    turnItems = [];
+    turnStartMessage = null;
+  };
+
+  for (const [offset, item] of timeline.entries()) {
+    const index = timelineStart + offset;
+
+    if (typeof item === "object" && "Message" in item) {
+      const message = messagesById.get(item.Message);
+      if (!message) continue;
+
+      if (message.role === "User") {
+        flushTurn();
+        turnStartMessage = message;
+        continue;
+      }
+
+      if (message.role === "Assistant" && shouldRenderMessage(message.role, message.body)) {
+        turnItems.push({ index, item, kind: "assistant", message });
+      }
+      continue;
+    }
+
+    if (typeof item === "object" && "Tool" in item) {
+      const tool = toolsById.get(item.Tool);
+      if (tool && shouldRenderTimelineTool(tool, hiddenPermissionRequestIds)) {
+        turnItems.push({ index, item, kind: "tool" });
+      }
+    }
+  }
+
+  flushTurn();
+  return { groupsBySummaryIndex, hiddenIndexes };
+}
+
+function elapsedLabelForTurn(
+  turnStartMessage: TimelineMessage | null,
+  finalAssistant: TimelineMessage,
+  collapsedItems: TimelineCollapseCandidate[],
+) {
+  const startMs =
+    parseTimestampMs(turnStartMessage?.created_at) ??
+    parseTimestampMs(collapsedItems.find((item) => item.message?.created_at)?.message?.created_at);
+  const endMs = parseTimestampMs(finalAssistant.created_at);
+  if (startMs == null || endMs == null || endMs < startMs) return null;
+  return formatElapsedDuration(endMs - startMs);
+}
+
+function parseTimestampMs(value?: string) {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatElapsedDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  return [hours, minutes, seconds]
+    .map((part) => part.toString().padStart(2, "0"))
+    .join(":");
+}
+
 export function ConversationTimeline({
   snapshot,
   onPermissionSelect,
@@ -369,6 +685,7 @@ export function ConversationTimeline({
   onReviewFileSelect,
   onReviewChangeSetSelect,
   hiddenPermissionRequestIds,
+  onRetryUserMessage,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
@@ -377,6 +694,9 @@ export function ConversationTimeline({
   const manualScrollIntent = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
+  const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const scrollToBottom = () => {
     scrollElementIntoView(bottomSentinelRef.current);
@@ -477,6 +797,7 @@ export function ConversationTimeline({
   useEffect(() => {
     visibleSessionId.current = snapshot.session.id;
     setVisibleCount(INITIAL_TIMELINE_WINDOW);
+    setExpandedCollapseGroups(new Set());
     userScrolledUp.current = false;
   }, [snapshot.session.id]);
 
@@ -581,8 +902,123 @@ export function ConversationTimeline({
     return { toolsById, childToolsByParent };
   }, [snapshot.tools, visibleToolIds]);
 
+  const collapseState = useMemo(
+    () =>
+      buildTimelineCollapseState({
+        timeline: visibleTimeline,
+        timelineStart,
+        messagesById,
+        toolsById,
+        hiddenPermissionRequestIds,
+        sessionStatus: snapshot.session.status,
+        turnIsActive,
+        activeTurnStartIndex,
+        fullTimelineLength: snapshot.timeline.length,
+      }),
+    [
+      activeTurnStartIndex,
+      hiddenPermissionRequestIds,
+      messagesById,
+      snapshot.session.status,
+      snapshot.timeline.length,
+      timelineStart,
+      toolsById,
+      turnIsActive,
+      visibleTimeline,
+    ],
+  );
+  const retryableMessages = useMemo(() => retryableUserMessageIds(snapshot), [snapshot]);
+
+  const toggleCollapseGroup = (key: string) => {
+    setExpandedCollapseGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
+
+  const renderTimelineItem = (
+    item: TimelineItem,
+    i: number,
+    {
+      keyPrefix = "",
+      renderChanges = true,
+    }: { keyPrefix?: string; renderChanges?: boolean } = {},
+  ) => {
+    if (typeof item === "string" && item === "Thinking") {
+      return null;
+    }
+
+    if (typeof item === "object" && "Message" in item) {
+      const msg = messagesById.get(item.Message);
+      if (!msg) return null;
+      const isStreaming =
+        msg.role === "Assistant" &&
+        snapshot.session.status === "Streaming" &&
+        isLastMessage(i);
+      const isCurrentTurnMessage =
+        turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
+      const changesForMessage =
+        renderChanges && msg.role === "Assistant" && !isStreaming && !isCurrentTurnMessage
+          ? displayTurnChangeSetsByMessageId[msg.id]
+          : undefined;
+      const renderMessage = shouldRenderMessage(msg.role, msg.body);
+
+      if (!renderMessage && !changesForMessage?.files.length) {
+        return null;
+      }
+
+      return (
+        <Fragment key={`${keyPrefix}${msg.id}`}>
+          {renderMessage && (
+            <MessageRow
+              id={msg.id}
+              role={msg.role}
+              body={msg.body}
+              streaming={isStreaming}
+              retryable={retryableMessages.has(msg.id)}
+              onRetry={onRetryUserMessage}
+            />
+          )}
+          {changesForMessage && changesForMessage.files.length > 0 && (
+            <ChangesBar
+              changeSetId={changesForMessage.changeSetId}
+              changes={changesForMessage.files}
+              onFileSelect={onReviewFileSelect ?? (() => {})}
+              onReviewClick={onReviewChangeSetSelect}
+            />
+          )}
+        </Fragment>
+      );
+    }
+
+    if (typeof item === "object" && "Tool" in item) {
+      const tool = toolsById.get(item.Tool);
+      if (!tool) return null;
+      if (!shouldRenderTimelineTool(tool, hiddenPermissionRequestIds)) return null;
+
+      return (
+        <ToolCallCard
+          key={`${keyPrefix}${tool.id}`}
+          tool={tool}
+          childToolsByParent={childToolsByParent}
+          nested={false}
+          onPermissionSelect={onPermissionSelect}
+          hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+        />
+      );
+    }
+
+    return null;
+  };
+
   return (
     <div className="timeline-scroll" ref={scrollRef}>
       <div className="timeline-items" ref={itemsRef}>
@@ -601,73 +1037,32 @@ export function ConversationTimeline({
         )}
         {visibleTimeline.map((item, offset) => {
           const i = timelineStart + offset;
-          if (typeof item === "string" && item === "Thinking") {
-            return null;
-          }
+          if (collapseState.hiddenIndexes.has(i)) return null;
 
-          if (typeof item === "object" && "Message" in item) {
-            const msg = messagesById.get(item.Message);
-            if (!msg) return null;
-            const isStreaming =
-              msg.role === "Assistant" &&
-              snapshot.session.status === "Streaming" &&
-              isLastMessage(i);
-            const isCurrentTurnMessage =
-              turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
-            const changesForMessage =
-              msg.role === "Assistant" && !isStreaming && !isCurrentTurnMessage
-                ? displayTurnChangeSetsByMessageId[msg.id]
-                : undefined;
-            const renderMessage = shouldRenderMessage(msg.role, msg.body);
+          const group = collapseState.groupsBySummaryIndex.get(i);
+          if (!group) return renderTimelineItem(item, i);
 
-            if (!renderMessage && !changesForMessage?.files.length) {
-              return null;
-            }
-
-            return (
-              <Fragment key={msg.id}>
-                {renderMessage && (
-                  <MessageRow
-                    id={msg.id}
-                    role={msg.role}
-                    body={msg.body}
-                    streaming={isStreaming}
-                  />
-                )}
-                {changesForMessage && changesForMessage.files.length > 0 && (
-                  <ChangesBar
-                    changeSetId={changesForMessage.changeSetId}
-                    changes={changesForMessage.files}
-                    onFileSelect={onReviewFileSelect ?? (() => {})}
-                    onReviewClick={onReviewChangeSetSelect}
-                  />
-                )}
-              </Fragment>
-            );
-          }
-
-          if (typeof item === "object" && "Tool" in item) {
-            const tool = toolsById.get(item.Tool);
-            if (!tool) return null;
-            if (shouldHidePermissionTool(tool, hiddenPermissionRequestIds))
-              return null;
-            if (tool.call_id === "workspace.scan" && !tool.parent_call_id)
-              return null;
-            if (tool.parent_call_id) return null;
-
-            return (
-              <ToolCallCard
-                key={tool.id}
-                tool={tool}
-                childToolsByParent={childToolsByParent}
-                nested={false}
-                onPermissionSelect={onPermissionSelect}
-                hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+          const expanded = expandedCollapseGroups.has(group.key);
+          return (
+            <Fragment key={`collapse:${group.key}`}>
+              <TimelineCollapseSummary
+                group={group}
+                expanded={expanded}
+                onToggle={() => toggleCollapseGroup(group.key)}
               />
-            );
-          }
-
-          return null;
+              {expanded && (
+                <div className="timeline-collapse-content">
+                  {group.items.map((candidate) =>
+                    renderTimelineItem(candidate.item, candidate.index, {
+                      keyPrefix: `collapsed:${group.key}:`,
+                      renderChanges: false,
+                    }),
+                  )}
+                </div>
+              )}
+              {renderTimelineItem(item, i)}
+            </Fragment>
+          );
         })}
         {snapshot.thinking_status === "Active" && (
           <div className="thinking-indicator thinking-active">
@@ -690,4 +1085,14 @@ function shouldHidePermissionTool(
     (tool.kind === "permission" &&
       (tool.status !== "Running" || !!tool.permission_decision))
   );
+}
+
+function shouldRenderTimelineTool(
+  tool: UiSnapshot["tools"][number],
+  hiddenPermissionRequestIds?: ReadonlySet<string>,
+) {
+  if (shouldHidePermissionTool(tool, hiddenPermissionRequestIds)) return false;
+  if (tool.call_id === "workspace.scan" && !tool.parent_call_id) return false;
+  if (tool.parent_call_id) return false;
+  return true;
 }

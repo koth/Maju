@@ -1,11 +1,16 @@
 use crate::state::AppState;
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use workspace_model::FileEntry;
 
 #[tauri::command]
-pub fn fs_list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<FileEntry>, String> {
-    state.list_workspace_dir(path)
+pub async fn fs_list_dir(app: AppHandle, path: String) -> Result<Vec<FileEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.list_workspace_dir(path)
+    })
+    .await
+    .map_err(|e| format!("List directory task failed: {e}"))?
 }
 
 #[tauri::command]

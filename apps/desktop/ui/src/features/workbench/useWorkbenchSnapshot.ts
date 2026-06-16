@@ -175,6 +175,12 @@ export function useWorkbenchSnapshot() {
     setSnapshot(null);
   }, []);
 
+  const clearWorkspace = useCallback(() => {
+    prevSnapshotRevision.current = 0;
+    setWorkspaceReady(false);
+    setSnapshot(null);
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -255,5 +261,6 @@ export function useWorkbenchSnapshot() {
     pollState,
     acceptSnapshot,
     clearSnapshot,
+    clearWorkspace,
   };
 }

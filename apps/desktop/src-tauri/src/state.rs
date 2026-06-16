@@ -218,6 +218,61 @@ impl AppState {
         Ok(())
     }
 
+    pub fn archive_workspace(&self, path: String) -> Result<Option<UiSnapshot>, String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let key = workspace_key_for_identifier(&guard, &path)
+            .ok_or_else(|| format!("Workspace is not open: {path}"))?;
+        let is_active_workspace = guard.active_workspace.as_deref() == Some(key.as_str());
+        let workspace_root = {
+            let entry = guard
+                .workspaces
+                .get_mut(&key)
+                .ok_or_else(|| format!("Workspace is not open: {path}"))?;
+            let workspace_root = entry_workspace_root(entry);
+            archive_workspace_sessions(&workspace_root)?;
+            if let WorkspaceEntry::Dormant(metadata) = entry {
+                metadata.sessions.clear();
+            }
+            workspace_root
+        };
+        let entry = guard
+            .workspaces
+            .remove(&key)
+            .ok_or_else(|| format!("Workspace is not open: {path}"))?;
+        app_core::startup_perf::mark(
+            "state/archive_workspace",
+            workspace_root.display().to_string(),
+        );
+        self.shutdown_workspace_entry(&key, &entry);
+        drop(entry);
+
+        if !is_active_workspace {
+            return Ok(None);
+        }
+
+        let next_key = guard.workspaces.keys().next().cloned();
+        let Some(next_key) = next_key else {
+            guard.active_workspace = None;
+            return Ok(None);
+        };
+
+        activate_workspace_locked(&mut guard, next_key).map(Some)
+    }
+
+    fn shutdown_workspace_entry(&self, key: &str, entry: &WorkspaceEntry) {
+        if let Some(remote) = entry_remote(entry) {
+            self.terminal_service
+                .shutdown_workspace_key(&remote_workspace_key(&remote));
+            return;
+        }
+        if let Some(root) = entry_path(entry) {
+            self.lsp_service.shutdown_workspace(&root);
+            self.terminal_service.shutdown_workspace(&root);
+        } else {
+            self.terminal_service.shutdown_workspace_key(key);
+        }
+    }
+
     pub fn shutdown_all(&self) {
         if let Ok(mut guard) = self.workspaces.lock() {
             guard.workspaces.clear();
@@ -747,6 +802,29 @@ fn connect_remote_workspace_locked(
     Ok(snapshot)
 }
 
+fn activate_workspace_locked(
+    guard: &mut WorkspaceRegistry,
+    key: String,
+) -> Result<UiSnapshot, String> {
+    let (remote, path) = {
+        let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
+        if let WorkspaceEntry::Connected(application) = entry {
+            let snapshot = application.lightweight_ui_snapshot();
+            guard.active_workspace = Some(key);
+            return Ok(snapshot);
+        }
+        (entry_remote(entry), entry_path(entry))
+    };
+
+    guard.active_workspace = Some(key.clone());
+    if let Some(remote) = remote {
+        return app_core::build_dormant_remote_workspace_ui(remote);
+    }
+
+    let path = path.ok_or("Workspace is not open")?;
+    connect_workspace_locked(guard, key, path, None)
+}
+
 fn build_remote_workspace_application(
     key: &str,
     remote: RemoteLinuxWorkspace,
@@ -844,6 +922,13 @@ fn load_lightweight_sessions(path: &Path) -> Result<Vec<SessionListItem>, String
         .map_err(|e| e.to_string())
 }
 
+fn archive_workspace_sessions(path: &Path) -> Result<(), String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    SessionStore::open(paths.root(), path)
+        .and_then(|store| store.archive_workspace_sessions())
+        .map_err(|e| e.to_string())
+}
+
 fn open_workspace_items(guard: &WorkspaceRegistry) -> Vec<OpenWorkspaceItem> {
     let active = guard.active_workspace.as_deref();
     let mut items = guard
@@ -900,6 +985,13 @@ fn entry_path(entry: &WorkspaceEntry) -> Option<PathBuf> {
         WorkspaceEntry::Connected(app) => app.ui.workspace.root.clone(),
         WorkspaceEntry::Dormant(metadata) => metadata.workspace.root.clone(),
     })
+}
+
+fn entry_workspace_root(entry: &WorkspaceEntry) -> PathBuf {
+    match entry {
+        WorkspaceEntry::Connected(app) => app.ui.workspace.root.clone(),
+        WorkspaceEntry::Dormant(metadata) => metadata.workspace.root.clone(),
+    }
 }
 
 fn entry_is_remote(entry: &WorkspaceEntry) -> bool {

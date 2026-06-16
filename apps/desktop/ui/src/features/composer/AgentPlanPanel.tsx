@@ -88,7 +88,7 @@ export function AgentPlanPanel({ entries }: Props) {
   );
 }
 
-export function shouldShowAgentPlanNearComposer(
+export function shouldShowAgentPlanDuringTurn(
   snapshot: Pick<UiSnapshot, "agent_plan" | "session">,
 ) {
   return (
@@ -96,6 +96,8 @@ export function shouldShowAgentPlanNearComposer(
     (snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool")
   );
 }
+
+export const shouldShowAgentPlanNearComposer = shouldShowAgentPlanDuringTurn;
 
 export function PermissionRequestPanel({
   request,

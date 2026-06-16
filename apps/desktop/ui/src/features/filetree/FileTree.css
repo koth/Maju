@@ -25,6 +25,31 @@
   padding: 4px 0;
 }
 
+.filetree-loading,
+.filetree-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.filetree-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid color-mix(in srgb, var(--text-soft) 28%, transparent);
+  border-top-color: color-mix(in srgb, var(--text-muted) 88%, transparent);
+  border-radius: 50%;
+  animation: filetree-spin 0.8s linear infinite;
+}
+
+@keyframes filetree-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .filetree-inline {
   --filetree-indent-base: 4px;
   --filetree-indent-step: 14px;

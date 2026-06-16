@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use workspace_model::RepositorySnapshot;
 
 #[tauri::command]
@@ -8,8 +8,13 @@ pub fn git_status(state: State<'_, AppState>) -> Result<RepositorySnapshot, Stri
 }
 
 #[tauri::command]
-pub fn git_refresh(state: State<'_, AppState>) -> Result<RepositorySnapshot, String> {
-    state.git_refresh()
+pub async fn git_refresh(app: AppHandle) -> Result<RepositorySnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.git_refresh()
+    })
+    .await
+    .map_err(|e| format!("Git refresh task failed: {e}"))?
 }
 
 #[tauri::command]

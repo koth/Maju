@@ -7,6 +7,7 @@ import {
   sessionArchive,
   sessionList,
   sessionSwitch,
+  workspaceArchive,
   workspaceSetActive,
   settingsGetAgentSnapshot,
   settingsGetRemoteProfiles,
@@ -31,6 +32,7 @@ vi.mock("../../lib/tauri", async () => {
     sessionCreate: vi.fn(),
     sessionArchive: vi.fn(),
     sessionCancel: vi.fn(),
+    workspaceArchive: vi.fn(),
     settingsGetAgentSnapshot: vi.fn(),
     settingsGetRemoteProfiles: vi.fn(),
     settingsValidateRemoteProfile: vi.fn(),
@@ -209,6 +211,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(sessionCreate).mockResolvedValue(undefined);
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
     vi.mocked(sessionArchive).mockResolvedValue(undefined);
+    vi.mocked(workspaceArchive).mockResolvedValue(null);
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
@@ -653,6 +656,71 @@ describe("SessionList agent picker", () => {
     await waitFor(() => {
       expect(sessionArchive).toHaveBeenCalledWith("session-archive", "/Users/kothchen/code/Kodex");
       expect(onSessionChanged).toHaveBeenCalled();
+    });
+  });
+
+  it("archives an inactive workspace without changing the active snapshot", async () => {
+    const onWorkspaceArchived = vi.fn();
+    vi.mocked(sessionList).mockResolvedValue([
+      workspaceSessions[0],
+      {
+        ...workspaceSessions[0],
+        workspace: {
+          ...workspaceSessions[0].workspace,
+          id: "workspace-2",
+          root: "/Users/kothchen/code/Other",
+          name: "Other",
+        },
+        sessions: [],
+        active_session_id: "",
+        is_active: false,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId="session-current"
+        activeSessionTitle="Current"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+        onWorkspaceArchived={onWorkspaceArchived}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "归档项目 Other" }));
+
+    await waitFor(() => {
+      expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Other");
+      expect(onWorkspaceArchived).not.toHaveBeenCalled();
+    });
+  });
+
+  it("archives the active workspace and returns the replacement snapshot", async () => {
+    const onWorkspaceArchived = vi.fn();
+    const nextSnapshot = { revision: 42 };
+    vi.mocked(workspaceArchive).mockResolvedValue(nextSnapshot as never);
+
+    render(
+      <SessionList
+        activeSessionId="session-current"
+        activeSessionTitle="Current"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+        onWorkspaceArchived={onWorkspaceArchived}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "归档项目 Kodex" }));
+
+    await waitFor(() => {
+      expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Kodex");
+      expect(onWorkspaceArchived).toHaveBeenCalledWith(nextSnapshot);
     });
   });
 

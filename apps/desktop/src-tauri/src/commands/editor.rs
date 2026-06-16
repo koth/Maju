@@ -1,13 +1,15 @@
 use crate::state::AppState;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use workspace_model::{EditorFileSnapshot, EditorFileVersion};
 
 #[tauri::command]
-pub fn editor_open_file(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<EditorFileSnapshot, String> {
-    state.open_workspace_file(path)
+pub async fn editor_open_file(app: AppHandle, path: String) -> Result<EditorFileSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.open_workspace_file(path)
+    })
+    .await
+    .map_err(|e| format!("Open editor file task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -29,9 +31,14 @@ pub fn editor_save_file(
 }
 
 #[tauri::command]
-pub fn editor_get_content(
-    state: State<'_, AppState>,
+pub async fn editor_get_content(
+    app: AppHandle,
     path: String,
 ) -> Result<EditorFileSnapshot, String> {
-    state.open_workspace_file(path)
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.open_workspace_file(path)
+    })
+    .await
+    .map_err(|e| format!("Get editor content task failed: {e}"))?
 }

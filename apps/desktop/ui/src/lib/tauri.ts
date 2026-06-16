@@ -22,6 +22,10 @@ export async function sessionSendPrompt(prompt: UserPromptContent[]): Promise<vo
   return invoke("session_send_prompt", { prompt });
 }
 
+export async function sessionRetryUserMessage(messageId: string, text: string): Promise<void> {
+  return invoke("session_retry_user_message", { messageId, text });
+}
+
 export async function sessionSetConfigControl(
   controlId: string,
   valueId: string,
@@ -148,6 +152,10 @@ export async function workspaceOpenRemoteProfile(request: RemoteOpenRequest): Pr
 
 export async function workspaceClose(): Promise<void> {
   return invoke("workspace_close");
+}
+
+export async function workspaceArchive(path: string): Promise<UiSnapshot | null> {
+  return invoke<UiSnapshot | null>("workspace_archive", { path });
 }
 
 export async function workspaceListOpen(): Promise<OpenWorkspaceItem[]> {

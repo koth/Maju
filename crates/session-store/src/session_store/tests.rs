@@ -93,6 +93,33 @@ fn test_archive_session_hides_from_lists_without_deleting_data() {
 }
 
 #[test]
+fn test_archive_workspace_sessions_hides_only_that_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("home").join(".kodex");
+    let workspace_a = dir.path().join("a");
+    let workspace_b = dir.path().join("b");
+    std::fs::create_dir_all(&workspace_a).unwrap();
+    std::fs::create_dir_all(&workspace_b).unwrap();
+
+    let store_a = SessionStore::open(&app_data, &workspace_a).unwrap();
+    store_a.create_session("a1", "gpt-4").unwrap();
+    store_a.create_session("a2", "claude-3").unwrap();
+    store_a
+        .insert_message("a1", "m1", "User", "archived but retained", 1)
+        .unwrap();
+    let store_b = SessionStore::open(&app_data, &workspace_b).unwrap();
+    store_b.create_session("b1", "gpt-4").unwrap();
+
+    store_a.archive_workspace_sessions().unwrap();
+
+    assert!(store_a.list_sessions().unwrap().is_empty());
+    assert_eq!(store_b.list_sessions().unwrap().len(), 1);
+    let (messages, _tools, _timeline) = store_a.load_session("a1").unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "archived but retained");
+}
+
+#[test]
 fn test_update_session_title() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path(), dir.path()).unwrap();

@@ -643,6 +643,17 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn archive_workspace_sessions(&self) -> Result<()> {
+        let now = now_iso();
+        self.conn.execute(
+            "UPDATE sessions
+             SET archived_at = ?1, updated_at = ?1
+             WHERE workspace_root = ?2 AND archived_at IS NULL",
+            params![now, &self.workspace_root],
+        )?;
+        Ok(())
+    }
+
     // ── Message persistence ──
 
     pub fn insert_message(
@@ -666,6 +677,14 @@ impl SessionStore {
             "UPDATE messages SET body = ?1 WHERE id = ?2",
             params![body, id],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_messages(&self, ids: &[String]) -> Result<()> {
+        for id in ids {
+            self.conn
+                .execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        }
         Ok(())
     }
 

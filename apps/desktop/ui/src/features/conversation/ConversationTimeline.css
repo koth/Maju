@@ -41,6 +41,77 @@
   color: var(--text-strong);
 }
 
+.timeline-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 7px;
+  width: auto;
+  min-height: 28px;
+  margin: 2px 0 0;
+  padding: 2px 7px 2px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-family: var(--font-chat);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+}
+
+.timeline-collapse-toggle:hover {
+  background: color-mix(in srgb, var(--surface-hover) 72%, transparent);
+  color: var(--text-muted);
+}
+
+.timeline-collapse-toggle:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.timeline-collapse-prefix {
+  width: 24px;
+  padding-right: 7px;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  text-align: right;
+  opacity: 0.68;
+}
+
+.timeline-collapse-label {
+  color: var(--text-muted);
+  font-weight: 580;
+}
+
+.timeline-collapse-count {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.timeline-collapse-chevron {
+  color: var(--text-soft);
+  font-size: 15px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform var(--transition-fast);
+}
+
+.timeline-collapse-toggle.is-expanded .timeline-collapse-chevron {
+  transform: rotate(90deg);
+}
+
+.timeline-collapse-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 2px 11px;
+  padding-left: 13px;
+  border-left: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+}
+
 /* ── Messages ── */
 .msg {
   display: flex;
@@ -60,6 +131,130 @@
   border-radius: 16px;
   background: var(--surface-bg);
   box-shadow: none;
+}
+
+.msg-user-wrap {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: fit-content;
+  max-width: min(760px, 86%);
+  margin: 14px 0 4px auto;
+}
+
+.msg-user-wrap .msg-user {
+  align-self: stretch;
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+}
+
+.msg-user-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 5px;
+  padding-right: 4px;
+}
+
+.msg-user-edit-btn,
+.msg-user-edit-cancel,
+.msg-user-edit-submit {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-alt-bg) 70%, transparent);
+  color: var(--text-muted);
+  font-family: var(--font-chat);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-user-edit-btn {
+  height: 23px;
+  padding: 0 8px;
+  border-color: color-mix(in srgb, var(--border-subtle) 70%, transparent);
+  background: transparent;
+  color: var(--text-soft);
+  opacity: 0.84;
+}
+
+.msg-user-edit-btn:hover,
+.msg-user-edit-cancel:hover,
+.msg-user-edit-submit:hover {
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+.msg-user-edit-btn:focus-visible,
+.msg-user-edit-cancel:focus-visible,
+.msg-user-edit-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.msg-user-editing {
+  display: block;
+  width: min(760px, 86%);
+  max-width: min(760px, 86%);
+}
+
+.msg-user-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg-user-edit-textarea {
+  width: 100%;
+  min-height: 86px;
+  max-height: 260px;
+  resize: vertical;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--app-bg) 82%, transparent);
+  color: var(--text-strong);
+  font-family: var(--font-chat);
+  font-size: 14px;
+  line-height: 1.45;
+  padding: 9px 10px;
+}
+
+.msg-user-edit-textarea:focus {
+  border-color: var(--border-strong);
+  outline: 0;
+}
+
+.msg-user-edit-error {
+  color: var(--danger);
+  font-family: var(--font-chat);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.msg-user-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.msg-user-edit-cancel,
+.msg-user-edit-submit {
+  height: 28px;
+  padding: 0 11px;
+}
+
+.msg-user-edit-submit {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-alt-bg));
+  color: var(--text-strong);
+}
+
+.msg-user-edit-submit:disabled,
+.msg-user-edit-cancel:disabled {
+  cursor: default;
+  opacity: 0.48;
 }
 
 .msg-user-stacked {
@@ -192,8 +387,14 @@
   margin-top: 14px;
 }
 
+.msg-user-wrap + .msg-assistant {
+  margin-top: 14px;
+}
+
 .msg-assistant + .msg-user,
-.tc + .msg-user {
+.msg-assistant + .msg-user-wrap,
+.tc + .msg-user,
+.tc + .msg-user-wrap {
   margin-top: 22px;
 }
 

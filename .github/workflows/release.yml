@@ -143,6 +143,7 @@ jobs:
             file \
             git \
             libssl-dev \
+            perl \
             pkg-config \
             python3 \
             xz-utils
@@ -187,6 +188,9 @@ jobs:
         run: npm ci --prefix kodex-claude
 
       - name: Build codex-acp
+        env:
+          OPENSSL_NO_VENDOR: "0"
+          OPENSSL_STATIC: "1"
         run: cargo build --manifest-path codex-acp/Cargo.toml --release --target ${{ matrix.rust_target }}
 
       - name: Build codex-acp Linux sandbox
@@ -224,6 +228,19 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Verify codex-acp OpenSSL linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="codex-acp/target/${{ matrix.rust_target }}/release/codex-acp"
+          test -x "${binary}"
+          echo "Dynamic dependencies for ${binary}:"
+          ldd "${binary}" || true
+          if ldd "${binary}" 2>/dev/null | grep -E 'libssl|libcrypto'; then
+            echo "${binary} must not depend on system OpenSSL; remote hosts may not provide the same libssl ABI." >&2
+            exit 1
+          fi
 
       - name: Package remote agent assets
         shell: bash

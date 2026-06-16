@@ -1,6 +1,6 @@
 use crate::commands::workspace::save_open_workspace_state;
 use crate::state::AppState;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, ChangeSetFilesResponse, ChangeSetSummary, FileChangeRecord,
     GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
@@ -23,6 +23,18 @@ pub fn session_send_prompt(
 ) -> Result<(), String> {
     state.with_app(|app| {
         app.send_prompt_content_background(prompt)
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+pub fn session_retry_user_message(
+    state: State<'_, AppState>,
+    message_id: String,
+    text: String,
+) -> Result<(), String> {
+    state.with_app(|app| {
+        app.retry_user_message_background(&message_id, text)
             .map_err(|e| e.to_string())
     })
 }
@@ -62,8 +74,13 @@ pub fn session_cancel(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn session_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceSessionList>, String> {
-    state.list_workspace_sessions()
+pub async fn session_list(app: AppHandle) -> Result<Vec<WorkspaceSessionList>, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.list_workspace_sessions()
+    })
+    .await
+    .map_err(|e| format!("Session list task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -117,27 +134,42 @@ pub fn session_get_changes(state: State<'_, AppState>) -> Result<Vec<SessionFile
 }
 
 #[tauri::command]
-pub fn session_list_change_sets(
-    state: State<'_, AppState>,
+pub async fn session_list_change_sets(
+    app: AppHandle,
     request: Option<ListChangeSetsRequest>,
 ) -> Result<Vec<ChangeSetSummary>, String> {
-    state.with_app(|app| Ok(app.list_change_sets(request.unwrap_or_default())))
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_app(|app| Ok(app.list_change_sets(request.unwrap_or_default())))
+    })
+    .await
+    .map_err(|e| format!("List change sets task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn session_list_change_set_files(
-    state: State<'_, AppState>,
+pub async fn session_list_change_set_files(
+    app: AppHandle,
     request: ListChangeSetFilesRequest,
 ) -> Result<ChangeSetFilesResponse, String> {
-    state.with_app(|app| Ok(app.list_change_set_files(request)))
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_app(|app| Ok(app.list_change_set_files(request)))
+    })
+    .await
+    .map_err(|e| format!("List change set files task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn session_get_change_set_file_diff(
-    state: State<'_, AppState>,
+pub async fn session_get_change_set_file_diff(
+    app: AppHandle,
     request: GetChangeSetFileDiffRequest,
 ) -> Result<Option<FileChangeRecord>, String> {
-    state.with_app(|app| Ok(app.get_change_set_file_diff(request)))
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_app(|app| Ok(app.get_change_set_file_diff(request)))
+    })
+    .await
+    .map_err(|e| format!("Get change set file diff task failed: {e}"))?
 }
 
 #[tauri::command]

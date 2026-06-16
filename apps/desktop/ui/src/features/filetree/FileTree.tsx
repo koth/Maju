@@ -183,6 +183,7 @@ export function FileTree({
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filterText, setFilterText] = useState("");
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const committingRenameRef = useRef(false);
   const workspaceRootRef = useRef(workspaceRoot);
   const consumedRefreshSignalRef = useRef(refreshSignal);
@@ -192,17 +193,33 @@ export function FileTree({
     async (dirPath: string, requestWorkspaceRoot = workspaceRootRef.current) => {
       if (workspaceRootRef.current === requestWorkspaceRoot) {
         setError(null);
+        setLoadingPaths((prev) => {
+          const next = new Set(prev);
+          next.add(dirPath);
+          return next;
+        });
       }
-      const entries = await fsListDir(dirPath);
-      if (workspaceRootRef.current !== requestWorkspaceRoot) {
-        return false;
+      try {
+        const entries = await fsListDir(dirPath);
+        if (workspaceRootRef.current !== requestWorkspaceRoot) {
+          return false;
+        }
+        if (dirPath) {
+          setChildrenCache((prev) => new Map(prev).set(dirPath, entries));
+        } else {
+          setRootEntries(entries);
+        }
+        return true;
+      } finally {
+        if (workspaceRootRef.current === requestWorkspaceRoot) {
+          setLoadingPaths((prev) => {
+            if (!prev.has(dirPath)) return prev;
+            const next = new Set(prev);
+            next.delete(dirPath);
+            return next;
+          });
+        }
       }
-      if (dirPath) {
-        setChildrenCache((prev) => new Map(prev).set(dirPath, entries));
-      } else {
-        setRootEntries(entries);
-      }
-      return true;
     },
     [],
   );
@@ -216,6 +233,7 @@ export function FileTree({
     setContextMenu(null);
     setRenameState(null);
     setError(null);
+    setLoadingPaths(new Set());
     refreshDirectory("", requestWorkspaceRoot).catch((e) => {
       if (workspaceRootRef.current === requestWorkspaceRoot) {
         setError(String(e));
@@ -426,6 +444,8 @@ export function FileTree({
     onAddComposerReference(entry.path);
   }, [composerReferenceEnabled, onAddComposerReference]);
 
+  const rootLoading = loadingPaths.has("");
+
   return (
     <div className={`filetree filetree-${variant}`}>
       {variant === "panel" ? (
@@ -443,28 +463,37 @@ export function FileTree({
       )}
       {error && <div className="filetree-inline-error">{error}</div>}
       <div className="filetree-list">
-        {rootEntries.map((entry) => (
-          <TreeNode
-            key={entry.path}
-            entry={entry}
-            depth={0}
-            expandedDirs={expandedDirs}
-            childrenCache={childrenCache}
-            selectedPath={selectedEntry?.path ?? null}
-            renamingPath={renameState?.entry.path ?? null}
-            renameValue={renameState?.value ?? ""}
-            onToggleDir={handleToggleDir}
-            onSelect={handleSelect}
-            onFileOpen={onFileOpen}
-            onContextMenu={handleContextMenu}
-            onRenameValueChange={(value) =>
-              setRenameState((current) => current ? { ...current, value } : current)
-            }
-            onRenameCommit={commitRename}
-            onRenameCancel={cancelRename}
-            filterText={filterText}
-          />
-        ))}
+        {rootLoading && rootEntries.length === 0 ? (
+          <div className="filetree-loading" role="status" aria-live="polite">
+            <span className="filetree-spinner" aria-hidden="true" />
+            <span>正在载入文件树</span>
+          </div>
+        ) : rootEntries.length === 0 && !error ? (
+          <div className="filetree-empty">目录为空</div>
+        ) : (
+          rootEntries.map((entry) => (
+            <TreeNode
+              key={entry.path}
+              entry={entry}
+              depth={0}
+              expandedDirs={expandedDirs}
+              childrenCache={childrenCache}
+              selectedPath={selectedEntry?.path ?? null}
+              renamingPath={renameState?.entry.path ?? null}
+              renameValue={renameState?.value ?? ""}
+              onToggleDir={handleToggleDir}
+              onSelect={handleSelect}
+              onFileOpen={onFileOpen}
+              onContextMenu={handleContextMenu}
+              onRenameValueChange={(value) =>
+                setRenameState((current) => current ? { ...current, value } : current)
+              }
+              onRenameCommit={commitRename}
+              onRenameCancel={cancelRename}
+              filterText={filterText}
+            />
+          ))
+        )}
       </div>
       {contextMenu && (
         <div
