@@ -142,7 +142,6 @@ jobs:
             curl \
             file \
             git \
-            libssl-dev \
             perl \
             pkg-config \
             python3 \
@@ -191,7 +190,9 @@ jobs:
         env:
           OPENSSL_NO_VENDOR: "0"
           OPENSSL_STATIC: "1"
-        run: cargo build --manifest-path codex-acp/Cargo.toml --release --target ${{ matrix.rust_target }}
+        run: |
+          cargo clean --manifest-path codex-acp/Cargo.toml -p openssl -p openssl-sys
+          cargo build --manifest-path codex-acp/Cargo.toml --release --target ${{ matrix.rust_target }}
 
       - name: Build codex-acp Linux sandbox
         run: |
