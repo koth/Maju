@@ -94,6 +94,50 @@ fn edit_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
     )
 }
 
+fn edit_request_with_location(path: &str) -> RequestPermissionRequest {
+    RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            "edit",
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Edit)
+                .title("Edit".to_string())
+                .locations(vec![ToolCallLocation::new(path)]),
+        ),
+        vec![
+            PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+        ],
+    )
+}
+
+fn codex_apply_patch_approval_request(path: &str) -> RequestPermissionRequest {
+    RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            "call_patch",
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Edit)
+                .title("Edit file".to_string())
+                .locations(vec![ToolCallLocation::new(path)])
+                .raw_input(json!({
+                    "call_id": "call_patch",
+                    "changes": [
+                        { "path": path }
+                    ]
+                })),
+        ),
+        vec![
+            PermissionOption::new("approved", "Yes", PermissionOptionKind::AllowOnce),
+            PermissionOption::new(
+                "abort",
+                "No, provide feedback",
+                PermissionOptionKind::RejectOnce,
+            ),
+        ],
+    )
+}
+
 fn user_input_request(raw_input: serde_json::Value) -> RequestPermissionRequest {
     RequestPermissionRequest::new(
         SessionId::new("session-1"),
@@ -220,6 +264,24 @@ fn apply_patch_policy_rejects_patchable_direct_edit_tools_with_guidance() {
             apply_patch_retry_guidance().to_string(),
         ),
     );
+}
+
+#[test]
+fn apply_patch_policy_allows_codex_apply_patch_approval() {
+    let root = temp_workspace("codex-apply-patch-approval");
+    let request = codex_apply_patch_approval_request("packages/backend/src/service.ts");
+
+    assert_eq!(
+        decide_permission_with_edit_policy(
+            PermissionPolicyMode::Build,
+            AgentEditPolicy::PreferApplyPatch,
+            root.to_str().unwrap(),
+            &request,
+        ),
+        PermissionDecision::Select("approved".to_string()),
+    );
+
+    let _ = fs::remove_dir_all(root.parent().unwrap());
 }
 
 #[test]
@@ -413,6 +475,36 @@ fn build_permission_allows_remote_workspace_read_paths() {
     assert_eq!(
         decide_permission(PermissionPolicyMode::Build, "/g/kknovel", &request),
         PermissionDecision::Select("allow".to_string()),
+    );
+}
+
+#[test]
+fn build_permission_allows_workspace_edit_paths() {
+    let request = edit_request_with_location("packages/backend/src/service.ts");
+
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+        PermissionDecision::Select("allow".to_string()),
+    );
+}
+
+#[test]
+fn build_permission_asks_for_workspace_edit_without_paths() {
+    let request = edit_request(json!({}));
+
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+        PermissionDecision::Ask,
+    );
+}
+
+#[test]
+fn build_permission_asks_for_outside_workspace_edit_paths() {
+    let request = edit_request_with_location("D:/outside/service.ts");
+
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+        PermissionDecision::Ask,
     );
 }
 

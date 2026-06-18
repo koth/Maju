@@ -2162,6 +2162,92 @@ describe("stop reason propagation", () => {
   });
 });
 
+describe("kodex.ai/tool_stop", () => {
+  function createMockAgent() {
+    const updates: SessionNotification[] = [];
+    const mockClient = {
+      sessionUpdate: async (notification: SessionNotification) => {
+        updates.push(notification);
+      },
+    } as unknown as AgentSideConnection;
+    return {
+      agent: new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} }),
+      updates,
+    };
+  }
+
+  function injectSession(agent: ClaudeAcpAgent, sessionId: string) {
+    function* empty() {}
+    const gen = Object.assign(empty(), { interrupt: vi.fn(), close: vi.fn() });
+    agent.sessions[sessionId] = {
+      query: gen as any,
+      input: new Pushable(),
+      cancelled: false,
+      cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
+      modes: { currentModeId: "default", availableModes: [] },
+      models: { currentModelId: "default", availableModels: [] },
+      modelInfos: [],
+      settingsManager: { dispose: vi.fn() } as any,
+      accumulatedUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedReadTokens: 0,
+        cachedWriteTokens: 0,
+      },
+      configOptions: [],
+      promptRunning: false,
+      stoppableToolCalls: new Set(),
+      pendingMessages: new Map(),
+      nextPendingOrder: 0,
+      abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
+      taskState: new Map(),
+    };
+    return agent.sessions[sessionId]!;
+  }
+
+  it("interrupts only a registered live tool call and emits a failed update", async () => {
+    const { agent, updates } = createMockAgent();
+    const session = injectSession(agent, "session-1");
+    session.stoppableToolCalls?.add("tool-1");
+
+    await agent.extNotification("kodex.ai/tool_stop", {
+      sessionId: "session-1",
+      toolCallId: "tool-1",
+    });
+
+    expect(session.query.interrupt).toHaveBeenCalledTimes(1);
+    expect(session.stoppableToolCalls?.has("tool-1")).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].update).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-1",
+      status: "failed",
+      rawOutput: {
+        interrupted: true,
+        reason: "tool stopped by user",
+      },
+    });
+  });
+
+  it("ignores unknown tool calls without interrupting the turn", async () => {
+    const { agent, updates } = createMockAgent();
+    const session = injectSession(agent, "session-1");
+    session.stoppableToolCalls?.add("tool-1");
+
+    await agent.extNotification("kodex.ai/tool_stop", {
+      sessionId: "session-1",
+      toolCallId: "other-tool",
+    });
+
+    expect(session.query.interrupt).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(0);
+    expect(session.stoppableToolCalls?.has("tool-1")).toBe(true);
+  });
+});
+
 describe("session/close", () => {
   function createMockAgent() {
     const mockClient = {

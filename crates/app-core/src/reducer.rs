@@ -104,6 +104,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.raw_output = None;
             tool.terminal_output = None;
             tool.error = None;
+            clear_tool_stop_state(tool);
             push_tool_log(tool, "Requested", display_summary);
             apply_codebuddy_task_update(ui, task_update_raw_input.as_deref());
             apply_codebuddy_todo_write(ui, todo_write_raw_input.as_deref());
@@ -206,6 +207,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.permission_options = options;
             tool.permission_input = input;
             tool.permission_decision = None;
+            tool.can_stop = false;
+            tool.stop_kind = None;
+            tool.stop_status = None;
             if let Some(details) = details.filter(|details| !details.trim().is_empty()) {
                 tool.detail_text = details.clone();
                 if !is_existing_execution_tool || tool.raw_input.is_none() {
@@ -217,11 +221,20 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             ui.session.status = SessionStatus::WaitingForTool;
         }
         ClientEvent::ToolPermissionResolved { id, outcome } => {
+            let outcome = normalize_permission_outcome_for_display(&outcome);
             if let Some(tool) = ui.tools.iter_mut().find(|tool| tool.call_id == id) {
                 if permission_resolution_should_preserve_local_reject(
                     tool.permission_decision.as_deref(),
                     &outcome,
                 ) {
+                    push_tool_log(tool, "Decision", outcome);
+                    refresh_session_status(ui);
+                    return;
+                }
+                if tool.stop_status.as_deref() == Some("stopped") {
+                    tool.permission_options.clear();
+                    tool.permission_input = None;
+                    tool.permission_decision = Some(outcome.clone());
                     push_tool_log(tool, "Decision", outcome);
                     refresh_session_status(ui);
                     return;
@@ -232,6 +245,10 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                     if !matches!(tool.status, ToolStatus::Succeeded | ToolStatus::Failed) {
                         tool.status = ToolStatus::Running;
                     }
+                } else if is_execution_tool && permission_outcome_is_control_success(&outcome) {
+                    tool.summary = outcome.clone();
+                    tool.status = ToolStatus::Succeeded;
+                    tool.error = None;
                 } else if is_execution_tool {
                     tool.summary = outcome.clone();
                     tool.status = ToolStatus::Interrupted;
@@ -243,7 +260,11 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.permission_options.clear();
                 tool.permission_input = None;
                 tool.permission_decision = Some(outcome.clone());
-                if !is_execution_tool || permission_outcome_allows_execution(&outcome) {
+                clear_tool_stop_state(tool);
+                if !is_execution_tool
+                    || permission_outcome_allows_execution(&outcome)
+                    || permission_outcome_is_control_success(&outcome)
+                {
                     tool.error = None;
                 }
                 push_tool_log(tool, "Decision", outcome);
@@ -303,6 +324,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.raw_output = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS);
                 tool.terminal_output = terminal_output.map(cap_terminal_output);
                 tool.error = None;
+                clear_tool_stop_state(tool);
                 push_tool_log(tool, "已完成", outcome.clone());
                 (tool.name.clone(), tool.raw_input.clone())
             };
@@ -328,8 +350,33 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             tool.raw_output = cap_optional_string(raw_output, MAX_TOOL_RAW_OUTPUT_CHARS);
             tool.terminal_output = terminal_output.map(cap_terminal_output);
             tool.error = Some(error.clone());
+            clear_tool_stop_state(tool);
             push_tool_log(tool, "错误", error);
             refresh_session_status(ui);
+        }
+        ClientEvent::ToolStopAvailability {
+            id,
+            can_stop,
+            stop_kind,
+        } => {
+            if let Some(tool) = ui.tools.iter_mut().find(|tool| tool.call_id == id) {
+                tool.can_stop = can_stop;
+                tool.stop_kind = stop_kind;
+                if can_stop {
+                    tool.stop_status = None;
+                }
+            }
+        }
+        ClientEvent::ToolStopped { id, outcome } => {
+            if let Some(tool) = ui.tools.iter_mut().find(|tool| tool.call_id == id) {
+                tool.status = ToolStatus::Interrupted;
+                tool.summary = outcome.clone();
+                tool.error = Some(outcome.clone());
+                clear_tool_stop_state(tool);
+                tool.stop_status = Some("stopped".into());
+                push_tool_log(tool, "已停止", outcome);
+                refresh_session_status(ui);
+            }
         }
         ClientEvent::ToolDiff {
             id,
@@ -458,6 +505,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 tool.status = ToolStatus::Interrupted;
                 tool.summary = reason.clone();
                 tool.error = Some(reason.clone());
+                clear_tool_stop_state(tool);
                 push_tool_log(tool, "已中断", reason.clone());
             }
             ui.inspector_sections.push(SidebarSection {
@@ -1025,6 +1073,9 @@ fn ensure_tool<'a>(
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     };
     let id = tool.id;
     ui.tools.push(tool);
@@ -1056,6 +1107,7 @@ fn finalize_running_children(
             && except_call_id != Some(tool.call_id.as_str())
     }) {
         tool.status = ToolStatus::Succeeded;
+        clear_tool_stop_state(tool);
         if tool.summary.trim().is_empty() || tool.summary == "等待活动" {
             tool.summary = "已完成".into();
         }
@@ -1073,6 +1125,7 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
     {
         if tool.error.is_some() {
             tool.status = ToolStatus::Failed;
+            clear_tool_stop_state(tool);
             continue;
         }
 
@@ -1081,6 +1134,7 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
         } else {
             ToolStatus::Interrupted
         };
+        clear_tool_stop_state(tool);
         if tool.summary.trim().is_empty()
             || tool.summary == "等待活动"
             || tool.summary.starts_with("等待权限")
@@ -1121,6 +1175,12 @@ fn finalize_open_tools(ui: &mut UiSnapshot, stop_reason: &str) {
     }
 }
 
+fn clear_tool_stop_state(tool: &mut ToolInvocation) {
+    tool.can_stop = false;
+    tool.stop_kind = None;
+    tool.stop_status = None;
+}
+
 fn summarize_completion(outcome: &str) -> String {
     let compact = collapse_whitespace(outcome);
     if compact.is_empty() {
@@ -1154,10 +1214,35 @@ fn permission_resolution_should_preserve_local_reject(
 
 fn permission_outcome_allows_execution(outcome: &str) -> bool {
     let outcome = outcome.to_ascii_lowercase();
-    (outcome.contains("allow") || outcome.contains("approved") || outcome.contains("default"))
+    (outcome.contains("allow")
+        || outcome.contains("approved")
+        || outcome.contains("default")
+        || outcome.trim().starts_with("permission selected: yes"))
         && !outcome.contains("reject")
         && !outcome.contains("deny")
         && !outcome.contains("cancel")
+}
+
+fn permission_outcome_is_control_success(outcome: &str) -> bool {
+    let trimmed = outcome.trim();
+    if trimmed.starts_with("继续规划")
+        || trimmed.starts_with("计划已终止")
+        || trimmed.starts_with("编辑已拒绝")
+    {
+        return true;
+    }
+    false
+}
+
+fn normalize_permission_outcome_for_display(outcome: &str) -> String {
+    if outcome
+        .trim()
+        .eq_ignore_ascii_case("Permission selected: No, provide feedback")
+    {
+        "编辑已拒绝".into()
+    } else {
+        outcome.to_string()
+    }
 }
 
 fn looks_like_fragment_old_text(old_text: &str, new_text: &str) -> bool {
@@ -1622,6 +1707,182 @@ mod tests {
             tool.logs
                 .iter()
                 .any(|entry| entry.body == "Permission resolved: allow")
+        );
+    }
+
+    #[test]
+    fn plan_replan_permission_does_not_interrupt_execution_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call_exit_plan".into(),
+                parent_id: None,
+                name: "ExitPlanMode".into(),
+                kind: "ExitPlanMode".into(),
+                summary: "ExitPlanMode".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "call_exit_plan".into(),
+                name: "ExitPlanMode".into(),
+                options: Vec::new(),
+                details: None,
+                input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_exit_plan".into(),
+                outcome: "继续规划：已发送调整要求".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::TurnFinished {
+                stop_reason: "cancelled".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_exit_plan")
+            .expect("exit plan tool should exist");
+        assert_eq!(tool.status, ToolStatus::Succeeded);
+        assert_eq!(tool.summary, "继续规划：已发送调整要求");
+        assert_eq!(
+            tool.permission_decision.as_deref(),
+            Some("继续规划：已发送调整要求")
+        );
+        assert_eq!(tool.error, None);
+    }
+
+    #[test]
+    fn codex_patch_reject_permission_does_not_interrupt_execution_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call_patch".into(),
+                parent_id: None,
+                name: "ThreadHeader.tsx".into(),
+                kind: "Edit".into(),
+                summary: "D:/work/kodex/apps/desktop/ui/src/features/workbench/ThreadHeader.tsx"
+                    .into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_patch".into(),
+                outcome: "Permission selected: No, provide feedback".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_patch")
+            .expect("patch tool should exist");
+        assert_eq!(tool.status, ToolStatus::Succeeded);
+        assert_eq!(tool.summary, "编辑已拒绝");
+        assert_eq!(tool.error, None);
+    }
+
+    #[test]
+    fn permission_selected_yes_keeps_execution_tool_running() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStarted {
+                id: "call_shell".into(),
+                parent_id: None,
+                name: "Bash".into(),
+                kind: "Execute".into(),
+                summary: "rg -n TODO src".into(),
+                is_subagent: false,
+                raw_input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_shell".into(),
+                outcome: "Permission selected: Yes".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_shell")
+            .expect("shell tool should exist");
+        assert_eq!(tool.status, ToolStatus::Running);
+        assert_eq!(tool.summary, "权限已通过，等待工具执行");
+        assert_eq!(tool.error, None);
+    }
+
+    #[test]
+    fn permission_resolved_does_not_override_stopped_permission_tool() {
+        let mut ui = empty_ui();
+
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionRequest {
+                id: "call_bash".into(),
+                name: "Bash".into(),
+                options: Vec::new(),
+                details: None,
+                input: None,
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStopAvailability {
+                id: "call_bash".into(),
+                can_stop: true,
+                stop_kind: Some("permission".into()),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolStopped {
+                id: "call_bash".into(),
+                outcome: "已停止".into(),
+            },
+        );
+        apply_event(
+            &mut ui,
+            ClientEvent::ToolPermissionResolved {
+                id: "call_bash".into(),
+                outcome: "Permission request cancelled".into(),
+            },
+        );
+
+        let tool = ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == "call_bash")
+            .expect("permission tool should exist");
+        assert_eq!(tool.status, ToolStatus::Interrupted);
+        assert_eq!(tool.summary, "已停止");
+        assert_eq!(tool.error.as_deref(), Some("已停止"));
+        assert!(!tool.can_stop);
+        assert_eq!(tool.stop_status.as_deref(), Some("stopped"));
+        assert_eq!(
+            tool.permission_decision.as_deref(),
+            Some("Permission request cancelled")
         );
     }
 

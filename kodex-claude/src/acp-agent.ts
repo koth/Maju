@@ -25,6 +25,7 @@ import {
   ResumeSessionRequest,
   ResumeSessionResponse,
   SessionConfigOption,
+  SessionNotification,
   SessionModelState,
   SessionModeState,
   SetSessionConfigOptionRequest,
@@ -68,6 +69,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 import {
+  KODEX_TOOL_STOP_META_KEY,
+  KODEX_TOOL_STOP_METHOD,
   promptToClaude,
   streamEventToAcpNotifications,
   toAcpNotifications,
@@ -206,6 +209,7 @@ type Session = {
   modelInfos: ModelInfo[];
   configOptions: SessionConfigOption[];
   promptRunning: boolean;
+  stoppableToolCalls?: Set<string>;
   pendingMessages: Map<string, { resolve: (cancelled: boolean) => void; order: number }>;
   nextPendingOrder: number;
   abortController: AbortController;
@@ -911,7 +915,7 @@ export class ClaudeAcpAgent implements Agent {
                     this.client,
                     this.logger,
                   )) {
-                    await this.client.sessionUpdate(notification);
+                    await this.sendLiveSessionUpdate(session, notification);
                   }
                 }
                 break;
@@ -1017,7 +1021,7 @@ export class ClaudeAcpAgent implements Agent {
                 taskState: session.taskState,
               },
             )) {
-              await this.client.sessionUpdate(notification);
+              await this.sendLiveSessionUpdate(session, notification);
             }
             break;
           }
@@ -1088,7 +1092,7 @@ export class ClaudeAcpAgent implements Agent {
                     taskState: session.taskState,
                   },
                 )) {
-                  await this.client.sessionUpdate(notification);
+                  await this.sendLiveSessionUpdate(session, notification);
                 }
               } else {
                 this.logger.log(message.message.content);
@@ -1147,7 +1151,7 @@ export class ClaudeAcpAgent implements Agent {
                 taskState: session.taskState,
               },
             )) {
-              await this.client.sessionUpdate(notification);
+              await this.sendLiveSessionUpdate(session, notification);
             }
             break;
           }
@@ -1226,6 +1230,83 @@ export class ClaudeAcpAgent implements Agent {
     }
     session.pendingMessages.clear();
     await session.query.interrupt();
+  }
+
+  async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
+    if (method !== KODEX_TOOL_STOP_METHOD) {
+      return;
+    }
+
+    const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
+    const toolCallId = typeof params.toolCallId === "string" ? params.toolCallId : undefined;
+    if (!sessionId || !toolCallId) {
+      return;
+    }
+
+    const session = this.sessions[sessionId];
+    const stoppableToolCalls = session ? this.stoppableToolCalls(session) : undefined;
+    if (!session || !stoppableToolCalls?.has(toolCallId)) {
+      return;
+    }
+
+    stoppableToolCalls.delete(toolCallId);
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "failed",
+        rawOutput: {
+          interrupted: true,
+          reason: "tool stopped by user",
+        },
+      },
+    });
+    await session.query.interrupt();
+  }
+
+  private observeToolStopUpdate(session: Session, update: SessionNotification["update"]): void {
+    const toolCallId =
+      "toolCallId" in update && typeof update.toolCallId === "string"
+        ? update.toolCallId
+        : undefined;
+    if (!toolCallId) {
+      return;
+    }
+
+    const meta = "_meta" in update ? update._meta : undefined;
+    const toolStop =
+      meta && typeof meta === "object"
+        ? (meta as Record<string, unknown>)[KODEX_TOOL_STOP_META_KEY]
+        : undefined;
+
+    if (
+      toolStop &&
+      typeof toolStop === "object" &&
+      (toolStop as Record<string, unknown>).toolCallId === toolCallId
+    ) {
+      this.stoppableToolCalls(session).add(toolCallId);
+    }
+
+    if (
+      "status" in update &&
+      (update.status === "completed" || update.status === "failed")
+    ) {
+      this.stoppableToolCalls(session).delete(toolCallId);
+    }
+  }
+
+  private stoppableToolCalls(session: Session): Set<string> {
+    session.stoppableToolCalls ??= new Set();
+    return session.stoppableToolCalls;
+  }
+
+  private async sendLiveSessionUpdate(
+    session: Session,
+    notification: SessionNotification,
+  ): Promise<void> {
+    this.observeToolStopUpdate(session, notification.update);
+    await this.client.sessionUpdate(notification);
   }
 
   /** Cleanly tear down a session: cancel in-flight work, dispose resources,
@@ -2506,6 +2587,7 @@ export class ClaudeAcpAgent implements Agent {
       modelInfos: routedModels,
       configOptions,
       promptRunning: false,
+      stoppableToolCalls: new Set(),
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       abortController,

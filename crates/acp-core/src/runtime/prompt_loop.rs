@@ -4,6 +4,9 @@ use super::prompt_content::{
     prompt_contains_file, prompt_contains_image, prompt_content_to_acp, prompt_title_text,
 };
 use super::session_titles::emit_turn_finished;
+use super::terminal::TerminalManager;
+use super::tool_stop::ToolStopNotification;
+use super::tool_stop::{KODEX_TOOL_STOP_METHOD, ToolExecutionRegistry};
 use super::{RuntimeCommand, ShutdownSignal};
 use crate::events::{ClientEvent, SessionConfig};
 use crate::mapping::{
@@ -17,6 +20,7 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{ActiveSession, Agent, Dispatch};
 use anyhow::anyhow;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use workspace_model::PromptInputCapabilities;
 
@@ -29,6 +33,8 @@ pub(super) async fn run_command_loop(
     tx_events: &mpsc::Sender<ClientEvent>,
     rx_commands: mpsc::Receiver<RuntimeCommand>,
     permission_broker: PermissionBroker,
+    terminal_manager: Arc<TerminalManager>,
+    tool_execution_registry: ToolExecutionRegistry,
     shutdown_signal: ShutdownSignal,
     supports_session_list: bool,
     prompt_capabilities: PromptInputCapabilities,
@@ -38,7 +44,13 @@ pub(super) async fn run_command_loop(
             match rx_commands.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(command) => break command,
                 Err(RecvTimeoutError::Timeout) => {
-                    drain_idle_session_state_update(session, config, tx_events).await?;
+                    drain_idle_session_state_update(
+                        session,
+                        config,
+                        tx_events,
+                        &tool_execution_registry,
+                    )
+                    .await?;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(anyhow!("ACP command channel closed"));
@@ -131,6 +143,7 @@ pub(super) async fn run_command_loop(
                                     reason,
                                 )
                                 .await?;
+                                tool_execution_registry.clear();
                                 return Ok(());
                             }
                             append_runtime_event_log(
@@ -170,8 +183,25 @@ pub(super) async fn run_command_loop(
                                 })();
                                 let _ = reply_tx.send(result);
                             }
+                            RuntimeCommand::StopTool {
+                                tool_call_id,
+                                reply_tx,
+                            } => {
+                                handle_stop_tool_command(
+                                    tx_events,
+                                    tool_call_id,
+                                    reply_tx,
+                                    &tool_execution_registry,
+                                    &terminal_manager,
+                                    &permission_broker,
+                                    |tool_call_id| {
+                                        send_agent_owned_stop(config, session, tool_call_id)
+                                    },
+                                );
+                            }
                             RuntimeCommand::Shutdown => {
                                 shutdown_signal.request_shutdown();
+                                tool_execution_registry.clear();
                                 return Ok(());
                             }
                             RuntimeCommand::ResolveCodeBuddyInterruption {
@@ -210,6 +240,7 @@ pub(super) async fn run_command_loop(
                                 reason,
                             )
                             .await?;
+                            tool_execution_registry.clear();
                             break;
                         }
                         continue;
@@ -217,7 +248,13 @@ pub(super) async fn run_command_loop(
 
                     match message {
                         agent_client_protocol::SessionMessage::SessionMessage(dispatch) => {
-                            handle_session_dispatch(&config, &tx_events, dispatch, false)?;
+                            handle_session_dispatch(
+                                &config,
+                                &tx_events,
+                                &tool_execution_registry,
+                                dispatch,
+                                false,
+                            )?;
                         }
                         agent_client_protocol::SessionMessage::StopReason(reason) => {
                             emit_turn_finished(
@@ -230,6 +267,7 @@ pub(super) async fn run_command_loop(
                                 reason,
                             )
                             .await?;
+                            tool_execution_registry.clear();
                             break;
                         }
                         other => {
@@ -345,8 +383,23 @@ pub(super) async fn run_command_loop(
                 let _ = permission_broker.cancel_all();
                 let _ = reply_tx.send(Ok(()));
             }
+            RuntimeCommand::StopTool {
+                tool_call_id,
+                reply_tx,
+            } => {
+                handle_stop_tool_command(
+                    tx_events,
+                    tool_call_id,
+                    reply_tx,
+                    &tool_execution_registry,
+                    &terminal_manager,
+                    &permission_broker,
+                    |tool_call_id| send_agent_owned_stop(config, session, tool_call_id),
+                );
+            }
             RuntimeCommand::Shutdown => {
                 shutdown_signal.request_shutdown();
+                tool_execution_registry.clear();
                 break;
             }
         }
@@ -386,6 +439,7 @@ async fn drain_idle_session_state_update(
     session: &mut ActiveSession<'static, Agent>,
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
+    tool_execution_registry: &ToolExecutionRegistry,
 ) -> anyhow::Result<()> {
     let next_message =
         tokio::time::timeout(std::time::Duration::from_millis(1), session.read_update()).await;
@@ -397,15 +451,84 @@ async fn drain_idle_session_state_update(
     };
 
     if let agent_client_protocol::SessionMessage::SessionMessage(dispatch) = message {
-        handle_session_dispatch(config, tx_events, dispatch, true)?;
+        handle_session_dispatch(config, tx_events, tool_execution_registry, dispatch, true)?;
     }
 
     Ok(())
 }
 
+fn handle_stop_tool_command<F>(
+    tx_events: &mpsc::Sender<ClientEvent>,
+    tool_call_id: String,
+    reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
+    tool_execution_registry: &ToolExecutionRegistry,
+    terminal_manager: &TerminalManager,
+    permission_broker: &PermissionBroker,
+    stop_agent_owned: F,
+) where
+    F: FnMut(&str) -> anyhow::Result<bool>,
+{
+    let result = stop_tool_events_with_agent_owned(
+        &tool_call_id,
+        tool_execution_registry,
+        terminal_manager,
+        permission_broker,
+        stop_agent_owned,
+    );
+    if let Ok(events) = &result {
+        for event in events {
+            let _ = tx_events.send(event.clone());
+        }
+    }
+    let _ = reply_tx.send(result);
+}
+
+fn stop_tool_events_with_agent_owned<F>(
+    tool_call_id: &str,
+    tool_execution_registry: &ToolExecutionRegistry,
+    terminal_manager: &TerminalManager,
+    permission_broker: &PermissionBroker,
+    stop_agent_owned: F,
+) -> anyhow::Result<Vec<ClientEvent>>
+where
+    F: FnMut(&str) -> anyhow::Result<bool>,
+{
+    tool_execution_registry.stop_tool(
+        tool_call_id,
+        terminal_manager,
+        permission_broker,
+        stop_agent_owned,
+    )
+}
+
+fn send_agent_owned_stop(
+    config: &SessionConfig,
+    session: &ActiveSession<'static, Agent>,
+    tool_call_id: &str,
+) -> anyhow::Result<bool> {
+    session
+        .connection()
+        .send_notification_to(
+            Agent,
+            ToolStopNotification::new(session.session_id().0.as_ref(), tool_call_id),
+        )
+        .map_err(|err| anyhow!(err.to_string()))?;
+    append_runtime_event_log(
+        config,
+        KODEX_TOOL_STOP_METHOD,
+        &json!({
+            "sessionId": session.session_id().0.as_ref(),
+            "toolCallId": tool_call_id,
+        }),
+    )
+    .ok();
+    Ok(true)
+}
+
 fn handle_session_dispatch(
     config: &SessionConfig,
     tx_events: &mpsc::Sender<ClientEvent>,
+    tool_execution_registry: &ToolExecutionRegistry,
     dispatch: Dispatch,
     state_only: bool,
 ) -> anyhow::Result<()> {
@@ -423,10 +546,14 @@ fn handle_session_dispatch(
         return Ok(());
     }
 
+    let stop_events = tool_execution_registry.events_from_session_payload(&payload)?;
     let notification: SessionNotification =
         serde_json::from_value(payload).map_err(|err| anyhow!(err.to_string()))?;
     if !state_only || is_session_state_update(&notification.update) {
         emit_notification(tx_events, &config.workspace_root, notification)?;
+        for event in stop_events {
+            let _ = tx_events.send(event);
+        }
     }
     Ok(())
 }
@@ -456,6 +583,7 @@ async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn codebuddy_session_end_update_is_ignored() {
@@ -479,5 +607,53 @@ mod tests {
             ),
             "kodex-provider/kimi_code/kimi-for-coding"
         );
+    }
+
+    #[test]
+    fn in_flight_stop_tool_command_reaches_agent_owned_stop_path() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let registry = ToolExecutionRegistry::default();
+        registry
+            .register_agent_owned("tool-agent-1")
+            .expect("agent-owned handle should register");
+        let terminal_manager = TerminalManager::default();
+        let permission_broker = PermissionBroker::default();
+        let mut stopped = Vec::new();
+
+        handle_stop_tool_command(
+            &event_tx,
+            "tool-agent-1".into(),
+            reply_tx,
+            &registry,
+            &terminal_manager,
+            &permission_broker,
+            |tool_call_id| {
+                stopped.push(tool_call_id.to_string());
+                Ok(true)
+            },
+        );
+
+        let events = reply_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stop reply should be sent")
+            .expect("stop should succeed");
+        assert_eq!(stopped, vec!["tool-agent-1"]);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::ToolStopped { id, .. } if id == "tool-agent-1"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::ToolStopAvailability { id, can_stop: false, .. }
+                    if id == "tool-agent-1"
+            )
+        }));
+
+        let emitted: Vec<_> = event_rx.try_iter().collect();
+        assert_eq!(emitted, events);
     }
 }

@@ -25,6 +25,7 @@ import {
   settingsSaveAgentProviderSecret,
   settingsResetProviderModels,
   settingsSaveProviderModels,
+  settingsSyncProviderModelsFromUrl,
   settingsSelectClaudeFastModel,
   settingsSaveLspServer,
   settingsSaveRemoteProfile,
@@ -144,6 +145,7 @@ export function SettingsPage({
   const [byokProfileInitialized, setByokProfileInitialized] = useState(false);
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
   const [providerModelsDraft, setProviderModelsDraft] = useState("");
+  const [modelListUrlDraft, setModelListUrlDraft] = useState("");
   const [busyProviderModels, setBusyProviderModels] = useState(false);
   const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
@@ -262,6 +264,7 @@ export function SettingsPage({
     const profile = snapshot.codex_acp.profiles.find((item) => item.id === byokProfileId);
     if (!profile) return;
     setProviderModelsDraft(profile.models.join("\n"));
+    setModelListUrlDraft(profile.model_list_url ?? "");
   }, [byokProfileId, snapshot]);
 
   useEffect(() => {
@@ -474,6 +477,37 @@ export function SettingsPage({
       setBusyProviderModels(false);
     }
   }, [byokProfileId, settingsRemoteProfileId]);
+
+  const handleSyncProviderModelsFromUrl = useCallback(async () => {
+    const modelListUrl = modelListUrlDraft.trim();
+    setError(null);
+    setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("models");
+    if (!byokProfileId) {
+      setError("请选择 BYOK 模型来源");
+      return;
+    }
+    if (!modelListUrl) {
+      setError("模型列表 URL 不能为空");
+      return;
+    }
+    setBusyProviderModels(true);
+    try {
+      const nextSnapshot = await settingsSyncProviderModelsFromUrl(byokProfileId, modelListUrl, settingsRemoteProfileId);
+      setSnapshot(nextSnapshot);
+      const profile = nextSnapshot.codex_acp.profiles.find((item) => item.id === byokProfileId);
+      if (profile) {
+        setProviderModelsDraft(profile.models.join("\n"));
+        setModelListUrlDraft(profile.model_list_url ?? modelListUrl);
+      }
+      setCodexAcpMessageTarget("models");
+      setCodexAcpMessage(`${providerLabel(nextSnapshot.codex_acp.profiles, byokProfileId)} 模型列表已同步，后续新建会话生效`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyProviderModels(false);
+    }
+  }, [byokProfileId, modelListUrlDraft, settingsRemoteProfileId]);
 
   const handleSelectByokProfile = useCallback((profileId: string) => {
     setByokProfileId(profileId);
@@ -830,6 +864,31 @@ export function SettingsPage({
               setCodexAcpMessageTarget("models");
             }}
           />
+        </label>
+        <label className="settings-field settings-provider-model-url-field">
+          <span>列表 URL</span>
+          <div className="settings-provider-model-url-row">
+            <input
+              aria-label="byok_provider_model_list_url"
+              type="url"
+              value={modelListUrlDraft}
+              disabled={busyProviderModels}
+              placeholder="https://example.com/v1/models"
+              onChange={(event) => {
+                setModelListUrlDraft(event.currentTarget.value);
+                setCodexAcpMessage(null);
+                setCodexAcpMessageTarget("models");
+              }}
+            />
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busyProviderModels || !modelListUrlDraft.trim()}
+              onClick={handleSyncProviderModelsFromUrl}
+            >
+              {busyProviderModels ? "同步中..." : "同步"}
+            </button>
+          </div>
         </label>
         <div className="settings-provider-config-actions">
           {codexAcpMessageTarget === "models" && codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}

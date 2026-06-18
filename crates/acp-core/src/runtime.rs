@@ -18,6 +18,7 @@ mod shutdown;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod tool_stop;
 mod workspace_paths;
 use agent_process::{AgentTransport, HiddenAgentProcess, RemoteSshAgentProcess, TcpAgentProcess};
 pub(crate) use permissions::PermissionBroker;
@@ -48,6 +49,10 @@ pub(crate) enum RuntimeCommand {
     },
     CancelPrompt {
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
+    },
+    StopTool {
+        tool_call_id: String,
+        reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
     },
     Shutdown,
 }

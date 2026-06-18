@@ -8,7 +8,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -303,7 +305,6 @@ fn remote_ssh_base_args(has_password: bool, use_multiplex: bool) -> Vec<String> 
     args
 }
 
-#[cfg(unix)]
 fn ssh_disable_multiplex_args() -> Vec<String> {
     vec![
         "-o".to_string(),
@@ -313,11 +314,6 @@ fn ssh_disable_multiplex_args() -> Vec<String> {
         "-o".to_string(),
         "ControlPersist=no".to_string(),
     ]
-}
-
-#[cfg(not(unix))]
-fn ssh_disable_multiplex_args() -> Vec<String> {
-    Vec::new()
 }
 
 #[cfg(unix)]

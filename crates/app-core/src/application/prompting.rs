@@ -437,6 +437,7 @@ impl Application {
         // Process events and track tool lifecycle for file change detection
         let ui_changed = !events.is_empty();
         let mut completed_tool_ids = Vec::new();
+        let mut completed_tool_raw_outputs = HashMap::<String, String>::new();
         let mut completed_tool_ids_with_tracker_changes = HashSet::new();
         let mut late_write_hint_tool_ids = Vec::new();
         let mut failed_tool_ids_without_changes = HashSet::new();
@@ -455,8 +456,11 @@ impl Application {
                         }
                     }
                 }
-                ClientEvent::ToolCompleted { id, .. } => {
+                ClientEvent::ToolCompleted { id, raw_output, .. } => {
                     completed_tool_ids.push(id.clone());
+                    if let Some(raw_output) = raw_output {
+                        completed_tool_raw_outputs.insert(id.clone(), raw_output.clone());
+                    }
                 }
                 ClientEvent::ToolFailed { id, .. } => {
                     let changes = self.file_tracker.finish_recording(id);
@@ -507,7 +511,10 @@ impl Application {
             if completed_tool_ids_with_tracker_changes.contains(id) {
                 continue;
             }
-            if self.apply_completed_tool_landed_edit_payload(id) {
+            if self.apply_completed_tool_landed_edit_payload_with_raw_output(
+                id,
+                completed_tool_raw_outputs.get(id).map(String::as_str),
+            ) {
                 self.file_tracker.discard_recording(id);
                 had_file_changes = true;
                 continue;
@@ -859,6 +866,23 @@ impl Application {
         Ok(())
     }
 
+    pub fn stop_tool(&mut self, tool_call_id: &str) -> Result<(), String> {
+        let tool_call_id = tool_call_id.trim();
+        if tool_call_id.is_empty() {
+            return Err("tool_call_id is required".into());
+        }
+
+        let events = self
+            .session
+            .stop_tool(tool_call_id)
+            .map_err(|error| error.to_string())?;
+        let result = self.apply_idle_runtime_events_with_file_tracking(events);
+        if result.ui_changed || result.had_file_changes {
+            self.bump_revision();
+        }
+        Ok(())
+    }
+
     pub(super) fn mark_current_turn_cancelled(&mut self) {
         let session_id = self.ui.session.id.to_string();
         let mut cancelled_tools = Vec::new();
@@ -881,6 +905,9 @@ impl Application {
             if tool.kind == "permission" && tool.permission_decision.is_none() {
                 tool.permission_decision = Some("已取消".into());
             }
+            tool.can_stop = false;
+            tool.stop_kind = None;
+            tool.stop_status = None;
             tool.logs.push(ToolLogEntry {
                 title: "已取消".into(),
                 body: "客户端发送了 session/cancel 取消当前轮次".into(),

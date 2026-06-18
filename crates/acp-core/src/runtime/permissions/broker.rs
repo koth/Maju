@@ -113,6 +113,24 @@ impl PermissionBroker {
         Ok(true)
     }
 
+    pub(crate) fn cancel(&self, request_id: &str) -> anyhow::Result<bool> {
+        let sender = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("permission broker lock poisoned"))?;
+            state.early_resolutions.remove(request_id);
+            state.pending.remove(request_id)
+        };
+
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
+
+        let _ = sender.send(PermissionResolution::default());
+        Ok(true)
+    }
+
     pub(crate) fn set_mode(&self, mode_id: &str) -> anyhow::Result<()> {
         let normalized = mode_id.to_ascii_lowercase();
         let mode = match normalized.as_str() {

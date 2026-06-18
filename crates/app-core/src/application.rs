@@ -397,6 +397,9 @@ fn agent_command_for_restored_session(
     let restored = session
         .and_then(|session| session.agent_cli.as_deref())
         .and_then(|label| {
+            if remote && agent_label_matches_command(label, &fallback_agent_command) {
+                return Some(fallback_agent_command.clone());
+            }
             if remote {
                 crate::settings::remote_linux_command_for_agent_label(label)
             } else {
@@ -521,11 +524,16 @@ impl Application {
         let now = self.runtime_now();
         let old_visible_session_id = self.ui.session.id;
         let old_was_in_flight = self.in_flight_prompt.is_some();
+        let old_needs_attention = self.runtime_needs_attention();
         self.swap_visible_state_with_runtime(&mut runtime);
 
         runtime.local_session_id = old_visible_session_id;
         runtime.last_viewed = now;
-        runtime.attention_state = SessionAttentionState::None;
+        runtime.attention_state = if !old_was_in_flight && old_needs_attention {
+            SessionAttentionState::NeedsAttention
+        } else {
+            SessionAttentionState::None
+        };
         if old_was_in_flight {
             runtime.runtime_status = SessionRuntimeStatus::BackgroundRunning;
             runtime.idle_since = None;

@@ -52,6 +52,10 @@ export async function sessionCancel(): Promise<void> {
   return invoke("session_cancel");
 }
 
+export async function sessionStopTool(toolCallId: string): Promise<void> {
+  return invoke("session_stop_tool", { toolCallId });
+}
+
 export async function gitStatus(): Promise<RepositorySnapshot> {
   return invoke<RepositorySnapshot>("git_status");
 }
@@ -313,6 +317,18 @@ export async function settingsSaveProviderModels(
   remoteProfileId?: string | null,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_provider_models", { provider, models, remoteProfileId: remoteProfileId ?? null });
+}
+
+export async function settingsSyncProviderModelsFromUrl(
+  provider: string,
+  modelListUrl: string,
+  remoteProfileId?: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_sync_provider_models_from_url", {
+    provider,
+    modelListUrl,
+    remoteProfileId: remoteProfileId ?? null,
+  });
 }
 
 export async function settingsResetProviderModels(

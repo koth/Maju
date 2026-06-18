@@ -46,6 +46,11 @@ export type ToolUpdateMeta = {
     exit_code: number;
     signal: string | null;
   };
+  "kodex.ai/toolStop"?: {
+    toolCallId: string;
+    stopKind: "agent_owned" | "terminal";
+    terminalId?: string;
+  };
 };
 
 export type ToolUseCache = {
@@ -56,6 +61,16 @@ export type ToolUseCache = {
     input: unknown;
   };
 };
+
+export const KODEX_TOOL_STOP_METHOD = "kodex.ai/tool_stop";
+export const KODEX_TOOL_STOP_META_KEY = "kodex.ai/toolStop";
+
+function agentOwnedToolStopMeta(toolCallId: string): ToolUpdateMeta["kodex.ai/toolStop"] {
+  return {
+    toolCallId,
+    stopKind: "agent_owned",
+  };
+}
 
 function formatUriAsLink(uri: string): string {
   try {
@@ -315,6 +330,9 @@ export function toAcpNotifications(
                 claudeCode: {
                   toolName: chunk.name,
                 },
+                ...(registerHooks
+                  ? { [KODEX_TOOL_STOP_META_KEY]: agentOwnedToolStopMeta(chunk.id) }
+                  : {}),
               } satisfies ToolUpdateMeta,
               toolCallId: chunk.id,
               sessionUpdate: "tool_call_update",
@@ -329,6 +347,9 @@ export function toAcpNotifications(
                 claudeCode: {
                   toolName: chunk.name,
                 },
+                ...(registerHooks
+                  ? { [KODEX_TOOL_STOP_META_KEY]: agentOwnedToolStopMeta(chunk.id) }
+                  : {}),
                 ...(chunk.name === "Bash" && supportsTerminalOutput
                   ? { terminal_info: { terminal_id: chunk.id } }
                   : {}),

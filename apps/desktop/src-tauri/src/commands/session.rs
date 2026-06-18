@@ -74,6 +74,11 @@ pub fn session_cancel(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn session_stop_tool(state: State<'_, AppState>, tool_call_id: String) -> Result<(), String> {
+    state.with_app(|app| app.stop_tool(&tool_call_id))
+}
+
+#[tauri::command]
 pub async fn session_list(app: AppHandle) -> Result<Vec<WorkspaceSessionList>, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();

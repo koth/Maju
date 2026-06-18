@@ -328,6 +328,9 @@ export interface ToolInvocation {
   permission_options: PermissionOption[];
   permission_input: PermissionInputRequest | null;
   permission_decision: string | null;
+  can_stop: boolean;
+  stop_kind: string | null;
+  stop_status: string | null;
 }
 
 export interface DiffStats {
@@ -628,6 +631,7 @@ export interface AgentProviderProfile {
   base_url: string | null;
   default_model: string | null;
   models: string[];
+  model_list_url: string | null;
   credential_label: string | null;
   requires_credential: boolean;
   help_text: string;

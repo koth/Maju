@@ -248,6 +248,38 @@ pub fn settings_save_provider_models(
 }
 
 #[tauri::command]
+pub async fn settings_sync_provider_models_from_url(
+    state: State<'_, AppState>,
+    provider: String,
+    model_list_url: String,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    ensure_no_running_codex_acp_session(&state)?;
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let models =
+        app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
+            .await
+            .map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_save_provider_models_with_model_list_url(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &provider,
+            models,
+            model_list_url,
+        )
+        .map_err(|e| e.to_string());
+    }
+    app_core::settings::save_provider_models_with_model_list_url(
+        &paths,
+        &provider,
+        models,
+        Some(model_list_url),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn settings_reset_provider_models(
     state: State<'_, AppState>,
     provider: String,

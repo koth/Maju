@@ -1017,6 +1017,21 @@
   max-width: 720px;
 }
 
+.settings-provider-model-url-field {
+  max-width: 720px;
+}
+
+.settings-provider-model-url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.settings-provider-model-url-row .settings-btn {
+  min-height: 34px;
+}
+
 .settings-field input:focus,
 .settings-field textarea:focus {
   outline: none;

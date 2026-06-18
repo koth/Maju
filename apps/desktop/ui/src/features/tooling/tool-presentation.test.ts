@@ -23,6 +23,9 @@ function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
     permission_options: [],
     permission_input: null,
     permission_decision: null,
+    can_stop: false,
+    stop_kind: null,
+    stop_status: null,
     ...overrides,
   };
 }
@@ -176,6 +179,18 @@ describe("deriveToolPresentation", () => {
 
     expect(presentation.headerLabel).toBe("失败");
     expect(presentation.footerStatus).toEqual({ label: "失败 (2)", tone: "danger" });
+  });
+
+  it("reports running command status as still running", () => {
+    const presentation = deriveToolPresentation(
+      makeTool({
+        status: "Running",
+        raw_input: JSON.stringify({ command: "pnpm run dev" }),
+      }),
+    );
+
+    expect(presentation.headerLabel).toBe("运行中");
+    expect(presentation.footerStatus).toEqual({ label: "运行中", tone: "running" });
   });
 
   it("reports interrupted command status", () => {

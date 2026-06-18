@@ -47,6 +47,8 @@ interface Props {
   nested: boolean;
   onPermissionSelect: (requestId: string, optionId: string | null, guidance?: string | null) => void;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
+  onCancelTurn?: () => Promise<void> | void;
+  onStopTool?: (toolCallId: string) => Promise<void> | void;
 }
 
 function ToolCallCardImpl({
@@ -55,12 +57,15 @@ function ToolCallCardImpl({
   nested,
   onPermissionSelect,
   hiddenPermissionRequestIds,
+  onCancelTurn,
+  onStopTool,
 }: Props) {
   const hiddenPermissionRequest =
     hiddenPermissionRequestIds?.has(tool.call_id);
 
   const [expanded, setExpanded] = useState(false);
   const [rawDetailsOpen, setRawDetailsOpen] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
 
   const children = childToolsByParent?.get(tool.call_id) ?? [];
 
@@ -126,6 +131,21 @@ function ToolCallCardImpl({
     tool.status === "Running" &&
     tool.permission_options.length > 0 &&
     !tool.permission_decision;
+  const canStopTool =
+    !!onStopTool &&
+    tool.can_stop &&
+    (tool.status === "Pending" || tool.status === "Running");
+  const handleStopTool = async () => {
+    if (!onStopTool || stopRequested) return;
+    setStopRequested(true);
+    try {
+      await onStopTool(tool.call_id);
+    } catch (_error) {
+      // The session state poll after stop is the user-visible error path.
+    } finally {
+      setStopRequested(false);
+    }
+  };
 
   // Does this card have expandable content?
   const hasDetail =
@@ -144,28 +164,42 @@ function ToolCallCardImpl({
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>
       {/* Header line: bullet + verb + title + expand chevron on hover */}
-      <button
-        type="button"
-        className={`tc-line tc-header-line ${hasDetail ? "tc-expandable" : ""}`}
-        onClick={hasDetail ? () => setExpanded((v) => !v) : undefined}
-        aria-expanded={hasDetail ? expanded : undefined}
-        disabled={!hasDetail}
-      >
-        <span className={`tc-bullet ${bullet.className}`}>{bullet.char}</span>
-        <span className="tc-verb">{verb}</span>
-        <span className="tc-cmd">{headerTitle}</span>
-        {category === "editing" && (diffStats.added > 0 || diffStats.removed > 0) && (
-          <span className="tc-diff-stats" aria-label={`${diffStats.added} 处添加，${diffStats.removed} 处删除`}>
-            <span className="tc-diff-added">+{diffStats.added}</span>
-            <span className="tc-diff-removed">-{diffStats.removed}</span>
-          </span>
+      <div className="tc-line-wrap">
+        <button
+          type="button"
+          className={`tc-line tc-header-line ${hasDetail ? "tc-expandable" : ""}`}
+          onClick={hasDetail ? () => setExpanded((v) => !v) : undefined}
+          aria-expanded={hasDetail ? expanded : undefined}
+          disabled={!hasDetail}
+        >
+          <span className={`tc-bullet ${bullet.className}`}>{bullet.char}</span>
+          <span className="tc-verb">{verb}</span>
+          <span className="tc-cmd">{headerTitle}</span>
+          {category === "editing" && (diffStats.added > 0 || diffStats.removed > 0) && (
+            <span className="tc-diff-stats" aria-label={`${diffStats.added} 处添加，${diffStats.removed} 处删除`}>
+              <span className="tc-diff-added">+{diffStats.added}</span>
+              <span className="tc-diff-removed">-{diffStats.removed}</span>
+            </span>
+          )}
+          {hasDetail && (
+            <span className={`tc-chevron ${expanded ? "tc-chevron-open" : ""}`}>
+              ›
+            </span>
+          )}
+        </button>
+        {canStopTool && (
+          <button
+            className="tc-stop-turn-btn"
+            type="button"
+            onClick={handleStopTool}
+            disabled={stopRequested}
+            aria-label="停止工具调用"
+            title="停止工具调用"
+          >
+            {stopRequested ? "停止中" : "停止"}
+          </button>
         )}
-        {hasDetail && (
-          <span className={`tc-chevron ${expanded ? "tc-chevron-open" : ""}`}>
-            ›
-          </span>
-        )}
-      </button>
+      </div>
 
       {needsPermission && (
         <div className="tc-permission-panel">
@@ -196,6 +230,8 @@ function ToolCallCardImpl({
               presentation={presentation}
               rawDetailsOpen={rawDetailsOpen}
               onRawDetailsToggle={() => setRawDetailsOpen((value) => !value)}
+              onStopTool={canStopTool ? handleStopTool : undefined}
+              stopRequested={stopRequested}
             />
           )}
 
@@ -345,6 +381,8 @@ function ToolCallCardImpl({
               nested
               onPermissionSelect={onPermissionSelect}
               hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+              onCancelTurn={onCancelTurn}
+              onStopTool={onStopTool}
             />
           ))}
         </div>
@@ -357,6 +395,8 @@ interface ShellToolPanelProps {
   presentation: ToolPresentation;
   rawDetailsOpen: boolean;
   onRawDetailsToggle: () => void;
+  onStopTool?: () => Promise<void> | void;
+  stopRequested?: boolean;
 }
 
 interface ExplorationResult {
@@ -369,6 +409,8 @@ function ShellToolPanel({
   presentation,
   rawDetailsOpen,
   onRawDetailsToggle,
+  onStopTool,
+  stopRequested = false,
 }: ShellToolPanelProps) {
   const hasRawDetails = presentation.rawDetails.length > 0;
   return (
@@ -395,6 +437,16 @@ function ShellToolPanel({
             aria-expanded={rawDetailsOpen}
           >
             原始详情
+          </button>
+        )}
+        {onStopTool && (
+          <button
+            className="tc-stop-turn-btn tc-shell-stop-btn"
+            type="button"
+            onClick={onStopTool}
+            disabled={stopRequested}
+          >
+            {stopRequested ? "停止中" : "停止工具"}
           </button>
         )}
         <span className={`tc-shell-status tc-shell-status-${presentation.footerStatus.tone}`}>
@@ -463,6 +515,8 @@ export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);
 function areToolCardPropsEqual(prev: Props, next: Props) {
   if (prev.nested !== next.nested) return false;
   if (prev.onPermissionSelect !== next.onPermissionSelect) return false;
+  if (prev.onCancelTurn !== next.onCancelTurn) return false;
+  if (prev.onStopTool !== next.onStopTool) return false;
   if (
     !sameReadonlySet(
       prev.hiddenPermissionRequestIds,
@@ -518,6 +572,9 @@ function sameToolForRender(prev: ToolInvocation, next: ToolInvocation) {
     prev.raw_output === next.raw_output &&
     prev.error === next.error &&
     prev.permission_decision === next.permission_decision &&
+    prev.can_stop === next.can_stop &&
+    prev.stop_kind === next.stop_kind &&
+    prev.stop_status === next.stop_status &&
     sameStringArray(prev.diff_paths, next.diff_paths) &&
     sameLogs(prev.logs, next.logs) &&
     samePermissionOptions(prev.permission_options, next.permission_options) &&

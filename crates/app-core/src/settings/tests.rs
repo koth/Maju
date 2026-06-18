@@ -1258,6 +1258,26 @@ fn provider_model_catalog_can_override_and_reset_models() {
         .find(|profile| profile.id == TIMIAI_PROVIDER_ID)
         .unwrap();
     assert_eq!(profile.models, vec!["gpt-5.6", "claude-opus-4.9"]);
+    assert_eq!(profile.model_list_url, None);
+
+    let snapshot = save_provider_models_with_model_list_url(
+        &paths,
+        TIMIAI_PROVIDER_ID,
+        vec!["gpt-5.7".to_string(), "claude-opus-4.10".to_string()],
+        Some("https://models.example.test/v1/models".to_string()),
+    )
+    .unwrap();
+    let profile = snapshot
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|profile| profile.id == TIMIAI_PROVIDER_ID)
+        .unwrap();
+    assert_eq!(profile.models, vec!["gpt-5.7", "claude-opus-4.10"]);
+    assert_eq!(
+        profile.model_list_url.as_deref(),
+        Some("https://models.example.test/v1/models")
+    );
 
     let catalog = std::fs::read_to_string(codex_model_catalog_path(&paths)).unwrap();
     let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -1267,8 +1287,8 @@ fn provider_model_catalog_can_override_and_reset_models() {
         .iter()
         .map(|model| model["display_name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(display_names.contains(&"gpt-5.6"));
-    assert!(display_names.contains(&"claude-opus-4.9"));
+    assert!(display_names.contains(&"gpt-5.7"));
+    assert!(display_names.contains(&"claude-opus-4.10"));
     assert!(!display_names.contains(&TIMIAI_CODEX_MODEL));
 
     let snapshot = reset_provider_models(&paths, TIMIAI_PROVIDER_ID).unwrap();
@@ -1279,7 +1299,32 @@ fn provider_model_catalog_can_override_and_reset_models() {
         .find(|profile| profile.id == TIMIAI_PROVIDER_ID)
         .unwrap();
     assert!(profile.models.contains(&TIMIAI_CODEX_MODEL.to_string()));
-    assert!(!profile.models.contains(&"gpt-5.6".to_string()));
+    assert_eq!(profile.model_list_url, None);
+    assert!(!profile.models.contains(&"gpt-5.7".to_string()));
+}
+
+#[test]
+fn provider_model_catalog_parser_accepts_common_model_list_shapes() {
+    let openai_models = parse_provider_models_response(
+        r#"{"object":"list","data":[{"id":"gpt-5.5"},{"id":"Qwen/Qwen3.7-Max"},{"id":"gpt-5.5"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(openai_models, vec!["gpt-5.5", "Qwen/Qwen3.7-Max"]);
+
+    let string_models =
+        parse_provider_models_response(r#"["claude-opus-4-8","MiniMaxAI/MiniMax-M3"]"#).unwrap();
+    assert_eq!(
+        string_models,
+        vec!["claude-opus-4-8", "MiniMaxAI/MiniMax-M3"]
+    );
+
+    let text_models =
+        parse_provider_models_response("deepseek/deepseek-v4-pro\n\n- google/gemini-3.5-flash\n")
+            .unwrap();
+    assert_eq!(
+        text_models,
+        vec!["deepseek/deepseek-v4-pro", "google/gemini-3.5-flash"]
+    );
 }
 
 #[test]

@@ -588,6 +588,54 @@ fn codebuddy_exit_plan_mode_preserves_plan_content_in_raw_input() {
 }
 
 #[test]
+fn codebuddy_exit_plan_completion_ignores_null_undefined_output() {
+    let (tx, rx) = mpsc::channel();
+
+    let handled = emit_codebuddy_notification(
+        &tx,
+        "",
+        &serde_json::json!({
+            "update": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "ExitPlanMode",
+                    "codebuddy.ai/planContent": "# Plan\n\nShip the fix."
+                },
+                "rawInput": {
+                    "allowedPrompts": []
+                },
+                "rawOutput": "null/undefined",
+                "sessionUpdate": "tool_call_update",
+                "status": "completed",
+                "title": "ExitPlanMode",
+                "toolCallId": "call-exit-plan"
+            }
+        }),
+    )
+    .unwrap();
+
+    assert!(handled);
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolUpdated {
+            id,
+            summary: Some(summary),
+            raw_output: None,
+            ..
+        } if id == "call-exit-plan" && summary == "ExitPlanMode"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolCompleted {
+            id,
+            outcome,
+            raw_output: None,
+            ..
+        } if id == "call-exit-plan" && outcome == "ExitPlanMode"
+    )));
+}
+
+#[test]
 fn codebuddy_interruption_request_includes_bash_details() {
     let (tx, rx) = mpsc::channel();
 
@@ -994,6 +1042,50 @@ fn claude_tool_response_api_error_is_mapped_as_tool_failure() {
     assert!(!events.iter().any(|event| matches!(
         event,
         ClientEvent::ToolCompleted { id, .. } if id == "tooluse_agent_error"
+    )));
+}
+
+#[test]
+fn codebuddy_completed_background_task_stays_running() {
+    let (tx, rx) = mpsc::channel();
+
+    let handled = emit_codebuddy_notification(
+        &tx,
+        "",
+        &serde_json::json!({
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-background-bash",
+                "status": "completed",
+                "title": "Bash",
+                "rawInput": {
+                    "command": "pnpm run dev"
+                },
+                "rawOutput": {
+                    "backgroundTaskId": "bg-123",
+                    "status": "running",
+                    "pid": 4242,
+                    "output": "Started dev server"
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    assert!(handled);
+
+    let events = rx.try_iter().collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolUpdated { id, .. } if id == "call-background-bash"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolCompleted { id, .. } if id == "call-background-bash"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ClientEvent::ToolFailed { id, .. } if id == "call-background-bash"
     )));
 }
 

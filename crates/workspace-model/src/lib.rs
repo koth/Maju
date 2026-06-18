@@ -509,6 +509,12 @@ pub struct ToolInvocation {
     pub permission_input: Option<PermissionInputRequest>,
     #[serde(default)]
     pub permission_decision: Option<String>,
+    #[serde(default)]
+    pub can_stop: bool,
+    #[serde(default)]
+    pub stop_kind: Option<String>,
+    #[serde(default)]
+    pub stop_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1091,6 +1097,8 @@ pub struct AgentProviderProfile {
     pub default_model: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_list_url: Option<String>,
     pub credential_label: Option<String>,
     pub requires_credential: bool,
     pub help_text: String,

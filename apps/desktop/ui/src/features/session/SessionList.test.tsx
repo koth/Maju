@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionList } from "./SessionList";
-import { onRemoteOpenProgress } from "../../lib/events";
+import { onRemoteOpenProgress, onSessionStatus } from "../../lib/events";
 import {
   sessionCreate,
   sessionArchive,
@@ -19,6 +19,7 @@ import type {
   AgentSettingsSnapshot,
   RemoteMachineProfilesSnapshot,
   RemoteOpenProgressEvent,
+  SessionSummary,
   SessionListItem,
   WorkspaceSessionList,
 } from "../../types";
@@ -47,6 +48,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../../lib/events", () => ({
   onRemoteOpenProgress: vi.fn(async (_callback: (progress: RemoteOpenProgressEvent) => void) => vi.fn()),
+  onSessionStatus: vi.fn(async (_callback: (status: SessionSummary) => void) => () => {}),
 }));
 
 function providerProfile(
@@ -66,6 +68,7 @@ function providerProfile(
     base_url: id === "xiaomi_mimo" ? "https://token-plan-cn.xiaomimimo.com/anthropic" : null,
     default_model: id === "xiaomi_mimo" ? "MiMo-V2.5-Pro" : null,
     models: id === "xiaomi_mimo" ? ["MiMo-V2.5-Pro", "MiMo-V2.5"] : [],
+    model_list_url: null,
     credential_label: requiresCredential ? `${label} API key` : null,
     requires_credential: requiresCredential,
     help_text: `${label} help`,
@@ -205,6 +208,7 @@ function remoteProfilesSnapshotWithTwoMachines(): RemoteMachineProfilesSnapshot 
 describe("SessionList agent picker", () => {
   beforeEach(() => {
     vi.mocked(sessionList).mockResolvedValue(workspaceSessions);
+    vi.mocked(onSessionStatus).mockImplementation(async (_callback: (status: SessionSummary) => void) => () => {});
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot());
     vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot());
     vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesSnapshot());
@@ -315,6 +319,7 @@ describe("SessionList agent picker", () => {
         base_url: "http://api.timiai.woa.com/ai_api_manage/llmproxy",
         default_model: "gpt-5.5",
         models: ["gpt-5.5"],
+        model_list_url: null,
         credential_label: "TimiAI API key",
         requires_credential: true,
         help_text: "TimiAI help",
@@ -751,6 +756,163 @@ describe("SessionList agent picker", () => {
     const indicator = await screen.findByLabelText("后台会话仍在运行");
     expect(indicator).toHaveClass("is-progress");
     expect(indicator.closest(".sl-item")).toHaveClass("is-background-running");
+  });
+
+  it("shows a spinner for an active session in a hidden workspace", async () => {
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        ...workspaceSessions[0],
+        sessions: [sessionItem({ id: "active-session", title: "Active" })],
+        active_session_id: "active-session",
+        is_active: true,
+      },
+      {
+        workspace: {
+          id: "workspace-2",
+          root: "/Users/kothchen/code/Other",
+          name: "Other",
+        },
+        sessions: [
+          sessionItem({
+            id: "hidden-workspace-session",
+            title: "Hidden workspace run",
+            status: "Streaming",
+            runtime_status: "active",
+          }),
+        ],
+        active_session_id: "hidden-workspace-session",
+        is_active: false,
+        connected: true,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("后台会话仍在运行");
+    expect(indicator).toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-background-running");
+  });
+
+  it("refreshes background session indicators when session status events arrive", async () => {
+    let callbackRegistered = false;
+    let statusCallback: (status: SessionSummary) => void = () => {
+      throw new Error("session status listener was not registered");
+    };
+    vi.mocked(onSessionStatus).mockImplementation(async (callback: (status: SessionSummary) => void) => {
+      statusCallback = callback;
+      callbackRegistered = true;
+      return () => {};
+    });
+    vi.mocked(sessionList)
+      .mockResolvedValueOnce(
+        workspaceWithSessions([
+          sessionItem({ id: "active-session", title: "Active" }),
+          sessionItem({ id: "background-session", title: "Background run" }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        workspaceWithSessions([
+          sessionItem({ id: "active-session", title: "Active" }),
+          sessionItem({
+            id: "background-session",
+            title: "Background run",
+            attention_state: "needs_attention",
+          }),
+        ]),
+      );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    await screen.findByTitle("Background run · Codex");
+    await waitFor(() => expect(callbackRegistered).toBe(true));
+    statusCallback({
+      id: "active-session",
+      workspace_id: "workspace-1",
+      title: "Active",
+      model: "test-model",
+      mode: "Build",
+      agent_cli: "Codex",
+      status: "Idle",
+    });
+
+    expect(await screen.findByLabelText("后台会话需要处理")).toHaveClass("is-attention");
+  });
+
+  it("shows attention instead of a spinner when a background session needs permission", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active" }),
+        sessionItem({
+          id: "background-session",
+          title: "Needs permission",
+          runtime_status: "background_running",
+          attention_state: "needs_attention",
+        }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("后台会话需要处理");
+    expect(indicator).toHaveClass("is-attention");
+    expect(indicator).not.toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-needs-attention");
+    expect(indicator.closest(".sl-item")).not.toHaveClass("is-background-running");
+  });
+
+  it("shows a spinner for the active session when the conversation is hidden", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active", status: "Idle" }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Streaming"
+        activeConversationVisible={false}
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("当前会话仍在运行");
+    expect(indicator).toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-active-running");
   });
 
   it("shows and clears the completed-unviewed dot from refreshed session data", async () => {

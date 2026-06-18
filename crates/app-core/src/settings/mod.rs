@@ -24,8 +24,9 @@ pub use lsp::{
 pub use remote::{
     remote_lsp_settings_snapshot, remote_probe_lsp_server, remote_reset_lsp_server_config,
     remote_reset_provider_models, remote_save_agent_provider_secret, remote_save_lsp_server_config,
-    remote_save_provider_models, remote_select_agent, remote_select_agent_provider_profile,
-    remote_select_claude_fast_model, remote_select_theme, remote_settings_snapshot,
+    remote_save_provider_models, remote_save_provider_models_with_model_list_url,
+    remote_select_agent, remote_select_agent_provider_profile, remote_select_claude_fast_model,
+    remote_select_theme, remote_settings_snapshot,
 };
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
     AgentCliId, AgentModelOption, AgentProviderFamily, AgentProviderProfile,
@@ -289,6 +291,8 @@ impl Default for ProviderModelsCatalog {
 struct ProviderModelsEntry {
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    model_list_url: Option<String>,
 }
 
 const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
@@ -671,6 +675,77 @@ fn normalize_model_list(models: Vec<String>) -> Result<Vec<String>> {
     Ok(normalized)
 }
 
+fn normalize_model_list_url(url: &str) -> Result<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        anyhow::bail!("model list URL cannot be empty");
+    }
+    let parsed =
+        reqwest::Url::parse(url).with_context(|| format!("invalid model list URL: {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed.to_string()),
+        scheme => anyhow::bail!("unsupported model list URL scheme: {scheme}"),
+    }
+}
+
+fn extract_model_ids_from_json(value: &serde_json::Value) -> Vec<String> {
+    let Some(candidates) = model_list_candidates(value) else {
+        return Vec::new();
+    };
+    candidates
+        .iter()
+        .filter_map(model_id_from_json_value)
+        .collect()
+}
+
+fn model_list_candidates(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    if let Some(items) = value.as_array() {
+        return Some(items);
+    }
+    for key in ["data", "models", "items", "result", "results"] {
+        if let Some(items) = value.get(key).and_then(|item| item.as_array()) {
+            return Some(items);
+        }
+    }
+    None
+}
+
+fn model_id_from_json_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(model) = value.as_str() {
+        return Some(model.to_string());
+    }
+    for key in ["id", "model", "name", "slug"] {
+        if let Some(model) = value.get(key).and_then(|item| item.as_str()) {
+            return Some(model.to_string());
+        }
+    }
+    None
+}
+
+fn parse_provider_models_response(body: &str) -> Result<Vec<String>> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("model list response is empty");
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let models = extract_model_ids_from_json(&value);
+        return normalize_model_list(models);
+    }
+    normalize_model_list(
+        trimmed
+            .lines()
+            .map(|line| {
+                line.trim()
+                    .trim_start_matches('-')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string()
+            })
+            .collect(),
+    )
+}
+
 fn normalize_model_source_provider(provider: &str) -> Result<&'static str> {
     let provider = normalize_codex_provider(provider)?;
     if !BYOK_SOURCE_PROVIDER_IDS.contains(&provider) {
@@ -884,6 +959,7 @@ fn provider_profile(
         base_url: definition.base_url.map(str::to_string),
         default_model: definition.default_model.map(str::to_string),
         models,
+        model_list_url: custom_model_list_url_for_provider(paths, definition.id),
         credential_label: definition.credential_label.map(str::to_string),
         requires_credential: definition.requires_credential,
         help_text: definition.help_text.to_string(),
@@ -1012,16 +1088,82 @@ pub fn save_provider_models(
     provider: &str,
     models: Vec<String>,
 ) -> Result<AgentSettingsSnapshot> {
+    save_provider_models_with_model_list_url(paths, provider, models, None)
+}
+
+pub fn save_provider_models_with_model_list_url(
+    paths: &AppPaths,
+    provider: &str,
+    models: Vec<String>,
+    model_list_url: Option<String>,
+) -> Result<AgentSettingsSnapshot> {
     let provider = normalize_model_source_provider(provider)?;
     let models = normalize_model_list(models)?;
     let mut catalog = read_provider_models_catalog(paths)?;
-    catalog.version = PROVIDER_MODELS_VERSION;
-    catalog
+    let existing_model_list_url = catalog
         .providers
-        .insert(provider.to_string(), ProviderModelsEntry { models });
+        .get(provider)
+        .and_then(|entry| entry.model_list_url.clone());
+    let model_list_url = match model_list_url {
+        Some(url) => Some(normalize_model_list_url(&url)?),
+        None => existing_model_list_url,
+    };
+    catalog.version = PROVIDER_MODELS_VERSION;
+    catalog.providers.insert(
+        provider.to_string(),
+        ProviderModelsEntry {
+            models,
+            model_list_url,
+        },
+    );
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
     Ok(settings_snapshot(paths))
+}
+
+pub async fn fetch_provider_models_from_url(
+    paths: &AppPaths,
+    provider: &str,
+    model_list_url: &str,
+) -> Result<Vec<String>> {
+    let provider = normalize_model_source_provider(provider)?;
+    let model_list_url = normalize_model_list_url(model_list_url)?;
+    let api_key = byok_source_secret(paths, AgentProviderFamily::Codex, provider)
+        .or_else(|| byok_source_secret(paths, AgentProviderFamily::Claude, provider));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .build()?;
+    let mut request = client.get(model_list_url.as_str());
+    if let Some(api_key) = api_key.as_deref().filter(|key| !key.trim().is_empty()) {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to request model list URL {model_list_url}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read model list response")?;
+    if !status.is_success() {
+        anyhow::bail!("model list URL returned {status}: {body}");
+    }
+    parse_provider_models_response(&body)
+}
+
+pub async fn sync_provider_models_from_url(
+    paths: &AppPaths,
+    provider: &str,
+    model_list_url: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let models = fetch_provider_models_from_url(paths, provider, model_list_url).await?;
+    save_provider_models_with_model_list_url(
+        paths,
+        provider,
+        models,
+        Some(model_list_url.to_string()),
+    )
 }
 
 pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSettingsSnapshot> {
@@ -1343,6 +1485,19 @@ fn custom_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Optio
     let catalog = load_provider_models_catalog(paths);
     let models = catalog.providers.get(provider)?.models.clone();
     (!models.is_empty()).then_some(models)
+}
+
+fn custom_model_list_url_for_provider(paths: &AppPaths, provider: &str) -> Option<String> {
+    let provider = normalize_codex_provider(provider).ok()?;
+    let catalog = load_provider_models_catalog(paths);
+    catalog
+        .providers
+        .get(provider)?
+        .model_list_url
+        .as_ref()
+        .map(|url| url.trim())
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
 }
 
 fn effective_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Vec<String> {

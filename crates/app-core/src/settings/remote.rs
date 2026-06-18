@@ -86,6 +86,23 @@ pub fn remote_save_provider_models(
     )
 }
 
+pub fn remote_save_provider_models_with_model_list_url(
+    profile: &RemoteMachineProfile,
+    ssh_password: Option<&str>,
+    provider: &str,
+    models: Vec<String>,
+    model_list_url: String,
+) -> Result<AgentSettingsSnapshot> {
+    remote_update_settings_with_runner(
+        profile,
+        ssh_password,
+        &SystemRemoteSshCommandRunner,
+        |paths| {
+            save_provider_models_with_model_list_url(paths, provider, models, Some(model_list_url))
+        },
+    )
+}
+
 pub fn remote_reset_provider_models(
     profile: &RemoteMachineProfile,
     ssh_password: Option<&str>,

@@ -159,6 +159,15 @@ pub enum ClientEvent {
         id: String,
         outcome: String,
     },
+    ToolStopAvailability {
+        id: String,
+        can_stop: bool,
+        stop_kind: Option<String>,
+    },
+    ToolStopped {
+        id: String,
+        outcome: String,
+    },
     SessionConfigUpdated {
         state: SessionConfigState,
     },

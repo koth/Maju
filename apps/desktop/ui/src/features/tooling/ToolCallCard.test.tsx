@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render } from "@testing-library/react";
 import { ToolCallCard, previewToCompactPatch } from "./ToolCallCard";
 import type { ToolInvocation, ToolStatus } from "../../types/index";
@@ -24,6 +24,9 @@ function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
     permission_options: [],
     permission_input: null,
     permission_decision: null,
+    can_stop: false,
+    stop_kind: null,
+    stop_status: null,
     ...overrides,
   };
 }
@@ -193,6 +196,51 @@ describe("ToolCallCard animation states", () => {
     fireEvent.click(getByText("Allow"));
 
     expect(selected).toBe("allow");
+  });
+
+  it("shows a stop action for stoppable running command tools", () => {
+    const tool = makeTool({
+      call_id: "call-long-bash",
+      status: "Running",
+      kind: "execute",
+      name: "Bash",
+      raw_input: JSON.stringify({ command: "pnpm run dev" }),
+      can_stop: true,
+      stop_kind: "terminal",
+    });
+    const onStopTool = vi.fn();
+    const { getByRole } = render(
+      <ToolCallCard
+        tool={tool}
+        nested={false}
+        onPermissionSelect={() => {}}
+        onStopTool={onStopTool}
+      />,
+    );
+
+    fireEvent.click(getByRole("button", { name: "停止工具调用" }));
+
+    expect(onStopTool).toHaveBeenCalledWith("call-long-bash");
+  });
+
+  it("does not show a stop action for running command tools without a stop handle", () => {
+    const tool = makeTool({
+      call_id: "call-background-bash",
+      status: "Running",
+      kind: "execute",
+      name: "Bash",
+      raw_input: JSON.stringify({ command: "pnpm run dev" }),
+    });
+    const { container } = render(
+      <ToolCallCard
+        tool={tool}
+        nested={false}
+        onPermissionSelect={() => {}}
+        onStopTool={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".tc-stop-turn-btn")).toBeNull();
   });
 });
 

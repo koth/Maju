@@ -75,7 +75,9 @@ impl Application {
             }
             ClientEvent::ToolStarted { id, .. }
             | ClientEvent::ToolCompleted { id, .. }
-            | ClientEvent::ToolFailed { id, .. } => {
+            | ClientEvent::ToolFailed { id, .. }
+            | ClientEvent::ToolStopped { id, .. }
+            | ClientEvent::ToolStopAvailability { id, .. } => {
                 // Find the tool in the UI snapshot and persist its latest display state
                 let tool_clone = self
                     .ui
@@ -151,6 +153,8 @@ impl Application {
             | ClientEvent::ToolProgress { id, .. }
             | ClientEvent::ToolCompleted { id, .. }
             | ClientEvent::ToolFailed { id, .. }
+            | ClientEvent::ToolStopAvailability { id, .. }
+            | ClientEvent::ToolStopped { id, .. }
             | ClientEvent::ToolDiff { id, .. }
             | ClientEvent::ToolDiffPreview { id, .. } => {
                 self.mark_tool_call_dirty(id);

@@ -909,6 +909,9 @@ impl SessionStore {
                         permission_options: Vec::new(),
                         permission_input: None,
                         permission_decision: None,
+                        can_stop: false,
+                        stop_kind: None,
+                        stop_status: None,
                     });
                     timeline.push(TimelineItem::Tool(id));
                 }

@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { ListChecks } from "lucide-react";
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
 import {
   startupPerfMark,
+  sessionCancel,
   sessionResolvePermission,
   sessionRetryUserMessage,
+  sessionStopTool,
   settingsGetAgentSnapshot,
 } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
@@ -140,6 +143,7 @@ export function Workbench() {
     handleRightPanelResizeStart,
   } = useRightPanelState();
   const [reviewPanelExpanded, setReviewPanelExpanded] = useState(false);
+  const [agentPlanDockCollapsed, setAgentPlanDockCollapsed] = useState(false);
   const [expandedReviewSideTreeVisible, setExpandedReviewSideTreeVisible] = useState(false);
   const [reviewPanelActiveTab, setReviewPanelActiveTab] = useState<ReviewPanelActiveTab>(
     INITIAL_REVIEW_PANEL_ACTIVE_TAB,
@@ -166,6 +170,7 @@ export function Workbench() {
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [startupUpdateInfo, setStartupUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [startupUpdateDismissed, setStartupUpdateDismissed] = useState(false);
+  const [cancellingTurn, setCancellingTurn] = useState(false);
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -349,6 +354,22 @@ export function Workbench() {
     await pollState();
   }, [pollState]);
 
+  const handleCancelTurn = useCallback(async () => {
+    if (cancellingTurn) return;
+    setCancellingTurn(true);
+    try {
+      await sessionCancel();
+      await pollState();
+    } finally {
+      setCancellingTurn(false);
+    }
+  }, [cancellingTurn, pollState]);
+
+  const handleStopTool = useCallback(async (toolCallId: string) => {
+    await sessionStopTool(toolCallId);
+    await pollState();
+  }, [pollState]);
+
   useEffect(() => {
     if (!remoteWorkspaceHydration) return;
     if (!snapshot || snapshot.workspace.root !== remoteWorkspaceHydration.workspaceRoot) {
@@ -477,21 +498,29 @@ export function Workbench() {
     />
   ), [appTheme, handleEditorDirtyChange, handleEditorSaved, snapshot?.workspace.name]);
 
+  const allPendingPermissionRequests = useMemo(
+    () => (snapshot ? findPendingPermissionRequests(snapshot.tools) : []),
+    [snapshot?.tools],
+  );
   const pendingPermissionRequests = useMemo(
     () =>
-      snapshot
-        ? findPendingPermissionRequests(snapshot.tools).filter(
-            (request) => !resolvingPermissionIds.has(request.requestId),
-          )
-        : [],
-    [snapshot?.tools, resolvingPermissionIds],
+      allPendingPermissionRequests.filter(
+        (request) => !resolvingPermissionIds.has(request.requestId),
+      ),
+    [allPendingPermissionRequests, resolvingPermissionIds],
   );
   const hiddenPermissionRequestIds = useMemo(
-    () =>
-      pendingPermissionRequests.length > 0
-        ? new Set(pendingPermissionRequests.map((request) => request.requestId))
-        : EMPTY_HIDDEN_PERMISSION_REQUEST_IDS,
-    [pendingPermissionRequests],
+    () => {
+      if (allPendingPermissionRequests.length === 0 && resolvingPermissionIds.size === 0) {
+        return EMPTY_HIDDEN_PERMISSION_REQUEST_IDS;
+      }
+      const ids = new Set(allPendingPermissionRequests.map((request) => request.requestId));
+      for (const requestId of resolvingPermissionIds) {
+        ids.add(requestId);
+      }
+      return ids;
+    },
+    [allPendingPermissionRequests, resolvingPermissionIds],
   );
   const updateNotice = startupUpdateInfo && !startupUpdateDismissed ? (
     <div className="startup-update-notice" role="status" aria-live="polite">
@@ -637,6 +666,7 @@ export function Workbench() {
               activeSessionTitle={snapshot.session.title}
               activeWorkspaceRoot={snapshot.workspace.root}
               currentSessionStatus={snapshot.session.status}
+              activeConversationVisible={activeTab.type === "conversation"}
               onOpenSettings={handleOpenSettings}
               onSessionChanged={handleSessionChanged}
               onWorkspaceChanged={handleWorkspaceChanged}
@@ -673,6 +703,22 @@ export function Workbench() {
               workspace={snapshot.workspace}
               activeTabLabel={agentLabel}
               changeCount={agentConversationChangeCount}
+              planToggle={
+                showAgentPlanDock ? (
+                  <button
+                    type="button"
+                    className={`thread-header-plan-toggle ${
+                      agentPlanDockCollapsed ? "" : "is-active"
+                    }`}
+                    aria-label={agentPlanDockCollapsed ? "展开任务计划" : "折叠任务计划"}
+                    aria-expanded={!agentPlanDockCollapsed}
+                    title={agentPlanDockCollapsed ? "展开任务计划" : "折叠任务计划"}
+                    onClick={() => setAgentPlanDockCollapsed((collapsed) => !collapsed)}
+                  >
+                    <ListChecks aria-hidden="true" size={16} strokeWidth={2.2} />
+                  </button>
+                ) : null
+              }
             />
 
             {displayTabs.length > 1 && (
@@ -715,9 +761,11 @@ export function Workbench() {
                 {activeTab.type === "conversation" ? (
                   <>
                     {showAgentPlanDock && (
-                      <aside className="agent-plan-dock" aria-label="当前任务计划">
-                        <AgentPlanPanel entries={snapshot.agent_plan} />
-                      </aside>
+                      !agentPlanDockCollapsed && (
+                        <aside className="agent-plan-dock" aria-label="当前任务计划">
+                          <AgentPlanPanel entries={snapshot.agent_plan} />
+                        </aside>
+                      )
                     )}
                     <ConversationTimeline
                       snapshot={snapshot}
@@ -729,6 +777,8 @@ export function Workbench() {
                       onReviewChangeSetSelect={handleReviewChangeSetSelect}
                       hiddenPermissionRequestIds={hiddenPermissionRequestIds}
                       onRetryUserMessage={handleRetryUserMessage}
+                      onCancelTurn={handleCancelTurn}
+                      onStopTool={handleStopTool}
                     />
                   </>
                 ) : (

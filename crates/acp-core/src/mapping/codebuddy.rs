@@ -134,6 +134,7 @@ fn emit_codebuddy_tool_call(
     let raw_input = tool_raw_input_for_ui(update);
     let raw_output_fallback = codebuddy_raw_output_fallback(update);
     let raw_output = update.get("rawOutput").or(raw_output_fallback.as_ref());
+    let raw_output_for_ui = codebuddy_raw_output_for_ui(raw_output);
     let effective_status = effective_codebuddy_tool_status(update, status.as_deref(), raw_output);
 
     tx.send(ClientEvent::ToolStarted {
@@ -159,7 +160,7 @@ fn emit_codebuddy_tool_call(
                 id,
                 name: Some(name),
                 outcome: summary,
-                raw_output: raw_output.map(format_value_for_ui),
+                raw_output: raw_output_for_ui,
                 terminal_output,
             })
             .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool completion"))?;
@@ -173,7 +174,7 @@ fn emit_codebuddy_tool_call(
                 id,
                 name: Some(name),
                 error,
-                raw_output: raw_output.map(format_value_for_ui),
+                raw_output: raw_output_for_ui,
                 terminal_output,
             })
             .map_err(|_| anyhow!("failed to emit CodeBuddy inline tool failure"))?;
@@ -234,6 +235,7 @@ fn emit_codebuddy_tool_call_update(
         .or(raw_output_fallback.as_ref());
     let effective_status = effective_codebuddy_tool_status(update, status.as_deref(), raw_output);
     let terminal_output = raw_output.and_then(parse_terminal_output);
+    let raw_output_for_ui = codebuddy_raw_output_for_ui(raw_output);
     // Only send rawInput on final updates to avoid sending incomplete JSON fragments
     let raw_input = if is_partial {
         None
@@ -255,7 +257,7 @@ fn emit_codebuddy_tool_call_update(
         summary: summary.clone(),
         is_subagent,
         raw_input: raw_input.as_ref().map(format_json),
-        raw_output: raw_output.map(format_value_for_ui),
+        raw_output: raw_output_for_ui.clone(),
         terminal_output: terminal_output.clone(),
         is_partial,
     })
@@ -266,11 +268,11 @@ fn emit_codebuddy_tool_call_update(
             .send(ClientEvent::ToolCompleted {
                 id,
                 name: name.clone(),
-                outcome: raw_output
-                    .map(format_value_for_ui)
+                outcome: raw_output_for_ui
+                    .clone()
                     .or(summary)
                     .unwrap_or_else(|| "Completed".to_string()),
-                raw_output: raw_output.map(format_value_for_ui),
+                raw_output: raw_output_for_ui,
                 terminal_output,
             })
             .map_err(|_| anyhow!("failed to emit CodeBuddy tool completion")),
@@ -288,7 +290,7 @@ fn emit_codebuddy_tool_call_update(
                 id,
                 name,
                 error,
-                raw_output: raw_output.map(format_value_for_ui),
+                raw_output: raw_output_for_ui,
                 terminal_output,
             })
             .map_err(|_| anyhow!("failed to emit CodeBuddy tool failure"))
@@ -977,6 +979,26 @@ fn codebuddy_raw_output_fallback(update: &Value) -> Option<Value> {
     claude_code_tool_response_text(update).map(Value::String)
 }
 
+fn codebuddy_raw_output_for_ui(raw_output: Option<&Value>) -> Option<String> {
+    raw_output
+        .map(format_value_for_ui)
+        .filter(|output| !is_low_value_codebuddy_output(output))
+}
+
+fn is_low_value_codebuddy_output(output: &str) -> bool {
+    let normalized = output
+        .trim()
+        .trim_matches('"')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "" | "null" | "undefined" | "null/undefined" | "null / undefined"
+    )
+}
+
 fn effective_codebuddy_tool_status(
     update: &Value,
     status: Option<&str>,
@@ -986,7 +1008,117 @@ fn effective_codebuddy_tool_status(
         return Some("failed".into());
     }
 
+    if status == Some("completed") && codebuddy_background_task_is_running(update, raw_output) {
+        return Some("running".into());
+    }
+
     status.map(str::to_string)
+}
+
+fn codebuddy_background_task_is_running(update: &Value, raw_output: Option<&Value>) -> bool {
+    raw_output.is_some_and(|value| value_contains_background_running_marker(value, 0))
+        || value_contains_background_running_marker(update, 0)
+}
+
+fn value_contains_background_running_marker(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+
+    match value {
+        Value::Object(map) => {
+            let has_background_marker = map.iter().any(|(key, value)| {
+                is_background_key(key) && background_value_indicates_running(value, depth + 1)
+            });
+            if has_background_marker {
+                return true;
+            }
+
+            let has_background_handle = map_has_string_field(
+                map,
+                &[
+                    "backgroundTaskId",
+                    "background_task_id",
+                    "backgroundTaskID",
+                    "taskId",
+                    "task_id",
+                ],
+            ) || map.get("pid").is_some();
+            let has_running_status = map
+                .iter()
+                .any(|(key, value)| is_status_key(key) && value_status_indicates_running(value));
+            if has_background_handle && has_running_status {
+                return true;
+            }
+
+            map.values()
+                .any(|child| value_contains_background_running_marker(child, depth + 1))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|child| value_contains_background_running_marker(child, depth + 1)),
+        _ => false,
+    }
+}
+
+fn background_value_indicates_running(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+
+    match value {
+        Value::Bool(true) => true,
+        Value::String(text) => status_text_indicates_running(text),
+        Value::Object(map) => {
+            let explicit_terminal_status = map.iter().find_map(|(key, value)| {
+                is_status_key(key).then_some(value).and_then(Value::as_str)
+            });
+            if let Some(status) = explicit_terminal_status {
+                return status_text_indicates_running(status);
+            }
+
+            map_has_string_field(
+                map,
+                &[
+                    "backgroundTaskId",
+                    "background_task_id",
+                    "backgroundTaskID",
+                    "taskId",
+                    "task_id",
+                ],
+            ) || map.get("pid").is_some()
+                || map
+                    .values()
+                    .any(|child| background_value_indicates_running(child, depth + 1))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|child| background_value_indicates_running(child, depth + 1)),
+        _ => false,
+    }
+}
+
+fn is_background_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("background") || lower == "run_in_background"
+}
+
+fn is_status_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "status" | "state" | "runtime_status" | "runtimestatus"
+    )
+}
+
+fn value_status_indicates_running(value: &Value) -> bool {
+    value.as_str().is_some_and(status_text_indicates_running)
+}
+
+fn status_text_indicates_running(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "running" | "active" | "started" | "in_progress" | "background_running"
+    )
 }
 
 fn codebuddy_hard_error_text(update: &Value, raw_output: Option<&Value>) -> Option<String> {

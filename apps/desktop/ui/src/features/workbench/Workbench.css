@@ -507,9 +507,9 @@ body.is-resizing-left-sidebar {
 .center-panel {
   --center-panel-gutter: clamp(8px, 1.5vw, 21px);
   --conversation-column-width: 83.333%;
-  --conversation-column-min: min(100%, 720px);
+  --conversation-column-min: min(100%, 640px);
   --conversation-column-max: 1180px;
-  --conversation-composer-max: 920px;
+  --conversation-composer-max: 720px;
   --expanded-review-side-tree-width: clamp(230px, 24vw, 300px);
   --expanded-review-composer-height: 58px;
 
@@ -563,7 +563,7 @@ body.is-resizing-left-sidebar {
   justify-content: space-between;
   min-height: var(--thread-header-height);
   gap: 18px;
-  padding: 12px 22px;
+  padding: 12px var(--center-panel-gutter);
   background: var(--app-bg);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -625,6 +625,48 @@ body.is-resizing-left-sidebar {
   color: var(--text-soft);
   font-size: var(--font-size-shell-meta);
   white-space: nowrap;
+}
+
+.thread-header-plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.thread-header-plan-toggle:hover {
+  background: var(--interactive-hover);
+  border-color: transparent;
+  color: var(--text-strong);
+}
+
+.thread-header-plan-toggle.is-active {
+  background: var(--surface-selected);
+  border-color: var(--border-focus);
+  color: var(--accent-hover);
+}
+
+.thread-header-plan-toggle:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.thread-header-plan-toggle svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .status-pill {
@@ -747,7 +789,7 @@ body.is-resizing-left-sidebar {
   flex-direction: column;
   min-height: 0;
   height: 100%;
-  padding: 18px var(--center-panel-gutter) 0;
+  padding: var(--center-panel-gutter) var(--center-panel-gutter) 0;
   background: var(--app-bg);
 }
 
@@ -756,62 +798,11 @@ body.is-resizing-left-sidebar {
 }
 
 .agent-plan-dock {
-  position: absolute;
-  top: 18px;
-  right: var(--center-panel-gutter);
-  z-index: 3;
-  width: clamp(238px, 18vw, 320px);
-  max-width: calc(100% - 2 * var(--center-panel-gutter));
+  width: min(var(--conversation-column-width), var(--conversation-composer-max));
+  min-width: min(var(--conversation-column-min), 100%);
+  max-width: var(--conversation-composer-max);
+  margin: 0 auto var(--center-panel-gutter);
   pointer-events: auto;
-}
-
-.agent-plan-dock .agent-plan {
-  max-height: min(42vh, 360px);
-  margin: 0;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-muted-bg) 92%, var(--app-bg));
-  box-shadow:
-    0 14px 36px rgba(0, 0, 0, 0.24),
-    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
-}
-
-.agent-plan-dock .agent-plan-header {
-  padding: 9px 10px 7px;
-}
-
-.agent-plan-dock .agent-plan-title {
-  max-width: 210px;
-  font-size: 12.5px;
-}
-
-.agent-plan-dock .agent-plan-list {
-  padding: 0 7px 7px;
-}
-
-.agent-plan-dock .agent-plan-entry {
-  grid-template-columns: 44px minmax(0, 1fr);
-  gap: 8px;
-  min-height: 31px;
-  padding: 6px 7px;
-  border-radius: 9px;
-}
-
-.agent-plan-dock .agent-plan-priority {
-  display: none;
-}
-
-@container (max-width: 1180px) {
-  .agent-plan-dock {
-    position: static;
-    width: min(var(--conversation-column-width), var(--conversation-composer-max));
-    min-width: min(var(--conversation-column-min), 100%);
-    max-width: var(--conversation-composer-max);
-    margin: 0 auto 10px;
-  }
-
-  .agent-plan-dock .agent-plan {
-    max-height: min(28vh, 220px);
-  }
 }
 
 .expanded-review-panel-shell {
@@ -893,7 +884,7 @@ body.is-resizing-left-sidebar {
   min-width: 0;
   padding: 0 var(--center-panel-gutter);
   background: var(--app-bg);
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 56%, transparent);
+  border-bottom: 1px solid var(--border-subtle);
   overflow: hidden;
 }
 

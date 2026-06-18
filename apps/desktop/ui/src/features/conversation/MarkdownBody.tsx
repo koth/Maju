@@ -350,7 +350,56 @@ function repairCompactFenceContent(language: string, content: string) {
 }
 
 function normalizeMarkdownInput(content: string) {
-  return normalizeEscapedMarkdownLineBreaks(unwrapStringifiedMarkdown(content));
+  return stripLeakedCourseBreakNoise(
+    normalizeEscapedMarkdownLineBreaks(unwrapStringifiedMarkdown(content)),
+  );
+}
+
+function stripLeakedCourseBreakNoise(content: string) {
+  const lines = content.split(/\r?\n/);
+  const repaired: string[] = [];
+  let noiseRun: string[] = [];
+  let courseLineCount = 0;
+  let inFence = false;
+
+  const flushNoiseRun = () => {
+    if (courseLineCount < 3) {
+      repaired.push(...noiseRun);
+    }
+    noiseRun = [];
+    courseLineCount = 0;
+  };
+
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/u.test(line)) {
+      flushNoiseRun();
+      inFence = !inFence;
+      repaired.push(line);
+      continue;
+    }
+
+    if (inFence) {
+      repaired.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    const isCourseNoise = /^course$/iu.test(trimmed);
+    const isBreakNoise = /^<br\s*\/?>$/iu.test(trimmed);
+    if (trimmed === "" || isCourseNoise || isBreakNoise) {
+      noiseRun.push(line);
+      if (isCourseNoise) {
+        courseLineCount += 1;
+      }
+      continue;
+    }
+
+    flushNoiseRun();
+    repaired.push(line);
+  }
+
+  flushNoiseRun();
+  return repaired.join("\n");
 }
 
 function repairCompactMarkdownLine(line: string) {

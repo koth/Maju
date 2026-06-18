@@ -1260,6 +1260,10 @@ describe("Bash terminal output", () => {
       expect(toolUseNotifications).toHaveLength(1);
       expect((toolUseNotifications[0].update as any)._meta).toMatchObject({
         terminal_info: { terminal_id: "toolu_bash_hook" },
+        "kodex.ai/toolStop": {
+          toolCallId: "toolu_bash_hook",
+          stopKind: "agent_owned",
+        },
       });
 
       // Step 2: Process bash result — produces separate terminal_output and terminal_exit notifications
@@ -1404,6 +1408,37 @@ describe("Bash terminal output", () => {
       expect(hookMeta.terminal_info).toBeUndefined();
       expect(hookMeta.terminal_output).toBeUndefined();
       expect(hookMeta.terminal_exit).toBeUndefined();
+    });
+
+    it("should omit stop metadata when replaying historical tool use", () => {
+      const toolUseCache: ToolUseCache = {};
+      const toolUseNotifications = toAcpNotifications(
+        [
+          {
+            type: "tool_use" as const,
+            id: "toolu_replay_bash",
+            name: "Bash",
+            input: { command: "ls -la" },
+          },
+        ],
+        "assistant",
+        "test-session",
+        toolUseCache,
+        mockClient,
+        mockLogger,
+        {
+          clientCapabilities: { _meta: { terminal_output: true } },
+          registerHooks: false,
+        },
+      );
+
+      expect(toolUseNotifications).toHaveLength(1);
+      expect((toolUseNotifications[0].update as any)._meta).toMatchObject({
+        terminal_info: { terminal_id: "toolu_replay_bash" },
+      });
+      expect((toolUseNotifications[0].update as any)._meta).not.toHaveProperty(
+        "kodex.ai/toolStop",
+      );
     });
   });
 });

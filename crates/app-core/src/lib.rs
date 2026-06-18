@@ -1662,6 +1662,9 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             permission_options: Vec::new(),
             permission_input: None,
             permission_decision: None,
+            can_stop: false,
+            stop_kind: None,
+            stop_status: None,
         };
         store.insert_tool(&session_id, &tool, 1).unwrap();
         drop(store);

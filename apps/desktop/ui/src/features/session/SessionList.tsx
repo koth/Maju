@@ -12,6 +12,7 @@ import {
   workspaceOpen,
   workspaceSetActive,
 } from "../../lib/tauri";
+import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
 import { RemoteOpenPanel } from "../workbench/RemoteOpenPanel";
 import "./SessionList.css";
@@ -21,6 +22,7 @@ interface Props {
   activeSessionTitle: string;
   activeWorkspaceRoot: string;
   currentSessionStatus: SessionStatus;
+  activeConversationVisible?: boolean;
   onOpenSettings: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
@@ -39,6 +41,7 @@ export function SessionList({
   activeSessionTitle,
   activeWorkspaceRoot,
   currentSessionStatus,
+  activeConversationVisible = true,
   onOpenSettings,
   onSessionChanged,
   onWorkspaceChanged,
@@ -83,6 +86,28 @@ export function SessionList({
     refresh();
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
+  }, [refresh]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    onSessionStatus(() => {
+      refresh();
+    })
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -420,6 +445,9 @@ export function SessionList({
             key={workspaceItem.workspace.root}
             item={workspaceItem}
             activeSessionId={activeSessionId}
+            activeSessionTitle={activeSessionTitle}
+            currentSessionStatus={currentSessionStatus}
+            activeConversationVisible={activeConversationVisible}
             onActivateWorkspace={handleActivateWorkspace}
             onReconnectRemoteWorkspace={handleReconnectRemoteWorkspace}
             onCreateSession={handleOpenAgentPicker}
@@ -665,6 +693,9 @@ function claudeAgentReady(snapshot: AgentSettingsSnapshot) {
 function WorkspaceSection({
   item,
   activeSessionId,
+  activeSessionTitle,
+  currentSessionStatus,
+  activeConversationVisible,
   onActivateWorkspace,
   onReconnectRemoteWorkspace,
   onCreateSession,
@@ -674,6 +705,9 @@ function WorkspaceSection({
 }: {
   item: WorkspaceSessionList;
   activeSessionId: string;
+  activeSessionTitle: string;
+  currentSessionStatus: SessionStatus;
+  activeConversationVisible: boolean;
   onActivateWorkspace: (workspaceRoot: string) => void;
   onReconnectRemoteWorkspace: (remote: RemoteLinuxWorkspace) => void;
   onCreateSession: (workspaceRoot: string, remoteAgent: AgentCliId | null, isRemoteWorkspace: boolean) => void;
@@ -747,17 +781,29 @@ function WorkspaceSection({
             </div>
           )}
 
-          {sessions.map((session) => (
-            <ThreadRow
-              key={session.id}
-              session={session}
-              active={session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace}
-              connected={session.id === activeSessionId && item.is_active && item.connected}
-              disabled={isDormantRemoteWorkspace}
-              onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
-              onArchive={(id) => onArchive(id, workspaceActionRoot)}
-            />
-          ))}
+          {sessions.map((session) => {
+            const isActiveSession = session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace;
+            const displaySession = isActiveSession
+              ? {
+                  ...session,
+                  title: activeSessionTitle || session.title,
+                  status: currentSessionStatus,
+                }
+              : session;
+
+            return (
+              <ThreadRow
+                key={session.id}
+                session={displaySession}
+                active={isActiveSession}
+                activeConversationVisible={isActiveSession ? activeConversationVisible : true}
+                connected={session.id === activeSessionId && item.is_active && item.connected}
+                disabled={isDormantRemoteWorkspace}
+                onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
+                onArchive={(id) => onArchive(id, workspaceActionRoot)}
+              />
+            );
+          })}
         </div>
       </div>
     </section>
@@ -784,6 +830,7 @@ function remoteAgentForWorkspace(remote: RemoteLinuxWorkspace | null): AgentCliI
 function ThreadRow({
   session,
   active,
+  activeConversationVisible,
   connected,
   disabled = false,
   onSwitch,
@@ -791,6 +838,7 @@ function ThreadRow({
 }: {
   session: SessionListItem;
   active: boolean;
+  activeConversationVisible: boolean;
   connected: boolean;
   disabled?: boolean;
   onSwitch: (id: string) => void;
@@ -806,15 +854,27 @@ function ThreadRow({
       : session.title;
   const runtimeStatus = session.runtime_status ?? "none";
   const attentionState = session.attention_state ?? "none";
-  const showBackgroundProgress = !disabled && !active && runtimeStatus === "background_running";
+  const turnStillRunning = session.status === "Streaming" || session.status === "WaitingForTool";
+  const showActiveProgress = !disabled && active && !activeConversationVisible && turnStillRunning;
+  const hasAttention = !disabled && !active && attentionState === "needs_attention";
+  const hiddenWorkspaceActiveProgress =
+    !disabled && !active && !hasAttention && runtimeStatus === "active" && turnStillRunning;
+  const showBackgroundProgress =
+    !disabled &&
+    !active &&
+    !hasAttention &&
+    (runtimeStatus === "background_running" || hiddenWorkspaceActiveProgress);
+  const showProgress = showActiveProgress || showBackgroundProgress;
   const showCompletedDot = !disabled && !active && attentionState === "completed_unviewed";
-  const showAttentionDot = !disabled && !active && attentionState === "needs_attention";
+  const showAttentionDot = hasAttention;
   const indicatorLabel = disabled
     ? disabledHint
-    : showBackgroundProgress
-    ? "后台会话仍在运行"
+    : showActiveProgress
+    ? "当前会话仍在运行"
     : showAttentionDot
       ? "后台会话需要处理"
+    : showBackgroundProgress
+    ? "后台会话仍在运行"
       : showCompletedDot
         ? "后台会话已完成，尚未查看"
         : connected
@@ -827,6 +887,7 @@ function ThreadRow({
         "sl-item",
         active ? "sl-active" : "",
         disabled ? "is-disabled" : "",
+        showActiveProgress ? "is-active-running" : "",
         showBackgroundProgress ? "is-background-running" : "",
         showCompletedDot ? "is-completed-unviewed" : "",
         showAttentionDot ? "is-needs-attention" : "",
@@ -843,7 +904,7 @@ function ThreadRow({
           className={[
             "sl-session-online",
             connected ? "is-visible" : "",
-            showBackgroundProgress ? "is-progress" : "",
+            showProgress ? "is-progress" : "",
             showCompletedDot ? "is-complete" : "",
             showAttentionDot ? "is-attention" : "",
           ].filter(Boolean).join(" ")}

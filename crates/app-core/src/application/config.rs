@@ -1,6 +1,36 @@
 use super::diff_utils::{is_file_write_tool_identity, tool_command_write_hint_paths};
 use super::*;
 
+fn permission_selection_outcome_for_display(
+    tool: &workspace_model::ToolInvocation,
+    decision: &str,
+) -> String {
+    let option = tool
+        .permission_options
+        .iter()
+        .find(|option| option.id == decision);
+    let label = option
+        .map(|option| option.label.as_str())
+        .unwrap_or(decision);
+    if decision.eq_ignore_ascii_case("abort")
+        && label.trim().eq_ignore_ascii_case("No, provide feedback")
+    {
+        "编辑已拒绝".into()
+    } else if option
+        .map(|option| option.kind.to_ascii_lowercase().contains("allow"))
+        .unwrap_or(false)
+    {
+        "Permission selected: Allow".into()
+    } else if option
+        .map(|option| option.kind.to_ascii_lowercase().contains("reject"))
+        .unwrap_or(false)
+    {
+        "Permission selected: Reject".into()
+    } else {
+        format!("Permission selected: {label}")
+    }
+}
+
 impl Application {
     pub(super) fn persist_current_codex_provider_if_needed(&self) {
         if !self.is_codex_acp_session() {
@@ -241,7 +271,7 @@ impl Application {
             .iter_mut()
             .find(|tool| tool.call_id == request_id)
         {
-            let outcome = format!("Permission selected: {decision}");
+            let outcome = permission_selection_outcome_for_display(tool, decision);
             tool.summary = outcome.clone();
             tool.status = workspace_model::ToolStatus::Succeeded;
             tool.permission_options.clear();

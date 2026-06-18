@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Ban, Check, Circle, ClipboardList, Loader2 } from "lucide-react";
 import type {
   AgentPlanEntry,
   PermissionInputQuestion,
@@ -51,19 +52,27 @@ export function AgentPlanPanel({ entries }: Props) {
   if (entries.length === 0) return null;
 
   const completed = entries.filter((entry) => entry.status === "completed").length;
-  const active = entries.find((entry) => entry.status === "in_progress");
   const visibleEntries = sortAgentPlanEntries(entries);
+  const progressPercent = Math.round((completed / entries.length) * 100);
 
   return (
     <section className="agent-plan" aria-label="智能体计划">
       <div className="agent-plan-header">
-        <div>
-          <div className="agent-plan-eyebrow">任务计划</div>
-          <div className="agent-plan-title">
-            {active ? active.content : `已完成 ${completed}/${entries.length} 个任务`}
+        <div className="agent-plan-headline">
+          <span className="agent-plan-icon" aria-hidden="true">
+            <ClipboardList size={18} strokeWidth={2.2} />
+          </span>
+          <div className="agent-plan-heading">
+            <div className="agent-plan-eyebrow">任务计划</div>
+            <div className="agent-plan-title">已完成 {completed}/{entries.length} 个任务</div>
           </div>
         </div>
-        <span className="agent-plan-count">{completed}/{entries.length}</span>
+        <span className="agent-plan-count" aria-label={`已完成 ${completed}/${entries.length} 个任务`}>
+          {completed}/{entries.length}
+        </span>
+      </div>
+      <div className="agent-plan-progress" aria-hidden="true">
+        <span style={{ width: `${progressPercent}%` }} />
       </div>
       <ol className="agent-plan-list">
         {visibleEntries.map((entry, index) => (
@@ -72,6 +81,7 @@ export function AgentPlanPanel({ entries }: Props) {
             key={entry.id ?? `${index}-${entry.content}`}
           >
             <span className="agent-plan-status" aria-label={statusLabel(entry.status)}>
+              {statusIcon(entry.status)}
               {statusMark(entry.status)}
             </span>
             <span className="agent-plan-content">{entry.content}</span>
@@ -522,6 +532,13 @@ function statusMark(status: AgentPlanEntry["status"]) {
   if (status === "cancelled") return "跳过";
   if (status === "in_progress") return "进行中";
   return "待处理";
+}
+
+function statusIcon(status: AgentPlanEntry["status"]) {
+  if (status === "completed") return <Check size={14} strokeWidth={2.4} aria-hidden="true" />;
+  if (status === "cancelled") return <Ban size={14} strokeWidth={2.2} aria-hidden="true" />;
+  if (status === "in_progress") return <Loader2 size={14} strokeWidth={2.2} aria-hidden="true" />;
+  return <Circle size={12} strokeWidth={2.4} aria-hidden="true" />;
 }
 
 function statusLabel(status: AgentPlanEntry["status"]) {

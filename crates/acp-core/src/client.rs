@@ -215,6 +215,19 @@ impl SessionHandle {
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
     }
 
+    pub fn stop_tool(&self, tool_call_id: &str) -> anyhow::Result<Vec<ClientEvent>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .send(RuntimeCommand::StopTool {
+                tool_call_id: tool_call_id.to_string(),
+                reply_tx,
+            })
+            .map_err(|_| anyhow!("ACP command channel closed"))?;
+        reply_rx
+            .recv()
+            .map_err(|_| anyhow!("ACP command reply channel closed"))?
+    }
+
     pub fn set_permission_mode(&self, mode_id: &str) -> anyhow::Result<()> {
         self.permission_broker.set_mode(mode_id)
     }

@@ -1,9 +1,10 @@
 use super::agent_process::{
     RemoteSshAgentProcess, build_remote_agent_cleanup_command, build_remote_agent_command,
-    build_remote_ssh_agent_command_args, build_remote_ssh_args, build_remote_ssh_command_args,
-    build_remote_ssh_reverse_forward_args, connect_loopback_tcp_with_retry, connect_tcp_stream,
-    kill_child_handle,
+    build_remote_ssh_args, build_remote_ssh_reverse_forward_args, connect_loopback_tcp_with_retry,
+    connect_tcp_stream, kill_child_handle,
 };
+#[cfg(unix)]
+use super::agent_process::{build_remote_ssh_agent_command_args, build_remote_ssh_command_args};
 use super::process::{apply_process_cwd_and_pwd, process_cwd};
 use super::prompt_content::prompt_title_text;
 use super::session_titles::{

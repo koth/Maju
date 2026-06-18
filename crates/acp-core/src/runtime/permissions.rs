@@ -175,6 +175,10 @@ fn request_should_retry_with_apply_patch(
     workspace_root: &str,
     request: &RequestPermissionRequest,
 ) -> bool {
+    if request_is_codex_apply_patch_approval(request) {
+        return false;
+    }
+
     match request.tool_call.fields.kind.unwrap_or(ToolKind::Other) {
         ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
             let paths = resolve_paths_against_workspace(workspace_root, permission_paths(request));
@@ -342,7 +346,14 @@ fn decide_build_permission(
                 PermissionDecision::Ask
             }
         }
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => PermissionDecision::Ask,
+        ToolKind::Edit | ToolKind::Delete | ToolKind::Move => {
+            let paths = resolve_paths_against_workspace(workspace_root, permission_paths(request));
+            if !paths.is_empty() && paths_are_inside_workspace(workspace_root, &paths) {
+                select_permission_option(request, true)
+            } else {
+                PermissionDecision::Ask
+            }
+        }
         _ => select_permission_option(request, true),
     }
 }
@@ -394,6 +405,31 @@ fn select_permission_option(request: &RequestPermissionRequest, allow: bool) -> 
     option
         .map(|option| PermissionDecision::Select(option.option_id.0.to_string()))
         .unwrap_or(PermissionDecision::Cancel)
+}
+
+fn request_is_codex_apply_patch_approval(request: &RequestPermissionRequest) -> bool {
+    let has_apply_patch_approval_options = request.options.iter().any(|option| {
+        option.option_id.0.as_ref() == "approved"
+            && option.kind == PermissionOptionKind::AllowOnce
+            && option.name.trim().eq_ignore_ascii_case("Yes")
+    }) && request.options.iter().any(|option| {
+        option.option_id.0.as_ref() == "abort"
+            && option.kind == PermissionOptionKind::RejectOnce
+            && option
+                .name
+                .trim()
+                .eq_ignore_ascii_case("No, provide feedback")
+    });
+
+    has_apply_patch_approval_options
+        && request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .is_some_and(|raw_input| {
+                raw_input.get("call_id").is_some() && raw_input.get("changes").is_some()
+            })
 }
 
 fn permission_paths(request: &RequestPermissionRequest) -> Vec<PathBuf> {

@@ -280,7 +280,11 @@ impl Application {
         })
     }
 
-    pub(super) fn apply_completed_tool_landed_edit_payload(&mut self, call_id: &str) -> bool {
+    pub(super) fn apply_completed_tool_landed_edit_payload_with_raw_output(
+        &mut self,
+        call_id: &str,
+        raw_output: Option<&str>,
+    ) -> bool {
         let Some(tool) = self
             .ui
             .tools
@@ -294,6 +298,15 @@ impl Application {
         if !is_file_write_tool_identity(&tool.kind, &tool.name) {
             return false;
         }
+
+        let tool = if let Some(raw_output) = raw_output.filter(|value| !value.trim().is_empty()) {
+            ToolInvocation {
+                raw_output: Some(raw_output.to_string()),
+                ..tool
+            }
+        } else {
+            tool
+        };
 
         let mut changes = Vec::new();
         for normalized_path in completed_tool_edit_candidate_paths(&tool, &self.ui.workspace.root) {
@@ -332,6 +345,13 @@ impl Application {
             if normalize_diff_text_for_session_change(&disk_text) != exact_edit.new_text {
                 continue;
             }
+            let change_type = if change_type == FileChangeType::Modified
+                && is_effectively_empty_text(&exact_edit.old_text)
+            {
+                FileChangeType::Created
+            } else {
+                change_type
+            };
             let old_text = if change_type == FileChangeType::Created {
                 None
             } else {

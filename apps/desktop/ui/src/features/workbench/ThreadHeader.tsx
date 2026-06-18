@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { SessionSummary, WorkspaceDescriptor } from "../../types";
 
 interface Props {
@@ -5,6 +6,7 @@ interface Props {
   workspace: WorkspaceDescriptor;
   activeTabLabel: string;
   changeCount: number;
+  planToggle?: ReactNode;
 }
 
 export function ThreadHeader({
@@ -12,6 +14,7 @@ export function ThreadHeader({
   workspace,
   activeTabLabel,
   changeCount,
+  planToggle,
 }: Props) {
   return (
     <header className="thread-header">
@@ -28,6 +31,7 @@ export function ThreadHeader({
       </div>
       <div className="thread-header-actions">
         <span className="thread-header-count">{changeCount} 处更改</span>
+        {planToggle}
         <StatusPill status={session.status} />
       </div>
     </header>

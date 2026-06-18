@@ -831,6 +831,7 @@ fn build_remote_workspace_application(
 ) -> Result<(Application, UiSnapshot), String> {
     app_core::startup_perf::mark("state/connect_remote_workspace/start", key);
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let mut remote = remote;
     let agent_command = remote
         .agent_command
         .clone()
@@ -841,6 +842,7 @@ fn build_remote_workspace_application(
             app_core::settings::remote_linux_command_for_agent(agent)
         })
         .unwrap_or_else(acp_core::platform_default_agent_command);
+    let agent_command = ensure_remote_agent_bootstrapped(&mut remote, agent_command, &paths)?;
 
     let application =
         Application::bootstrap_remote_linux_with_app_paths(remote, agent_command, paths)
@@ -848,6 +850,85 @@ fn build_remote_workspace_application(
     let snapshot = application.lightweight_ui_snapshot();
     app_core::startup_perf::mark("state/connect_remote_workspace/end", "");
     Ok((application, snapshot))
+}
+
+fn ensure_remote_agent_bootstrapped(
+    remote: &mut RemoteLinuxWorkspace,
+    agent_command: String,
+    paths: &app_core::AppPaths,
+) -> Result<String, String> {
+    let Some(agent) = remote_agent_command_needs_bootstrap(remote, &agent_command) else {
+        return Ok(agent_command);
+    };
+    let profile = remote
+        .profile_id
+        .and_then(|profile_id| {
+            app_core::remote_profiles::get_remote_machine_profile(paths, profile_id).ok()
+        })
+        .unwrap_or_else(|| remote_machine_profile_from_workspace(remote));
+    let bootstrap = app_core::remote_bootstrap::bootstrap_remote_agent(
+        app_core::remote_bootstrap::RemoteAgentBootstrapRequest {
+            request_id: uuid::Uuid::new_v4(),
+            profile: &profile,
+            remote_path: &remote.remote_path,
+            ssh_password: remote.ssh_password.as_deref(),
+            agent_cli: agent,
+        },
+        &app_core::remote_ssh::SystemRemoteSshCommandRunner,
+        |_| {},
+    )
+    .map_err(|error| error.to_string())?;
+    remote.agent_cli = Some(agent);
+    remote.agent_command = Some(bootstrap.agent_command.clone());
+    Ok(bootstrap.agent_command)
+}
+
+fn remote_agent_command_needs_bootstrap(
+    remote: &RemoteLinuxWorkspace,
+    agent_command: &str,
+) -> Option<AgentCliId> {
+    let agent = remote
+        .agent_cli
+        .or_else(|| remote_agent_id_from_standard_command(agent_command))?;
+    is_standard_remote_agent_command(agent, agent_command).then_some(agent)
+}
+
+fn remote_agent_id_from_standard_command(agent_command: &str) -> Option<AgentCliId> {
+    let command = agent_command.trim().to_ascii_lowercase();
+    if app_core::settings::is_codex_acp_command(&command) {
+        return Some(AgentCliId::CodexAcp);
+    }
+    if app_core::settings::is_claude_agent_acp_command(&command) {
+        return Some(AgentCliId::ClaudeAgentAcp);
+    }
+    if command == "codebuddy --acp" || command == "codebuddy --acp --acp-transport streamable-http"
+    {
+        return Some(AgentCliId::Codebuddy);
+    }
+    None
+}
+
+fn is_standard_remote_agent_command(agent: AgentCliId, agent_command: &str) -> bool {
+    let command = agent_command.trim();
+    if app_core::settings::remote_linux_command_for_agent(agent).as_deref() == Some(command) {
+        return true;
+    }
+    matches!(agent, AgentCliId::Codebuddy)
+        && command == "codebuddy --acp --acp-transport streamable-http"
+}
+
+fn remote_machine_profile_from_workspace(
+    remote: &RemoteLinuxWorkspace,
+) -> workspace_model::RemoteMachineProfile {
+    workspace_model::RemoteMachineProfile {
+        id: remote.profile_id.unwrap_or_else(uuid::Uuid::new_v4),
+        display_name: remote.display_name(),
+        ssh_target: remote.ssh_target.clone(),
+        ssh_port: remote.ssh_port,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        last_validation: None,
+    }
 }
 
 fn ensure_workspace_connected_locked(
@@ -880,16 +961,15 @@ fn workspace_session_list(
     is_active: bool,
 ) -> Result<WorkspaceSessionList, String> {
     match entry {
-        WorkspaceEntry::Connected(app) => {
-            app.session_list_after_poll()
-                .map(|sessions| WorkspaceSessionList {
-                    workspace: app.ui.workspace.clone(),
-                    sessions,
-                    active_session_id: app.ui.session.id,
-                    is_active,
-                    connected: true,
-                })
-        }
+        WorkspaceEntry::Connected(app) => app
+            .session_list_after_poll_for_visibility(is_active)
+            .map(|sessions| WorkspaceSessionList {
+                workspace: app.ui.workspace.clone(),
+                sessions,
+                active_session_id: app.ui.session.id,
+                is_active,
+                connected: true,
+            }),
         WorkspaceEntry::Dormant(metadata) => Ok(WorkspaceSessionList {
             workspace: metadata.workspace.clone(),
             sessions: metadata.sessions.clone(),
@@ -1175,6 +1255,74 @@ mod tests {
 
         assert_eq!(entry_remote(&entry), Some(remote));
         assert!(entry_path(&entry).is_none());
+    }
+
+    #[test]
+    fn stale_remote_standard_agent_command_requires_bootstrap() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some("codex-acp".into()),
+            local_port: None,
+            remote_port: None,
+        };
+
+        assert_eq!(
+            remote_agent_command_needs_bootstrap(&remote, "codex-acp"),
+            Some(AgentCliId::CodexAcp)
+        );
+    }
+
+    #[test]
+    fn verified_remote_agent_command_does_not_bootstrap_again() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: Some(AgentCliId::CodexAcp),
+            agent_command: Some(
+                "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp".into(),
+            ),
+            local_port: None,
+            remote_port: None,
+        };
+
+        assert_eq!(
+            remote_agent_command_needs_bootstrap(
+                &remote,
+                "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_codebuddy_streamable_command_requires_bootstrap() {
+        let remote = RemoteLinuxWorkspace {
+            profile_id: None,
+            ssh_target: "devbox".into(),
+            ssh_port: Some(22),
+            remote_path: "/srv/kodex".into(),
+            ssh_password: None,
+            agent_cli: None,
+            agent_command: Some("codebuddy --acp --acp-transport streamable-http".into()),
+            local_port: None,
+            remote_port: None,
+        };
+
+        assert_eq!(
+            remote_agent_command_needs_bootstrap(
+                &remote,
+                "codebuddy --acp --acp-transport streamable-http"
+            ),
+            Some(AgentCliId::Codebuddy)
+        );
     }
 
     #[test]

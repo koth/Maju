@@ -734,6 +734,9 @@ fn command_write_hint_retries_only_for_codebuddy_shell_tools() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.completed_tool_has_detectable_write_hint("call-bash"));
@@ -800,6 +803,9 @@ fn completed_shell_write_hint_without_tool_baseline_does_not_use_git_fallback() 
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["call-shell".into()]));
@@ -854,6 +860,9 @@ fn completed_codebuddy_python_write_without_tool_baseline_does_not_use_git_fallb
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["call-codebuddy-python".into()]));
@@ -1744,6 +1753,9 @@ fn pending_review_change_set_merges_landed_hunks_from_intermediate_detection_bas
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.apply_tracker_changes(
@@ -2070,6 +2082,9 @@ fn completed_read_tool_does_not_claim_preexisting_git_change() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["read-main".into()]));
@@ -2116,6 +2131,9 @@ fn completed_tool_preview_does_not_claim_preexisting_git_change() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["preview-main".into()]));
@@ -2155,6 +2173,9 @@ fn completed_chinese_edit_summary_without_tool_baseline_does_not_use_git_fallbac
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(!app.detect_file_writes_from_tools(&["edit-proposal".into()]));
@@ -2218,6 +2239,9 @@ fn failed_tool_without_recorded_file_change_discards_speculative_diff() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: Some("Reject".into()),
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.discard_failed_tool_speculative_diffs("write-tags"));
@@ -2284,6 +2308,9 @@ fn failed_tool_does_not_discard_previous_successful_change_for_same_path() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
     app.ui.tools.push(ToolInvocation {
         id: uuid::Uuid::new_v4(),
@@ -2320,6 +2347,9 @@ fn failed_tool_does_not_discard_previous_successful_change_for_same_path() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.discard_failed_tool_speculative_diffs("failed-write-tags"));
@@ -2437,6 +2467,9 @@ fn late_codebuddy_edit_prefers_exact_turn_diff_over_git_cumulative_diff() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.detect_file_writes_from_tools(&["edit-frontend-preview".into()]));
@@ -2516,6 +2549,9 @@ fn late_codebuddy_unified_diff_recovers_turn_base_when_git_diff_is_smaller() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+            can_stop: false,
+            stop_kind: None,
+            stop_status: None,
     });
 
     assert!(app.detect_file_writes_from_tools(&["edit-main".into()]));
@@ -2603,6 +2639,9 @@ fn review_uses_landed_tool_preview_instead_of_narrow_exact_edit() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.apply_tracker_changes(
@@ -2962,6 +3001,9 @@ fn raw_output_diff_preview_replaces_larger_single_fragment_with_multi_hunk_snaps
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     });
 
     assert!(app.apply_tracker_changes(
@@ -3133,6 +3175,86 @@ fn completed_acp_edit_diff_enters_review_when_tracker_starts_after_file_landed()
     app.advance_runtime_clock(Duration::from_secs(1));
     assert!(!app.retry_pending_tool_write_detections());
     assert_eq!(app.ui.review_changes.len(), 1);
+}
+
+#[test]
+fn completed_large_raw_output_change_map_uses_uncapped_payload_for_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "docs/rembg_api_for_callers.md";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let lines = (1..=1800)
+        .map(|line| format!("RembgService caller protocol line {line:04}"))
+        .collect::<Vec<_>>();
+    let after = format!("{}\n", lines.join("\n"));
+    fs::write(&file_path, &after).unwrap();
+
+    let unified_added = lines
+        .iter()
+        .map(|line| format!("+{line}\n"))
+        .collect::<String>();
+    let unified_diff = format!("@@ -0,0 +1,{} @@\n{}", lines.len(), unified_added);
+    let raw_payload = serde_json::json!({
+        "call_id": "call-large-doc-edit",
+        "changes": {
+            file_path.display().to_string(): {
+                "move_path": null,
+                "type": "update",
+                "unified_diff": unified_diff.clone()
+            }
+        },
+        "success": true
+    })
+    .to_string();
+    assert!(raw_payload.len() > 32 * 1024);
+    assert_eq!(
+        tool_event_change_paths(Some(&raw_payload)),
+        vec![file_path.display().to_string()]
+    );
+    assert_eq!(
+        crate::normalize_path_for_storage(&file_path.display().to_string(), dir.path()),
+        relative_path
+    );
+    assert!(
+        reverse_apply_unified_diff(&after, &unified_diff)
+            .as_deref()
+            .is_some_and(|text| text.trim().is_empty())
+    );
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-large-doc-edit".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(
+                serde_json::json!({
+                    "path": "external/RembgService/app.py"
+                })
+                .to_string(),
+            ),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-large-doc-edit".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Updated the following files".into(),
+            raw_output: Some(raw_payload),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, after);
+    assert_eq!((change.added_lines, change.removed_lines), (1800, 0));
 }
 
 #[test]

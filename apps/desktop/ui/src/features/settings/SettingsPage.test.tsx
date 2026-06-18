@@ -11,6 +11,7 @@ import {
   settingsSaveAgentProviderSecret,
   settingsSaveLspServer,
   settingsSaveProviderModels,
+  settingsSyncProviderModelsFromUrl,
   settingsSaveRemoteProfile,
   settingsDeleteRemoteProfile,
   settingsValidateRemoteProfile,
@@ -40,6 +41,7 @@ vi.mock("../../lib/tauri", async () => {
     settingsValidateRemoteProfile: vi.fn(),
     settingsProbeLspServer: vi.fn(),
     settingsSaveProviderModels: vi.fn(),
+    settingsSyncProviderModelsFromUrl: vi.fn(),
     settingsResetProviderModels: vi.fn(),
     settingsSaveCodexAcpProviderKey: vi.fn(),
     settingsSelectCodexAcpProvider: vi.fn(),
@@ -106,6 +108,7 @@ function providerProfile(
       : isXiaomiTokenPlan
         ? ["MiMo-V2.5-Pro", "MiMo-V2.5"]
         : [],
+    model_list_url: isCommandCode ? "https://api.commandcode.ai/provider/v1/models" : null,
     credential_label: requiresCredential ? `${label} API key` : null,
     requires_credential: requiresCredential,
     help_text: `${label} help`,
@@ -338,6 +341,24 @@ describe("SettingsPage LSP settings", () => {
         ),
       },
     }));
+    vi.mocked(settingsSyncProviderModelsFromUrl).mockImplementation(async (profileId, modelListUrl) => {
+      const models = ["Qwen/Qwen3.8-Max", "MiniMaxAI/MiniMax-M4"];
+      return {
+        ...agentSnapshot,
+        codex_acp: {
+          ...agentSnapshot.codex_acp,
+          profiles: codexProfiles("byok").map((profile) =>
+            profile.id === profileId ? { ...profile, models, model_list_url: modelListUrl } : profile,
+          ),
+        },
+        claude: {
+          ...agentSnapshot.claude,
+          profiles: claudeProfiles("byok").map((profile) =>
+            profile.id === profileId ? { ...profile, models, model_list_url: modelListUrl } : profile,
+          ),
+        },
+      };
+    });
     vi.mocked(settingsResetProviderModels).mockResolvedValue(agentSnapshot);
     vi.mocked(settingsSelectClaudeFastModel).mockImplementation(async (modelId) => ({
       ...agentSnapshot,
@@ -848,6 +869,30 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
     await waitFor(() => expect(settingsResetProviderModels).toHaveBeenCalledWith("timiai", null));
     await screen.findByText("TimiAI 模型列表已恢复默认，后续新建会话生效");
+  });
+
+  it("syncs editable BYOK provider models from a configured URL", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/CommandCode/);
+
+    const urlInput = screen.getByLabelText("byok_provider_model_list_url");
+    expect(urlInput).toHaveValue("https://api.commandcode.ai/provider/v1/models");
+    fireEvent.change(urlInput, {
+      target: { value: "https://api.commandcode.ai/provider/v1/models?all=1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+
+    await waitFor(() =>
+      expect(settingsSyncProviderModelsFromUrl).toHaveBeenCalledWith(
+        "commandcode",
+        "https://api.commandcode.ai/provider/v1/models?all=1",
+        null,
+      ),
+    );
+    await screen.findByText("CommandCode 模型列表已同步，后续新建会话生效");
+    expect(screen.getByLabelText("byok_provider_models")).toHaveValue("Qwen/Qwen3.8-Max\nMiniMaxAI/MiniMax-M4");
   });
 
   it("shows configured BYOK providers as a single shared model pool", async () => {

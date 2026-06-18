@@ -233,6 +233,15 @@ impl TerminalManager {
         Ok(KillTerminalResponse::new())
     }
 
+    pub(super) fn kill_terminal_id(&self, terminal_id: &str) -> anyhow::Result<bool> {
+        let terminal = match self.get_terminal(terminal_id) {
+            Ok(terminal) => terminal,
+            Err(_) => return Ok(false),
+        };
+        terminal.kill()?;
+        Ok(true)
+    }
+
     pub(super) fn release_terminal(
         &self,
         request: &ReleaseTerminalRequest,

@@ -8,6 +8,7 @@ use super::permissions::{
     shell_command_prefers_apply_patch_for_writes,
 };
 use super::terminal::TerminalManager;
+use super::tool_stop::{ToolExecutionRegistry, terminal_tool_call_id_from_request_payload};
 use super::workspace_paths::{
     read_remote_workspace_text_file, read_workspace_text_file, validate_client_file_path,
     validate_remote_client_file_path, write_remote_workspace_text_file, write_workspace_text_file,
@@ -44,6 +45,11 @@ struct CodeBuddyTerminalDenials {
 #[derive(Clone, Default)]
 struct CodeBuddyTerminalApprovals {
     inner: Arc<Mutex<Vec<CodeBuddyTerminalApproval>>>,
+}
+
+#[derive(Clone, Default)]
+struct FsWriteApprovals {
+    inner: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 struct CodeBuddyTerminalDenial {
@@ -117,6 +123,39 @@ impl CodeBuddyTerminalApprovals {
     }
 }
 
+impl FsWriteApprovals {
+    fn register(&self, paths: Vec<PathBuf>) -> anyhow::Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut approvals = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("file write approval registry poisoned"))?;
+        for path in paths {
+            if !approvals.iter().any(|existing| existing == &path) {
+                approvals.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn take(&self, workspace_root: &str, path: &Path) -> anyhow::Result<bool> {
+        let mut approvals = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("file write approval registry poisoned"))?;
+        let Some(index) = approvals
+            .iter()
+            .position(|approval| fs_write_approval_path_matches(workspace_root, approval, path))
+        else {
+            return Ok(false);
+        };
+        approvals.remove(index);
+        Ok(true)
+    }
+}
+
 pub(super) async fn connect_agent_client(
     agent: AgentTransport,
     config: SessionConfig,
@@ -138,6 +177,7 @@ pub(super) async fn connect_agent_client(
     let fs_read_workspace_root = config.workspace_root.clone();
     let fs_read_remote_ssh = config.remote_ssh.clone();
     let terminal_manager = Arc::new(TerminalManager::default());
+    let tool_execution_registry = ToolExecutionRegistry::default();
     let terminal_create_log_config = config.clone();
     let terminal_create_agent_command = config.agent_command.clone();
     let terminal_create_workspace_root = config.workspace_root.clone();
@@ -148,17 +188,25 @@ pub(super) async fn connect_agent_client(
     let terminal_wait_log_config = config.clone();
     let terminal_kill_log_config = config.clone();
     let terminal_release_log_config = config.clone();
+    let terminal_release_tx = tx_events.clone();
     let terminal_create_manager = terminal_manager.clone();
     let terminal_output_manager = terminal_manager.clone();
     let terminal_wait_manager = terminal_manager.clone();
     let terminal_kill_manager = terminal_manager.clone();
     let terminal_release_manager = terminal_manager.clone();
+    let permission_tool_registry = tool_execution_registry.clone();
+    let terminal_create_tool_registry = tool_execution_registry.clone();
+    let terminal_release_tool_registry = tool_execution_registry.clone();
+    let prompt_tool_registry = tool_execution_registry.clone();
     let codebuddy_terminal_denials = CodeBuddyTerminalDenials::default();
     let codebuddy_terminal_approvals = CodeBuddyTerminalApprovals::default();
+    let fs_write_approvals = FsWriteApprovals::default();
     let permission_terminal_denials = codebuddy_terminal_denials.clone();
     let permission_terminal_approvals = codebuddy_terminal_approvals.clone();
+    let permission_fs_write_approvals = fs_write_approvals.clone();
     let terminal_create_denials = codebuddy_terminal_denials.clone();
     let terminal_create_approvals = codebuddy_terminal_approvals.clone();
+    let fs_write_approval_cache = fs_write_approvals.clone();
 
     Client
         .builder()
@@ -221,6 +269,11 @@ pub(super) async fn connect_agent_client(
                             id: request_id.clone(),
                             content: format_permission_options(&option_labels),
                         });
+                        if let Ok(Some(event)) =
+                            permission_tool_registry.register_permission(&request_id, &request_id)
+                        {
+                            let _ = tx_permissions.send(event);
+                        }
                         reply_rx.recv().unwrap_or_default()
                     }
                 };
@@ -238,6 +291,13 @@ pub(super) async fn connect_agent_client(
                     &request_payload,
                     selected_option_id,
                     &permission_terminal_approvals,
+                    &permission_log_config,
+                )?;
+                register_fs_write_approval(
+                    &request,
+                    selected_option_id,
+                    &permission_fs_write_approvals,
+                    &permission_workspace_root,
                     &permission_log_config,
                 )?;
 
@@ -264,22 +324,23 @@ pub(super) async fn connect_agent_client(
                         selected_option_id,
                     );
 
-                let outcome = match selected_option_id {
-                    Some(option_id) => {
-                        let label = options
-                            .iter()
-                            .find(|option| option.id == option_id)
-                            .map(|option| option.label.as_str())
-                            .unwrap_or(option_id);
-                        format!("Permission selected: {label}")
-                    }
-                    None => "Permission request cancelled".into(),
-                };
+                let outcome = permission_resolution_outcome_for_display(
+                    &request_payload,
+                    &options,
+                    selected_option_id,
+                    codebuddy_interruption_decision.as_deref(),
+                    permission_resolution.guidance.as_deref(),
+                );
 
                 let _ = tx_permissions.send(ClientEvent::ToolPermissionResolved {
-                    id: request_id,
+                    id: request_id.clone(),
                     outcome,
                 });
+                if let Ok(Some(event)) =
+                    permission_tool_registry.unregister_permission(&request_id, &request_id)
+                {
+                    let _ = tx_permissions.send(event);
+                }
 
                 let should_forward_codebuddy_plan_guidance =
                     codebuddy_interruption_decision.as_deref() == Some("deny")
@@ -439,6 +500,7 @@ pub(super) async fn connect_agent_client(
                                 &remote_ssh.remote_workspace_root,
                                 &path_for_diff,
                                 agent_edit_policy_for_command(&fs_write_log_config.agent_command),
+                                &fs_write_approval_cache,
                             )?;
                             let outcome = write_remote_workspace_text_file(remote_ssh, &request)?;
                             Ok((outcome.path, outcome.old_text))
@@ -457,6 +519,7 @@ pub(super) async fn connect_agent_client(
                                 &fs_write_workspace_root,
                                 &path_for_diff,
                                 agent_edit_policy_for_command(&fs_write_log_config.agent_command),
+                                &fs_write_approval_cache,
                             )?;
                             let old_text = path_for_diff
                                 .exists()
@@ -519,6 +582,7 @@ pub(super) async fn connect_agent_client(
                 let terminal_gate = ensure_codebuddy_terminal_create_permission(
                     &terminal_create_permission_broker,
                     &terminal_create_tx,
+                    &terminal_create_tool_registry,
                     &terminal_create_log_config,
                     &terminal_create_agent_command,
                     &terminal_create_workspace_root,
@@ -558,6 +622,13 @@ pub(super) async fn connect_agent_client(
                     "client/terminal_create_response",
                     &response_payload,
                 )?;
+                if let Some(tool_call_id) =
+                    terminal_tool_call_id_from_request_payload(&request_payload)
+                    && let Ok(Some(event)) = terminal_create_tool_registry
+                        .register_terminal(tool_call_id, response.terminal_id.0.to_string())
+                {
+                    let _ = terminal_create_tx.send(event);
+                }
 
                 responder.respond(response)
             },
@@ -650,6 +721,22 @@ pub(super) async fn connect_agent_client(
                     "client/terminal_release_response",
                     &response_payload,
                 )?;
+                match terminal_release_tool_registry
+                    .unregister_terminal_id(request.terminal_id.0.as_ref())
+                {
+                    Ok(events) => {
+                        for event in events {
+                            let _ = terminal_release_tx.send(event);
+                        }
+                    }
+                    Err(error) => {
+                        append_runtime_event_log(
+                            &terminal_release_log_config,
+                            "client/terminal_release_stop_cleanup_error",
+                            &json!({ "error": error.to_string() }),
+                        )?;
+                    }
+                }
 
                 responder.respond(response)
             },
@@ -671,6 +758,8 @@ pub(super) async fn connect_agent_client(
                     &tx_events,
                     rx_commands,
                     permission_broker,
+                    terminal_manager,
+                    prompt_tool_registry,
                     shutdown_signal,
                     supports_session_list,
                     prompt_capabilities,
@@ -970,6 +1059,7 @@ fn raw_input_detail_text(value: &Value) -> Option<String> {
 fn ensure_codebuddy_terminal_create_permission(
     permission_broker: &PermissionBroker,
     tx_events: &mpsc::Sender<ClientEvent>,
+    tool_execution_registry: &ToolExecutionRegistry,
     log_config: &SessionConfig,
     agent_command: &str,
     workspace_root: &str,
@@ -1078,6 +1168,11 @@ fn ensure_codebuddy_terminal_create_permission(
                 id: request_id.clone(),
                 content: format_permission_options(&option_labels),
             });
+            if let Ok(Some(event)) =
+                tool_execution_registry.register_permission(&request_id, &request_id)
+            {
+                let _ = tx_events.send(event);
+            }
 
             let selected_option_id = reply_rx
                 .recv()
@@ -1105,9 +1200,14 @@ fn ensure_codebuddy_terminal_create_permission(
             )?;
 
             let _ = tx_events.send(ClientEvent::ToolPermissionResolved {
-                id: request_id,
+                id: request_id.clone(),
                 outcome,
             });
+            if let Ok(Some(event)) =
+                tool_execution_registry.unregister_permission(&request_id, &request_id)
+            {
+                let _ = tx_events.send(event);
+            }
 
             if allowed {
                 Ok(CodeBuddyTerminalCreateGate::Allow)
@@ -1289,6 +1389,34 @@ fn register_codebuddy_bash_terminal_approval(
     Ok(())
 }
 
+fn register_fs_write_approval(
+    request: &RequestPermissionRequest,
+    selected_option_id: Option<&str>,
+    fs_write_approvals: &FsWriteApprovals,
+    workspace_root: &str,
+    log_config: &SessionConfig,
+) -> anyhow::Result<()> {
+    if !request_option_is_allow(request, selected_option_id) {
+        return Ok(());
+    }
+
+    let paths = permission_request_write_paths(request, workspace_root);
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    fs_write_approvals.register(paths.clone())?;
+    append_runtime_event_log(
+        log_config,
+        "client/fs_write_permission_preapproval",
+        &json!({
+            "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
+            "paths": display_paths(&paths),
+        }),
+    )?;
+    Ok(())
+}
+
 fn request_option_is_allow(
     request: &RequestPermissionRequest,
     selected_option_id: Option<&str>,
@@ -1378,6 +1506,159 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+fn permission_request_write_paths(
+    request: &RequestPermissionRequest,
+    workspace_root: &str,
+) -> Vec<PathBuf> {
+    let Some(raw_input) = request.tool_call.fields.raw_input.as_ref() else {
+        return Vec::new();
+    };
+    let mut path_texts = Vec::new();
+    collect_raw_input_write_path_texts(raw_input, &mut path_texts);
+
+    let mut seen = Vec::new();
+    let mut paths = Vec::new();
+    for path_text in path_texts {
+        let normalized = normalize_path_text_for_compare(workspace_root, &path_text);
+        if normalized.is_empty() || seen.iter().any(|existing| existing == &normalized) {
+            continue;
+        }
+        seen.push(normalized.clone());
+        paths.push(PathBuf::from(normalized));
+    }
+    paths
+}
+
+fn collect_raw_input_write_path_texts(value: &Value, path_texts: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if raw_input_write_path_key(key) {
+                    collect_raw_input_path_values(value, path_texts);
+                } else {
+                    collect_raw_input_write_path_texts(value, path_texts);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_raw_input_write_path_texts(value, path_texts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_raw_input_path_values(value: &Value, path_texts: &mut Vec<String>) {
+    match value {
+        Value::String(value) => {
+            let value = value.trim();
+            if !value.is_empty() {
+                path_texts.push(value.to_string());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_raw_input_path_values(value, path_texts);
+            }
+        }
+        Value::Object(map) => {
+            for (key, value) in map {
+                if raw_input_write_path_key(key) {
+                    collect_raw_input_path_values(value, path_texts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn raw_input_write_path_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "path" | "paths" | "file" | "files" | "filepath" | "filename"
+    ) || normalized.ends_with("path")
+        || normalized.ends_with("file")
+}
+
+fn fs_write_approval_path_matches(workspace_root: &str, approved: &Path, requested: &Path) -> bool {
+    normalize_path_for_compare(workspace_root, approved)
+        == normalize_path_for_compare(workspace_root, requested)
+}
+
+fn normalize_path_for_compare(workspace_root: &str, path: &Path) -> String {
+    normalize_path_text_for_compare(workspace_root, &path.display().to_string())
+}
+
+fn normalize_path_text_for_compare(workspace_root: &str, path_text: &str) -> String {
+    let path_text = path_text.trim().replace('\\', "/");
+    if path_text.is_empty() {
+        return String::new();
+    }
+    let path_text = if path_text_is_absolute_like(&path_text) || workspace_root.trim().is_empty() {
+        path_text
+    } else {
+        let root = workspace_root.trim().replace('\\', "/");
+        format!(
+            "{}/{}",
+            root.trim_end_matches('/'),
+            path_text.trim_start_matches("./")
+        )
+    };
+    normalize_slash_path(&path_text)
+}
+
+fn path_text_is_absolute_like(path_text: &str) -> bool {
+    let bytes = path_text.as_bytes();
+    path_text.starts_with('/')
+        || (bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\'))
+}
+
+fn normalize_slash_path(path_text: &str) -> String {
+    let path_text = path_text.trim().replace('\\', "/");
+    let mut rest = path_text.as_str();
+    let mut prefix = String::new();
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
+        prefix = rest[..3].to_string();
+        rest = &rest[3..];
+    } else if rest.starts_with("//") {
+        prefix = "//".into();
+        rest = &rest[2..];
+    } else if rest.starts_with('/') {
+        prefix = "/".into();
+        rest = &rest[1..];
+    }
+
+    let mut parts = Vec::new();
+    for part in rest.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if !parts.is_empty() {
+                parts.pop();
+            }
+            continue;
+        }
+        parts.push(part);
+    }
+
+    let body = parts.join("/");
+    if prefix.is_empty() {
+        body
+    } else if body.is_empty() {
+        prefix
+    } else {
+        format!("{prefix}{body}")
+    }
+}
+
 fn attach_permission_meta(
     response: RequestPermissionResponse,
     resolution: &PermissionResolution,
@@ -1412,10 +1693,21 @@ fn ensure_fs_write_permission(
     workspace_root: &str,
     path: &Path,
     edit_policy: AgentEditPolicy,
+    fs_write_approvals: &FsWriteApprovals,
 ) -> anyhow::Result<()> {
     let prefer_apply_patch =
         edit_policy == AgentEditPolicy::PreferApplyPatch && path_prefers_apply_patch(path);
     if fs_write_is_auto_allowed(permission_broker.mode(), workspace_root, path) {
+        return Ok(());
+    }
+    if fs_write_approvals.take(workspace_root, path)? {
+        append_runtime_event_log(
+            log_config,
+            "client/fs_write_permission_reused",
+            &json!({
+                "path": path.display().to_string(),
+            }),
+        )?;
         return Ok(());
     }
 
@@ -1571,6 +1863,72 @@ fn normalize_codebuddy_interruption_decision(option_id: Option<&str>) -> String 
     }
 }
 
+fn permission_resolution_outcome_for_display(
+    request: &Value,
+    options: &[PermissionOption],
+    selected_option_id: Option<&str>,
+    codebuddy_interruption_decision: Option<&str>,
+    guidance: Option<&str>,
+) -> String {
+    if is_codebuddy_exit_plan_permission(request) {
+        match codebuddy_interruption_decision {
+            Some("deny") => {
+                if guidance
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return "继续规划：已发送调整要求".into();
+                }
+                return "继续规划".into();
+            }
+            Some("rejectAndExitPlan") => return "计划已终止".into(),
+            Some("allow") | Some("allowAll") => return "Permission selected: Allow".into(),
+            _ => {}
+        }
+    }
+
+    if selected_option_rejects_patch_edit(options, selected_option_id) {
+        return "编辑已拒绝".into();
+    }
+
+    match selected_option_id {
+        Some(option_id) => {
+            let Some(option) = options.iter().find(|option| option.id == option_id) else {
+                return format!("Permission selected: {option_id}");
+            };
+            let kind = option.kind.to_ascii_lowercase();
+            if kind.contains("allow") {
+                return "Permission selected: Allow".into();
+            }
+            if kind.contains("reject") {
+                return "Permission selected: Reject".into();
+            }
+            format!("Permission selected: {}", option.label)
+        }
+        None => "Permission request cancelled".into(),
+    }
+}
+
+fn selected_option_rejects_patch_edit(
+    options: &[PermissionOption],
+    selected_option_id: Option<&str>,
+) -> bool {
+    let Some(option_id) = selected_option_id else {
+        return false;
+    };
+    let Some(option) = options.iter().find(|option| option.id == option_id) else {
+        return false;
+    };
+    let id = option.id.trim().to_ascii_lowercase();
+    if !matches!(id.as_str(), "abort" | "timed_out") {
+        return false;
+    }
+    option
+        .label
+        .trim()
+        .eq_ignore_ascii_case("No, provide feedback")
+}
+
 fn normalize_codebuddy_exit_plan_decision(option_id: Option<&str>) -> String {
     let Some(option_id) = option_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return "deny".into();
@@ -1722,6 +2080,84 @@ mod tests {
             )
             .as_deref(),
             Some("rejectAndExitPlan")
+        );
+    }
+
+    #[test]
+    fn codebuddy_exit_plan_replan_outcome_is_not_a_reject_display() {
+        let payload = json!({
+            "toolCall": {
+                "_meta": {
+                    "codebuddy.ai/toolName": "ExitPlanMode"
+                },
+                "toolCallId": "call_exit_plan"
+            }
+        });
+        let options = vec![workspace_model::PermissionOption {
+            id: "reject".into(),
+            label: "Reject".into(),
+            kind: "RejectOnce".into(),
+        }];
+
+        assert_eq!(
+            permission_resolution_outcome_for_display(
+                &payload,
+                &options,
+                Some("reject"),
+                Some("deny"),
+                Some(" 补充风险和验证步骤 ")
+            ),
+            "继续规划：已发送调整要求"
+        );
+    }
+
+    #[test]
+    fn codex_patch_reject_permission_outcome_is_edit_rejected_display() {
+        let payload = json!({
+            "toolCall": {
+                "toolCallId": "call_patch"
+            }
+        });
+        let options = vec![workspace_model::PermissionOption {
+            id: "abort".into(),
+            label: "No, provide feedback".into(),
+            kind: "RejectOnce".into(),
+        }];
+
+        assert_eq!(
+            permission_resolution_outcome_for_display(
+                &payload,
+                &options,
+                Some("abort"),
+                None,
+                Some("不要改这里")
+            ),
+            "编辑已拒绝"
+        );
+    }
+
+    #[test]
+    fn permission_resolution_outcome_uses_option_kind_for_allow_display() {
+        let payload = json!({
+            "toolCall": {
+                "toolCallId": "call_shell"
+            }
+        });
+        let options = vec![workspace_model::PermissionOption {
+            id: "approved".into(),
+            label: "Yes".into(),
+            kind: "AllowOnce".into(),
+        }];
+
+        assert_eq!(
+            permission_resolution_outcome_for_display(
+                &payload,
+                &options,
+                Some("approved"),
+                None,
+                None,
+            ),
+            "Permission selected: Allow"
         );
     }
 
@@ -1950,6 +2386,7 @@ mod tests {
             .unwrap();
         let denials = CodeBuddyTerminalDenials::default();
         let (tx, rx) = mpsc::channel();
+        let tool_execution_registry = ToolExecutionRegistry::default();
         let broker = PermissionBroker::default();
         let root = temp_workspace("terminal-approval");
         let mut config = test_session_config(&root);
@@ -1963,6 +2400,7 @@ mod tests {
         let gate = ensure_codebuddy_terminal_create_permission(
             &broker,
             &tx,
+            &tool_execution_registry,
             &config,
             &config.agent_command,
             &config.workspace_root,
@@ -1983,6 +2421,7 @@ mod tests {
         approvals.register("pnpm build", Vec::new()).unwrap();
         let denials = CodeBuddyTerminalDenials::default();
         let (tx, rx) = mpsc::channel();
+        let tool_execution_registry = ToolExecutionRegistry::default();
         let broker = PermissionBroker::default();
         let root = temp_workspace("terminal-pathless-approval");
         let mut config = test_session_config(&root);
@@ -1993,6 +2432,7 @@ mod tests {
         let gate = ensure_codebuddy_terminal_create_permission(
             &broker,
             &tx,
+            &tool_execution_registry,
             &config,
             &config.agent_command,
             &config.workspace_root,
@@ -2030,6 +2470,7 @@ mod tests {
             .unwrap();
         let approvals = CodeBuddyTerminalApprovals::default();
         let (tx, _rx) = mpsc::channel();
+        let tool_execution_registry = ToolExecutionRegistry::default();
         let broker = PermissionBroker::default();
         let root = temp_workspace("terminal-denial");
         let mut config = test_session_config(&root);
@@ -2040,6 +2481,7 @@ mod tests {
         let gate = ensure_codebuddy_terminal_create_permission(
             &broker,
             &tx,
+            &tool_execution_registry,
             &config,
             &config.agent_command,
             &config.workspace_root,
@@ -2058,6 +2500,7 @@ mod tests {
         let broker_for_gate = broker.clone();
         let denials = CodeBuddyTerminalDenials::default();
         let approvals = CodeBuddyTerminalApprovals::default();
+        let tool_execution_registry = ToolExecutionRegistry::default();
         let (tx, rx) = mpsc::channel();
         let root = temp_workspace("terminal-mkdir-request");
         let mut config = test_session_config(&root);
@@ -2072,6 +2515,7 @@ mod tests {
             ensure_codebuddy_terminal_create_permission(
                 &broker_for_gate,
                 &tx,
+                &tool_execution_registry,
                 &config_for_gate,
                 &config_for_gate.agent_command,
                 &config_for_gate.workspace_root,
@@ -2141,6 +2585,60 @@ mod tests {
 
         assert!(content.contains("# New Plan"));
 
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn write_permission_request_registers_fs_write_approval() {
+        let root = temp_workspace("fs-write-approval-register");
+        let request = permission_request_with_raw_input(json!({
+            "file_path": "src/main.ts"
+        }));
+        let approvals = FsWriteApprovals::default();
+        let config = test_session_config(&root);
+
+        register_fs_write_approval(
+            &request,
+            Some("allow"),
+            &approvals,
+            root.to_str().unwrap(),
+            &config,
+        )
+        .expect("file write approval should register");
+
+        assert!(
+            approvals
+                .take(root.to_str().unwrap(), &root.join("src/main.ts"))
+                .expect("approval registry should not be poisoned")
+        );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn fs_write_registered_approval_skips_second_permission_request() {
+        let root = temp_workspace("fs-write-approval-skip");
+        let path = root.join("src").join("main.ts");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let approvals = FsWriteApprovals::default();
+        approvals
+            .register(vec![PathBuf::from("src/main.ts")])
+            .expect("approval should register");
+        let broker = PermissionBroker::default();
+        let (tx, rx) = mpsc::channel();
+        let config = test_session_config(&root);
+
+        ensure_fs_write_permission(
+            &broker,
+            &tx,
+            &config,
+            root.to_str().unwrap(),
+            &path,
+            AgentEditPolicy::None,
+            &approvals,
+        )
+        .expect("registered approval should allow write");
+
+        assert!(rx.try_recv().is_err());
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 

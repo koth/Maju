@@ -393,13 +393,17 @@
 
 .agent-plan {
   width: 100%;
-  max-height: min(34vh, 260px);
+  max-height: min(42vh, 380px);
   overflow: hidden auto;
-  margin: 8px 0 2px;
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
-  background: var(--surface-muted-bg);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
+  margin: 4px 0 2px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-alt-bg);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-soft) 32%, transparent) transparent;
 }
 
 .agent-plan-header {
@@ -407,67 +411,111 @@
   top: 0;
   z-index: 1;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
-  padding: 10px 12px 8px;
-  background: color-mix(in srgb, var(--surface-muted-bg) 92%, transparent);
-  backdrop-filter: blur(10px);
+  gap: 16px;
+  padding: 14px 16px 8px;
+  background: var(--surface-alt-bg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-plan-headline {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.agent-plan-icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
+  color: var(--text-strong);
+}
+
+.agent-plan-heading {
+  min-width: 0;
 }
 
 .agent-plan-eyebrow {
-  color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
-  font-weight: 600;
-  letter-spacing: var(--letter-spacing-shell);
-  text-transform: uppercase;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0;
 }
 
 .agent-plan-title {
-  max-width: min(62vw, 720px);
+  max-width: min(58vw, 720px);
+  margin-top: 6px;
   overflow: hidden;
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-plan-count {
   flex-shrink: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--border-subtle);
+  min-width: 52px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 60%, transparent);
   border-radius: 999px;
-  color: var(--accent-hover);
-  font-size: var(--font-size-shell-label);
-  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+
+.agent-plan-progress {
+  position: sticky;
+  top: 52px;
+  z-index: 1;
+  height: 2px;
+  margin: 0 16px 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-strong) 8%, transparent);
+}
+
+.agent-plan-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent-hover) 78%, var(--text-strong) 12%);
 }
 
 .agent-plan-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 1px;
   margin: 0;
-  padding: 0 8px 8px;
+  padding: 0 16px 14px;
   list-style: none;
 }
 
 .agent-plan-entry {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 7px 9px;
+  gap: 12px;
+  min-height: 44px;
+  padding: 7px 0;
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: 10px;
   color: var(--text-muted);
 }
 
 .agent-plan-entry.is-in_progress {
-  border-color: rgba(143, 199, 189, 0.32);
-  background: rgba(106, 168, 159, 0.11);
   color: var(--text-strong);
 }
 
@@ -487,23 +535,34 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 24px;
+  min-height: 28px;
   border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   letter-spacing: 0;
-  text-transform: uppercase;
 }
 
 .agent-plan-status {
-  border: 1px solid var(--border-subtle);
+  min-width: 78px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 50%, transparent);
+  background: color-mix(in srgb, var(--surface-bg) 28%, transparent);
   color: var(--text-muted);
+  gap: 6px;
+}
+
+.agent-plan-status svg {
+  flex: 0 0 auto;
 }
 
 .agent-plan-entry.is-in_progress .agent-plan-status {
-  border-color: rgba(143, 199, 189, 0.42);
-  background: rgba(106, 168, 159, 0.15);
+  border-color: color-mix(in srgb, var(--accent-hover) 45%, transparent);
+  background: var(--accent-soft);
   color: var(--accent-hover);
+}
+
+.agent-plan-entry.is-in_progress .agent-plan-status svg {
+  animation: agent-plan-spin 1.2s linear infinite;
 }
 
 .agent-plan-entry.is-completed .agent-plan-status {
@@ -514,24 +573,28 @@
 
 .agent-plan-entry.is-cancelled .agent-plan-status {
   border-color: var(--border-subtle);
-  background: rgba(255, 255, 255, 0.035);
+  background: color-mix(in srgb, var(--text-strong) 4%, transparent);
   color: var(--text-soft);
 }
 
 .agent-plan-content {
   min-width: 0;
   overflow: hidden;
-  font-size: 12.5px;
-  font-weight: 500;
+  color: currentColor;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agent-plan-priority {
-  min-width: 58px;
-  padding: 0 8px;
-  border: 1px solid var(--border-subtle);
+  min-width: 50px;
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 42%, transparent);
   color: var(--text-soft);
+  font-size: 11px;
 }
 
 .agent-plan-priority.is-high {
@@ -542,6 +605,12 @@
 .agent-plan-priority.is-medium {
   border-color: rgba(200, 168, 106, 0.34);
   color: var(--warning);
+}
+
+@keyframes agent-plan-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .plan-approval-backdrop {
@@ -789,7 +858,7 @@
   }
 
   .agent-plan-entry {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .agent-plan-priority {

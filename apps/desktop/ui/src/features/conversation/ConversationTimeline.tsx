@@ -29,6 +29,8 @@ interface Props {
   onReviewChangeSetSelect?: (changeSetId: string) => void;
   hiddenPermissionRequestIds?: ReadonlySet<string>;
   onRetryUserMessage?: (messageId: string, text: string) => Promise<void> | void;
+  onCancelTurn?: () => Promise<void> | void;
+  onStopTool?: (toolCallId: string) => Promise<void> | void;
 }
 
 export interface TimelineTurnChangeSet {
@@ -675,6 +677,8 @@ export function ConversationTimeline({
   onReviewChangeSetSelect,
   hiddenPermissionRequestIds,
   onRetryUserMessage,
+  onCancelTurn,
+  onStopTool,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
@@ -997,6 +1001,8 @@ export function ConversationTimeline({
           nested={false}
           onPermissionSelect={onPermissionSelect}
           hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+          onCancelTurn={onCancelTurn}
+          onStopTool={onStopTool}
         />
       );
     }

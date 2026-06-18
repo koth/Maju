@@ -21,6 +21,15 @@ fn remote_machine_profile_from_workspace(
     }
 }
 
+fn session_status_label(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Idle => "Idle",
+        SessionStatus::Streaming => "Streaming",
+        SessionStatus::WaitingForTool => "WaitingForTool",
+        SessionStatus::Interrupted => "Interrupted",
+    }
+}
+
 impl Application {
     pub(super) fn should_auto_reconnect_after_clean_exit(&self) -> bool {
         false
@@ -247,12 +256,68 @@ impl Application {
         let mut sessions = self.store.list_sessions().map_err(|e| e.to_string())?;
         self.runtime_registry
             .annotate_sessions(&mut sessions, &self.ui.session.id.to_string());
+        self.annotate_visible_session_summary(&mut sessions);
         Ok(sessions)
     }
 
     pub fn session_list_after_poll(&mut self) -> Result<Vec<SessionListItem>, String> {
         self.poll_prompt_progress();
         self.session_list()
+    }
+
+    pub fn session_list_for_visibility(
+        &self,
+        workspace_visible: bool,
+    ) -> Result<Vec<SessionListItem>, String> {
+        let mut sessions = self.session_list()?;
+        if !workspace_visible {
+            self.annotate_visible_session_as_background(&mut sessions);
+        }
+        Ok(sessions)
+    }
+
+    pub fn session_list_after_poll_for_visibility(
+        &mut self,
+        workspace_visible: bool,
+    ) -> Result<Vec<SessionListItem>, String> {
+        self.poll_prompt_progress();
+        self.session_list_for_visibility(workspace_visible)
+    }
+
+    fn annotate_visible_session_summary(&self, sessions: &mut [SessionListItem]) {
+        let visible_session_id = self.ui.session.id.to_string();
+        let Some(item) = sessions
+            .iter_mut()
+            .find(|session| session.id == visible_session_id)
+        else {
+            return;
+        };
+
+        item.title = self.ui.session.title.clone();
+        item.status = session_status_label(&self.ui.session.status).to_string();
+        if self.ui.session.agent_cli.is_some() {
+            item.agent_cli = self.ui.session.agent_cli.clone();
+        }
+    }
+
+    fn annotate_visible_session_as_background(&self, sessions: &mut [SessionListItem]) {
+        let visible_session_id = self.ui.session.id.to_string();
+        let Some(item) = sessions
+            .iter_mut()
+            .find(|session| session.id == visible_session_id)
+        else {
+            return;
+        };
+
+        if self.runtime_needs_attention() {
+            item.attention_state = SessionAttentionState::NeedsAttention;
+        }
+
+        item.runtime_status = if self.in_flight_prompt.is_some() {
+            SessionRuntimeStatus::BackgroundRunning
+        } else {
+            SessionRuntimeStatus::BackgroundIdle
+        };
     }
 
     pub fn session_switch(&mut self, id: &str) -> Result<(), String> {

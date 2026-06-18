@@ -63,6 +63,7 @@ function profile(
     base_url: null,
     default_model: null,
     models: [],
+    model_list_url: null,
     credential_label: requiresCredential ? "API key" : null,
     requires_credential: requiresCredential,
     help_text: `${id} help`,

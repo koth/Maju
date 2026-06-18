@@ -267,6 +267,9 @@ function tool(overrides: Partial<ToolInvocation>): ToolInvocation {
     permission_options: [],
     permission_input: null,
     permission_decision: null,
+    can_stop: false,
+    stop_kind: null,
+    stop_status: null,
     ...overrides,
   };
 }

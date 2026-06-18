@@ -139,6 +139,20 @@ fn restored_session_agent_command_prefers_recent_session_agent() {
         Some(AgentCliId::Codebuddy)
     );
 
+    let recent_codex = session_list_item("recent-codex", Some("Codex"));
+    let bootstrapped_codex =
+        "/root/.kodex/remote-agents/codex-acp/current/bin/codex-acp".to_string();
+    assert_eq!(
+        super::agent_command_for_restored_session(
+            Some(&recent_codex),
+            bootstrapped_codex.clone(),
+            &app_paths,
+            true,
+        ),
+        bootstrapped_codex,
+        "remote restore must preserve the verified bootstrapped binary path"
+    );
+
     assert_eq!(
         super::agent_command_for_restored_session(
             Some(&unlabelled),
@@ -719,6 +733,55 @@ fn cancel_visible_session_does_not_cancel_background_prompt() {
 }
 
 #[test]
+fn hidden_workspace_visible_session_is_listed_as_background_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let session_id = app.ui.session.id.to_string();
+
+    app.send_prompt_background("keep running while workspace hidden")
+        .unwrap();
+
+    let hidden_session = app
+        .session_list_for_visibility(false)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap();
+    assert_eq!(
+        hidden_session.runtime_status,
+        SessionRuntimeStatus::BackgroundRunning
+    );
+    assert_eq!(hidden_session.status, "Streaming");
+}
+
+#[test]
+fn hidden_workspace_visible_session_permission_needs_attention() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let session_id = app.ui.session.id.to_string();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "permission-1".into(),
+        name: "Write".into(),
+        options: vec![],
+        details: None,
+        input: None,
+    });
+
+    let hidden_session = app
+        .session_list_for_visibility(false)
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .unwrap();
+    assert_eq!(
+        hidden_session.attention_state,
+        SessionAttentionState::NeedsAttention
+    );
+    assert_eq!(hidden_session.status, "WaitingForTool");
+}
+
+#[test]
 fn background_permission_marks_only_owning_session_as_needing_attention() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -769,6 +832,34 @@ fn background_permission_marks_only_owning_session_as_needing_attention() {
 }
 
 #[test]
+fn switching_away_from_pending_permission_marks_background_session_attention() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let background_session_id = app.ui.session.id.to_string();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "permission-1".into(),
+        name: "Write".into(),
+        options: vec![],
+        details: None,
+        input: None,
+    });
+
+    app.session_create(None).unwrap();
+
+    let background = app
+        .session_list()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == background_session_id)
+        .unwrap();
+    assert_eq!(
+        background.attention_state,
+        SessionAttentionState::NeedsAttention
+    );
+}
+
+#[test]
 fn local_permission_selection_marks_tool_succeeded() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -795,6 +886,75 @@ fn local_permission_selection_marks_tool_succeeded() {
         tool.permission_decision.as_deref(),
         Some("Permission selected: allow")
     );
+}
+
+#[test]
+fn local_permission_selection_uses_option_kind_for_allow_display() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "permission-1".into(),
+        name: "Bash".into(),
+        options: vec![workspace_model::PermissionOption {
+            id: "approved".into(),
+            label: "Yes".into(),
+            kind: "AllowOnce".into(),
+        }],
+        details: Some("Path: D:/work/repo/src/app.ts".into()),
+        input: None,
+    });
+
+    app.mark_tool_permission_selected("permission-1", "approved");
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "permission-1")
+        .expect("permission tool should exist");
+    assert_eq!(
+        tool.permission_decision.as_deref(),
+        Some("Permission selected: Allow")
+    );
+    assert_eq!(tool.summary, "Permission selected: Allow");
+}
+
+#[test]
+fn local_codex_patch_reject_selection_marks_edit_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "patch-1".into(),
+        name: "Edit".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "approved".into(),
+                label: "Yes".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "abort".into(),
+                label: "No, provide feedback".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some("Path: D:/work/repo/src/app.ts".into()),
+        input: None,
+    });
+
+    app.mark_tool_permission_selected("patch-1", "abort");
+
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "patch-1")
+        .expect("permission tool should exist");
+    assert_eq!(tool.status, ToolStatus::Succeeded);
+    assert_eq!(tool.permission_decision.as_deref(), Some("编辑已拒绝"));
+    assert_eq!(tool.summary, "编辑已拒绝");
 }
 
 fn model_config_state(
