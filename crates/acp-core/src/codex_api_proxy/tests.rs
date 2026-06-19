@@ -191,7 +191,7 @@ fn routes_anthropic_messages_to_chat_completions_for_non_anthropic_models() {
         "deepseek",
         "deepseek-v4-pro"
     ));
-    assert!(should_bridge_anthropic_messages_to_chat_completions(
+    assert!(!should_bridge_anthropic_messages_to_chat_completions(
         "kimi_code",
         "kimi-for-coding"
     ));

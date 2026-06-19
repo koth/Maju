@@ -14,9 +14,10 @@
   display: flex;
   flex-shrink: 0;
   align-items: center;
+  height: calc(var(--thread-header-height) - 10px);
   min-width: 0;
   gap: 4px;
-  padding: 0 0 8px;
+  padding: 0 0 7px;
   border: 0;
   border-bottom: 1px solid var(--border-subtle);
   border-radius: 0;

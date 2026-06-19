@@ -620,16 +620,28 @@ fn non_codex_agent_command_does_not_imply_session_list_support() {
 }
 
 #[test]
-fn codex_and_claude_acp_commands_prefer_apply_patch_edits() {
+fn codex_acp_commands_prefer_apply_patch_edits() {
     for command in [
         r#"C:\Users\yvonchen\.kodex\bin\codex-acp.exe"#,
         r#"C:\Users\yvonchen\.kodex\bin\kodex-acp.exe"#,
+    ] {
+        assert_eq!(
+            agent_edit_policy_for_command(command),
+            AgentEditPolicy::PreferApplyPatch,
+            "{command}",
+        );
+    }
+}
+
+#[test]
+fn claude_acp_commands_keep_default_edit_policy() {
+    for command in [
         r#"C:\Users\yvonchen\.kodex\bin\claude-agent-acp.exe"#,
         r#"C:\Users\yvonchen\.kodex\bin\claude-acp.exe"#,
     ] {
         assert_eq!(
             agent_edit_policy_for_command(command),
-            AgentEditPolicy::PreferApplyPatch,
+            AgentEditPolicy::None,
             "{command}",
         );
     }

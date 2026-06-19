@@ -147,7 +147,8 @@ pub(super) fn should_bridge_anthropic_messages_to_chat_completions(
     model: &str,
 ) -> bool {
     match normalize_proxy_provider(provider) {
-        "commandcode" | "deepseek" | "kimi_code" | "xiaomi_mimo" => !is_claude_family_model(model),
+        "kimi_code" => false,
+        "commandcode" | "deepseek" | "xiaomi_mimo" => !is_claude_family_model(model),
         "timiai" => !is_claude_family_model(model),
         _ => false,
     }

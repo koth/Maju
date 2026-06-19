@@ -24,11 +24,7 @@ pub fn agent_edit_policy_for_command(agent_command: &str) -> AgentEditPolicy {
         .unwrap_or(&normalized)
         .trim_matches(['"', '\'', '`']);
 
-    if basename.contains("codex-acp")
-        || basename.contains("kodex-acp")
-        || basename.contains("claude-agent-acp")
-        || basename.contains("claude-acp")
-    {
+    if basename.contains("codex-acp") || basename.contains("kodex-acp") {
         AgentEditPolicy::PreferApplyPatch
     } else {
         AgentEditPolicy::None

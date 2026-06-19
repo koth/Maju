@@ -40,7 +40,6 @@ function renderChrome(options: {
   remoteWorkspace?: boolean;
   onToggleTerminal?: () => void;
   onRefreshGit?: () => void;
-  onOpenRemoteWorkspace?: () => void;
 }) {
   render(
     <GlobalChrome
@@ -54,7 +53,6 @@ function renderChrome(options: {
       onToggleTerminal={options.onToggleTerminal ?? vi.fn()}
       onRefreshGit={options.onRefreshGit ?? vi.fn()}
       onToggleRightPanel={vi.fn()}
-      onOpenRemoteWorkspace={options.onOpenRemoteWorkspace ?? vi.fn()}
       onFileOpen={vi.fn()}
     />,
   );
@@ -93,15 +91,5 @@ describe("GlobalChrome", () => {
     expect(onRefreshGit).toHaveBeenCalledOnce();
     expect(screen.getByPlaceholderText("搜索文件...")).toBeInTheDocument();
     expect(fsSearch).not.toHaveBeenCalled();
-  });
-
-  it("opens the remote directory flow from the chrome", () => {
-    const onOpenRemoteWorkspace = vi.fn();
-
-    renderChrome({ onOpenRemoteWorkspace });
-
-    fireEvent.click(screen.getByRole("button", { name: "打开远程目录" }));
-
-    expect(onOpenRemoteWorkspace).toHaveBeenCalled();
   });
 });

@@ -116,7 +116,7 @@ pub(super) fn paths_are_inside_workspace(workspace_root: &str, paths: &[PathBuf]
     };
 
     paths.iter().all(|path| {
-        let candidate = if path.is_absolute() {
+        let candidate = if path.is_absolute() || pathbuf_is_absolute_like(path) {
             path.to_path_buf()
         } else {
             root.join(path)
@@ -150,6 +150,10 @@ fn paths_are_lexically_inside_workspace(workspace_root: &str, paths: &[PathBuf])
 
 fn path_is_absolute_like(path: &str) -> bool {
     path.starts_with('/') || path.starts_with("//") || looks_windows_drive_path(path)
+}
+
+fn pathbuf_is_absolute_like(path: &Path) -> bool {
+    path_is_absolute_like(&path.to_string_lossy().replace('\\', "/"))
 }
 
 fn looks_windows_drive_path(path: &str) -> bool {
@@ -832,6 +836,18 @@ mod tests {
             "/g/kknovel",
             &[PathBuf::from("../secret")]
         ));
+    }
+
+    #[test]
+    fn path_permission_check_rejects_windows_absolute_paths_outside_existing_workspace() {
+        let root = temp_workspace("windows-outside");
+
+        assert!(!paths_are_inside_workspace(
+            root.to_str().unwrap(),
+            &[PathBuf::from("D:/outside/service.ts")]
+        ));
+
+        let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
     #[test]

@@ -49,13 +49,18 @@ pub(super) fn resolve_paths_against_workspace(
     paths
         .into_iter()
         .map(|path| {
-            if path.is_absolute() {
+            if path.is_absolute() || pathbuf_is_absolute_like(&path) {
                 path
             } else {
                 root.join(path)
             }
         })
         .collect()
+}
+
+fn pathbuf_is_absolute_like(path: &Path) -> bool {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    raw.starts_with('/') || raw.starts_with("//") || looks_windows_drive_path(&raw)
 }
 
 pub(in crate::runtime) fn shell_command_prefers_apply_patch_for_writes(

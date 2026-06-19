@@ -117,7 +117,6 @@ export function Workbench() {
   const {
     timelineTurnChangeSets,
     liveTurnChangeSet,
-    agentConversationChangeCount,
     clearChangeSets,
   } = useTimelineChangeSets({
     snapshot,
@@ -631,7 +630,6 @@ export function Workbench() {
     isRemoteWorkspace && remoteWorkspaceHydration?.workspaceRoot === snapshot.workspace.root;
   const terminalDockAvailable = isTerminalDockAvailableForWorkspace(snapshot.workspace);
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
-  const agentLabel = snapshot.session.agent_cli || "智能体";
   const agentPlanEnvironment = buildAgentPlanEnvironmentInfo(snapshot, gitHydrated);
   const agentPlanDockSlot =
     agentPlanDockVisible ? (
@@ -701,7 +699,6 @@ export function Workbench() {
         onToggleTerminal={terminalDockAvailable ? handleToggleTerminalDock : () => undefined}
         onRefreshGit={handleRefreshGit}
         onToggleRightPanel={handleToggleRightPanel}
-        onOpenRemoteWorkspace={() => setRemoteOpenVisible(true)}
         onFileOpen={handleSearchResultOpen}
       />
 
@@ -760,9 +757,6 @@ export function Workbench() {
             )}
             <ThreadHeader
               session={snapshot.session}
-              workspace={snapshot.workspace}
-              activeTabLabel={agentLabel}
-              changeCount={agentConversationChangeCount}
               planToggle={
                 showAgentPlanDock ? (
                   <button

@@ -16,7 +16,6 @@ interface Props {
   onToggleTerminal: () => void;
   onRefreshGit: () => void;
   onToggleRightPanel: () => void;
-  onOpenRemoteWorkspace: () => void;
   onFileOpen: (filePath: string, lineNumber?: number, searchQuery?: string) => void;
 }
 
@@ -31,7 +30,6 @@ export function GlobalChrome({
   onToggleTerminal,
   onRefreshGit,
   onToggleRightPanel,
-  onOpenRemoteWorkspace,
   onFileOpen,
 }: Props) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -134,15 +132,6 @@ export function GlobalChrome({
         </div>
       </div>
       <div className="global-chrome-actions">
-        <button
-          type="button"
-          className="chrome-icon-btn"
-          onClick={onOpenRemoteWorkspace}
-          title="打开远程目录"
-          aria-label="打开远程目录"
-        >
-          <RemoteHostIcon />
-        </button>
         <button
           type="button"
           className={`chrome-icon-btn ${terminalDockVisible ? "is-active" : ""}`}
@@ -249,19 +238,6 @@ function TerminalIcon() {
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <path d="m8 10 3 2-3 2" />
       <path d="M13 15h3" />
-    </svg>
-  );
-}
-
-function RemoteHostIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="4" y="5" width="16" height="10" rx="2" />
-      <path d="M8 19h8" />
-      <path d="M12 15v4" />
-      <path d="M8 10h.01" />
-      <path d="M12 10h.01" />
-      <path d="M16 10h.01" />
     </svg>
   );
 }
