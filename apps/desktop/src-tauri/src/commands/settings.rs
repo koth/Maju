@@ -121,7 +121,6 @@ pub fn settings_save_codex_acp_provider_key(
     api_key: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_save_agent_provider_secret(
@@ -143,7 +142,6 @@ pub fn settings_select_codex_acp_provider(
     provider: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_select_agent_provider_profile(
@@ -162,7 +160,6 @@ pub fn settings_select_codex_default_mode(
     state: State<'_, AppState>,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_select_agent_provider_profile(
@@ -183,9 +180,6 @@ pub fn settings_select_agent_provider_profile(
     profile_id: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    if family == AgentProviderFamily::Codex {
-        ensure_no_running_codex_acp_session(&state)?;
-    }
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_select_agent_provider_profile(
@@ -208,9 +202,6 @@ pub fn settings_save_agent_provider_secret(
     secret: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    if family == AgentProviderFamily::Codex && codex_secret_updates_active_channel(&profile_id) {
-        ensure_no_running_codex_acp_session(&state)?;
-    }
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_save_agent_provider_secret(
@@ -233,7 +224,6 @@ pub fn settings_save_provider_models(
     models: Vec<String>,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_save_provider_models(
@@ -254,7 +244,6 @@ pub async fn settings_sync_provider_models_from_url(
     model_list_url: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     let models =
         app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
@@ -285,7 +274,6 @@ pub fn settings_reset_provider_models(
     provider: String,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
-    ensure_no_running_codex_acp_session(&state)?;
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_reset_provider_models(
@@ -316,10 +304,6 @@ pub fn settings_select_claude_fast_model(
     app_core::settings::select_claude_fast_model(&paths, model_id).map_err(|e| e.to_string())
 }
 
-fn codex_secret_updates_active_channel(profile_id: &str) -> bool {
-    profile_id != "default"
-}
-
 struct RemoteSettingsScope {
     profile: RemoteMachineProfile,
     ssh_password: Option<String>,
@@ -343,16 +327,6 @@ fn remote_settings_scope(
         profile,
         ssh_password,
     }))
-}
-
-fn ensure_no_running_codex_acp_session(state: &State<'_, AppState>) -> Result<(), String> {
-    if state.has_running_codex_acp_session()? {
-        return Err(
-            "已有当前配置codex启动，不能切换，请把对应codex会话删除先，确保没有对应的codex-acp启动了再写新配置。"
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 #[tauri::command]

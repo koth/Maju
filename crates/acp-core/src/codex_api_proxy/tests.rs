@@ -940,6 +940,24 @@ fn preserves_markdown_newlines_in_anthropic_stream() {
 }
 
 #[test]
+fn skips_empty_chat_text_deltas_in_anthropic_stream() {
+    let body = concat!(
+        "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n",
+        "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    let normalized = chat_sse_to_anthropic_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: message_start"));
+    assert!(!text.contains("event: content_block_start"));
+    assert!(!text.contains("event: content_block_delta"));
+    assert!(text.contains("\"stop_reason\":\"end_turn\""));
+    assert!(text.contains("event: message_stop"));
+}
+
+#[test]
 fn converts_chat_tool_stream_to_anthropic_tool_use() {
     let body = concat!(
         "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
@@ -1048,7 +1066,7 @@ fn injects_remembered_reasoning_content_into_next_chat_request() {
 }
 
 #[test]
-fn synthesizes_deepseek_reasoning_for_uncached_assistant_history() {
+fn leaves_uncached_deepseek_text_history_without_fake_reasoning() {
     let payload = json!({
         "input": [{
             "type": "message",
@@ -1061,10 +1079,7 @@ fn synthesizes_deepseek_reasoning_for_uncached_assistant_history() {
 
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert_eq!(chat["messages"][0]["content"], "uncached assistant answer");
-    assert_eq!(
-        chat["messages"][0]["reasoning_content"],
-        DEEPSEEK_REASONING_PLACEHOLDER
-    );
+    assert!(chat["messages"][0].get("reasoning_content").is_none());
 }
 
 #[test]
@@ -1085,10 +1100,7 @@ fn normalizes_deepseek_assistant_messages_before_upstream_request() {
 
     let normalized = normalize_chat_payload_for_provider(payload, "deepseek");
 
-    assert_eq!(
-        normalized["messages"][1]["reasoning_content"],
-        DEEPSEEK_REASONING_PLACEHOLDER
-    );
+    assert!(normalized["messages"][1].get("reasoning_content").is_none());
     assert_eq!(
         normalized["messages"][2]["reasoning_content"],
         "already present"
@@ -1108,10 +1120,35 @@ fn normalizes_timiai_deepseek_assistant_messages_before_chat_upstream_request() 
 
     let normalized = normalize_chat_payload_for_provider(payload, "timiai");
 
-    assert_eq!(
-        normalized["messages"][1]["reasoning_content"],
-        DEEPSEEK_REASONING_PLACEHOLDER
-    );
+    assert!(normalized["messages"][1].get("reasoning_content").is_none());
+}
+
+#[test]
+fn disables_deepseek_thinking_when_tool_reasoning_history_is_missing() {
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "messages": [
+            { "role": "user", "content": "inspect" },
+            {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_missing_reasoning",
+                    "type": "function",
+                    "function": { "name": "Read", "arguments": "{\"file_path\":\"README.md\"}" }
+                }]
+            },
+            { "role": "tool", "tool_call_id": "call_missing_reasoning", "content": "file contents" }
+        ],
+        "reasoning_effort": "max",
+        "stream": true
+    });
+
+    let normalized = normalize_chat_payload_for_provider(payload, "deepseek");
+
+    assert_eq!(normalized["thinking"]["type"], "disabled");
+    assert!(normalized.get("reasoning_effort").is_none());
+    assert!(normalized["messages"][1].get("reasoning_content").is_none());
 }
 
 #[test]
@@ -1234,10 +1271,7 @@ fn ignores_unsupported_responses_input_item() {
     assert_eq!(chat["messages"].as_array().unwrap().len(), 2);
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert_eq!(chat["messages"][0]["content"], "recovered answer");
-    assert_eq!(
-        chat["messages"][0]["reasoning_content"],
-        DEEPSEEK_REASONING_PLACEHOLDER
-    );
+    assert!(chat["messages"][0].get("reasoning_content").is_none());
     assert_eq!(chat["messages"][1]["role"], "user");
     assert_eq!(chat["messages"][1]["content"], "hello");
 }

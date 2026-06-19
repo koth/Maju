@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
-import { Ban, Check, Circle, ClipboardList, Loader2 } from "lucide-react";
+import {
+  Ban,
+  Check,
+  Circle,
+  ClipboardList,
+  FileDiff,
+  GitBranch,
+  GitPullRequest,
+  Laptop,
+  Loader2,
+  Server,
+  Upload,
+} from "lucide-react";
 import type {
   AgentPlanEntry,
   PermissionInputQuestion,
@@ -13,6 +25,17 @@ import "./Composer.css";
 
 interface Props {
   entries: AgentPlanEntry[];
+  environment?: AgentPlanEnvironmentInfo | null;
+}
+
+export interface AgentPlanEnvironmentInfo {
+  changeCount: number;
+  addedLines: number;
+  removedLines: number;
+  locationLabel: string;
+  branchLabel: string;
+  actionLabel: string;
+  githubLabel: string;
 }
 
 export interface PlanApprovalRequest {
@@ -48,66 +71,132 @@ interface PlanApprovalModalProps {
   onPermissionSelect?: (requestId: string, optionId: string | null, guidance?: string | null) => void;
 }
 
-export function AgentPlanPanel({ entries }: Props) {
+const AGENT_PLAN_PANEL_ENTRY_LIMIT = 5;
+
+export function AgentPlanPanel({ entries, environment }: Props) {
   if (entries.length === 0) return null;
 
   const completed = entries.filter((entry) => entry.status === "completed").length;
   const visibleEntries = sortAgentPlanEntries(entries);
+  const panelEntries = visibleEntries.slice(0, AGENT_PLAN_PANEL_ENTRY_LIMIT);
+  const hiddenEntryCount = visibleEntries.length - panelEntries.length;
   const progressPercent = Math.round((completed / entries.length) * 100);
 
   return (
-    <section className="agent-plan" aria-label="智能体计划">
-      <div className="agent-plan-header">
-        <div className="agent-plan-headline">
-          <span className="agent-plan-icon" aria-hidden="true">
-            <ClipboardList size={18} strokeWidth={2.2} />
-          </span>
-          <div className="agent-plan-heading">
-            <div className="agent-plan-eyebrow">任务计划</div>
-            <div className="agent-plan-title">已完成 {completed}/{entries.length} 个任务</div>
+    <section className="agent-plan" aria-label="智能体进度">
+      {environment && <AgentPlanEnvironment environment={environment} />}
+      <div className="agent-plan-progress-section" aria-label="进度">
+        <div className="agent-plan-header">
+          <div className="agent-plan-headline">
+            <span className="agent-plan-icon" aria-hidden="true">
+              <ClipboardList size={18} strokeWidth={2.2} />
+            </span>
+            <div className="agent-plan-heading">
+              <div className="agent-plan-eyebrow">进度</div>
+              <div className="agent-plan-title">已完成 {completed}/{entries.length} 个任务</div>
+            </div>
           </div>
+          <span className="agent-plan-count" aria-label={`已完成 ${completed}/${entries.length} 个任务`}>
+            {completed}/{entries.length}
+          </span>
         </div>
-        <span className="agent-plan-count" aria-label={`已完成 ${completed}/${entries.length} 个任务`}>
-          {completed}/{entries.length}
-        </span>
-      </div>
-      <div className="agent-plan-progress" aria-hidden="true">
-        <span style={{ width: `${progressPercent}%` }} />
-      </div>
-      <ol className="agent-plan-list">
-        {visibleEntries.map((entry, index) => (
-          <li
-            className={`agent-plan-entry is-${entry.status}`}
-            key={entry.id ?? `${index}-${entry.content}`}
-          >
-            <span className="agent-plan-status" aria-label={statusLabel(entry.status)}>
-              {statusIcon(entry.status)}
-              {statusMark(entry.status)}
-            </span>
-            <span className="agent-plan-content">{entry.content}</span>
-            <span
-              className={`agent-plan-priority is-${entry.priority}`}
-              aria-label={`Priority: ${priorityLabel(entry.priority)}`}
+        <div className="agent-plan-progress" aria-hidden="true">
+          <span style={{ width: `${progressPercent}%` }} />
+        </div>
+        <ol className="agent-plan-list">
+          {panelEntries.map((entry, index) => (
+            <li
+              className={`agent-plan-entry is-${entry.status}`}
+              key={entry.id ?? `${index}-${entry.content}`}
             >
-              {priorityLabel(entry.priority)}
-            </span>
-          </li>
-        ))}
-      </ol>
+              <span className="agent-plan-status" aria-label={statusLabel(entry.status)}>
+                {statusIcon(entry.status)}
+                {statusMark(entry.status)}
+              </span>
+              <span className="agent-plan-content">{entry.content}</span>
+              <span
+                className={`agent-plan-priority is-${entry.priority}`}
+                aria-label={`Priority: ${priorityLabel(entry.priority)}`}
+              >
+                {priorityLabel(entry.priority)}
+              </span>
+            </li>
+          ))}
+        </ol>
+        {hiddenEntryCount > 0 && (
+          <div className="agent-plan-more">还有 {hiddenEntryCount} 个任务</div>
+        )}
+      </div>
     </section>
   );
 }
 
-export function shouldShowAgentPlanDuringTurn(
-  snapshot: Pick<UiSnapshot, "agent_plan" | "session">,
-) {
+function AgentPlanEnvironment({
+  environment,
+}: {
+  environment: AgentPlanEnvironmentInfo;
+}) {
+  const hasLineChanges = environment.addedLines > 0 || environment.removedLines > 0;
+
   return (
-    snapshot.agent_plan.length > 0 &&
-    (snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool")
+    <div className="agent-plan-environment" aria-label="环境信息">
+      <div className="agent-plan-environment-title">环境信息</div>
+      <div className="agent-plan-env-row">
+        <span className="agent-plan-env-label">
+          <FileDiff size={14} strokeWidth={2.1} aria-hidden="true" />
+          <span>变更</span>
+        </span>
+        <span className="agent-plan-env-change-metrics">
+          {hasLineChanges ? (
+            <>
+              <span className="agent-plan-env-added">+{environment.addedLines}</span>
+              <span className="agent-plan-env-removed">-{environment.removedLines}</span>
+            </>
+          ) : (
+            <span className="agent-plan-env-file-count">{environment.changeCount} 处</span>
+          )}
+        </span>
+      </div>
+      <div className="agent-plan-env-row">
+        <span className="agent-plan-env-label">
+          {environment.locationLabel === "远程" ? (
+            <Server size={14} strokeWidth={2.1} aria-hidden="true" />
+          ) : (
+            <Laptop size={14} strokeWidth={2.1} aria-hidden="true" />
+          )}
+          <span>{environment.locationLabel}</span>
+        </span>
+      </div>
+      <div className="agent-plan-env-row">
+        <span className="agent-plan-env-label">
+          <GitBranch size={14} strokeWidth={2.1} aria-hidden="true" />
+          <span>{environment.branchLabel}</span>
+        </span>
+      </div>
+      <div className="agent-plan-env-row">
+        <span className="agent-plan-env-label">
+          <Upload size={14} strokeWidth={2.1} aria-hidden="true" />
+          <span>{environment.actionLabel}</span>
+        </span>
+      </div>
+      <div className="agent-plan-env-row is-muted">
+        <span className="agent-plan-env-label">
+          <GitPullRequest size={14} strokeWidth={2.1} aria-hidden="true" />
+          <span>{environment.githubLabel}</span>
+        </span>
+      </div>
+    </div>
   );
 }
 
-export const shouldShowAgentPlanNearComposer = shouldShowAgentPlanDuringTurn;
+export function shouldShowAgentPlanForSession(
+  snapshot: Pick<UiSnapshot, "agent_plan" | "session">,
+) {
+  return snapshot.agent_plan.length > 0;
+}
+
+export const shouldShowAgentPlanDuringTurn = shouldShowAgentPlanForSession;
+export const shouldShowAgentPlanNearComposer = shouldShowAgentPlanForSession;
 
 export function PermissionRequestPanel({
   request,

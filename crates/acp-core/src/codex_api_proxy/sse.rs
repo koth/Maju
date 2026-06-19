@@ -111,6 +111,10 @@ fn sse_data_line(event: &str) -> Option<&str> {
 }
 
 fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+
     if !state.message_started {
         state.message_started = true;
         push_sse(
@@ -234,6 +238,8 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
 }
 
 fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
+    log_chat_stream_done("responses", state);
+
     let mut final_output = Vec::new();
     if state.message_started {
         push_sse(
@@ -817,6 +823,10 @@ fn ensure_anthropic_message_started(output: &mut String, state: &mut ChatStreamS
 }
 
 fn emit_anthropic_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+
     ensure_anthropic_message_started(output, state);
     let index = if let Some(index) = state.text_block_index {
         index
@@ -920,6 +930,8 @@ fn emit_anthropic_tool_call_delta(
 }
 
 fn emit_anthropic_stream_done(output: &mut String, state: &mut ChatStreamState) {
+    log_chat_stream_done("anthropic", state);
+
     ensure_anthropic_message_started(output, state);
     if state.text_block_started {
         if let Some(index) = state.text_block_index {
@@ -968,6 +980,18 @@ fn chat_finish_reason_to_anthropic(reason: &str) -> &str {
         "length" => "max_tokens",
         _ => "end_turn",
     }
+}
+
+fn log_chat_stream_done(kind: &str, state: &ChatStreamState) {
+    append_codex_api_proxy_log(&format!(
+        "chat_sse_stream_done kind={kind} stop_reason={} text_chars={} reasoning_chars={} tool_calls={} message_started={} text_block_started={}",
+        state.stop_reason.as_deref().unwrap_or("<missing>"),
+        state.text.len(),
+        state.reasoning_content.len(),
+        state.tool_calls.iter().filter(|call| call.added).count(),
+        state.message_started,
+        state.text_block_started,
+    ));
 }
 
 fn next_sse_event(buffer: &str) -> Option<(String, usize)> {

@@ -35,24 +35,6 @@ impl Application {
         false
     }
 
-    pub fn has_running_codex_acp_session(&self) -> bool {
-        let visible_running = self.is_codex_acp_session() && self.session.is_alive();
-        let background_running = self.runtime_registry.entries.values().any(|runtime| {
-            runtime
-                .ui
-                .session
-                .agent_cli
-                .as_deref()
-                .map(is_codex_agent_label)
-                .unwrap_or_else(|| {
-                    let command = runtime.agent_command.to_ascii_lowercase();
-                    command.contains("codex-acp") || command.contains("kodex-acp")
-                })
-                && runtime.session.is_alive()
-        });
-        visible_running || background_running
-    }
-
     pub(super) fn is_codex_acp_session(&self) -> bool {
         self.ui
             .session

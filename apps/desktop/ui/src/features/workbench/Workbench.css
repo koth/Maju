@@ -513,6 +513,7 @@ body.is-resizing-left-sidebar {
   --expanded-review-side-tree-width: clamp(230px, 24vw, 300px);
   --expanded-review-composer-height: 58px;
 
+  position: relative;
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
@@ -631,11 +632,11 @@ body.is-resizing-left-sidebar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -649,9 +650,9 @@ body.is-resizing-left-sidebar {
 }
 
 .thread-header-plan-toggle.is-active {
-  background: var(--surface-selected);
-  border-color: var(--border-focus);
-  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--surface-selected) 76%, transparent);
+  border-color: color-mix(in srgb, var(--border-focus) 46%, transparent);
+  color: var(--text-strong);
 }
 
 .thread-header-plan-toggle:focus-visible {
@@ -660,8 +661,8 @@ body.is-resizing-left-sidebar {
 }
 
 .thread-header-plan-toggle svg {
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.9;
@@ -798,12 +799,138 @@ body.is-resizing-left-sidebar {
 }
 
 .agent-plan-dock {
-  width: min(var(--conversation-column-width), var(--conversation-composer-max));
-  min-width: min(var(--conversation-column-min), 100%);
-  max-width: var(--conversation-composer-max);
-  margin: 0 auto var(--center-panel-gutter);
+  position: absolute;
+  top: calc(var(--thread-header-height) + 10px);
+  right: 0;
+  z-index: 7;
+  width: min(248px, calc(100% - 2 * var(--center-panel-gutter)));
+  max-width: calc(100% - 2 * var(--center-panel-gutter));
   pointer-events: auto;
 }
+
+.agent-plan-dock.has-center-tabs {
+  top: calc(var(--thread-header-height) + 46px);
+}
+
+.agent-plan-dock .agent-plan {
+  border-radius: 8px 0 0 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+/* Compact the docked plan so a 248px column stays readable. */
+.agent-plan-dock .agent-plan-title {
+  max-width: 140px;
+}
+
+.agent-plan-dock .agent-plan-entry {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.agent-plan-dock .agent-plan-priority {
+  display: none;
+}
+
+.agent-plan-dock .agent-plan-status {
+  min-width: 56px;
+  padding: 0 5px;
+  font-size: 10px;
+}
+
+.agent-plan-dock .agent-plan-env-row {
+  min-height: 24px;
+}
+
+.agent-plan-dock .agent-plan-env-label {
+  gap: 7px;
+  font-size: 12px;
+}
+
+.agent-plan-dock .agent-plan-env-change-metrics {
+  gap: 4px;
+  font-size: 11px;
+}
+
+.agent-plan-dock .agent-plan-content {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.3;
+}
+
+/*
+ * When the agent plan dock is shown, push the centered conversation column
+ * (timeline + composer + status slot) to the left so the docked panel floats
+ * over empty right-margin space instead of covering message text.
+ *
+ * On wide viewports (>1280px) there is enough room beside the 720px composer
+ * column to host the dock in the right margin, so the column stays centered
+ * and the dock floats in the empty space on the right. Below that we use
+ * viewport @media queries (not @container) to push the column to the LEFT
+ * of the dock. The dock itself always floats in the top-right corner.
+ */
+.center-panel.is-agent-plan-active {
+  --agent-plan-dock-width: 248px;
+  --agent-plan-dock-gap: 12px;
+}
+
+/*
+ * Actual overlap detection happens at runtime in the `useAgentPlanOverlap`
+ * hook. It computes the unshifted column geometry from the center panel width
+ * and CSS variables, then toggles `is-agent-plan-overlap` only when the dock
+ * would cover that unshifted column. The hook intentionally does not measure
+ * the shifted column/dock after these classes apply, avoiding layout feedback
+ * loops at threshold widths.
+ *
+ * To shift the column left we override the default centered geometry:
+ *   - margin-left = panel gutter (flushes the column to the left edge of
+ *     the panel's content area)
+ *   - margin-right = dock width + gap (reserves the right strip for the dock)
+ * Composer and message text therefore sit on the LEFT of the dock with the
+ * dock floating in the top-right corner.
+ */
+.center-panel.is-agent-plan-overlap .conversation-container .timeline-items,
+.center-panel.is-agent-plan-overlap .conversation-container .composer-plan-slot,
+.center-panel.is-agent-plan-overlap .conversation-container .composer {
+  margin-left: var(--center-panel-gutter);
+  margin-right: calc(var(--agent-plan-dock-width) + var(--agent-plan-dock-gap));
+}
+
+/*
+ * "tight" tier: column shifted but even 248px is not enough to fully clear
+ * the column. We shrink the dock to 200px and reduce the right margin to
+ * match. The hook decides when this tier is needed; the CSS just renders it.
+ */
+.center-panel.is-agent-plan-tight .agent-plan-dock {
+  width: 200px;
+}
+.center-panel.is-agent-plan-tight .conversation-container .timeline-items,
+.center-panel.is-agent-plan-tight .conversation-container .composer-plan-slot,
+.center-panel.is-agent-plan-tight .conversation-container .composer {
+  margin-right: calc(200px + var(--agent-plan-dock-gap));
+}
+
+/*
+ * "stacked" tier: panel so narrow that even a 200px dock cannot sit beside
+ * the column. Turn the dock into a slim bar across the very top of the panel
+ * and let the column re-center.
+ */
+.center-panel.is-agent-plan-stacked .agent-plan-dock {
+  width: calc(100% - 2 * var(--center-panel-gutter));
+  top: calc(var(--thread-header-height) + 6px);
+}
+.center-panel.is-agent-plan-stacked .agent-plan-dock .agent-plan {
+  border-radius: 8px;
+}
+.center-panel.is-agent-plan-stacked .conversation-container .timeline-items,
+.center-panel.is-agent-plan-stacked .conversation-container .composer-plan-slot,
+.center-panel.is-agent-plan-stacked .conversation-container .composer {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* The actual shift is applied by the rules above based on which tier the
+   `useAgentPlanOverlap` hook sets. */
 
 .expanded-review-panel-shell {
   display: flex;

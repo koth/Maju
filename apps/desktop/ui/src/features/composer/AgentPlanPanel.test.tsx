@@ -7,7 +7,7 @@ import {
   findPlanAcceptOption,
   findPlanReplanOption,
   findPlanTerminateOption,
-  shouldShowAgentPlanNearComposer,
+  shouldShowAgentPlanForSession,
 } from "./AgentPlanPanel";
 import type { AgentPlanEntry, UiSnapshot } from "../../types";
 
@@ -31,7 +31,43 @@ describe("AgentPlanPanel", () => {
     );
 
     expect(screen.getByText("检查现有实现")).toBeTruthy();
+    expect(screen.getByText("进度")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "接受计划" })).toBeNull();
+  });
+
+  it("renders environment information above progress", () => {
+    const { container } = render(
+      <AgentPlanPanel
+        entries={[
+          {
+            id: "1",
+            content: "检查现有实现",
+            priority: "medium",
+            status: "pending",
+          },
+        ]}
+        environment={{
+          changeCount: 2,
+          addedLines: 34,
+          removedLines: 5,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "提交或推送",
+          githubLabel: "GitHub CLI 不可用",
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("环境信息")).toBeTruthy();
+    expect(
+      screen.getByLabelText("环境信息").compareDocumentPosition(screen.getByLabelText("进度")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByText("变更")).toBeTruthy();
+    expect(screen.getByText("+34")).toBeTruthy();
+    expect(screen.getByText("-5")).toBeTruthy();
+    expect(screen.getByText("master")).toBeTruthy();
+    expect(container.querySelector(".agent-plan")?.className).toContain("agent-plan");
   });
 
   it("orders active tasks first, pending next, and completed last", () => {
@@ -85,7 +121,32 @@ describe("AgentPlanPanel", () => {
     ]);
   });
 
-  it("only shows near the composer while a turn is active", () => {
+  it("summarizes overflow tasks instead of rendering a long scroll list", () => {
+    render(
+      <AgentPlanPanel
+        entries={[
+          "Task 1",
+          "Task 2",
+          "Task 3",
+          "Task 4",
+          "Task 5",
+          "Task 6",
+          "Task 7",
+        ].map((content, index) => ({
+          id: `${index + 1}`,
+          content,
+          priority: "medium",
+          status: index === 0 ? "in_progress" : "pending",
+        }))}
+      />,
+    );
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(5);
+    expect(screen.getByText("还有 2 个任务")).toBeTruthy();
+    expect(screen.queryByText("Task 7")).toBeNull();
+  });
+
+  it("shows when the session has retained plan entries", () => {
     const entry: AgentPlanEntry = {
       id: "1",
       content: "检查现有实现",
@@ -105,11 +166,11 @@ describe("AgentPlanPanel", () => {
       },
     });
 
-    expect(shouldShowAgentPlanNearComposer(snapshot("Streaming"))).toBe(true);
-    expect(shouldShowAgentPlanNearComposer(snapshot("WaitingForTool"))).toBe(true);
-    expect(shouldShowAgentPlanNearComposer(snapshot("Idle"))).toBe(false);
-    expect(shouldShowAgentPlanNearComposer(snapshot("Interrupted"))).toBe(false);
-    expect(shouldShowAgentPlanNearComposer(snapshot("Streaming", []))).toBe(false);
+    expect(shouldShowAgentPlanForSession(snapshot("Streaming"))).toBe(true);
+    expect(shouldShowAgentPlanForSession(snapshot("WaitingForTool"))).toBe(true);
+    expect(shouldShowAgentPlanForSession(snapshot("Idle"))).toBe(true);
+    expect(shouldShowAgentPlanForSession(snapshot("Interrupted"))).toBe(true);
+    expect(shouldShowAgentPlanForSession(snapshot("Streaming", []))).toBe(false);
   });
 });
 

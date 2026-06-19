@@ -1,6 +1,6 @@
 use super::*;
 use agent_client_protocol::schema::{
-    PlanEntry, SessionMode, SessionModeId, SessionModeState, SessionNotification,
+    PlanEntry, SessionMode, SessionModeId, SessionModeState, SessionNotification, TextContent,
 };
 use std::path::PathBuf;
 
@@ -188,6 +188,20 @@ fn generic_in_progress_tool_update_preserves_raw_output() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn empty_text_content_does_not_emit_message_chunk() {
+    let (tx, rx) = mpsc::channel();
+
+    emit_content(
+        &tx,
+        MessageRole::Assistant,
+        ContentBlock::Text(TextContent::new(String::new())),
+    )
+    .unwrap();
+
     assert!(rx.try_recv().is_err());
 }
 

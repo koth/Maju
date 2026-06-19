@@ -496,14 +496,6 @@ impl AppState {
         Ok(!guard.workspaces.is_empty())
     }
 
-    pub fn has_running_codex_acp_session(&self) -> Result<bool, String> {
-        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-        Ok(guard.workspaces.values().any(|entry| match entry {
-            WorkspaceEntry::Connected(app) => app.has_running_codex_acp_session(),
-            WorkspaceEntry::Dormant(_) => false,
-        }))
-    }
-
     pub fn active_remote_linux_workspace(&self) -> Result<Option<RemoteLinuxWorkspace>, String> {
         let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
         let Some(active_key) = guard.active_workspace.as_deref() else {

@@ -15,10 +15,10 @@ import {
   AgentPlanPanel,
   PermissionRequestPanel,
   type PendingPermissionRequest,
+  type AgentPlanEnvironmentInfo,
   findPlanAcceptOption,
   findPlanReplanOption,
   findPlanTerminateOption,
-  shouldShowAgentPlanDuringTurn,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
 import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "../review/ReviewPanel";
@@ -48,6 +48,8 @@ import { useWorkbenchTabs } from "./useWorkbenchTabs";
 import { useLeftSidebarState } from "./useLeftSidebarState";
 import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
+import { useAgentPlanOverlap } from "./useAgentPlanOverlap";
+import { useSessionAgentPlan } from "./useSessionAgentPlan";
 import {
   latestReviewableTurnChangeSet,
   reviewableTurnChangeSetSignature,
@@ -61,6 +63,34 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
 const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
 
 let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
+
+function buildAgentPlanEnvironmentInfo(
+  snapshot: UiSnapshot,
+  gitHydrated: boolean,
+): AgentPlanEnvironmentInfo {
+  const changedFiles = snapshot.repository.changed_files;
+  const addedLines = changedFiles.reduce((sum, file) => sum + file.stats.added, 0);
+  const removedLines = changedFiles.reduce((sum, file) => sum + file.stats.removed, 0);
+  const branchLabel =
+    snapshot.repository.branch.trim() ||
+    (snapshot.repository.head ? snapshot.repository.head.slice(0, 7) : "") ||
+    "无分支";
+  const changeCount = changedFiles.length;
+
+  return {
+    changeCount,
+    addedLines,
+    removedLines,
+    locationLabel: snapshot.workspace.location?.kind === "remote_linux" ? "远程" : "本地",
+    branchLabel,
+    actionLabel: !gitHydrated
+      ? "读取 Git 状态"
+      : changeCount > 0
+        ? "提交或推送"
+        : "工作区干净",
+    githubLabel: "GitHub CLI 不可用",
+  };
+}
 
 export function Workbench() {
   const {
@@ -95,6 +125,7 @@ export function Workbench() {
     workspaceReady,
     onGitRefresh: handleRefreshGit,
   });
+  const agentPlanEntries = useSessionAgentPlan(snapshot);
   const handleAfterEditorSave = useCallback(async () => {
     await handleRefreshGit();
     await pollState();
@@ -127,6 +158,7 @@ export function Workbench() {
   } | null>(null);
   const autoReviewSignatureRef = useRef<string | null>(null);
   const reviewFocusSeqRef = useRef(0);
+  const centerPanelRef = useRef<HTMLElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     leftSidebarWidth,
@@ -543,6 +575,16 @@ export function Workbench() {
       </div>
     </div>
   ) : null;
+  const showAgentPlanDock =
+    !!snapshot &&
+    activeTab.type === "conversation" &&
+    !reviewPanelExpanded &&
+    agentPlanEntries.length > 0;
+  const agentPlanDockVisible = showAgentPlanDock && !agentPlanDockCollapsed;
+  const agentPlanOverlap = useAgentPlanOverlap(
+    centerPanelRef,
+    agentPlanDockVisible,
+  );
 
   if (settingsOpen) {
     return (
@@ -590,17 +632,24 @@ export function Workbench() {
   const terminalDockAvailable = isTerminalDockAvailableForWorkspace(snapshot.workspace);
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentLabel = snapshot.session.agent_cli || "智能体";
-  const showAgentPlanDock =
-    activeTab.type === "conversation" &&
-    !reviewPanelExpanded &&
-    shouldShowAgentPlanDuringTurn(snapshot);
-  const composerStatusSlot = pendingPermissionRequests.length > 0 ? (
+  const agentPlanEnvironment = buildAgentPlanEnvironmentInfo(snapshot, gitHydrated);
+  const agentPlanDockSlot =
+    agentPlanDockVisible ? (
+      <aside
+        className={`agent-plan-dock ${displayTabs.length > 1 ? "has-center-tabs" : ""}`}
+        aria-label="当前进度"
+      >
+        <AgentPlanPanel entries={agentPlanEntries} environment={agentPlanEnvironment} />
+      </aside>
+    ) : null;
+  const composerStatusSlot =
+    pendingPermissionRequests.length > 0 ? (
     <div className="composer-plan-slot">
       {pendingPermissionRequests.map((request) => (
         <PermissionRequestPanel
           key={request.requestId}
           request={request}
-          entries={snapshot.agent_plan ?? []}
+          entries={agentPlanEntries}
           onPermissionSelect={handlePermissionSelect}
         />
       ))}
@@ -692,7 +741,18 @@ export function Workbench() {
           className={workbenchBodyClassName}
           style={rightPanelStyle}
         >
-          <main className="center-panel">
+          <main
+            ref={centerPanelRef}
+            className={
+              "center-panel" +
+              (showAgentPlanDock && !agentPlanDockCollapsed ? " is-agent-plan-active" : "") +
+              (showAgentPlanDock && !agentPlanDockCollapsed && agentPlanOverlap !== "none"
+                ? " is-agent-plan-overlap"
+                : "") +
+              (agentPlanOverlap === "tight" ? " is-agent-plan-tight" : "") +
+              (agentPlanOverlap === "stacked" ? " is-agent-plan-stacked" : "")
+            }
+          >
             {reviewPanelExpanded && (
               <section className="expanded-review-panel-shell" aria-label="展开审查面板">
                 {reviewPanel}
@@ -710,9 +770,9 @@ export function Workbench() {
                     className={`thread-header-plan-toggle ${
                       agentPlanDockCollapsed ? "" : "is-active"
                     }`}
-                    aria-label={agentPlanDockCollapsed ? "展开任务计划" : "折叠任务计划"}
+                    aria-label={agentPlanDockCollapsed ? "展开进度" : "折叠进度"}
                     aria-expanded={!agentPlanDockCollapsed}
-                    title={agentPlanDockCollapsed ? "展开任务计划" : "折叠任务计划"}
+                    title={agentPlanDockCollapsed ? "展开进度" : "折叠进度"}
                     onClick={() => setAgentPlanDockCollapsed((collapsed) => !collapsed)}
                   >
                     <ListChecks aria-hidden="true" size={16} strokeWidth={2.2} />
@@ -720,6 +780,7 @@ export function Workbench() {
                 ) : null
               }
             />
+            {agentPlanDockSlot}
 
             {displayTabs.length > 1 && (
               <div className="center-tab-bar-shell">
@@ -760,13 +821,6 @@ export function Workbench() {
               >
                 {activeTab.type === "conversation" ? (
                   <>
-                    {showAgentPlanDock && (
-                      !agentPlanDockCollapsed && (
-                        <aside className="agent-plan-dock" aria-label="当前任务计划">
-                          <AgentPlanPanel entries={snapshot.agent_plan} />
-                        </aside>
-                      )
-                    )}
                     <ConversationTimeline
                       snapshot={snapshot}
                       onPermissionSelect={handlePermissionSelect}

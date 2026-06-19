@@ -590,7 +590,7 @@ describe("SettingsPage LSP settings", () => {
     await waitFor(() => expect(passwordInput).toHaveValue(""));
   });
 
-  it("opens remote settings with the active remote context", async () => {
+  it("does not connect SSH when settings opens with an active remote context", async () => {
     vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot(true));
 
     render(
@@ -609,18 +609,46 @@ describe("SettingsPage LSP settings", () => {
     );
 
     expect(await screen.findByText("当前远程上下文")).toBeInTheDocument();
-    expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1");
-    expect(settingsGetLspSnapshot).toHaveBeenCalledWith("remote-1");
+    expect(settingsGetAgentSnapshot).toHaveBeenCalledWith(null);
+    expect(settingsGetAgentSnapshot).not.toHaveBeenCalledWith("remote-1");
+    expect(settingsGetLspSnapshot).toHaveBeenCalledWith(null);
+    expect(settingsGetLspSnapshot).not.toHaveBeenCalledWith("remote-1");
     expect(screen.getByText("project · root@devbox:36000")).toBeInTheDocument();
     expect(screen.getByText("/srv/project")).toBeInTheDocument();
     expect(screen.getAllByText("CodeBuddy").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Claude 通道" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Codex 通道" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑远程 Claude" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑远程 Codex" })).toBeInTheDocument();
+  });
+
+  it("loads remote runtime settings only after an explicit remote edit action", async () => {
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot(true));
+
+    render(
+      <SettingsPage
+        initialPane="remote"
+        remoteContext={{
+          profileId: "remote-1",
+          workspaceName: "project",
+          sshTarget: "root@devbox",
+          sshPort: 36000,
+          remotePath: "/srv/project",
+          agentLabel: "CodeBuddy",
+        }}
+        onBack={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "编辑远程 Codex" }));
+
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"));
+    expect(settingsGetLspSnapshot).toHaveBeenCalledWith("remote-1");
+    expect(await screen.findByText("正在编辑 project 的远程运行时设置。")).toBeInTheDocument();
   });
 
   it("writes runtime settings to the active remote profile", async () => {
     render(
       <SettingsPage
+        initialPane="remote"
         remoteContext={{
           profileId: "remote-1",
           workspaceName: "project",
@@ -633,7 +661,8 @@ describe("SettingsPage LSP settings", () => {
       />,
     );
 
-    await openAgentSettingsTab("Codex");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑远程 Codex" }));
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"));
     await selectByokProvider(/TimiAI/);
     fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "remote-timiai-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存 TimiAI key" }));
@@ -725,9 +754,12 @@ describe("SettingsPage LSP settings", () => {
 
     render(<SettingsPage onBack={vi.fn()} />);
 
+    expect(await screen.findByText("选择本机默认智能体和可用模型来源。")).toBeInTheDocument();
+    expect(screen.queryByText("Error: remote load failed")).not.toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "远程" }));
     expect(await screen.findByText("Error: remote load failed")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
-    fireEvent.click(await screen.findByRole("button", { name: "远程" }));
     expect(await screen.findByText("还没有远程机器")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "添加远程机器" })[0]);

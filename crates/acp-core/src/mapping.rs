@@ -243,6 +243,10 @@ fn emit_content(
         other => format!("{:?}", other),
     };
 
+    if text.is_empty() {
+        return Ok(());
+    }
+
     tx.send(ClientEvent::MessageChunk {
         role,
         content: text,

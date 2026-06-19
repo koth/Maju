@@ -56,7 +56,6 @@ const MIMO_UPSTREAM_CHAT_COMPLETIONS_URL: &str =
 const MIMO_UPSTREAM_MESSAGES_URL: &str =
     "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages";
 const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
-const DEEPSEEK_REASONING_PLACEHOLDER: &str = "[previous reasoning unavailable]";
 const PROVIDER_MODEL_ID_PREFIX: &str = "kodex-provider/";
 
 #[derive(Debug, Clone)]
@@ -1125,6 +1124,35 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
         return payload;
     };
+
+    let missing_tool_reasoning = messages
+        .iter()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .filter(|message| chat_message_has_tool_calls(message))
+        .filter(|message| {
+            message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+                && reasoning_content_for_assistant_message(message).is_none()
+        })
+        .count();
+    if missing_tool_reasoning > 0 {
+        append_codex_api_proxy_log(&format!(
+            "deepseek_thinking_disabled_missing_tool_reasoning count={missing_tool_reasoning}"
+        ));
+        for message in messages {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("reasoning_content");
+            }
+        }
+        payload["thinking"] = json!({ "type": "disabled" });
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("reasoning_effort");
+        }
+        return payload;
+    }
+
     for message in &mut *messages {
         if message.get("role").and_then(Value::as_str) != Some("assistant") {
             continue;
@@ -1140,12 +1168,20 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let reasoning_content = reasoning_content_for_assistant_message(message)
+        if let Some(reasoning_content) = reasoning_content_for_assistant_message(message)
             .or_else(|| reasoning_content_for_text(content))
-            .unwrap_or_else(|| DEEPSEEK_REASONING_PLACEHOLDER.to_string());
-        message["reasoning_content"] = Value::String(reasoning_content);
+        {
+            message["reasoning_content"] = Value::String(reasoning_content);
+        }
     }
     payload
+}
+
+fn chat_message_has_tool_calls(message: &Value) -> bool {
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .is_some_and(|tool_calls| !tool_calls.is_empty())
 }
 
 fn chat_payload_needs_deepseek_reasoning_compat(payload: &Value, provider: &str) -> bool {
@@ -1218,12 +1254,8 @@ fn responses_input_item_to_chat_message(
             }
             let mut message = json!({ "role": role, "content": content });
             if role == "assistant" {
-                if let Some(reasoning_content) = reasoning_content
-                    .or_else(|| reasoning_content_for_text(&content))
-                    .or_else(|| {
-                        (normalize_proxy_provider(provider) == "deepseek")
-                            .then(|| DEEPSEEK_REASONING_PLACEHOLDER.to_string())
-                    })
+                if let Some(reasoning_content) =
+                    reasoning_content.or_else(|| reasoning_content_for_text(&content))
                 {
                     message["reasoning_content"] = Value::String(reasoning_content);
                 }
@@ -1297,14 +1329,15 @@ fn fallback_input_item_to_chat_message(item: &Value, provider: &str) -> Option<V
         .filter(|text| !text.trim().is_empty())?;
     let mut message = json!({ "role": role, "content": content });
     if role == "assistant" && normalize_proxy_provider(provider) == "deepseek" {
-        let reasoning_content = item
+        if let Some(reasoning_content) = item
             .get("reasoning_content")
             .and_then(Value::as_str)
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty())
             .or_else(|| reasoning_content_for_text(&content))
-            .unwrap_or_else(|| DEEPSEEK_REASONING_PLACEHOLDER.to_string());
-        message["reasoning_content"] = Value::String(reasoning_content);
+        {
+            message["reasoning_content"] = Value::String(reasoning_content);
+        }
     }
     Some(message)
 }

@@ -46,6 +46,7 @@ import "./SettingsPage.css";
 
 export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
 export type SettingsPane = "general" | "remote" | "lsp";
+type SettingsScope = "local" | "remote";
 type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "installing" | "installed" | "error";
 type RemoteProfileDraft = {
   id?: string | null;
@@ -119,6 +120,7 @@ export function SettingsPage({
 }: Props) {
   const [activePane, setActivePane] = useState<SettingsPane>(initialPane ?? "general");
   const [activeAgentTab, setActiveAgentTab] = useState<AgentSettingsTab>(initialAgentTab ?? "claude-agent-acp");
+  const [settingsScope, setSettingsScope] = useState<SettingsScope>("local");
   const [visibleStartupNotice, setVisibleStartupNotice] = useState<SettingsStartupNotice | null>(startupNotice ?? null);
   const [snapshot, setSnapshot] = useState<AgentSettingsSnapshot | null>(null);
   const [lspSnapshot, setLspSnapshot] = useState<LspSettingsSnapshot | null>(null);
@@ -156,7 +158,9 @@ export function SettingsPage({
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const byokProviderMenuRef = useRef<HTMLDivElement>(null);
-  const settingsRemoteProfileId = remoteContext?.profileId ?? null;
+  const canUseRemoteSettings = !!remoteContext?.profileId;
+  const settingsRemoteProfileId = settingsScope === "remote" ? remoteContext?.profileId ?? null : null;
+  const editingRemoteSettings = settingsScope === "remote" && !!settingsRemoteProfileId;
 
   const applyLspSnapshot = useCallback((nextSnapshot: LspSettingsSnapshot) => {
     setLspSnapshot(nextSnapshot);
@@ -169,28 +173,38 @@ export function SettingsPage({
         args: server.args,
       },
     ])));
-  }, [settingsRemoteProfileId]);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     setLspError(null);
+    setRemoteError(null);
+
+    const remoteProfilesPromise = settingsGetRemoteProfiles()
+      .then(setRemoteSnapshot)
+      .catch((e) => setRemoteError(String(e)));
+
     try {
-      const [nextSnapshot, nextLspSnapshot, nextRemoteSnapshot] = await Promise.all([
-        settingsGetAgentSnapshot(settingsRemoteProfileId),
-        settingsGetLspSnapshot(settingsRemoteProfileId),
-        settingsGetRemoteProfiles(),
-      ]);
+      const nextSnapshot = await settingsGetAgentSnapshot(settingsRemoteProfileId);
       setSnapshot(nextSnapshot);
-      applyLspSnapshot(nextLspSnapshot);
-      setRemoteSnapshot(nextRemoteSnapshot);
-      onThemeChange?.(applyAppTheme(nextSnapshot.settings.theme));
+      if (!editingRemoteSettings) {
+        onThemeChange?.(applyAppTheme(nextSnapshot.settings.theme));
+      }
     } catch (e) {
       setError(String(e));
+    }
+
+    try {
+      const nextLspSnapshot = await settingsGetLspSnapshot(settingsRemoteProfileId);
+      applyLspSnapshot(nextLspSnapshot);
+    } catch (e) {
+      setLspError(String(e));
     } finally {
+      await remoteProfilesPromise;
       setLoading(false);
     }
-  }, [applyLspSnapshot, onThemeChange, settingsRemoteProfileId]);
+  }, [applyLspSnapshot, editingRemoteSettings, onThemeChange, settingsRemoteProfileId]);
 
   useEffect(() => {
     load();
@@ -294,6 +308,19 @@ export function SettingsPage({
     setVisibleStartupNotice(null);
     onStartupNoticeDismissed?.();
   }, [onStartupNoticeDismissed]);
+
+  const openRemoteAgentSettings = useCallback((tab: AgentSettingsTab) => {
+    if (!canUseRemoteSettings) return;
+    setSettingsScope("remote");
+    setActivePane("general");
+    setActiveAgentTab(tab);
+  }, [canUseRemoteSettings]);
+
+  const returnToLocalSettings = useCallback(() => {
+    setSettingsScope("local");
+    setError(null);
+    setLspError(null);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -969,29 +996,40 @@ export function SettingsPage({
                 <strong>{remoteContext.agentLabel ?? "未识别"}</strong>
               </div>
               <div className="settings-row-actions">
-                <button type="button" className="settings-btn" onClick={() => {
-                  setActivePane("general");
-                  setActiveAgentTab("claude-agent-acp");
-                }}>
-                  Claude 通道
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={!canUseRemoteSettings}
+                  onClick={() => openRemoteAgentSettings("claude-agent-acp")}
+                >
+                  编辑远程 Claude
                 </button>
-                <button type="button" className="settings-btn" onClick={() => {
-                  setActivePane("general");
-                  setActiveAgentTab("codex-acp");
-                }}>
-                  Codex 通道
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={!canUseRemoteSettings}
+                  onClick={() => openRemoteAgentSettings("codex-acp")}
+                >
+                  编辑远程 Codex
                 </button>
-                <button type="button" className="settings-btn" onClick={() => {
-                  setActivePane("general");
-                  setActiveAgentTab("codebuddy");
-                }}>
-                  CodeBuddy
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={!canUseRemoteSettings}
+                  onClick={() => openRemoteAgentSettings("codebuddy")}
+                >
+                  编辑远程 CodeBuddy
                 </button>
               </div>
             </div>
           </div>
         )}
-        {remoteError && <div className="settings-error">{remoteError}</div>}
+        {remoteError && (
+          <div className="settings-error">
+            <span>{remoteError}</span>
+            <button type="button" className="settings-link-btn" onClick={load}>重试</button>
+          </div>
+        )}
         {remoteMessage && <div className="settings-success">{remoteMessage}</div>}
         {remoteDraft && (
           <div className="settings-remote-editor">
@@ -1268,14 +1306,29 @@ export function SettingsPage({
           )}
         </section>
 
-        <section className="settings-section">
-          <h2 className="settings-section-title">智能体</h2>
-          <p className="settings-section-desc">选择默认智能体和可用模型来源。</p>
+	        <section className="settings-section">
+	          <h2 className="settings-section-title">智能体</h2>
+	          <p className="settings-section-desc">
+	            {editingRemoteSettings && remoteContext
+	              ? `正在编辑 ${remoteContext.workspaceName} 的远程运行时设置。`
+	              : "选择本机默认智能体和可用模型来源。"}
+	          </p>
 
-          {loading && <div className="settings-status">加载中...</div>}
-          {error && (
-            <div className="settings-error">
-              <span>{error}</span>
+	          {loading && <div className="settings-status">加载中...</div>}
+	          {editingRemoteSettings && remoteContext && (
+	            <div className="settings-warning">
+	              <span>
+	                远程设置会连接 {remoteContext.sshTarget}
+	                {remoteContext.sshPort ? `:${remoteContext.sshPort}` : ""}。
+	              </span>
+	              <button type="button" className="settings-link-btn" onClick={returnToLocalSettings}>
+	                回到本机设置
+	              </button>
+	            </div>
+	          )}
+	          {error && (
+	            <div className="settings-error">
+	              <span>{error}</span>
               <button type="button" className="settings-link-btn" onClick={load}>重试</button>
             </div>
           )}
