@@ -1077,7 +1077,9 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
             }
         }
         Some(other) => {
-            messages.push(json!({ "role": "user", "content": response_content_to_text(other) }));
+            if let Some(content) = response_content_to_chat_content(other) {
+                messages.push(json!({ "role": "user", "content": content }));
+            }
         }
         None => {}
     }
@@ -1243,19 +1245,24 @@ fn responses_input_item_to_chat_message(
                 "tool" => "tool",
                 _ => "user",
             };
-            let content = response_content_to_text(item.get("content").unwrap_or(&Value::Null));
+            let content_value = item.get("content").unwrap_or(&Value::Null);
+            let content_text = response_content_to_text(content_value);
+            let chat_content = response_content_to_chat_content(content_value);
             let reasoning_content = item
                 .get("reasoning_content")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .filter(|text| !text.is_empty());
-            if content.is_empty() && reasoning_content.is_none() {
+            if chat_content.is_none() && reasoning_content.is_none() {
                 return Ok(None);
             }
-            let mut message = json!({ "role": role, "content": content });
+            let mut message = json!({
+                "role": role,
+                "content": chat_content.unwrap_or_else(|| Value::String(String::new()))
+            });
             if role == "assistant" {
                 if let Some(reasoning_content) =
-                    reasoning_content.or_else(|| reasoning_content_for_text(&content))
+                    reasoning_content.or_else(|| reasoning_content_for_text(&content_text))
                 {
                     message["reasoning_content"] = Value::String(reasoning_content);
                 }
@@ -1324,17 +1331,17 @@ fn fallback_input_item_to_chat_message(item: &Value, provider: &str) -> Option<V
         .get("content")
         .or_else(|| item.get("text"))
         .or_else(|| item.get("output"))
-        .or_else(|| item.get("input"))
-        .map(response_content_to_text)
-        .filter(|text| !text.trim().is_empty())?;
-    let mut message = json!({ "role": role, "content": content });
+        .or_else(|| item.get("input"))?;
+    let chat_content = response_content_to_chat_content(content)?;
+    let content_text = response_content_to_text(content);
+    let mut message = json!({ "role": role, "content": chat_content });
     if role == "assistant" && normalize_proxy_provider(provider) == "deepseek" {
         if let Some(reasoning_content) = item
             .get("reasoning_content")
             .and_then(Value::as_str)
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty())
-            .or_else(|| reasoning_content_for_text(&content))
+            .or_else(|| reasoning_content_for_text(&content_text))
         {
             message["reasoning_content"] = Value::String(reasoning_content);
         }
@@ -1359,6 +1366,185 @@ fn response_content_to_text(value: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn response_content_to_chat_content(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(text) => (!text.trim().is_empty()).then(|| Value::String(text.clone())),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(response_content_item_to_chat_part)
+                .collect::<Vec<_>>();
+            chat_content_from_parts(parts)
+        }
+        Value::Null => None,
+        other => {
+            let text = other.to_string();
+            (!text.trim().is_empty()).then_some(Value::String(text))
+        }
+    }
+}
+
+fn response_content_item_to_chat_part(item: &Value) -> Option<Value> {
+    if let Some(text) = item.as_str().filter(|text| !text.trim().is_empty()) {
+        return Some(chat_text_part(text));
+    }
+
+    if let Some(text) = item
+        .get("text")
+        .or_else(|| item.get("output_text"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Some(chat_text_part(text));
+    }
+
+    chat_image_url_from_value(item).map(|url| chat_image_url_part(&url))
+}
+
+fn chat_content_from_parts(parts: Vec<Value>) -> Option<Value> {
+    chat_content_from_parts_with_text_separator(parts, "")
+}
+
+fn chat_content_from_parts_with_text_separator(
+    parts: Vec<Value>,
+    separator: &str,
+) -> Option<Value> {
+    if parts.is_empty() {
+        return None;
+    }
+    let has_non_text = parts
+        .iter()
+        .any(|part| part.get("type").and_then(Value::as_str) != Some("text"));
+    if has_non_text {
+        return Some(Value::Array(parts));
+    }
+
+    let text = parts
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(separator);
+    (!text.trim().is_empty()).then_some(Value::String(text))
+}
+
+fn chat_text_part(text: &str) -> Value {
+    json!({ "type": "text", "text": text })
+}
+
+fn chat_image_url_part(url: &str) -> Value {
+    json!({ "type": "image_url", "image_url": { "url": url } })
+}
+
+fn chat_image_url_from_value(value: &Value) -> Option<String> {
+    value
+        .get("image_url")
+        .and_then(image_url_from_chat_image_value)
+        .or_else(|| value.get("url").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            value
+                .get("source")
+                .and_then(anthropic_source_to_chat_image_url)
+        })
+}
+
+fn image_url_from_chat_image_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(url) => Some(url.clone()),
+        Value::Object(_) => value.get("url").and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    }
+}
+
+fn anthropic_source_to_chat_image_url(source: &Value) -> Option<String> {
+    match source.get("type").and_then(Value::as_str) {
+        Some("base64") => {
+            let data = source.get("data").and_then(Value::as_str)?;
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            Some(format!("data:{media_type};base64,{data}"))
+        }
+        Some("url") => source
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => source.as_str().map(str::to_string).or_else(|| {
+            source
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+    }
+}
+
+fn chat_content_to_anthropic_blocks(value: &Value) -> Vec<Value> {
+    match value {
+        Value::String(text) => (!text.trim().is_empty())
+            .then(|| json!({ "type": "text", "text": text }))
+            .into_iter()
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(chat_content_item_to_anthropic_block)
+            .collect(),
+        Value::Null => Vec::new(),
+        other => vec![json!({ "type": "text", "text": other.to_string() })],
+    }
+}
+
+fn chat_content_item_to_anthropic_block(item: &Value) -> Option<Value> {
+    if let Some(text) = item.as_str().filter(|text| !text.trim().is_empty()) {
+        return Some(json!({ "type": "text", "text": text }));
+    }
+
+    if let Some(text) = item
+        .get("text")
+        .or_else(|| item.get("output_text"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        return Some(json!({ "type": "text", "text": text }));
+    }
+
+    chat_image_url_from_value(item).map(|url| image_url_to_anthropic_block(&url))
+}
+
+fn image_url_to_anthropic_block(url: &str) -> Value {
+    if let Some((media_type, data)) = parse_base64_data_url(url) {
+        return json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data
+            }
+        });
+    }
+
+    json!({
+        "type": "image",
+        "source": {
+            "type": "url",
+            "url": url
+        }
+    })
+}
+
+fn parse_base64_data_url(url: &str) -> Option<(String, String)> {
+    let rest = url.trim().strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    let mut metadata_parts = metadata.split(';');
+    let media_type = metadata_parts.next()?.trim();
+    if media_type.is_empty()
+        || !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64"))
+        || data.is_empty()
+    {
+        return None;
+    }
+    Some((media_type.to_string(), data.to_string()))
 }
 
 fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
@@ -1398,11 +1584,8 @@ fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
                 continue;
             }
 
-            let mut content = Vec::new();
-            let text = response_content_to_text(message.get("content").unwrap_or(&Value::Null));
-            if !text.is_empty() {
-                content.push(json!({ "type": "text", "text": text }));
-            }
+            let mut content =
+                chat_content_to_anthropic_blocks(message.get("content").unwrap_or(&Value::Null));
             if role == "assistant" {
                 if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                     for tool_call in tool_calls {
@@ -1767,20 +1950,27 @@ fn anthropic_user_message_to_chat_messages(item: &Value) -> Vec<Value> {
     };
 
     let mut messages = Vec::new();
-    let mut text_parts = Vec::new();
+    let mut pending_parts = Vec::new();
     for part in parts {
         match part.get("type").and_then(Value::as_str).unwrap_or("") {
             "text" => {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
-                        text_parts.push(text.to_string());
+                        pending_parts.push(chat_text_part(text));
                     }
                 }
             }
+            "image" => {
+                if let Some(url) = part
+                    .get("source")
+                    .and_then(anthropic_source_to_chat_image_url)
+                {
+                    pending_parts.push(chat_image_url_part(&url));
+                }
+            }
             "tool_result" => {
-                if !text_parts.is_empty() {
-                    messages.push(json!({ "role": "user", "content": text_parts.join("\n") }));
-                    text_parts.clear();
+                if !pending_parts.is_empty() {
+                    push_chat_user_message_from_parts(&mut messages, &mut pending_parts);
                 }
                 let tool_call_id = part
                     .get("tool_use_id")
@@ -1798,10 +1988,16 @@ fn anthropic_user_message_to_chat_messages(item: &Value) -> Vec<Value> {
             _ => {}
         }
     }
-    if !text_parts.is_empty() || messages.is_empty() {
-        messages.push(json!({ "role": "user", "content": text_parts.join("\n") }));
+    if !pending_parts.is_empty() || messages.is_empty() {
+        push_chat_user_message_from_parts(&mut messages, &mut pending_parts);
     }
     messages
+}
+
+fn push_chat_user_message_from_parts(messages: &mut Vec<Value>, pending_parts: &mut Vec<Value>) {
+    let content = chat_content_from_parts_with_text_separator(std::mem::take(pending_parts), "\n")
+        .unwrap_or_else(|| Value::String(String::new()));
+    messages.push(json!({ "role": "user", "content": content }));
 }
 
 fn anthropic_tools_to_chat_tools(value: Option<&Value>) -> Option<Value> {

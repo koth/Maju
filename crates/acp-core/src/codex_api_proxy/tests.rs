@@ -66,6 +66,32 @@ fn converts_responses_request_to_chat_payload() {
 }
 
 #[test]
+fn converts_responses_image_input_to_chat_image_content() {
+    let payload = json!({
+        "model": "glm-5.1",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [
+                { "type": "input_text", "text": "what is this?" },
+                { "type": "input_image", "image_url": "data:image/png;base64,aW1n" }
+            ]
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "kimi_code").unwrap();
+
+    assert_eq!(chat["messages"][0]["role"], "user");
+    assert_eq!(chat["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(chat["messages"][0]["content"][0]["text"], "what is this?");
+    assert_eq!(chat["messages"][0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        chat["messages"][0]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,aW1n"
+    );
+}
+
+#[test]
 fn converts_apply_patch_custom_tool_to_chat_function_tool() {
     let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
     let payload = json!({
@@ -680,7 +706,13 @@ fn converts_chat_payload_to_kimi_anthropic_messages() {
         "temperature": 0.2,
         "messages": [
             { "role": "system", "content": "base" },
-            { "role": "user", "content": "hello" },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,aW1n" } }
+                ]
+            },
             {
                 "role": "assistant",
                 "content": "checking",
@@ -709,6 +741,19 @@ fn converts_chat_payload_to_kimi_anthropic_messages() {
     assert_eq!(anthropic["system"], "base");
     assert_eq!(anthropic["messages"][0]["role"], "user");
     assert_eq!(anthropic["messages"][0]["content"][0]["text"], "hello");
+    assert_eq!(anthropic["messages"][0]["content"][1]["type"], "image");
+    assert_eq!(
+        anthropic["messages"][0]["content"][1]["source"]["type"],
+        "base64"
+    );
+    assert_eq!(
+        anthropic["messages"][0]["content"][1]["source"]["media_type"],
+        "image/png"
+    );
+    assert_eq!(
+        anthropic["messages"][0]["content"][1]["source"]["data"],
+        "aW1n"
+    );
     assert_eq!(anthropic["messages"][1]["role"], "assistant");
     assert_eq!(anthropic["messages"][1]["content"][0]["text"], "checking");
     assert_eq!(anthropic["messages"][1]["content"][1]["type"], "tool_use");
@@ -770,6 +815,38 @@ fn converts_anthropic_tools_to_chat_completion_tools() {
         "string"
     );
     assert_eq!(chat["tool_choice"], "auto");
+}
+
+#[test]
+fn converts_anthropic_image_blocks_to_chat_image_content() {
+    let anthropic = json!({
+        "model": "deepseek-v4-pro",
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "inspect" },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "anBn"
+                    }
+                }
+            ]
+        }]
+    });
+
+    let chat = anthropic_payload_to_chat_payload(anthropic);
+
+    assert_eq!(chat["messages"][0]["role"], "user");
+    assert_eq!(chat["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(chat["messages"][0]["content"][0]["text"], "inspect");
+    assert_eq!(chat["messages"][0]["content"][1]["type"], "image_url");
+    assert_eq!(
+        chat["messages"][0]["content"][1]["image_url"]["url"],
+        "data:image/jpeg;base64,anBn"
+    );
 }
 
 #[test]
