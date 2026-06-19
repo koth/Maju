@@ -70,12 +70,12 @@ afterEach(() => {
 });
 
 describe("useAgentPlanOverlap", () => {
-  it("returns 'none' when the column does not overlap a 248px dock", () => {
+  it("returns 'none' when the column does not overlap a 300px dock", () => {
     const restore = installResizeObserverMock();
     const { panel } = setLayout({
-      panel: { left: 0, width: 1400 },
+      panel: { left: 0, width: 1440 },
       column: { left: 340, width: 720 },
-      dock: { left: 1152, width: 248 },
+      dock: { left: 1126, width: 300 },
     });
     const ref: RefObject<HTMLElement | null> = { current: panel };
     const { result } = renderHook(() => useAgentPlanOverlap(ref, true));
@@ -83,44 +83,44 @@ describe("useAgentPlanOverlap", () => {
     restore();
   });
 
-  it("returns 'shift' when shifting the column left of a 248px dock clears it", () => {
+  it("returns 'shift' when shifting the column left of a 300px dock clears it", () => {
     const restore = installResizeObserverMock();
     const { panel } = setLayout({
-      panel: { left: 0, width: 1100 },
+      panel: { left: 0, width: 1120 },
       column: { left: 190, width: 720 },
-      dock: { left: 852, width: 248 },
+      dock: { left: 806, width: 300 },
     });
     const ref: RefObject<HTMLElement | null> = { current: panel };
     const { result } = renderHook(() => useAgentPlanOverlap(ref, true));
-    // Column right edge is 910, dock left is 852 → overlaps at 248.
-    // Shifted right edge = 14 + 720 = 734 ≤ 852 → "shift".
+    // Column right edge is 910, dock safe edge is 778 -> overlaps.
+    // Shifted right edge = 14 + 720 = 734 <= 778 -> "shift".
     expect(result.current).toBe("shift");
     restore();
   });
 
-  it("returns 'tight' when only a 200px dock can fit beside the column", () => {
+  it("returns 'hidden' when shifting would still enter the dock safety gap", () => {
     const restore = installResizeObserverMock();
     const { panel } = setLayout({
-      panel: { left: 0, width: 940 },
-      column: { left: 100, width: 720 },
-      dock: { left: 692, width: 248 },
+      panel: { left: 0, width: 1065 },
+      column: { left: 165, width: 720 },
+      dock: { left: 751, width: 300 },
     });
     const ref: RefObject<HTMLElement | null> = { current: panel };
     const { result } = renderHook(() => useAgentPlanOverlap(ref, true));
-    expect(result.current).toBe("tight");
+    expect(result.current).toBe("hidden");
     restore();
   });
 
-  it("returns 'stacked' when even a 200px dock cannot fit beside the column", () => {
+  it("returns 'hidden' when even shifting the column left would overlap the dock", () => {
     const restore = installResizeObserverMock();
     const { panel } = setLayout({
-      panel: { left: 0, width: 880 },
-      column: { left: 70, width: 740 },
-      dock: { left: 632, width: 248 },
+      panel: { left: 0, width: 1000 },
+      column: { left: 100, width: 720 },
+      dock: { left: 686, width: 300 },
     });
     const ref: RefObject<HTMLElement | null> = { current: panel };
     const { result } = renderHook(() => useAgentPlanOverlap(ref, true));
-    expect(result.current).toBe("stacked");
+    expect(result.current).toBe("hidden");
     restore();
   });
 

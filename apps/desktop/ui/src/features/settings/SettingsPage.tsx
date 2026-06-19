@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { ArchiveRestore, ChevronDown, Folder, ListFilter, Search, Trash2, X } from "lucide-react";
 import type {
   AgentCliId,
   AgentInstallResult,
   AgentProviderProfile,
   AgentSettingsSnapshot,
   AppTheme,
+  ArchivedSessionListItem,
   LspSettingsSnapshot,
   LspServerConfigInput,
   RemoteMachineProfile,
@@ -33,6 +36,10 @@ import {
   settingsSelectAgent,
   settingsSelectTheme,
   settingsValidateRemoteProfile,
+  sessionDeleteAllArchived,
+  sessionDeleteArchived,
+  sessionListArchived,
+  sessionUnarchive,
 } from "../../lib/tauri";
 import {
   checkForAppUpdate,
@@ -45,7 +52,7 @@ import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
 export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
-export type SettingsPane = "general" | "remote" | "lsp";
+export type SettingsPane = "general" | "archive" | "remote" | "lsp";
 type SettingsScope = "local" | "remote";
 type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "installing" | "installed" | "error";
 type RemoteProfileDraft = {
@@ -125,11 +132,16 @@ export function SettingsPage({
   const [snapshot, setSnapshot] = useState<AgentSettingsSnapshot | null>(null);
   const [lspSnapshot, setLspSnapshot] = useState<LspSettingsSnapshot | null>(null);
   const [remoteSnapshot, setRemoteSnapshot] = useState<RemoteMachineProfilesSnapshot>({ profiles: [] });
+  const [archivedSessions, setArchivedSessions] = useState<ArchivedSessionListItem[]>([]);
   const [lspDrafts, setLspDrafts] = useState<Record<string, LspServerConfigInput>>({});
   const [remoteDraft, setRemoteDraft] = useState<RemoteProfileDraft | null>(null);
   const [remoteValidationPaths, setRemoteValidationPaths] = useState<Record<string, string>>({});
   const [remoteValidationPasswords, setRemoteValidationPasswords] = useState<Record<string, string>>({});
+  const [archivedSearch, setArchivedSearch] = useState("");
+  const [archivedChatFilter, setArchivedChatFilter] = useState<"all" | "with_messages">("all");
+  const [archivedWorkspaceFilter, setArchivedWorkspaceFilter] = useState("all");
   const [loading, setLoading] = useState(true);
+  const [archivedLoading, setArchivedLoading] = useState(false);
   const [busyAgent, setBusyAgent] = useState<AgentCliId | null>(null);
   const [busyCodexAcp, setBusyCodexAcp] = useState(false);
   const [busyTheme, setBusyTheme] = useState<AppTheme | null>(null);
@@ -138,7 +150,11 @@ export function SettingsPage({
   const [error, setError] = useState<string | null>(null);
   const [lspError, setLspError] = useState<string | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [archivedError, setArchivedError] = useState<string | null>(null);
   const [remoteMessage, setRemoteMessage] = useState<string | null>(null);
+  const [archivedMessage, setArchivedMessage] = useState<string | null>(null);
+  const [busyArchivedSession, setBusyArchivedSession] = useState<string | null>(null);
+  const [deletingAllArchived, setDeletingAllArchived] = useState(false);
   const [installResult, setInstallResult] = useState<AgentInstallResult | null>(null);
   const [probeMessages, setProbeMessages] = useState<Record<string, string>>({});
   const [codexProfileId, setCodexProfileId] = useState("byok");
@@ -206,9 +222,32 @@ export function SettingsPage({
     }
   }, [applyLspSnapshot, editingRemoteSettings, onThemeChange, settingsRemoteProfileId]);
 
+  const loadArchivedSessions = useCallback(async () => {
+    setArchivedLoading(true);
+    setArchivedError(null);
+    try {
+      setArchivedSessions(await sessionListArchived());
+    } catch (e) {
+      setArchivedError(String(e));
+    } finally {
+      setArchivedLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (activePane !== "archive") return;
+    loadArchivedSessions();
+  }, [activePane, loadArchivedSessions]);
+
+  useEffect(() => {
+    if (archivedWorkspaceFilter === "all") return;
+    if (archivedSessions.some((session) => session.workspace_root === archivedWorkspaceFilter)) return;
+    setArchivedWorkspaceFilter("all");
+  }, [archivedSessions, archivedWorkspaceFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -719,6 +758,54 @@ export function SettingsPage({
     }
   }, []);
 
+  const handleRestoreArchivedSession = useCallback(async (session: ArchivedSessionListItem) => {
+    setBusyArchivedSession(session.id);
+    setArchivedError(null);
+    setArchivedMessage(null);
+    try {
+      await sessionUnarchive(session.id, session.workspace_root);
+      setArchivedSessions((sessions) => sessions.filter((item) => item.id !== session.id));
+      setArchivedMessage(`已恢复 ${session.title}`);
+    } catch (e) {
+      setArchivedError(String(e));
+    } finally {
+      setBusyArchivedSession(null);
+    }
+  }, []);
+
+  const handleDeleteArchivedSession = useCallback(async (session: ArchivedSessionListItem) => {
+    setBusyArchivedSession(session.id);
+    setArchivedError(null);
+    setArchivedMessage(null);
+    try {
+      await sessionDeleteArchived(session.id);
+      setArchivedSessions((sessions) => sessions.filter((item) => item.id !== session.id));
+      setArchivedMessage(`已删除 ${session.title}`);
+    } catch (e) {
+      setArchivedError(String(e));
+    } finally {
+      setBusyArchivedSession(null);
+    }
+  }, []);
+
+  const handleDeleteAllArchivedSessions = useCallback(async () => {
+    if (archivedSessions.length === 0) return;
+    const accepted = await confirm("确定删除所有已归档对话？此操作不可撤销。");
+    if (!accepted) return;
+    setDeletingAllArchived(true);
+    setArchivedError(null);
+    setArchivedMessage(null);
+    try {
+      await sessionDeleteAllArchived();
+      setArchivedSessions([]);
+      setArchivedMessage("已删除所有已归档对话");
+    } catch (e) {
+      setArchivedError(String(e));
+    } finally {
+      setDeletingAllArchived(false);
+    }
+  }, [archivedSessions.length]);
+
   const handleValidateRemoteProfile = useCallback(async (profile: RemoteMachineProfile) => {
     setBusyRemote(profile.id);
     setRemoteError(null);
@@ -957,6 +1044,172 @@ export function SettingsPage({
           >
             {busyCodexAcp ? "保存中..." : `保存 ${profile.label} key`}
           </button>
+        </div>
+      </section>
+    );
+  };
+
+  const renderArchivePane = () => {
+    const workspaceOptions = archivedWorkspaceOptions(archivedSessions);
+    const normalizedSearch = archivedSearch.trim().toLowerCase();
+    const visibleSessions = archivedSessions.filter((session) => {
+      const workspaceName = workspaceNameFromRoot(session.workspace_root);
+      const matchesWorkspace =
+        archivedWorkspaceFilter === "all" || session.workspace_root === archivedWorkspaceFilter;
+      const matchesChatFilter = archivedChatFilter === "all" || session.message_count > 0;
+      const matchesSearch =
+        !normalizedSearch ||
+        session.title.toLowerCase().includes(normalizedSearch) ||
+        workspaceName.toLowerCase().includes(normalizedSearch) ||
+        session.workspace_root.toLowerCase().includes(normalizedSearch);
+      return matchesWorkspace && matchesChatFilter && matchesSearch;
+    });
+    const groups = groupArchivedSessionsByWorkspace(visibleSessions);
+
+    return (
+      <section className="settings-section settings-archive-section">
+        <div className="settings-section-head settings-archive-head">
+          <div>
+            <h2 className="settings-section-title">已归档对话</h2>
+            <p className="settings-section-desc">恢复或永久删除已从项目列表中移除的会话。</p>
+          </div>
+          <button
+            type="button"
+            className="settings-btn settings-danger-btn"
+            disabled={deletingAllArchived || archivedSessions.length === 0}
+            onClick={handleDeleteAllArchivedSessions}
+          >
+            <Trash2 aria-hidden="true" size={15} />
+            {deletingAllArchived ? "删除中..." : "全部删除"}
+          </button>
+        </div>
+
+        <div className="settings-archive-panel">
+          <div className="settings-archive-toolbar">
+            <label className="settings-archive-search">
+              <Search aria-hidden="true" size={16} />
+              <input
+                aria-label="搜索已归档聊天"
+                value={archivedSearch}
+                placeholder="搜索已归档聊天"
+                onChange={(event) => setArchivedSearch(event.currentTarget.value)}
+              />
+              {archivedSearch && (
+                <button
+                  type="button"
+                  aria-label="清空归档搜索"
+                  onClick={() => setArchivedSearch("")}
+                >
+                  <X aria-hidden="true" size={14} />
+                </button>
+              )}
+            </label>
+            <label className="settings-archive-select">
+              <ListFilter aria-hidden="true" size={16} />
+              <select
+                aria-label="归档聊天范围"
+                value={archivedChatFilter}
+                onChange={(event) => setArchivedChatFilter(event.currentTarget.value as "all" | "with_messages")}
+              >
+                <option value="all">全部聊天</option>
+                <option value="with_messages">有消息</option>
+              </select>
+              <ChevronDown aria-hidden="true" size={15} />
+            </label>
+            <label className="settings-archive-select">
+              <Folder aria-hidden="true" size={16} />
+              <select
+                aria-label="归档项目筛选"
+                value={archivedWorkspaceFilter}
+                onChange={(event) => setArchivedWorkspaceFilter(event.currentTarget.value)}
+              >
+                <option value="all">All projects</option>
+                {workspaceOptions.map((workspace) => (
+                  <option key={workspace.root} value={workspace.root}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" size={15} />
+            </label>
+          </div>
+
+          {archivedError && (
+            <div className="settings-error settings-archive-status">
+              <span>{archivedError}</span>
+              <button type="button" className="settings-link-btn" onClick={loadArchivedSessions}>重试</button>
+            </div>
+          )}
+          {archivedMessage && <div className="settings-success settings-archive-status">{archivedMessage}</div>}
+          {archivedLoading && <div className="settings-status settings-archive-status">正在载入已归档对话...</div>}
+
+          {!archivedLoading && archivedSessions.length === 0 && (
+            <div className="settings-empty-panel settings-archive-empty">
+              <div className="settings-row-title">还没有已归档对话</div>
+              <p>归档会话后，它们会保留在这里，可以恢复到项目列表。</p>
+            </div>
+          )}
+
+          {!archivedLoading && archivedSessions.length > 0 && groups.length === 0 && (
+            <div className="settings-empty-panel settings-archive-empty">
+              <div className="settings-row-title">没有匹配的归档对话</div>
+              <p>换一个搜索词或项目筛选试试。</p>
+            </div>
+          )}
+
+          {groups.length > 0 && (
+            <div className="settings-archive-list">
+              {groups.map((group) => (
+                <section key={group.root} className="settings-archive-group">
+                  <div className="settings-archive-group-head">
+                    <span className="settings-archive-group-title">
+                      <Folder aria-hidden="true" size={16} />
+                      {group.name}
+                    </span>
+                    <span>{group.sessions.length} 个聊天</span>
+                  </div>
+                  <div className="settings-archive-rows">
+                    {group.sessions.map((session) => {
+                      const busy = busyArchivedSession === session.id;
+                      return (
+                        <article key={session.id} className="settings-archive-row">
+                          <div className="settings-archive-row-copy">
+                            <div className="settings-archive-row-title">{session.title}</div>
+                            <div className="settings-archive-row-meta">
+                              {formatArchiveDate(session.archived_at)}
+                              {session.message_count > 0 ? ` · ${session.message_count} 条消息` : ""}
+                            </div>
+                          </div>
+                          <div className="settings-archive-row-actions">
+                            <button
+                              type="button"
+                              className="settings-icon-btn"
+                              disabled={busy}
+                              title="恢复对话"
+                              aria-label={`恢复对话 ${session.title}`}
+                              onClick={() => handleRestoreArchivedSession(session)}
+                            >
+                              <ArchiveRestore aria-hidden="true" size={16} />
+                            </button>
+                            <button
+                              type="button"
+                              className="settings-icon-btn is-danger"
+                              disabled={busy}
+                              title="删除对话"
+                              aria-label={`删除对话 ${session.title}`}
+                              onClick={() => handleDeleteArchivedSession(session)}
+                            >
+                              <Trash2 aria-hidden="true" size={16} />
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
         </div>
       </section>
     );
@@ -1216,6 +1469,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "archive" ? "is-active" : ""}`}
+            onClick={() => setActivePane("archive")}
+          >
+            已归档
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "lsp" ? "is-active" : ""}`}
             onClick={() => setActivePane("lsp")}
           >
@@ -1461,6 +1721,8 @@ export function SettingsPage({
 
         {activePane === "remote" && renderRemotePane()}
 
+        {activePane === "archive" && renderArchivePane()}
+
         {activePane === "lsp" && (
         <section className="settings-section">
           <h2 className="settings-section-title">LSP 语言服务</h2>
@@ -1595,15 +1857,66 @@ function startupNoticeCopyFor(notice: SettingsStartupNotice) {
 }
 
 function settingsPaneTitle(pane: SettingsPane): string {
+  if (pane === "archive") return "已归档";
   if (pane === "remote") return "远程";
   if (pane === "lsp") return "LSP";
   return "通用";
 }
 
 function settingsPaneDescription(pane: SettingsPane): string {
+  if (pane === "archive") return "查看、恢复或删除保留在本地的已归档对话。";
   if (pane === "remote") return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
   if (pane === "lsp") return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";
+}
+
+function workspaceNameFromRoot(root: string): string {
+  const trimmed = root.trim();
+  if (!trimmed) return "未知项目";
+  const pathOnly = trimmed.startsWith("ssh://")
+    ? trimmed.replace(/^ssh:\/\/[^/]+/, "")
+    : trimmed;
+  const segments = pathOnly.split(/[\\/]+/).filter(Boolean);
+  return segments.length > 0 ? segments[segments.length - 1] : trimmed;
+}
+
+function archivedWorkspaceOptions(sessions: ArchivedSessionListItem[]) {
+  const options = new Map<string, string>();
+  for (const session of sessions) {
+    if (!options.has(session.workspace_root)) {
+      options.set(session.workspace_root, workspaceNameFromRoot(session.workspace_root));
+    }
+  }
+  return [...options.entries()]
+    .map(([root, name]) => ({ root, name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function groupArchivedSessionsByWorkspace(sessions: ArchivedSessionListItem[]) {
+  const groups = new Map<string, { root: string; name: string; sessions: ArchivedSessionListItem[] }>();
+  for (const session of sessions) {
+    const root = session.workspace_root || "unknown";
+    const group = groups.get(root) ?? {
+      root,
+      name: workspaceNameFromRoot(root),
+      sessions: [],
+    };
+    group.sessions.push(session);
+    groups.set(root, group);
+  }
+  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function formatArchiveDate(value: string): string {
+  const timestamp = Date.parse(value.includes("T") ? value : value.replace(" ", "T"));
+  if (!Number.isFinite(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function parseRemotePort(value: string): number | null {

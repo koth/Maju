@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AgentPlanEnvironment,
   AgentPlanPanel,
   PermissionRequestPanel,
   PlanApprovalModal,
@@ -15,8 +16,12 @@ afterEach(() => {
   cleanup();
 });
 
+function expandProgress() {
+  fireEvent.click(screen.getByRole("button", { name: "进度" }));
+}
+
 describe("AgentPlanPanel", () => {
-  it("renders only the current task list inline", () => {
+  it("renders collapsed progress and expands the current task list", () => {
     render(
       <AgentPlanPanel
         entries={[
@@ -30,22 +35,16 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
+    expandProgress();
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("检查现有实现")).toBeTruthy();
-    expect(screen.getByText("进度")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "接受计划" })).toBeNull();
   });
 
-  it("renders environment information above progress", () => {
-    const { container } = render(
-      <AgentPlanPanel
-        entries={[
-          {
-            id: "1",
-            content: "检查现有实现",
-            priority: "medium",
-            status: "pending",
-          },
-        ]}
+  it("renders environment information independently from progress", () => {
+    render(
+      <AgentPlanEnvironment
         environment={{
           changeCount: 2,
           addedLines: 34,
@@ -59,15 +58,21 @@ describe("AgentPlanPanel", () => {
     );
 
     expect(screen.getByLabelText("环境信息")).toBeTruthy();
-    expect(
-      screen.getByLabelText("环境信息").compareDocumentPosition(screen.getByLabelText("进度")) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(screen.queryByLabelText("进度")).toBeNull();
     expect(screen.getByText("变更")).toBeTruthy();
     expect(screen.getByText("+34")).toBeTruthy();
     expect(screen.getByText("-5")).toBeTruthy();
     expect(screen.getByText("master")).toBeTruthy();
-    expect(container.querySelector(".agent-plan")?.className).toContain("agent-plan");
+    expect(screen.queryByText("来源")).toBeNull();
+    expect(screen.queryByText("暂无来源")).toBeNull();
+  });
+
+  it("renders an empty progress state when there are no plan entries", () => {
+    render(<AgentPlanPanel entries={[]} />);
+
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
+    expandProgress();
+    expect(screen.getByText("暂无进度")).toBeTruthy();
   });
 
   it("orders active tasks first, pending next, and completed last", () => {
@@ -108,6 +113,7 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
+    expandProgress();
     const contents = screen
       .getAllByRole("listitem")
       .map((item) => item.querySelector(".agent-plan-content")?.textContent);
@@ -141,6 +147,7 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
+    expandProgress();
     expect(screen.getAllByRole("listitem")).toHaveLength(5);
     expect(screen.getByText("还有 2 个任务")).toBeTruthy();
     expect(screen.queryByText("Task 7")).toBeNull();

@@ -409,6 +409,42 @@
     inset 0 1px 0 color-mix(in srgb, var(--text-strong) 4%, transparent);
 }
 
+.agent-plan-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-chat);
+  cursor: pointer;
+}
+
+.agent-plan-toggle:hover {
+  color: var(--text-strong);
+}
+
+.agent-plan-toggle-label {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.agent-plan-toggle-chevron {
+  flex: 0 0 auto;
+  transform: rotate(-90deg);
+  transition: transform var(--transition-fast), color var(--transition-fast);
+}
+
+.agent-plan.is-expanded .agent-plan-toggle-chevron {
+  transform: rotate(0deg);
+}
+
 .agent-plan-progress-section {
   padding: 0 0 9px;
 }
@@ -418,8 +454,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 12px 7px;
-  border-top: 1px solid var(--border-subtle);
+  padding: 2px 12px 7px;
 }
 
 .agent-plan-headline {
@@ -504,12 +539,28 @@
   padding: 11px 12px 10px;
 }
 
-.agent-plan-environment-title {
+.agent-plan-environment-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin: 0 0 7px;
+}
+
+.agent-plan-environment-title {
+  margin: 0;
   color: var(--text-soft);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
+}
+
+.agent-plan-env-add {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
 }
 
 .agent-plan-env-row {
@@ -540,11 +591,26 @@
   color: currentColor;
 }
 
+.agent-plan-env-label.has-menu {
+  gap: 6px;
+}
+
 .agent-plan-env-label span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-plan-env-chevron {
+  color: var(--text-soft);
+}
+
+.agent-plan-env-github {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: currentColor;
 }
 
 .agent-plan-env-change-metrics {
@@ -577,6 +643,14 @@
   margin: 0;
   padding: 0 12px;
   list-style: none;
+}
+
+.agent-plan-empty {
+  padding: 0 12px 4px;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
 }
 
 .agent-plan-entry {

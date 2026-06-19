@@ -40,6 +40,7 @@ function getRightPanelDefaultWidth() {
 
 export function useRightPanelState() {
   const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);
+  const [rightPanelResizing, setRightPanelResizing] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY));
     return Number.isFinite(stored) ? clampRightPanelWidth(stored) : getRightPanelDefaultWidth();
@@ -60,6 +61,7 @@ export function useRightPanelState() {
     const pointerId = event.pointerId;
     event.currentTarget.setPointerCapture(pointerId);
     document.body.classList.add("is-resizing-right-panel");
+    setRightPanelResizing(true);
 
     const updateWidth = (clientX: number) => {
       const nextWidth = clampRightPanelWidth(window.innerWidth - clientX - 10);
@@ -73,6 +75,7 @@ export function useRightPanelState() {
 
     const handlePointerUp = () => {
       document.body.classList.remove("is-resizing-right-panel");
+      setRightPanelResizing(false);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerUp);
@@ -90,6 +93,7 @@ export function useRightPanelState() {
   return {
     rightPanelCollapsed,
     setRightPanelCollapsed,
+    rightPanelResizing,
     rightPanelWidth,
     rightPanelStyle,
     clampStoredRightPanelWidth,

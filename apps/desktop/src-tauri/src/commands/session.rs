@@ -2,10 +2,10 @@ use crate::commands::workspace::save_open_workspace_state;
 use crate::state::AppState;
 use tauri::{AppHandle, Manager, State};
 use workspace_model::{
-    AgentCliId, ChangeSetFilesResponse, ChangeSetSummary, FileChangeRecord,
-    GetChangeSetFileDiffRequest, ListChangeSetFilesRequest, ListChangeSetsRequest,
-    PermissionInputResponse, SessionConfigState, SessionFileChange, UiSnapshot, UserPromptContent,
-    WorkspaceSessionList,
+    AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
+    FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
+    ListChangeSetsRequest, PermissionInputResponse, SessionConfigState, SessionFileChange,
+    UiSnapshot, UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -89,6 +89,18 @@ pub async fn session_list(app: AppHandle) -> Result<Vec<WorkspaceSessionList>, S
 }
 
 #[tauri::command]
+pub async fn session_list_archived() -> Result<Vec<ArchivedSessionListItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let store =
+            session_store::SessionStore::open_global(paths.root()).map_err(|e| e.to_string())?;
+        store.list_archived_sessions().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Archived session list task failed: {e}"))?
+}
+
+#[tauri::command]
 pub fn session_switch(
     state: State<'_, AppState>,
     id: String,
@@ -131,6 +143,26 @@ pub fn session_archive(
 ) -> Result<(), String> {
     state.archive_session(workspace_root, &id)?;
     save_open_workspace_state(&state)
+}
+
+#[tauri::command]
+pub fn session_unarchive(
+    state: State<'_, AppState>,
+    id: String,
+    workspace_root: Option<String>,
+) -> Result<(), String> {
+    state.unarchive_session(workspace_root, &id)?;
+    save_open_workspace_state(&state)
+}
+
+#[tauri::command]
+pub fn session_delete_archived(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.delete_archived_session(&id)
+}
+
+#[tauri::command]
+pub fn session_delete_all_archived(state: State<'_, AppState>) -> Result<(), String> {
+    state.delete_all_archived_sessions()
 }
 
 #[tauri::command]

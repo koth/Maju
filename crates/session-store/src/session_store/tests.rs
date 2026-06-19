@@ -93,6 +93,42 @@ fn test_archive_session_hides_from_lists_without_deleting_data() {
 }
 
 #[test]
+fn test_list_restore_and_delete_archived_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("home").join(".kodex");
+    let workspace = dir.path().join("kodex");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::open(&app_data, &workspace).unwrap();
+
+    store.create_session("s1", "gpt-4").unwrap();
+    store.create_session("s2", "claude-3").unwrap();
+    store
+        .insert_message("s1", "m1", "User", "archived", 1)
+        .unwrap();
+    store.archive_session("s1").unwrap();
+
+    let global = SessionStore::open_global(&app_data).unwrap();
+    let archived = global.list_archived_sessions().unwrap();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].id, "s1");
+    assert_eq!(archived[0].workspace_root, store.workspace_root());
+    assert_eq!(archived[0].message_count, 1);
+
+    global.unarchive_session("s1").unwrap();
+    assert!(global.list_archived_sessions().unwrap().is_empty());
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
+
+    global.archive_session("s1").unwrap();
+    global.delete_archived_session("s1").unwrap();
+    assert!(global.get_session_model_mode("s1").unwrap().is_none());
+
+    global.archive_session("s2").unwrap();
+    assert_eq!(global.list_archived_sessions().unwrap().len(), 1);
+    global.delete_all_archived_sessions().unwrap();
+    assert!(global.list_archived_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn test_archive_workspace_sessions_hides_only_that_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let app_data = dir.path().join("home").join(".kodex");
@@ -283,6 +319,9 @@ fn test_insert_and_load_tool_diff_preview() {
         permission_options: Vec::new(),
         permission_input: None,
         permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
     };
 
     store.insert_tool("s1", &tool, 1).unwrap();

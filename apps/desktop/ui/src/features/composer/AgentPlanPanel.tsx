@@ -2,15 +2,16 @@ import { useEffect, useState } from "react";
 import {
   Ban,
   Check,
+  ChevronDown,
   Circle,
   ClipboardList,
   FileDiff,
   GitBranch,
-  GitPullRequest,
+  GitCommitHorizontal,
   Laptop,
   Loader2,
+  Plus,
   Server,
-  Upload,
 } from "lucide-react";
 import type {
   AgentPlanEntry,
@@ -25,7 +26,6 @@ import "./Composer.css";
 
 interface Props {
   entries: AgentPlanEntry[];
-  environment?: AgentPlanEnvironmentInfo | null;
 }
 
 export interface AgentPlanEnvironmentInfo {
@@ -73,84 +73,105 @@ interface PlanApprovalModalProps {
 
 const AGENT_PLAN_PANEL_ENTRY_LIMIT = 5;
 
-export function AgentPlanPanel({ entries, environment }: Props) {
-  if (entries.length === 0) return null;
+export function AgentPlanPanel({ entries }: Props) {
+  const [expanded, setExpanded] = useState(false);
 
   const completed = entries.filter((entry) => entry.status === "completed").length;
   const visibleEntries = sortAgentPlanEntries(entries);
   const panelEntries = visibleEntries.slice(0, AGENT_PLAN_PANEL_ENTRY_LIMIT);
   const hiddenEntryCount = visibleEntries.length - panelEntries.length;
-  const progressPercent = Math.round((completed / entries.length) * 100);
+  const progressPercent = entries.length > 0 ? Math.round((completed / entries.length) * 100) : 0;
 
   return (
-    <section className="agent-plan" aria-label="智能体进度">
-      {environment && <AgentPlanEnvironment environment={environment} />}
-      <div className="agent-plan-progress-section" aria-label="进度">
-        <div className="agent-plan-header">
-          <div className="agent-plan-headline">
-            <span className="agent-plan-icon" aria-hidden="true">
-              <ClipboardList size={18} strokeWidth={2.2} />
-            </span>
-            <div className="agent-plan-heading">
-              <div className="agent-plan-eyebrow">进度</div>
-              <div className="agent-plan-title">已完成 {completed}/{entries.length} 个任务</div>
+    <section className={`agent-plan ${expanded ? "is-expanded" : ""}`} aria-label="进度">
+      <button
+        type="button"
+        className="agent-plan-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="agent-plan-toggle-label">进度</span>
+        <ChevronDown className="agent-plan-toggle-chevron" size={16} strokeWidth={2.2} aria-hidden="true" />
+      </button>
+      <div className="agent-plan-progress-section" hidden={!expanded}>
+        {entries.length === 0 ? (
+          <div className="agent-plan-empty">暂无进度</div>
+        ) : (
+          <>
+            <div className="agent-plan-header">
+              <div className="agent-plan-headline">
+                <span className="agent-plan-icon" aria-hidden="true">
+                  <ClipboardList size={18} strokeWidth={2.2} />
+                </span>
+                <div className="agent-plan-heading">
+                  <div className="agent-plan-eyebrow">任务</div>
+                  <div className="agent-plan-title">已完成 {completed}/{entries.length} 个任务</div>
+                </div>
+              </div>
+              <span className="agent-plan-count" aria-label={`已完成 ${completed}/${entries.length} 个任务`}>
+                {completed}/{entries.length}
+              </span>
             </div>
-          </div>
-          <span className="agent-plan-count" aria-label={`已完成 ${completed}/${entries.length} 个任务`}>
-            {completed}/{entries.length}
-          </span>
-        </div>
-        <div className="agent-plan-progress" aria-hidden="true">
-          <span style={{ width: `${progressPercent}%` }} />
-        </div>
-        <ol className="agent-plan-list">
-          {panelEntries.map((entry, index) => (
-            <li
-              className={`agent-plan-entry is-${entry.status}`}
-              key={entry.id ?? `${index}-${entry.content}`}
-            >
-              <span className="agent-plan-status" aria-label={statusLabel(entry.status)}>
-                {statusIcon(entry.status)}
-                {statusMark(entry.status)}
-              </span>
-              <span className="agent-plan-content">{entry.content}</span>
-              <span
-                className={`agent-plan-priority is-${entry.priority}`}
-                aria-label={`Priority: ${priorityLabel(entry.priority)}`}
-              >
-                {priorityLabel(entry.priority)}
-              </span>
-            </li>
-          ))}
-        </ol>
-        {hiddenEntryCount > 0 && (
-          <div className="agent-plan-more">还有 {hiddenEntryCount} 个任务</div>
+            <div className="agent-plan-progress" aria-hidden="true">
+              <span style={{ width: `${progressPercent}%` }} />
+            </div>
+            <ol className="agent-plan-list">
+              {panelEntries.map((entry, index) => (
+                <li
+                  className={`agent-plan-entry is-${entry.status}`}
+                  key={entry.id ?? `${index}-${entry.content}`}
+                >
+                  <span className="agent-plan-status" aria-label={statusLabel(entry.status)}>
+                    {statusIcon(entry.status)}
+                    {statusMark(entry.status)}
+                  </span>
+                  <span className="agent-plan-content">{entry.content}</span>
+                  <span
+                    className={`agent-plan-priority is-${entry.priority}`}
+                    aria-label={`Priority: ${priorityLabel(entry.priority)}`}
+                  >
+                    {priorityLabel(entry.priority)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+            {hiddenEntryCount > 0 && (
+              <div className="agent-plan-more">还有 {hiddenEntryCount} 个任务</div>
+            )}
+          </>
         )}
       </div>
     </section>
   );
 }
 
-function AgentPlanEnvironment({
+export function AgentPlanEnvironment({
   environment,
 }: {
   environment: AgentPlanEnvironmentInfo;
 }) {
   const hasLineChanges = environment.addedLines > 0 || environment.removedLines > 0;
+  const addedLines = environment.addedLines.toLocaleString("en-US");
+  const removedLines = environment.removedLines.toLocaleString("en-US");
 
   return (
     <div className="agent-plan-environment" aria-label="环境信息">
-      <div className="agent-plan-environment-title">环境信息</div>
+      <div className="agent-plan-environment-header">
+        <div className="agent-plan-environment-title">环境信息</div>
+        <span className="agent-plan-env-add" aria-hidden="true">
+          <Plus size={17} strokeWidth={1.9} />
+        </span>
+      </div>
       <div className="agent-plan-env-row">
         <span className="agent-plan-env-label">
-          <FileDiff size={14} strokeWidth={2.1} aria-hidden="true" />
+          <FileDiff size={16} strokeWidth={2.1} aria-hidden="true" />
           <span>变更</span>
         </span>
         <span className="agent-plan-env-change-metrics">
           {hasLineChanges ? (
             <>
-              <span className="agent-plan-env-added">+{environment.addedLines}</span>
-              <span className="agent-plan-env-removed">-{environment.removedLines}</span>
+              <span className="agent-plan-env-added">+{addedLines}</span>
+              <span className="agent-plan-env-removed">-{removedLines}</span>
             </>
           ) : (
             <span className="agent-plan-env-file-count">{environment.changeCount} 处</span>
@@ -158,34 +179,44 @@ function AgentPlanEnvironment({
         </span>
       </div>
       <div className="agent-plan-env-row">
-        <span className="agent-plan-env-label">
+        <span className="agent-plan-env-label has-menu">
           {environment.locationLabel === "远程" ? (
-            <Server size={14} strokeWidth={2.1} aria-hidden="true" />
+            <Server size={16} strokeWidth={2.1} aria-hidden="true" />
           ) : (
-            <Laptop size={14} strokeWidth={2.1} aria-hidden="true" />
+            <Laptop size={16} strokeWidth={2.1} aria-hidden="true" />
           )}
           <span>{environment.locationLabel}</span>
+          <ChevronDown className="agent-plan-env-chevron" size={14} strokeWidth={2.1} aria-hidden="true" />
         </span>
       </div>
       <div className="agent-plan-env-row">
-        <span className="agent-plan-env-label">
-          <GitBranch size={14} strokeWidth={2.1} aria-hidden="true" />
+        <span className="agent-plan-env-label has-menu">
+          <GitBranch size={16} strokeWidth={2.1} aria-hidden="true" />
           <span>{environment.branchLabel}</span>
+          <ChevronDown className="agent-plan-env-chevron" size={14} strokeWidth={2.1} aria-hidden="true" />
         </span>
       </div>
       <div className="agent-plan-env-row">
         <span className="agent-plan-env-label">
-          <Upload size={14} strokeWidth={2.1} aria-hidden="true" />
+          <GitCommitHorizontal size={16} strokeWidth={2.1} aria-hidden="true" />
           <span>{environment.actionLabel}</span>
         </span>
       </div>
       <div className="agent-plan-env-row is-muted">
         <span className="agent-plan-env-label">
-          <GitPullRequest size={14} strokeWidth={2.1} aria-hidden="true" />
+          <GithubMark />
           <span>{environment.githubLabel}</span>
         </span>
       </div>
     </div>
+  );
+}
+
+function GithubMark() {
+  return (
+    <svg className="agent-plan-env-github" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M8 .9a7.1 7.1 0 0 0-2.25 13.84c.36.07.49-.16.49-.35v-1.25c-2 .44-2.42-.86-2.42-.86-.33-.84-.8-1.06-.8-1.06-.66-.45.05-.44.05-.44.73.05 1.12.75 1.12.75.65 1.1 1.7.78 2.11.6.07-.47.25-.78.46-.96-1.59-.18-3.26-.79-3.26-3.54 0-.78.28-1.42.74-1.92-.07-.18-.32-.91.07-1.9 0 0 .6-.19 1.96.74A6.85 6.85 0 0 1 8 4.36c.6 0 1.2.08 1.76.24 1.36-.93 1.96-.74 1.96-.74.39.99.14 1.72.07 1.9.46.5.74 1.14.74 1.92 0 2.75-1.68 3.36-3.28 3.54.26.22.49.66.49 1.33v1.84c0 .19.13.42.5.35A7.1 7.1 0 0 0 8 .9Z" />
+    </svg>
   );
 }
 

@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import type { RefObject } from "react";
 
-export type AgentPlanOverlapTier = "none" | "shift" | "tight" | "stacked";
+export type AgentPlanOverlapTier = "none" | "shift" | "hidden";
 
-const FULL_DOCK_WIDTH = 248;
-const TIGHT_DOCK_WIDTH = 200;
+const DOCK_WIDTH = 300;
+const DOCK_GAP = 28;
 const DEFAULT_PANEL_GUTTER = 14;
 const DEFAULT_COLUMN_MAX = 720;
 const DEFAULT_COLUMN_RATIO = 0.83333;
@@ -59,24 +59,22 @@ export function useAgentPlanOverlap(
       );
 
       const centeredColumnRight = panelGutter + (innerWidth + columnWidth) / 2;
-      const overlapWithFull = centeredColumnRight > panelWidth - FULL_DOCK_WIDTH + 1;
+      const dockLeft = panelWidth - panelGutter - DOCK_WIDTH;
+      const contentSafeRight = dockLeft - DOCK_GAP;
+      const overlapsDock = centeredColumnRight > contentSafeRight + 1;
       const columnShiftedRight = panelGutter + columnWidth;
-      const fullDockLeft = panelWidth - FULL_DOCK_WIDTH;
-      const tightDockLeft = panelWidth - TIGHT_DOCK_WIDTH;
 
       let next: AgentPlanOverlapTier;
-      if (!overlapWithFull) {
+      if (!overlapsDock) {
         next = "none";
-      } else if (columnShiftedRight <= fullDockLeft + 1) {
+      } else if (columnShiftedRight <= contentSafeRight + 1) {
         next = "shift";
-      } else if (columnShiftedRight <= tightDockLeft + 1) {
-        next = "tight";
       } else {
-        next = "stacked";
+        next = "hidden";
       }
 
-      if (next !== "stacked" && columnWidth < 360 && panelWidth - 2 * panelGutter >= 360) {
-        next = "stacked";
+      if (next !== "hidden" && columnWidth < 360 && panelWidth - 2 * panelGutter >= 360) {
+        next = "hidden";
       }
       setTier((prev) => (prev === next ? prev : next));
     };

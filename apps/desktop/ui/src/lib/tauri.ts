@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest, PermissionInputResponse } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, ArchivedSessionListItem, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest, PermissionInputResponse } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
   await shellOpen(url);
@@ -190,6 +190,10 @@ export async function sessionList(): Promise<WorkspaceSessionList[]> {
   return invoke<WorkspaceSessionList[]>("session_list");
 }
 
+export async function sessionListArchived(): Promise<ArchivedSessionListItem[]> {
+  return invoke<ArchivedSessionListItem[]>("session_list_archived");
+}
+
 export async function sessionSwitch(id: string, workspaceRoot?: string): Promise<void> {
   return invoke("session_switch", { id, workspaceRoot });
 }
@@ -204,6 +208,18 @@ export async function sessionDelete(id: string, workspaceRoot?: string): Promise
 
 export async function sessionArchive(id: string, workspaceRoot?: string): Promise<void> {
   return invoke("session_archive", { id, workspaceRoot });
+}
+
+export async function sessionUnarchive(id: string, workspaceRoot?: string): Promise<void> {
+  return invoke("session_unarchive", { id, workspaceRoot });
+}
+
+export async function sessionDeleteArchived(id: string): Promise<void> {
+  return invoke("session_delete_archived", { id });
+}
+
+export async function sessionDeleteAllArchived(): Promise<void> {
+  return invoke("session_delete_all_archived");
 }
 
 export async function sessionGetChanges(): Promise<SessionFileChange[]> {

@@ -22,9 +22,9 @@ use util::{
     upsert_loaded_change,
 };
 use workspace_model::{
-    ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage, FileChangeRecord,
-    FileChangeSummary, FileChangeType, MessageRole, SessionFileChange, SessionListItem,
-    TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
+    ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
+    FileChangeRecord, FileChangeSummary, FileChangeType, MessageRole, SessionFileChange,
+    SessionListItem, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
@@ -53,6 +53,25 @@ impl SessionStore {
         };
         store.run_migrations()?;
         store.import_legacy_workspace_db(workspace_root)?;
+        Ok(store)
+    }
+
+    pub fn open_global(app_data_root: &Path) -> Result<Self> {
+        let sessions_dir = app_data_root.join("sessions");
+        fs::create_dir_all(&sessions_dir)
+            .with_context(|| format!("在 {} 创建会话数据目录失败", sessions_dir.display()))?;
+
+        let db_path = sessions_dir.join("sessions.db");
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("在 {} 打开 sessions.db 失败", db_path.display()))?;
+
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+
+        let store = Self {
+            conn,
+            workspace_root: String::new(),
+        };
+        store.run_migrations()?;
         Ok(store)
     }
 
@@ -237,10 +256,12 @@ impl SessionStore {
                 .execute_batch("ALTER TABLE tool_invocations ADD COLUMN diff_previews TEXT;")?;
         }
 
-        self.conn.execute(
-            "UPDATE sessions SET workspace_root = ?1 WHERE workspace_root IS NULL OR workspace_root = ''",
-            params![&self.workspace_root],
-        )?;
+        if !self.workspace_root.is_empty() {
+            self.conn.execute(
+                "UPDATE sessions SET workspace_root = ?1 WHERE workspace_root IS NULL OR workspace_root = ''",
+                params![&self.workspace_root],
+            )?;
+        }
 
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated ON sessions(workspace_root, updated_at);",
@@ -628,6 +649,41 @@ impl SessionStore {
         Ok(items)
     }
 
+    pub fn list_archived_sessions(&self) -> Result<Vec<ArchivedSessionListItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.title, s.status, s.created_at, s.updated_at,
+                    COALESCE(s.archived_at, ''),
+                    COUNT(m.id) as msg_count,
+                    s.acp_session_id, s.agent_cli, COALESCE(s.workspace_root, '')
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id
+             WHERE s.archived_at IS NOT NULL
+             GROUP BY s.id
+             ORDER BY s.archived_at DESC, s.updated_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(ArchivedSessionListItem {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                archived_at: row.get(5)?,
+                message_count: row.get(6)?,
+                acp_session_id: row.get(7)?,
+                agent_cli: row.get(8)?,
+                workspace_root: row.get(9)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -640,6 +696,29 @@ impl SessionStore {
             "UPDATE sessions SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
+        Ok(())
+    }
+
+    pub fn unarchive_session(&self, id: &str) -> Result<()> {
+        let now = now_iso();
+        self.conn.execute(
+            "UPDATE sessions SET archived_at = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_archived_session(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id = ?1 AND archived_at IS NOT NULL",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_archived_sessions(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM sessions WHERE archived_at IS NOT NULL", [])?;
         Ok(())
     }
 

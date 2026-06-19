@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
-import { ListChecks } from "lucide-react";
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
 import {
   startupPerfMark,
@@ -8,12 +7,14 @@ import {
   sessionResolvePermission,
   sessionRetryUserMessage,
   sessionStopTool,
+  sessionUnarchive,
   settingsGetAgentSnapshot,
 } from "../../lib/tauri";
 import { ConversationTimeline } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
   AgentPlanPanel,
+  AgentPlanEnvironment,
   PermissionRequestPanel,
   type PendingPermissionRequest,
   type AgentPlanEnvironmentInfo,
@@ -26,7 +27,7 @@ import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "../review/ReviewP
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
 import { WelcomeLauncher } from "./WelcomeLauncher";
-import { SessionList } from "../session/SessionList";
+import { SessionList, type ArchivedSessionNotice } from "../session/SessionList";
 import { TabBar } from "./TabBar";
 import { GlobalChrome } from "./GlobalChrome";
 import { RemoteOpenPanel } from "./RemoteOpenPanel";
@@ -49,7 +50,7 @@ import { useWorkbenchTabs } from "./useWorkbenchTabs";
 import { useLeftSidebarState } from "./useLeftSidebarState";
 import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
-import { useAgentPlanOverlap } from "./useAgentPlanOverlap";
+import { useAgentPlanOverlap, type AgentPlanOverlapTier } from "./useAgentPlanOverlap";
 import { useSessionAgentPlan } from "./useSessionAgentPlan";
 import {
   latestReviewableTurnChangeSet,
@@ -64,6 +65,23 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
 const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
 
 let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
+
+type SessionArchiveToast = ArchivedSessionNotice & {
+  token: number;
+  restoring: boolean;
+  error: string | null;
+};
+
+function ContextDockToggleIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+      <circle cx="7" cy="8" r="1.7" />
+      <circle cx="7" cy="16" r="1.7" />
+      <line x1="12" y1="8" x2="18" y2="8" />
+      <line x1="12" y1="16" x2="18" y2="16" />
+    </svg>
+  );
+}
 
 function buildAgentPlanEnvironmentInfo(
   snapshot: UiSnapshot,
@@ -159,6 +177,7 @@ export function Workbench() {
   const autoReviewSignatureRef = useRef<string | null>(null);
   const reviewFocusSeqRef = useRef(0);
   const centerPanelRef = useRef<HTMLElement>(null);
+  const contextDockResizeCheckRef = useRef(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     leftSidebarWidth,
@@ -169,13 +188,16 @@ export function Workbench() {
   const {
     rightPanelCollapsed,
     setRightPanelCollapsed,
+    rightPanelResizing,
     rightPanelWidth,
     rightPanelStyle,
     clampStoredRightPanelWidth,
     handleRightPanelResizeStart,
   } = useRightPanelState();
   const [reviewPanelExpanded, setReviewPanelExpanded] = useState(false);
-  const [agentPlanDockCollapsed, setAgentPlanDockCollapsed] = useState(false);
+  const [contextDockCollapsed, setContextDockCollapsed] = useState(true);
+  const [contextDockResizeTier, setContextDockResizeTier] =
+    useState<AgentPlanOverlapTier>("none");
   const [expandedReviewSideTreeVisible, setExpandedReviewSideTreeVisible] = useState(false);
   const [reviewPanelActiveTab, setReviewPanelActiveTab] = useState<ReviewPanelActiveTab>(
     INITIAL_REVIEW_PANEL_ACTIVE_TAB,
@@ -202,6 +224,8 @@ export function Workbench() {
   const [appTheme, setAppTheme] = useState<AppTheme>(DEFAULT_APP_THEME);
   const [startupUpdateInfo, setStartupUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [startupUpdateDismissed, setStartupUpdateDismissed] = useState(false);
+  const [sessionListRefreshToken, setSessionListRefreshToken] = useState(0);
+  const [sessionArchiveToast, setSessionArchiveToast] = useState<SessionArchiveToast | null>(null);
   const [cancellingTurn, setCancellingTurn] = useState(false);
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(
     () => new Set(),
@@ -310,6 +334,20 @@ export function Workbench() {
     window.addEventListener("kodex:open-settings", handleOpenSettingsEvent);
     return () => window.removeEventListener("kodex:open-settings", handleOpenSettingsEvent);
   }, [handleOpenSettings]);
+
+  useEffect(() => {
+    if (!sessionArchiveToast || sessionArchiveToast.restoring || sessionArchiveToast.error) return;
+    const timeout = window.setTimeout(() => {
+      setSessionArchiveToast((current) =>
+        current?.token === sessionArchiveToast.token ? null : current,
+      );
+    }, 7000);
+    return () => window.clearTimeout(timeout);
+  }, [
+    sessionArchiveToast?.error,
+    sessionArchiveToast?.restoring,
+    sessionArchiveToast?.token,
+  ]);
 
   const handleWorkspaceOpened = useCallback((nextSnapshot: UiSnapshot) => {
     void startupPerfMark("workbench/handle_workspace_opened", "");
@@ -446,6 +484,34 @@ export function Workbench() {
     pollState();
   }, [clearChangeSets, clearSnapshot, pollState, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
+  const handleSessionArchived = useCallback((session: ArchivedSessionNotice) => {
+    setSessionArchiveToast({
+      ...session,
+      token: Date.now(),
+      restoring: false,
+      error: null,
+    });
+  }, []);
+
+  const handleUndoSessionArchive = useCallback(async () => {
+    if (!sessionArchiveToast || sessionArchiveToast.restoring) return;
+    const token = sessionArchiveToast.token;
+    setSessionArchiveToast((current) =>
+      current?.token === token ? { ...current, restoring: true, error: null } : current,
+    );
+    try {
+      await sessionUnarchive(sessionArchiveToast.id, sessionArchiveToast.workspaceRoot);
+      setSessionArchiveToast((current) => (current?.token === token ? null : current));
+      setSessionListRefreshToken((value) => value + 1);
+    } catch (error) {
+      setSessionArchiveToast((current) =>
+        current?.token === token
+          ? { ...current, restoring: false, error: `恢复失败：${String(error)}` }
+          : current,
+      );
+    }
+  }, [sessionArchiveToast]);
+
   const handleToggleThreads = useCallback(() => {
     setSidebarCollapsed((collapsed) => !collapsed);
   }, []);
@@ -579,16 +645,46 @@ export function Workbench() {
       </div>
     </div>
   ) : null;
-  const showAgentPlanDock =
-    !!snapshot &&
-    activeTab.type === "conversation" &&
-    !reviewPanelExpanded &&
-    agentPlanEntries.length > 0;
-  const agentPlanDockVisible = showAgentPlanDock && !agentPlanDockCollapsed;
+  const contextDockBaseOpen = !!snapshot && !reviewPanelExpanded && !contextDockCollapsed;
+  const contextDockResizeCheck =
+    contextDockBaseOpen && rightPanelResizing && activeTab.type === "conversation";
   const agentPlanOverlap = useAgentPlanOverlap(
     centerPanelRef,
-    agentPlanDockVisible,
+    contextDockResizeCheck,
   );
+  const effectiveContextDockTier = contextDockResizeCheck ? agentPlanOverlap : contextDockResizeTier;
+  const contextDockAutoHidden = effectiveContextDockTier === "hidden";
+  const contextDockVisible = contextDockBaseOpen && !contextDockAutoHidden;
+  const contextDockShouldShift =
+    contextDockVisible && effectiveContextDockTier === "shift";
+
+  useEffect(() => {
+    if (contextDockResizeCheck) {
+      setContextDockResizeTier(agentPlanOverlap);
+    }
+  }, [agentPlanOverlap, contextDockResizeCheck]);
+
+  useEffect(() => {
+    const wasResizeChecking = contextDockResizeCheckRef.current;
+    contextDockResizeCheckRef.current = contextDockResizeCheck;
+
+    if (!wasResizeChecking || contextDockResizeCheck || contextDockResizeTier !== "hidden") {
+      return;
+    }
+
+    setContextDockCollapsed(true);
+  }, [contextDockResizeCheck, contextDockResizeTier]);
+
+  useEffect(() => {
+    if (contextDockCollapsed) {
+      contextDockResizeCheckRef.current = false;
+    }
+  }, [contextDockCollapsed]);
+
+  const handleContextDockToggle = useCallback(() => {
+    setContextDockResizeTier("none");
+    setContextDockCollapsed((collapsed) => !collapsed);
+  }, []);
 
   if (settingsOpen) {
     return (
@@ -637,27 +733,30 @@ export function Workbench() {
   const terminalDockActive = terminalDockAvailable && terminalDockVisible;
   const agentPlanEnvironment = buildAgentPlanEnvironmentInfo(snapshot, gitHydrated);
   const agentPlanDockSlot =
-    agentPlanDockVisible ? (
+    contextDockVisible ? (
       <aside
-        className={`agent-plan-dock ${displayTabs.length > 1 ? "has-center-tabs" : ""}`}
-        aria-label="当前进度"
+        className={`agent-plan-dock ${displayTabs.length > 1 ? "has-center-tabs" : ""} ${
+          agentPlanEntries.length > 0 ? "has-progress" : ""
+        }`}
+        aria-label="环境信息"
       >
-        <AgentPlanPanel entries={agentPlanEntries} environment={agentPlanEnvironment} />
+        <AgentPlanEnvironment environment={agentPlanEnvironment} />
+        <AgentPlanPanel entries={agentPlanEntries} />
       </aside>
     ) : null;
   const composerStatusSlot =
     pendingPermissionRequests.length > 0 ? (
-    <div className="composer-plan-slot">
-      {pendingPermissionRequests.map((request) => (
-        <PermissionRequestPanel
-          key={request.requestId}
-          request={request}
-          entries={agentPlanEntries}
-          onPermissionSelect={handlePermissionSelect}
-        />
-      ))}
-    </div>
-  ) : null;
+      <div className="composer-plan-slot">
+        {pendingPermissionRequests.map((request) => (
+          <PermissionRequestPanel
+            key={request.requestId}
+            request={request}
+            entries={agentPlanEntries}
+            onPermissionSelect={handlePermissionSelect}
+          />
+        ))}
+      </div>
+    ) : null;
   const workbenchBodyClassName = [
     "workbench-body",
     terminalDockActive ? "has-terminal-dock" : "",
@@ -718,10 +817,12 @@ export function Workbench() {
               activeWorkspaceRoot={snapshot.workspace.root}
               currentSessionStatus={snapshot.session.status}
               activeConversationVisible={activeTab.type === "conversation"}
+              refreshToken={sessionListRefreshToken}
               onOpenSettings={handleOpenSettings}
               onSessionChanged={handleSessionChanged}
               onWorkspaceChanged={handleWorkspaceChanged}
               onWorkspaceArchived={handleWorkspaceArchived}
+              onSessionArchived={handleSessionArchived}
             />
           )}
         </ThreadSidebarShell>
@@ -738,23 +839,17 @@ export function Workbench() {
         )}
 
         <div className="workbench-main-shell">
-
-        <div
-          className={workbenchBodyClassName}
-          style={rightPanelStyle}
-        >
-          <main
-            ref={centerPanelRef}
-            className={
-              "center-panel" +
-              (showAgentPlanDock && !agentPlanDockCollapsed ? " is-agent-plan-active" : "") +
-              (showAgentPlanDock && !agentPlanDockCollapsed && agentPlanOverlap !== "none"
-                ? " is-agent-plan-overlap"
-                : "") +
-              (agentPlanOverlap === "tight" ? " is-agent-plan-tight" : "") +
-              (agentPlanOverlap === "stacked" ? " is-agent-plan-stacked" : "")
-            }
+          <div
+            className={workbenchBodyClassName}
+            style={rightPanelStyle}
           >
+            <main
+              ref={centerPanelRef}
+              className={
+                "center-panel" +
+                (contextDockShouldShift ? " is-agent-plan-active is-agent-plan-overlap" : "")
+              }
+            >
             {reviewPanelExpanded && (
               <section className="expanded-review-panel-shell" aria-label="展开审查面板">
                 {reviewPanel}
@@ -763,22 +858,56 @@ export function Workbench() {
             <ThreadHeader
               session={snapshot.session}
               planToggle={
-                showAgentPlanDock ? (
-                  <button
-                    type="button"
-                    className={`thread-header-plan-toggle ${
-                      agentPlanDockCollapsed ? "" : "is-active"
-                    }`}
-                    aria-label={agentPlanDockCollapsed ? "展开进度" : "折叠进度"}
-                    aria-expanded={!agentPlanDockCollapsed}
-                    title={agentPlanDockCollapsed ? "展开进度" : "折叠进度"}
-                    onClick={() => setAgentPlanDockCollapsed((collapsed) => !collapsed)}
-                  >
-                    <ListChecks aria-hidden="true" size={16} strokeWidth={2.2} />
-                  </button>
-                ) : null
+                <button
+                  type="button"
+                  className={`thread-header-plan-toggle ${
+                    contextDockVisible ? "is-active" : ""
+                  }`}
+                  aria-label={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
+                  aria-expanded={contextDockVisible}
+                  title={contextDockVisible ? "折叠环境信息" : "展开环境信息"}
+                  onClick={handleContextDockToggle}
+                >
+                  <ContextDockToggleIcon />
+                </button>
               }
             />
+            {sessionArchiveToast && (
+              <div className="session-archive-toast" role="status" aria-live="polite">
+                <div className="session-archive-toast-copy">
+                  <span>已归档“{sessionArchiveToast.title}”</span>
+                  {sessionArchiveToast.error && <small>{sessionArchiveToast.error}</small>}
+                </div>
+                <div className="session-archive-toast-actions">
+                  <button
+                    type="button"
+                    className="session-archive-toast-btn"
+                    disabled={sessionArchiveToast.restoring}
+                    onClick={handleUndoSessionArchive}
+                  >
+                    {sessionArchiveToast.restoring ? "恢复中..." : "撤销"}
+                  </button>
+                  <button
+                    type="button"
+                    className="session-archive-toast-btn"
+                    onClick={() => {
+                      setSessionArchiveToast(null);
+                      handleOpenSettings({ initialPane: "archive" });
+                    }}
+                  >
+                    查看已归档
+                  </button>
+                  <button
+                    type="button"
+                    className="session-archive-toast-close"
+                    aria-label="关闭归档提示"
+                    onClick={() => setSessionArchiveToast(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            )}
             {agentPlanDockSlot}
 
             {displayTabs.length > 1 && (
@@ -866,93 +995,93 @@ export function Workbench() {
                 />
               </div>
             )}
-          </main>
+            </main>
 
-          {!rightPanelCollapsed && !reviewPanelExpanded && (
-            <div className="panel-resizer">
-              <button
-                type="button"
-                className="panel-resizer-hit"
-                aria-label="调整右侧面板宽度"
-                title="拖拽调整右侧面板宽度"
-                onPointerDown={handleRightPanelResizeStart}
-              />
-            </div>
-          )}
-
-          {reviewPanelExpanded ? (
-            <aside className="right-panel is-expanded-spacer" aria-hidden="true" />
-          ) : (
-            <aside className={`right-panel ${rightPanelCollapsed ? "is-collapsed" : ""}`}>
-              {reviewPanel}
-            </aside>
-          )}
-        </div>
-        {shouldRenderTerminalDock(snapshot.workspace, terminalDockMounted) && (
-          <TerminalDock
-            key={snapshot.workspace.root}
-            workspaceRoot={snapshot.workspace.root}
-            appTheme={appTheme}
-            visible={terminalDockActive}
-            height={terminalDockHeight}
-            layoutSignal={`${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`}
-            onHeightChange={handleTerminalDockHeightChange}
-            onHide={handleHideTerminalDock}
-          />
-        )}
-        {pendingCloseTab && (
-          <div className="unsaved-close-backdrop" role="presentation">
-            <div className="unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="unsaved-close-title">
-              <div className="unsaved-close-title" id="unsaved-close-title">
-                内容有改变
-              </div>
-              <div className="unsaved-close-message">
-                {pendingCloseTab.label} 还没有保存，关闭前要保存修改吗？
-              </div>
-              <div className="unsaved-close-actions">
-                <button type="button" className="unsaved-close-btn" onClick={handleCancelClose}>
-                  取消
-                </button>
-                <button type="button" className="unsaved-close-btn" onClick={handleConfirmDiscardClose}>
-                  直接关闭
-                </button>
-                <button type="button" className="unsaved-close-btn is-primary" onClick={handleConfirmSaveClose}>
-                  保存并关闭
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-        {remoteOpenVisible && (
-          <div className="remote-open-backdrop" role="presentation">
-            <div className="remote-open-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-open-title">
-              <div className="remote-open-dialog-head">
-                <div>
-                  <div className="remote-open-dialog-kicker">远程</div>
-                  <h2 id="remote-open-title">打开远程目录</h2>
-                </div>
+            {!rightPanelCollapsed && !reviewPanelExpanded && (
+              <div className="panel-resizer">
                 <button
                   type="button"
-                  className="remote-open-close"
-                  onClick={() => setRemoteOpenVisible(false)}
-                  aria-label="关闭远程打开"
-                >
-                  ×
-                </button>
+                  className="panel-resizer-hit"
+                  aria-label="调整右侧面板宽度"
+                  title="拖拽调整右侧面板宽度"
+                  onPointerDown={handleRightPanelResizeStart}
+                />
               </div>
-              <RemoteOpenPanel
-                onWorkspaceOpened={handleWorkspaceChanged}
-                onOpenSettings={() => {
-                  setRemoteOpenVisible(false);
-                  handleOpenSettings();
-                }}
-                onCancel={() => setRemoteOpenVisible(false)}
-              />
-            </div>
+            )}
+
+            {reviewPanelExpanded ? (
+              <aside className="right-panel is-expanded-spacer" aria-hidden="true" />
+            ) : (
+              <aside className={`right-panel ${rightPanelCollapsed ? "is-collapsed" : ""}`}>
+                {reviewPanel}
+              </aside>
+            )}
           </div>
-        )}
-        {updateNotice}
-      </div>
+          {shouldRenderTerminalDock(snapshot.workspace, terminalDockMounted) && (
+            <TerminalDock
+              key={snapshot.workspace.root}
+              workspaceRoot={snapshot.workspace.root}
+              appTheme={appTheme}
+              visible={terminalDockActive}
+              height={terminalDockHeight}
+              layoutSignal={`${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`}
+              onHeightChange={handleTerminalDockHeightChange}
+              onHide={handleHideTerminalDock}
+            />
+          )}
+          {pendingCloseTab && (
+            <div className="unsaved-close-backdrop" role="presentation">
+              <div className="unsaved-close-dialog" role="dialog" aria-modal="true" aria-labelledby="unsaved-close-title">
+                <div className="unsaved-close-title" id="unsaved-close-title">
+                  内容有改变
+                </div>
+                <div className="unsaved-close-message">
+                  {pendingCloseTab.label} 还没有保存，关闭前要保存修改吗？
+                </div>
+                <div className="unsaved-close-actions">
+                  <button type="button" className="unsaved-close-btn" onClick={handleCancelClose}>
+                    取消
+                  </button>
+                  <button type="button" className="unsaved-close-btn" onClick={handleConfirmDiscardClose}>
+                    直接关闭
+                  </button>
+                  <button type="button" className="unsaved-close-btn is-primary" onClick={handleConfirmSaveClose}>
+                    保存并关闭
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {remoteOpenVisible && (
+            <div className="remote-open-backdrop" role="presentation">
+              <div className="remote-open-dialog" role="dialog" aria-modal="true" aria-labelledby="remote-open-title">
+                <div className="remote-open-dialog-head">
+                  <div>
+                    <div className="remote-open-dialog-kicker">远程</div>
+                    <h2 id="remote-open-title">打开远程目录</h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="remote-open-close"
+                    onClick={() => setRemoteOpenVisible(false)}
+                    aria-label="关闭远程打开"
+                  >
+                    ×
+                  </button>
+                </div>
+                <RemoteOpenPanel
+                  onWorkspaceOpened={handleWorkspaceChanged}
+                  onOpenSettings={() => {
+                    setRemoteOpenVisible(false);
+                    handleOpenSettings();
+                  }}
+                  onCancel={() => setRemoteOpenVisible(false)}
+                />
+              </div>
+            </div>
+          )}
+          {updateNotice}
+        </div>
       </div>
     </div>
   );

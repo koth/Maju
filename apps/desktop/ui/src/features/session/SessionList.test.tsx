@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { SessionList } from "./SessionList";
 import { onRemoteOpenProgress, onSessionStatus } from "../../lib/events";
 import {
@@ -44,6 +45,7 @@ vi.mock("../../lib/tauri", async () => {
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+  confirm: vi.fn(),
 }));
 
 vi.mock("../../lib/events", () => ({
@@ -216,6 +218,7 @@ describe("SessionList agent picker", () => {
     vi.mocked(sessionSwitch).mockResolvedValue(undefined);
     vi.mocked(sessionArchive).mockResolvedValue(undefined);
     vi.mocked(workspaceArchive).mockResolvedValue(null);
+    vi.mocked(confirm).mockResolvedValue(true);
     vi.mocked(workspaceSetActive).mockResolvedValue({} as never);
     vi.mocked(workspaceOpenRemoteProfile).mockResolvedValue({} as never);
   });
@@ -638,6 +641,7 @@ describe("SessionList agent picker", () => {
 
   it("archives a session from the session row action", async () => {
     const onSessionChanged = vi.fn();
+    const onSessionArchived = vi.fn();
     vi.mocked(sessionList).mockResolvedValue(
       workspaceWithSessions([
         sessionItem({ id: "session-archive", title: "Old work" }),
@@ -653,6 +657,7 @@ describe("SessionList agent picker", () => {
         onOpenSettings={vi.fn()}
         onSessionChanged={onSessionChanged}
         onWorkspaceChanged={vi.fn()}
+        onSessionArchived={onSessionArchived}
       />,
     );
 
@@ -660,8 +665,14 @@ describe("SessionList agent picker", () => {
 
     await waitFor(() => {
       expect(sessionArchive).toHaveBeenCalledWith("session-archive", "/Users/kothchen/code/Kodex");
+      expect(onSessionArchived).toHaveBeenCalledWith({
+        id: "session-archive",
+        title: "Old work",
+        workspaceRoot: "/Users/kothchen/code/Kodex",
+      });
       expect(onSessionChanged).toHaveBeenCalled();
     });
+    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("archives an inactive workspace without changing the active snapshot", async () => {
@@ -698,6 +709,7 @@ describe("SessionList agent picker", () => {
     fireEvent.click(await screen.findByRole("button", { name: "归档项目 Other" }));
 
     await waitFor(() => {
+      expect(confirm).toHaveBeenCalledWith("确定归档项目 Other？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。");
       expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Other");
       expect(onWorkspaceArchived).not.toHaveBeenCalled();
     });
@@ -724,6 +736,7 @@ describe("SessionList agent picker", () => {
     fireEvent.click(await screen.findByRole("button", { name: "归档项目 Kodex" }));
 
     await waitFor(() => {
+      expect(confirm).toHaveBeenCalledWith("确定归档项目 Kodex？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。");
       expect(workspaceArchive).toHaveBeenCalledWith("/Users/kothchen/code/Kodex");
       expect(onWorkspaceArchived).toHaveBeenCalledWith(nextSnapshot);
     });

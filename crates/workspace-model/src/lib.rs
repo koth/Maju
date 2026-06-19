@@ -755,6 +755,21 @@ pub struct SessionListItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchivedSessionListItem {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub archived_at: String,
+    pub message_count: i64,
+    pub acp_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<String>,
+    pub workspace_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenWorkspaceItem {
     pub workspace: WorkspaceDescriptor,
     pub active_session_id: Uuid,

@@ -729,6 +729,42 @@ impl AppState {
             }
         }
     }
+
+    pub fn unarchive_session(
+        &self,
+        workspace_root: Option<String>,
+        id: &str,
+    ) -> Result<(), String> {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let store = SessionStore::open_global(paths.root()).map_err(|e| e.to_string())?;
+        store.unarchive_session(id).map_err(|e| e.to_string())?;
+
+        let Some(workspace_root) = workspace_root else {
+            return Ok(());
+        };
+
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        if let Some(key) = workspace_key_for_identifier(&guard, &workspace_root)
+            && let Some(WorkspaceEntry::Dormant(metadata)) = guard.workspaces.get_mut(&key)
+        {
+            metadata.sessions = load_lightweight_sessions(&metadata.workspace.root)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_archived_session(&self, id: &str) -> Result<(), String> {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let store = SessionStore::open_global(paths.root()).map_err(|e| e.to_string())?;
+        store.delete_archived_session(id).map_err(|e| e.to_string())
+    }
+
+    pub fn delete_all_archived_sessions(&self) -> Result<(), String> {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let store = SessionStore::open_global(paths.root()).map_err(|e| e.to_string())?;
+        store
+            .delete_all_archived_sessions()
+            .map_err(|e| e.to_string())
+    }
 }
 
 fn connect_workspace_locked(

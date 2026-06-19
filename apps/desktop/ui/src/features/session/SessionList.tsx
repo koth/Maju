@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import type { AgentCliId, AgentSettingsSnapshot, RemoteLinuxWorkspace, SessionListItem, SessionStatus, UiSnapshot, WorkspaceSessionList } from "../../types";
 import {
@@ -23,13 +24,21 @@ interface Props {
   activeWorkspaceRoot: string;
   currentSessionStatus: SessionStatus;
   activeConversationVisible?: boolean;
+  refreshToken?: number;
   onOpenSettings: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
   onWorkspaceArchived?: (snapshot: UiSnapshot | null) => void;
+  onSessionArchived?: (session: ArchivedSessionNotice) => void;
 }
 
 type AgentModalMode = "workspace" | "session";
+
+export interface ArchivedSessionNotice {
+  id: string;
+  title: string;
+  workspaceRoot: string;
+}
 
 interface PendingSwitch {
   id: string;
@@ -42,10 +51,12 @@ export function SessionList({
   activeWorkspaceRoot,
   currentSessionStatus,
   activeConversationVisible = true,
+  refreshToken,
   onOpenSettings,
   onSessionChanged,
   onWorkspaceChanged,
   onWorkspaceArchived,
+  onSessionArchived,
 }: Props) {
   const [workspaceSessions, setWorkspaceSessions] = useState<WorkspaceSessionList[]>([]);
   const [agentSnapshot, setAgentSnapshot] = useState<AgentSettingsSnapshot | null>(null);
@@ -87,6 +98,11 @@ export function SessionList({
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  useEffect(() => {
+    if (refreshToken === undefined) return;
+    refresh();
+  }, [refresh, refreshToken]);
 
   useEffect(() => {
     let disposed = false;
@@ -323,21 +339,26 @@ export function SessionList({
   }, [modalMode, onSessionChanged, onWorkspaceChanged, pendingWorkspacePath, pendingWorkspaceRoot, refresh, selectedAgent]);
 
   const handleArchive = useCallback(
-    async (id: string, workspaceRoot: string) => {
+    async (id: string, workspaceRoot: string, sessionTitle?: string) => {
       try {
+        const label = sessionTitle || "此会话";
         await sessionArchive(id, workspaceRoot);
+        onSessionArchived?.({ id, title: label, workspaceRoot });
         onSessionChanged();
         refresh();
       } catch (error) {
         console.error("Failed to archive session", error);
       }
     },
-    [onSessionChanged, refresh],
+    [onSessionArchived, onSessionChanged, refresh],
   );
 
   const handleArchiveWorkspace = useCallback(
-    async (workspaceRoot: string, isActive: boolean) => {
+    async (workspaceRoot: string, isActive: boolean, workspaceName?: string) => {
       try {
+        const label = workspaceName || "此项目";
+        const accepted = await confirm(`确定归档项目 ${label}？归档后该项目及其所有会话将从列表中移除，数据仍保留在本地。`);
+        if (!accepted) return;
         const nextSnapshot = await workspaceArchive(workspaceRoot);
         if (isActive) {
           onWorkspaceArchived?.(nextSnapshot);
@@ -712,8 +733,8 @@ function WorkspaceSection({
   onReconnectRemoteWorkspace: (remote: RemoteLinuxWorkspace) => void;
   onCreateSession: (workspaceRoot: string, remoteAgent: AgentCliId | null, isRemoteWorkspace: boolean) => void;
   onSwitch: (id: string, workspaceRoot: string) => void;
-  onArchive: (id: string, workspaceRoot: string) => void;
-  onArchiveWorkspace: (workspaceRoot: string, isActive: boolean) => void;
+  onArchive: (id: string, workspaceRoot: string, sessionTitle?: string) => void;
+  onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
   const workspaceRoot = item.workspace.root;
@@ -764,7 +785,7 @@ function WorkspaceSection({
         <button
           className="sl-workspace-archive"
           type="button"
-          onClick={() => onArchiveWorkspace(workspaceActionRoot, item.is_active)}
+          onClick={() => onArchiveWorkspace(workspaceActionRoot, item.is_active, item.workspace.name)}
           title="归档项目"
           aria-label={`归档项目 ${item.workspace.name}`}
         >
@@ -800,7 +821,7 @@ function WorkspaceSection({
                 connected={session.id === activeSessionId && item.is_active && item.connected}
                 disabled={isDormantRemoteWorkspace}
                 onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
-                onArchive={(id) => onArchive(id, workspaceActionRoot)}
+                onArchive={(id) => onArchive(id, workspaceActionRoot, session.title)}
               />
             );
           })}

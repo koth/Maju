@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { SettingsPage } from "./SettingsPage";
 import {
+  sessionDeleteAllArchived,
+  sessionDeleteArchived,
+  sessionListArchived,
+  sessionUnarchive,
   settingsGetAgentSnapshot,
   settingsGetLspSnapshot,
   settingsGetRemoteProfiles,
@@ -23,13 +28,21 @@ import {
   getCurrentAppVersion,
   installPendingAppUpdate,
 } from "../../lib/updater";
-import type { AgentProviderProfile, AgentSettingsSnapshot, LspSettingsSnapshot, RemoteMachineProfilesSnapshot } from "../../types";
+import type { AgentProviderProfile, AgentSettingsSnapshot, ArchivedSessionListItem, LspSettingsSnapshot, RemoteMachineProfilesSnapshot } from "../../types";
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  confirm: vi.fn(),
+}));
 
 vi.mock("../../lib/tauri", async () => {
   const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
   return {
     ...actual,
     settingsGetAgentSnapshot: vi.fn(),
+    sessionListArchived: vi.fn(),
+    sessionUnarchive: vi.fn(),
+    sessionDeleteArchived: vi.fn(),
+    sessionDeleteAllArchived: vi.fn(),
     settingsDetectAgents: vi.fn(),
     settingsSelectAgent: vi.fn(),
     settingsSelectTheme: vi.fn(),
@@ -296,6 +309,22 @@ function remoteProfilesValidationFailed(): RemoteMachineProfilesSnapshot {
   };
 }
 
+function archivedSession(overrides: Partial<ArchivedSessionListItem> = {}): ArchivedSessionListItem {
+  return {
+    id: "archived-1",
+    title: "Fix codex-acp bundle error",
+    status: "Idle",
+    created_at: "2026-05-20T22:20:00Z",
+    updated_at: "2026-05-20T22:23:00Z",
+    archived_at: "2026-06-15T08:31:00Z",
+    message_count: 4,
+    acp_session_id: null,
+    agent_cli: "Codex",
+    workspace_root: "/Users/kothchen/code/Kodex",
+    ...overrides,
+  };
+}
+
 async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
   const tab = await screen.findByRole("tab", { name: label });
   fireEvent.click(tab);
@@ -313,9 +342,14 @@ describe("SettingsPage LSP settings", () => {
     vi.mocked(getCurrentAppVersion).mockResolvedValue("0.1.0");
     vi.mocked(checkForAppUpdate).mockResolvedValue(null);
     vi.mocked(installPendingAppUpdate).mockResolvedValue(undefined);
+    vi.mocked(confirm).mockResolvedValue(true);
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(agentSnapshot);
     vi.mocked(settingsGetLspSnapshot).mockResolvedValue(lspSnapshot());
     vi.mocked(settingsGetRemoteProfiles).mockResolvedValue({ profiles: [] });
+    vi.mocked(sessionListArchived).mockResolvedValue([]);
+    vi.mocked(sessionUnarchive).mockResolvedValue(undefined);
+    vi.mocked(sessionDeleteArchived).mockResolvedValue(undefined);
+    vi.mocked(sessionDeleteAllArchived).mockResolvedValue(undefined);
     vi.mocked(settingsSaveRemoteProfile).mockResolvedValue(remoteProfilesSnapshot());
     vi.mocked(settingsDeleteRemoteProfile).mockResolvedValue({ profiles: [] });
     vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesSnapshot(true));
@@ -489,6 +523,62 @@ describe("SettingsPage LSP settings", () => {
 
     await waitFor(() => expect(installPendingAppUpdate).toHaveBeenCalled());
     expect(await screen.findByText("更新已安装，正在重启")).toBeInTheDocument();
+  });
+
+  it("shows archived sessions by project and restores or deletes individual chats", async () => {
+    vi.mocked(sessionListArchived).mockResolvedValue([
+      archivedSession(),
+      archivedSession({
+        id: "archived-2",
+        title: "开发 bluedot 应用",
+        workspace_root: "/Users/kothchen/code/Bluedot",
+        archived_at: "2026-06-13T18:56:00Z",
+        message_count: 2,
+      }),
+    ]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已归档" }));
+
+    expect(await screen.findByText("Fix codex-acp bundle error")).toBeInTheDocument();
+    expect(screen.getAllByText("Kodex").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Bluedot").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), { target: { value: "bluedot" } });
+    expect(screen.getByText("开发 bluedot 应用")).toBeInTheDocument();
+    expect(screen.queryByText("Fix codex-acp bundle error")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("归档项目筛选"), { target: { value: "/Users/kothchen/code/Kodex" } });
+    expect(screen.getByText("Fix codex-acp bundle error")).toBeInTheDocument();
+    expect(screen.queryByText("开发 bluedot 应用")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复对话 Fix codex-acp bundle error" }));
+    await waitFor(() =>
+      expect(sessionUnarchive).toHaveBeenCalledWith("archived-1", "/Users/kothchen/code/Kodex"),
+    );
+    expect(await screen.findByText("已恢复 Fix codex-acp bundle error")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("归档项目筛选"), { target: { value: "all" } });
+    fireEvent.click(screen.getByRole("button", { name: "删除对话 开发 bluedot 应用" }));
+    await waitFor(() => expect(sessionDeleteArchived).toHaveBeenCalledWith("archived-2"));
+  });
+
+  it("deletes all archived sessions after confirmation", async () => {
+    vi.mocked(sessionListArchived).mockResolvedValue([archivedSession()]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已归档" }));
+    await screen.findByText("Fix codex-acp bundle error");
+    fireEvent.click(screen.getByRole("button", { name: "全部删除" }));
+
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith("确定删除所有已归档对话？此操作不可撤销。"),
+    );
+    await waitFor(() => expect(sessionDeleteAllArchived).toHaveBeenCalled());
+    expect(await screen.findByText("已删除所有已归档对话")).toBeInTheDocument();
   });
 
   it("loads, probes, saves, disables, and resets a language server", async () => {

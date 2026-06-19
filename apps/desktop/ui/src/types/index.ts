@@ -433,6 +433,19 @@ export interface SessionListItem {
   attention_state?: "none" | "completed_unviewed" | "needs_attention";
 }
 
+export interface ArchivedSessionListItem {
+  id: string;
+  title: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string;
+  message_count: number;
+  acp_session_id?: string | null;
+  agent_cli?: string | null;
+  workspace_root: string;
+}
+
 export interface OpenWorkspaceItem {
   workspace: WorkspaceDescriptor;
   active_session_id: string;

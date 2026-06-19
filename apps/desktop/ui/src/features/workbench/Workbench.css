@@ -602,12 +602,12 @@ body.is-resizing-left-sidebar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
+  border-radius: 10px;
+  background: rgba(215, 225, 223, 0.055);
   color: var(--text-muted);
   cursor: pointer;
   transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
@@ -615,13 +615,13 @@ body.is-resizing-left-sidebar {
 
 .thread-header-plan-toggle:hover {
   background: var(--interactive-hover);
-  border-color: transparent;
+  border-color: color-mix(in srgb, var(--border-strong) 45%, transparent);
   color: var(--text-strong);
 }
 
 .thread-header-plan-toggle.is-active {
-  background: color-mix(in srgb, var(--surface-selected) 76%, transparent);
-  border-color: color-mix(in srgb, var(--border-focus) 46%, transparent);
+  background: color-mix(in srgb, var(--text-strong) 10%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 54%, transparent);
   color: var(--text-strong);
 }
 
@@ -631,13 +631,105 @@ body.is-resizing-left-sidebar {
 }
 
 .thread-header-plan-toggle svg {
-  width: 13px;
-  height: 13px;
+  width: 17px;
+  height: 17px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.9;
+  stroke-width: 2.05;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.session-archive-toast {
+  position: absolute;
+  top: calc(var(--thread-header-height) + 10px);
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(560px, calc(100% - 32px));
+  min-height: 44px;
+  padding: 9px 10px 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 74%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-bg) 92%, var(--app-bg));
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.28);
+  color: var(--text-strong);
+  font-family: var(--font-chat);
+  transform: translateX(-50%);
+}
+
+.session-archive-toast-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-archive-toast-copy span,
+.session-archive-toast-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-archive-toast-copy span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.session-archive-toast-copy small {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.session-archive-toast-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.session-archive-toast-btn,
+.session-archive-toast-close {
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-chat);
+  cursor: pointer;
+}
+
+.session-archive-toast-btn {
+  padding: 0 9px;
+  border-color: var(--border-subtle);
+  background: rgba(215, 225, 223, 0.04);
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.session-archive-toast-close {
+  width: 28px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.session-archive-toast-btn:hover:not(:disabled),
+.session-archive-toast-close:hover {
+  border-color: var(--border-strong);
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.session-archive-toast-btn:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .startup-update-notice {
@@ -738,12 +830,25 @@ body.is-resizing-left-sidebar {
 
 .agent-plan-dock {
   position: absolute;
-  top: calc(var(--thread-header-height) + 10px);
-  right: 0;
+  top: calc(var(--thread-header-height) + 12px);
+  right: var(--center-panel-gutter);
   z-index: 7;
-  width: min(248px, calc(100% - 2 * var(--center-panel-gutter)));
+  display: flex;
+  width: min(300px, calc(100% - 2 * var(--center-panel-gutter)));
   max-width: calc(100% - 2 * var(--center-panel-gutter));
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 58%, transparent);
+  border-radius: 18px;
+  background: #2c2c2c;
+  box-shadow:
+    0 16px 44px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
   pointer-events: auto;
+}
+
+.agent-plan-dock.has-progress {
+  width: min(300px, calc(100% - 2 * var(--center-panel-gutter)));
 }
 
 .agent-plan-dock.has-center-tabs {
@@ -751,13 +856,44 @@ body.is-resizing-left-sidebar {
 }
 
 .agent-plan-dock .agent-plan {
-  border-radius: 8px 0 0 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
-/* Compact the docked plan so a 248px column stays readable. */
+.agent-plan-dock .agent-plan-environment {
+  padding: 18px 18px 20px;
+}
+
+.agent-plan-dock .agent-plan-environment-header {
+  margin-bottom: 12px;
+}
+
+.agent-plan-dock .agent-plan-environment-title {
+  font-size: 13px;
+}
+
+.agent-plan-dock .agent-plan-env-add {
+  color: var(--text-soft);
+}
+
+.agent-plan-dock .agent-plan-toggle {
+  min-height: 54px;
+  padding: 0 18px;
+}
+
+.agent-plan-dock .agent-plan-toggle-label {
+  font-size: 15px;
+}
+
+.agent-plan-dock .agent-plan-header {
+  border-top: 0;
+}
+
+/* Compact the docked plan so the floating column stays readable. */
 .agent-plan-dock .agent-plan-title {
-  max-width: 140px;
+  max-width: 172px;
 }
 
 .agent-plan-dock .agent-plan-entry {
@@ -775,17 +911,22 @@ body.is-resizing-left-sidebar {
 }
 
 .agent-plan-dock .agent-plan-env-row {
-  min-height: 24px;
+  min-height: 30px;
 }
 
 .agent-plan-dock .agent-plan-env-label {
+  gap: 11px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.agent-plan-dock .agent-plan-env-label.has-menu {
   gap: 7px;
-  font-size: 12px;
 }
 
 .agent-plan-dock .agent-plan-env-change-metrics {
-  gap: 4px;
-  font-size: 11px;
+  gap: 6px;
+  font-size: 15px;
 }
 
 .agent-plan-dock .agent-plan-content {
@@ -808,8 +949,8 @@ body.is-resizing-left-sidebar {
  * of the dock. The dock itself always floats in the top-right corner.
  */
 .center-panel.is-agent-plan-active {
-  --agent-plan-dock-width: 248px;
-  --agent-plan-dock-gap: 12px;
+  --agent-plan-dock-width: 300px;
+  --agent-plan-dock-gap: 28px;
 }
 
 /*
@@ -821,8 +962,8 @@ body.is-resizing-left-sidebar {
  * loops at threshold widths.
  *
  * To shift the column left we override the default centered geometry:
- *   - margin-left = panel gutter (flushes the column to the left edge of
- *     the panel's content area)
+ *   - margin-left = 0 (flushes the column to the panel content area's
+ *     already-padded left edge)
  *   - margin-right = dock width + gap (reserves the right strip for the dock)
  * Composer and message text therefore sit on the LEFT of the dock with the
  * dock floating in the top-right corner.
@@ -830,41 +971,8 @@ body.is-resizing-left-sidebar {
 .center-panel.is-agent-plan-overlap .conversation-container .timeline-items,
 .center-panel.is-agent-plan-overlap .conversation-container .composer-plan-slot,
 .center-panel.is-agent-plan-overlap .conversation-container .composer {
-  margin-left: var(--center-panel-gutter);
+  margin-left: 0;
   margin-right: calc(var(--agent-plan-dock-width) + var(--agent-plan-dock-gap));
-}
-
-/*
- * "tight" tier: column shifted but even 248px is not enough to fully clear
- * the column. We shrink the dock to 200px and reduce the right margin to
- * match. The hook decides when this tier is needed; the CSS just renders it.
- */
-.center-panel.is-agent-plan-tight .agent-plan-dock {
-  width: 200px;
-}
-.center-panel.is-agent-plan-tight .conversation-container .timeline-items,
-.center-panel.is-agent-plan-tight .conversation-container .composer-plan-slot,
-.center-panel.is-agent-plan-tight .conversation-container .composer {
-  margin-right: calc(200px + var(--agent-plan-dock-gap));
-}
-
-/*
- * "stacked" tier: panel so narrow that even a 200px dock cannot sit beside
- * the column. Turn the dock into a slim bar across the very top of the panel
- * and let the column re-center.
- */
-.center-panel.is-agent-plan-stacked .agent-plan-dock {
-  width: calc(100% - 2 * var(--center-panel-gutter));
-  top: calc(var(--thread-header-height) + 6px);
-}
-.center-panel.is-agent-plan-stacked .agent-plan-dock .agent-plan {
-  border-radius: 8px;
-}
-.center-panel.is-agent-plan-stacked .conversation-container .timeline-items,
-.center-panel.is-agent-plan-stacked .conversation-container .composer-plan-slot,
-.center-panel.is-agent-plan-stacked .conversation-container .composer {
-  margin-left: auto;
-  margin-right: auto;
 }
 
 /* The actual shift is applied by the rules above based on which tier the
