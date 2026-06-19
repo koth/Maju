@@ -512,10 +512,10 @@ export function FileTree({
             <button
               type="button"
               role="menuitem"
-              title="添加到 Composer 引用"
+              title="发送到上下文"
               onClick={() => handleAddReference(contextMenu.entry)}
             >
-              添加到 Composer 引用
+              发送到上下文
             </button>
           )}
           {contextMenu.entry.kind === "File" && (

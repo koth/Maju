@@ -14,10 +14,10 @@ import "./ReviewPanel.css";
 export type ReviewPanelTab = "Review" | "Diff" | "Files";
 export type ReviewPanelActiveTab =
   | { kind: "base"; tab: ReviewPanelTab }
-  | { kind: "file"; path: string }
+  | { kind: "file"; path: string; lineNumber?: number; searchQuery?: string; navToken?: number }
   | { kind: "diff"; path: string; changeSetId: string };
 export type ReviewPanelOpenTab =
-  | { kind: "file"; path: string }
+  | { kind: "file"; path: string; lineNumber?: number; searchQuery?: string; navToken?: number }
   | { kind: "diff"; path: string; changeSetId: string };
 type ReviewScope = "last" | "manual";
 
@@ -38,6 +38,13 @@ interface TreeNode {
   children: TreeNode[];
   stats: DiffStats;
   file?: ChangedFile;
+}
+
+interface ReviewFileContextMenuState {
+  path: string;
+  x: number;
+  y: number;
+  trackable?: boolean;
 }
 
 const MAX_REVIEW_FILES = 300;
@@ -228,7 +235,14 @@ interface Props {
   onEditorFileTreeVisibleChange?: (visible: boolean) => void;
   renderFileTab?: (
     path: string,
-    context: { fileTreeVisible: boolean; onToggleFileTree?: () => void; onUserInteraction?: () => void },
+    context: {
+      fileTreeVisible: boolean;
+      onToggleFileTree?: () => void;
+      onUserInteraction?: () => void;
+      lineNumber?: number;
+      searchQuery?: string;
+      navToken?: number;
+    },
   ) => ReactNode;
   activeTab?: ReviewPanelActiveTab;
   openTabs?: ReviewPanelOpenTab[];
@@ -278,7 +292,8 @@ export function ReviewPanel({
     : null;
   const handledFocusRequestKeyRef = useRef<string | null>(focusRequestKey);
   const activeBaseTab = activeTab.kind === "base" ? activeTab.tab : null;
-  const activeFilePath = activeTab.kind === "file" ? activeTab.path : null;
+  const activeFileTab = activeTab.kind === "file" ? activeTab : null;
+  const activeFilePath = activeFileTab?.path ?? null;
   const activeDiffTab = activeTab.kind === "diff" ? activeTab : null;
   const activeSideTreeKeyRef = useRef<string | null>(null);
   const workspaceConnected = snapshot.workspace_connected !== false;
@@ -320,7 +335,7 @@ export function ReviewPanel({
     const tabId = reviewOpenTabId(tab);
     setOpenTabs((current) => {
       if (current.some((openTab) => reviewOpenTabId(openTab) === tabId)) {
-        return current;
+        return current.map((openTab) => (reviewOpenTabId(openTab) === tabId ? tab : openTab));
       }
       // Ephemeral file tabs: when opening a new file, close all existing
       // unpinned file tabs so rapid browsing doesn't stack.
@@ -596,42 +611,48 @@ export function ReviewPanel({
             <span>正在加载 Git 变更...</span>
           </div>
         ) : (
-        <>
-          <div className="review-meta">
-            {snapshot.repository.changed_files.length} 个变更文件
-            {filteredFiles.length > MAX_REVIEW_FILES && (
-              <span> / 显示前 {MAX_REVIEW_FILES} 个</span>
-            )}
-          </div>
+          <>
+            <div className="review-meta">
+              {snapshot.repository.changed_files.length} 个变更文件
+              {filteredFiles.length > MAX_REVIEW_FILES && (
+                <span> / 显示前 {MAX_REVIEW_FILES} 个</span>
+              )}
+            </div>
 
-          <div className="review-filter">
-            <input
-              type="text"
-              className="review-filter-input"
-              placeholder="过滤文件..."
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+            <div className="review-filter">
+              <input
+                type="text"
+                className="review-filter-input"
+                placeholder="过滤文件..."
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              />
+            </div>
+
+            <FileGroup
+              title="未暂存"
+              files={grouped.Unstaged}
+              changeSetId="git-worktree:unstaged"
+              onFileSelect={handleGitFileOpen}
+              onAddComposerReference={onAddComposerReference}
+              composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
             />
-          </div>
-
-          <FileGroup
-            title="未暂存"
-            files={grouped.Unstaged}
-            changeSetId="git-worktree:unstaged"
-            onFileSelect={handleGitFileOpen}
-          />
-          <FileGroup
-            title="已暂存"
-            files={grouped.Staged}
-            changeSetId="git-worktree:staged"
-            onFileSelect={handleGitFileOpen}
-          />
-          <UntrackedTree
-            files={grouped.Untracked}
-            onFileSelect={handleGitFileOpen}
-            onRefresh={onRefresh}
-          />
-        </>
+            <FileGroup
+              title="已暂存"
+              files={grouped.Staged}
+              changeSetId="git-worktree:staged"
+              onFileSelect={handleGitFileOpen}
+              onAddComposerReference={onAddComposerReference}
+              composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+            />
+            <UntrackedTree
+              files={grouped.Untracked}
+              onFileSelect={handleGitFileOpen}
+              onRefresh={onRefresh}
+              onAddComposerReference={onAddComposerReference}
+              composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
+            />
+          </>
         )}
       </div>
       {activeFilePath && renderFileTab && (
@@ -641,6 +662,9 @@ export function ReviewPanel({
               fileTreeVisible: editorFileTreeVisible,
               onToggleFileTree: handleEditorFileTreeToggle,
               onUserInteraction: () => handleFileInteraction(activeFilePath),
+              lineNumber: activeFileTab?.lineNumber,
+              searchQuery: activeFileTab?.searchQuery,
+              navToken: activeFileTab?.navToken,
             })}
           </div>
           {editorFileTreeVisible && workspaceConnected && (
@@ -649,6 +673,8 @@ export function ReviewPanel({
                 workspaceRoot={snapshot.workspace.root}
                 onFileOpen={handleFileTreeOpen}
                 refreshSignal={fileTreeRefreshSignal}
+                onAddComposerReference={onAddComposerReference}
+                composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
                 activePath={activeFilePath}
                 variant="inline"
               />
@@ -677,6 +703,8 @@ export function ReviewPanel({
                 activePath={activeDiffTab.path}
                 onFileSelect={handleGitFileOpen}
                 onRefresh={onRefresh}
+                onAddComposerReference={onAddComposerReference}
+                composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
               />
             </aside>
           )}
@@ -764,6 +792,8 @@ function GitChangesTree({
   activePath,
   onFileSelect,
   onRefresh,
+  onAddComposerReference,
+  composerReferenceEnabled = false,
 }: {
   grouped: Record<ChangeSection, ChangedFile[]>;
   filter: string;
@@ -771,7 +801,61 @@ function GitChangesTree({
   activePath: string;
   onFileSelect: (path: string, changeSetId: string) => void;
   onRefresh: () => void | Promise<void>;
+  onAddComposerReference?: (path: string) => void;
+  composerReferenceEnabled?: boolean;
 }) {
+  const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
+  const [contextMenuError, setContextMenuError] = useState<string | null>(null);
+  const canSendToContext = composerReferenceEnabled && Boolean(onAddComposerReference);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
+
+  const handleFileContextMenu = useCallback((path: string, x: number, y: number, trackable = false) => {
+    if (!canSendToContext && !trackable) return;
+    const width = 190;
+    const height = canSendToContext && trackable ? 88 : 50;
+    setContextMenu({
+      path,
+      x: Math.min(x, window.innerWidth - width - 8),
+      y: Math.min(y, window.innerHeight - height - 8),
+      trackable,
+    });
+  }, [canSendToContext]);
+
+  const handleSendToContext = useCallback((path: string) => {
+    if (!canSendToContext || !onAddComposerReference) return;
+    setContextMenu(null);
+    onAddComposerReference(path);
+  }, [canSendToContext, onAddComposerReference]);
+
+  const handleTrackFile = useCallback(
+    async (path: string) => {
+      setContextMenu(null);
+      const accepted = await confirm(`是否跟踪文件 ${path}？`);
+      if (!accepted) return;
+
+      try {
+        await gitStage([path]);
+        await onRefresh();
+        setContextMenuError(null);
+      } catch (e) {
+        setContextMenuError(String(e));
+      }
+    },
+    [onRefresh],
+  );
+
   return (
     <div className="review-git-filetree">
       <label className="review-git-filetree-search">
@@ -784,6 +868,7 @@ function GitChangesTree({
         />
       </label>
       <div className="review-git-filetree-list">
+        {contextMenuError && <div className="review-tree-error">{contextMenuError}</div>}
         <FileGroup
           title="未暂存"
           files={grouped.Unstaged}
@@ -791,6 +876,7 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
+          onFileContextMenu={handleFileContextMenu}
         />
         <FileGroup
           title="已暂存"
@@ -799,6 +885,7 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
+          onFileContextMenu={handleFileContextMenu}
         />
         <UntrackedTree
           files={grouped.Untracked}
@@ -806,8 +893,60 @@ function GitChangesTree({
           onRefresh={onRefresh}
           activePath={activePath}
           compact
+          onAddComposerReference={onAddComposerReference}
+          composerReferenceEnabled={composerReferenceEnabled}
+          onFileContextMenu={handleFileContextMenu}
         />
       </div>
+      {contextMenu && (
+        <ReviewFileContextMenu
+          menu={contextMenu}
+          canSendToContext={canSendToContext}
+          onSendToContext={handleSendToContext}
+          onTrackFile={handleTrackFile}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReviewFileContextMenu({
+  menu,
+  canSendToContext,
+  onSendToContext,
+  onTrackFile,
+}: {
+  menu: ReviewFileContextMenuState;
+  canSendToContext: boolean;
+  onSendToContext: (path: string) => void;
+  onTrackFile: (path: string) => void;
+}) {
+  return (
+    <div
+      className="review-file-context-menu"
+      style={{ left: menu.x, top: menu.y }}
+      role="menu"
+      onClick={(event) => event.stopPropagation()}
+    >
+      {canSendToContext && (
+        <button
+          type="button"
+          role="menuitem"
+          title="发送到上下文"
+          onClick={() => onSendToContext(menu.path)}
+        >
+          发送到上下文
+        </button>
+      )}
+      {menu.trackable && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => onTrackFile(menu.path)}
+        >
+          跟踪文件
+        </button>
+      )}
     </div>
   );
 }
@@ -1795,6 +1934,9 @@ function FileGroup({
   files,
   changeSetId,
   onFileSelect,
+  onAddComposerReference,
+  composerReferenceEnabled = false,
+  onFileContextMenu,
   activePath,
   compact = false,
 }: {
@@ -1802,11 +1944,16 @@ function FileGroup({
   files: ChangedFile[];
   changeSetId: string;
   onFileSelect: (path: string, changeSetId: string) => void;
+  onAddComposerReference?: (path: string) => void;
+  composerReferenceEnabled?: boolean;
+  onFileContextMenu?: (path: string, x: number, y: number) => void;
   activePath?: string;
   compact?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
+  const canSendToContext = composerReferenceEnabled && Boolean(onAddComposerReference);
 
   const tree = useMemo(() => buildFileTree(files), [files]);
 
@@ -1834,6 +1981,40 @@ function FileGroup({
     });
   }, []);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
+
+  const handleLocalFileContextMenu = useCallback((path: string, x: number, y: number) => {
+    if (onFileContextMenu) {
+      onFileContextMenu(path, x, y);
+      return;
+    }
+    if (!canSendToContext) return;
+    const width = 190;
+    const height = 50;
+    setContextMenu({
+      path,
+      x: Math.min(x, window.innerWidth - width - 8),
+      y: Math.min(y, window.innerHeight - height - 8),
+    });
+  }, [canSendToContext, onFileContextMenu]);
+
+  const handleSendToContext = useCallback((path: string) => {
+    if (!canSendToContext || !onAddComposerReference) return;
+    setContextMenu(null);
+    onAddComposerReference(path);
+  }, [canSendToContext, onAddComposerReference]);
+
   if (files.length === 0) return null;
 
   return (
@@ -1860,12 +2041,21 @@ function FileGroup({
               expandedDirs={expandedDirs}
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
+              onFileContextMenu={handleLocalFileContextMenu}
               changeSetId={changeSetId}
               activePath={activePath}
               compact={compact}
             />
           ))}
         </div>
+      )}
+      {contextMenu && (
+        <ReviewFileContextMenu
+          menu={contextMenu}
+          canSendToContext={canSendToContext}
+          onSendToContext={handleSendToContext}
+          onTrackFile={() => undefined}
+        />
       )}
     </div>
   );
@@ -1877,6 +2067,7 @@ function DiffTreeNode({
   expandedDirs,
   onToggleDir,
   onFileSelect,
+  onFileContextMenu,
   changeSetId,
   activePath,
   compact,
@@ -1886,6 +2077,7 @@ function DiffTreeNode({
   expandedDirs: Set<string>;
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
+  onFileContextMenu?: (path: string, x: number, y: number) => void;
   changeSetId: string;
   activePath?: string;
   compact: boolean;
@@ -1918,6 +2110,7 @@ function DiffTreeNode({
                 expandedDirs={expandedDirs}
                 onToggleDir={onToggleDir}
                 onFileSelect={onFileSelect}
+                onFileContextMenu={onFileContextMenu}
                 changeSetId={changeSetId}
                 activePath={activePath}
                 compact={compact}
@@ -1935,6 +2128,12 @@ function DiffTreeNode({
         className={`review-diff-row review-diff-file ${activePath === node.path ? "is-active" : ""}`}
         style={{ paddingLeft: indent }}
         onClick={() => onFileSelect(node.path, changeSetId)}
+        onContextMenu={(event) => {
+          if (!onFileContextMenu) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onFileContextMenu(node.path, event.clientX, event.clientY);
+        }}
       >
         <span className="review-tree-arrow" />
         <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
@@ -1952,12 +2151,18 @@ function UntrackedTree({
   files,
   onFileSelect,
   onRefresh,
+  onAddComposerReference,
+  composerReferenceEnabled = false,
+  onFileContextMenu,
   activePath,
   compact = false,
 }: {
   files: ChangedFile[];
   onFileSelect: (path: string, changeSetId: string) => void;
   onRefresh: () => void | Promise<void>;
+  onAddComposerReference?: (path: string) => void;
+  composerReferenceEnabled?: boolean;
+  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean) => void;
   activePath?: string;
   compact?: boolean;
 }) {
@@ -1965,6 +2170,8 @@ function UntrackedTree({
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [childrenCache, setChildrenCache] = useState<Map<string, FileEntry[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
+  const canSendToContext = composerReferenceEnabled && Boolean(onAddComposerReference);
 
   const rootEntries = useMemo(() => files.map(changedFileToEntry), [files]);
 
@@ -1996,6 +2203,7 @@ function UntrackedTree({
 
   const handleTrackFile = useCallback(
     async (path: string) => {
+      setContextMenu(null);
       const accepted = await confirm(`是否跟踪文件 ${path}？`);
       if (!accepted) return;
 
@@ -2008,6 +2216,41 @@ function UntrackedTree({
     },
     [onRefresh],
   );
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [contextMenu]);
+
+  const handleLocalFileContextMenu = useCallback((path: string, x: number, y: number, trackable = false) => {
+    if (onFileContextMenu) {
+      onFileContextMenu(path, x, y, trackable);
+      return;
+    }
+    if (!canSendToContext && !trackable) return;
+    const width = 190;
+    const height = canSendToContext && trackable ? 88 : 50;
+    setContextMenu({
+      path,
+      x: Math.min(x, window.innerWidth - width - 8),
+      y: Math.min(y, window.innerHeight - height - 8),
+      trackable,
+    });
+  }, [canSendToContext, onFileContextMenu]);
+
+  const handleSendToContext = useCallback((path: string) => {
+    if (!canSendToContext || !onAddComposerReference) return;
+    setContextMenu(null);
+    onAddComposerReference(path);
+  }, [canSendToContext, onAddComposerReference]);
 
   if (files.length === 0) return null;
 
@@ -2038,10 +2281,21 @@ function UntrackedTree({
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={handleTrackFile}
+              onAddComposerReference={onAddComposerReference}
+              composerReferenceEnabled={composerReferenceEnabled}
+              onFileContextMenu={handleLocalFileContextMenu}
               activePath={activePath}
               compact={compact}
             />
           ))}
+          {contextMenu && (
+            <ReviewFileContextMenu
+              menu={contextMenu}
+              canSendToContext={canSendToContext}
+              onSendToContext={handleSendToContext}
+              onTrackFile={handleTrackFile}
+            />
+          )}
         </div>
       )}
     </div>
@@ -2056,6 +2310,9 @@ function UntrackedTreeNode({
   onToggleDir,
   onFileSelect,
   onTrackFile,
+  onAddComposerReference,
+  composerReferenceEnabled,
+  onFileContextMenu,
   activePath,
   compact,
 }: {
@@ -2066,6 +2323,9 @@ function UntrackedTreeNode({
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
   onTrackFile: (path: string) => void;
+  onAddComposerReference?: (path: string) => void;
+  composerReferenceEnabled: boolean;
+  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean) => void;
   activePath?: string;
   compact: boolean;
 }) {
@@ -2088,9 +2348,17 @@ function UntrackedTreeNode({
           if (isDir) return;
           event.preventDefault();
           event.stopPropagation();
+          if (onFileContextMenu) {
+            onFileContextMenu(entry.path, event.clientX, event.clientY, true);
+            return;
+          }
+          if (composerReferenceEnabled && onAddComposerReference) {
+            onAddComposerReference(entry.path);
+            return;
+          }
           onTrackFile(entry.path);
         }}
-        title={isDir ? entry.path : `${entry.path} - 右键点击以跟踪`}
+        title={isDir ? entry.path : entry.path}
       >
         <span className="review-tree-arrow">
           {isDir ? (isExpanded ? "v" : ">") : ""}
@@ -2114,6 +2382,9 @@ function UntrackedTreeNode({
               onToggleDir={onToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={onTrackFile}
+              onAddComposerReference={onAddComposerReference}
+              composerReferenceEnabled={composerReferenceEnabled}
+              onFileContextMenu={onFileContextMenu}
               activePath={activePath}
               compact={compact}
             />

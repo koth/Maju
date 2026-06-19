@@ -67,7 +67,7 @@ describe("FileTree", () => {
     expect(screen.queryByRole("menuitem", { name: "删除文件" })).toBeNull();
   });
 
-  it("omits composer reference action when references are unavailable", async () => {
+  it("omits context action when references are unavailable", async () => {
     render(
       <FileTree
         workspaceRoot="/repo"
@@ -82,7 +82,28 @@ describe("FileTree", () => {
       clientY: 12,
     });
 
-    expect(screen.queryByRole("menuitem", { name: "添加到 Composer 引用" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "发送到上下文" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /Composer/ })).toBeNull();
+  });
+
+  it("sends a file to context from the context menu", async () => {
+    const onAddReference = vi.fn();
+    render(
+      <FileTree
+        workspaceRoot="/repo"
+        onFileOpen={vi.fn()}
+        onAddComposerReference={onAddReference}
+        composerReferenceEnabled
+      />,
+    );
+
+    fireEvent.contextMenu(await screen.findByText("notes.md"), {
+      clientX: 12,
+      clientY: 12,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "发送到上下文" }));
+
+    expect(onAddReference).toHaveBeenCalledWith("notes.md");
   });
 
   it("uses inline search chrome without the panel header", async () => {

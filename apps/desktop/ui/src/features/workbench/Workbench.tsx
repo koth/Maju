@@ -64,6 +64,10 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
 };
 const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
 
+function reviewOpenTabKey(tab: ReviewPanelOpenTab) {
+  return tab.kind === "diff" ? `diff:${tab.changeSetId}:${tab.path}` : `file:${tab.path}`;
+}
+
 let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
 
 type SessionArchiveToast = ArchivedSessionNotice & {
@@ -157,7 +161,6 @@ export function Workbench() {
     resetTabs,
     handleOpenDiffTab,
     handleOpenEditorTab,
-    handleSearchResultOpen,
     handleCloseTab,
     handleConfirmSaveClose,
     handleConfirmDiscardClose,
@@ -176,6 +179,7 @@ export function Workbench() {
   } | null>(null);
   const autoReviewSignatureRef = useRef<string | null>(null);
   const reviewFocusSeqRef = useRef(0);
+  const searchOpenSeqRef = useRef(0);
   const centerPanelRef = useRef<HTMLElement>(null);
   const contextDockResizeCheckRef = useRef(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -539,6 +543,27 @@ export function Workbench() {
     setReviewFocusRequest({ changeSetId, token: reviewFocusSeqRef.current });
   }, [setRightPanelCollapsed]);
 
+  const handleSearchFileOpen = useCallback((filePath: string, lineNumber?: number, searchQuery?: string) => {
+    searchOpenSeqRef.current += 1;
+    const tab: ReviewPanelOpenTab = {
+      kind: "file",
+      path: filePath,
+      lineNumber,
+      searchQuery,
+      navToken: searchOpenSeqRef.current,
+    };
+    setRightPanelCollapsed(false);
+    setReviewPanelExpanded(false);
+    setReviewPanelOpenTabs((current) => {
+      const tabId = `file:${filePath}`;
+      if (current.some((openTab) => reviewOpenTabKey(openTab) === tabId)) {
+        return current.map((openTab) => (reviewOpenTabKey(openTab) === tabId ? tab : openTab));
+      }
+      return [...current, tab];
+    });
+    setReviewPanelActiveTab(tab);
+  }, [setRightPanelCollapsed]);
+
   const autoReviewTarget = useMemo(
     () => latestReviewableTurnChangeSet(timelineTurnChangeSets, liveTurnChangeSet),
     [liveTurnChangeSet, timelineTurnChangeSets],
@@ -582,10 +607,20 @@ export function Workbench() {
 
   const renderReviewFileTab = useCallback((
     path: string,
-    context?: { fileTreeVisible: boolean; onToggleFileTree?: () => void; onUserInteraction?: () => void },
+    context?: {
+      fileTreeVisible: boolean;
+      onToggleFileTree?: () => void;
+      onUserInteraction?: () => void;
+      lineNumber?: number;
+      searchQuery?: string;
+      navToken?: number;
+    },
   ) => (
     <EditorView
       path={path}
+      lineNumber={context?.lineNumber}
+      searchQuery={context?.searchQuery}
+      navToken={context?.navToken}
       appTheme={appTheme}
       toolbarMode="breadcrumbs"
       workspaceName={snapshot?.workspace.name}
@@ -597,8 +632,9 @@ export function Workbench() {
         handleEditorUserInteraction(p);
         context?.onUserInteraction?.();
       }}
+      onAddComposerReference={enqueueComposerReference}
     />
-  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, handleEditorUserInteraction, snapshot?.workspace.name]);
+  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, handleEditorUserInteraction, enqueueComposerReference, snapshot?.workspace.name]);
 
   const allPendingPermissionRequests = useMemo(
     () => (snapshot ? findPendingPermissionRequests(snapshot.tools) : []),
@@ -803,7 +839,7 @@ export function Workbench() {
         onToggleTerminal={terminalDockAvailable ? handleToggleTerminalDock : () => undefined}
         onRefreshGit={handleRefreshGit}
         onToggleRightPanel={handleToggleRightPanel}
-        onFileOpen={handleSearchResultOpen}
+        onFileOpen={handleSearchFileOpen}
       />
 
       <div className="workbench-content" style={leftSidebarStyle}>

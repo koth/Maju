@@ -946,6 +946,59 @@ describe("ReviewPanel scoped change sets", () => {
     );
   });
 
+  it("sends files to context from right-side file tree context menus", async () => {
+    const onAddComposerReference = vi.fn();
+    vi.mocked(fsListDir).mockResolvedValue([
+      { name: "app.ts", kind: "File", path: "src/app.ts" },
+    ]);
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          prompt_capabilities: { image: false, embedded_context: true },
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("src/unstaged.ts", "Unstaged"),
+              makeChangedFile("src/untracked.ts", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+        onAddComposerReference={onAddComposerReference}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+    fireEvent.contextMenu(await screen.findByText("app.ts"), {
+      clientX: 14,
+      clientY: 18,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "发送到上下文" }));
+    expect(onAddComposerReference).toHaveBeenCalledWith("src/app.ts");
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    fireEvent.contextMenu(await screen.findByText("unstaged.ts"), {
+      clientX: 18,
+      clientY: 22,
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "发送到上下文" }));
+    expect(onAddComposerReference).toHaveBeenCalledWith("src/unstaged.ts");
+
+    fireEvent.contextMenu(screen.getByText("untracked.ts"), {
+      clientX: 20,
+      clientY: 24,
+    });
+    expect(screen.getByRole("menuitem", { name: "跟踪文件" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("menuitem", { name: "发送到上下文" }));
+    expect(onAddComposerReference).toHaveBeenCalledWith("src/untracked.ts");
+  });
+
   it("reloads the file tree when the active workspace changes", async () => {
     vi.mocked(fsListDir)
       .mockResolvedValueOnce([

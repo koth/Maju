@@ -39,8 +39,10 @@ export function GlobalChrome({
   const [searchError, setSearchError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
+  const searchRequestRef = useRef(0);
 
   const closeSearch = useCallback(() => {
+    searchRequestRef.current += 1;
     setSearchOpen(false);
     setSearchResult(null);
     setSearchError(null);
@@ -75,21 +77,48 @@ export function GlobalChrome({
     return () => document.removeEventListener("mousedown", handleClick);
   }, [searchOpen, closeSearch]);
 
-  const handleSearchSubmit = useCallback(async () => {
-    const q = searchQuery.trim();
-    if (!q) return;
+  const runSearch = useCallback(async (q: string) => {
+    const requestId = ++searchRequestRef.current;
     setSearchLoading(true);
     setSearchError(null);
     setSearchResult(null);
     try {
       const result = await fsSearch(q);
-      setSearchResult(result);
+      if (searchRequestRef.current === requestId) {
+        setSearchResult(result);
+      }
     } catch (err) {
-      setSearchError(String(err));
+      if (searchRequestRef.current === requestId) {
+        setSearchError(String(err));
+      }
     } finally {
-      setSearchLoading(false);
+      if (searchRequestRef.current === requestId) {
+        setSearchLoading(false);
+      }
     }
-  }, [searchQuery]);
+  }, []);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const q = searchQuery.trim();
+    if (!q) {
+      searchRequestRef.current += 1;
+      setSearchResult(null);
+      setSearchError(null);
+      setSearchLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void runSearch(q);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [runSearch, searchOpen, searchQuery]);
+
+  const handleSearchSubmit = useCallback(async () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    await runSearch(q);
+  }, [runSearch, searchQuery]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {

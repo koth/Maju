@@ -616,11 +616,24 @@ export interface SearchFileResult {
   matches: SearchMatch[];
 }
 
+export interface SearchFileSuggestion {
+  path: string;
+  name: string;
+}
+
+export interface SearchNotice {
+  message: string;
+  url?: string | null;
+  url_label?: string | null;
+}
+
 export interface SearchResult {
   query: string;
+  file_suggestions: SearchFileSuggestion[];
   files: SearchFileResult[];
   total_matches: number;
   truncated: boolean;
+  notice?: SearchNotice | null;
 }
 
 // App settings types

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FileChangeRecord, SessionFileChange, TabDescriptor } from "../../types";
 import { editorSaveFile, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import {
@@ -82,7 +82,6 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   const [resolvedDiffChange, setResolvedDiffChange] = useState<
     SessionFileChange | FileChangeRecord | null
   >(null);
-  const navTokenRef = useRef(0);
 
   const resetTabs = useCallback(() => {
     setTabs([CONVERSATION_TAB]);
@@ -130,20 +129,6 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
   setTabs((prev) => openEditorTab(prev, filePath));
   setActiveTabId(tabId);
  }, []);
-
-  const handleSearchResultOpen = useCallback(
-    (filePath: string, lineNumber?: number, searchQuery?: string) => {
-      const tabId = editorTabId(filePath);
-      const token = ++navTokenRef.current;
-      setTabs((prev) => openEditorTab(prev, filePath, {
-        lineNumber,
-        searchQuery,
-        navToken: token,
-      }));
-      setActiveTabId(tabId);
-    },
-    [activeTabId],
-  );
 
   const closeTabById = useCallback(
     (id: string) => {
@@ -316,7 +301,6 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
     resetTabs,
     handleOpenDiffTab,
     handleOpenEditorTab,
-    handleSearchResultOpen,
     handleCloseTab,
     handleConfirmSaveClose,
     handleConfirmDiscardClose,

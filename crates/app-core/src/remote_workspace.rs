@@ -789,6 +789,74 @@ const SEARCH_SCRIPT: &str = r#"
 const root = fs.realpathSync(process.argv[1]);
 const query = process.argv[2] || '';
 if (!query.trim()) die('Search query must not be empty');
+const RIPGREP_INSTALL_URL = 'https://github.com/BurntSushi/ripgrep#installation';
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'dist', 'build']);
+const SKIP_SUFFIXES = ['.min.js', '.min.css', '.map', '.lock'];
+const MAX_FILE_SUGGESTIONS = 25;
+
+function ripgrepMissingNotice() {
+  return {
+    message: '未检测到 ripgrep (rg)，内容搜索不可用。安装说明：',
+    url: RIPGREP_INSTALL_URL,
+    url_label: RIPGREP_INSTALL_URL
+  };
+}
+
+function shouldSkipFile(name) {
+  const lower = name.toLowerCase();
+  return SKIP_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+function suggestionScore(relative, name, q) {
+  const file = name.toLowerCase();
+  const rel = relative.toLowerCase();
+  if (file === q) return 0;
+  if (file.startsWith(q)) return 1;
+  if (rel.startsWith(q)) return 2;
+  if (file.includes(q)) return 3;
+  if (rel.includes(q)) return 4;
+  return null;
+}
+
+function collectFileSuggestions(root, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const ranked = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+    for (const entry of entries) {
+      const target = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) stack.push(target);
+        continue;
+      }
+      if (!entry.isFile() || shouldSkipFile(entry.name)) continue;
+      const relative = relPath(root, target);
+      const score = suggestionScore(relative, entry.name, q);
+      if (score == null) continue;
+      ranked.push({
+        score,
+        length: relative.length,
+        sortPath: relative.toLowerCase(),
+        path: relative,
+        name: entry.name
+      });
+    }
+  }
+  return ranked
+    .sort((a, b) => a.score - b.score || a.length - b.length || a.sortPath.localeCompare(b.sortPath))
+    .slice(0, MAX_FILE_SUGGESTIONS)
+    .map(({ path, name }) => ({ path, name }));
+}
+
+const file_suggestions = collectFileSuggestions(root, query);
 const result = cp.spawnSync('rg', [
   '--json',
   '--no-messages',
@@ -823,6 +891,17 @@ const result = cp.spawnSync('rg', [
   maxBuffer: 16 * 1024 * 1024
 });
 const stdout = result.stdout || '';
+if (result.error && result.error.code === 'ENOENT') {
+  console.log(JSON.stringify({
+    query,
+    file_suggestions,
+    files: [],
+    total_matches: 0,
+    truncated: false,
+    notice: ripgrepMissingNotice()
+  }));
+  process.exit(0);
+}
 if (result.error) die(result.error.message || 'failed to execute ripgrep');
 if (result.status === 2 && !stdout.trim()) {
   die((result.stderr || 'ripgrep error').trim());
@@ -860,7 +939,7 @@ for (const line of stdout.split(/\r?\n/)) {
 const sorted = Array.from(files.entries())
   .sort((a, b) => a[0].toLowerCase().localeCompare(b[0].toLowerCase()))
   .map(([path, matches]) => ({ path, matches }));
-console.log(JSON.stringify({ query, files: sorted, total_matches, truncated }));
+console.log(JSON.stringify({ query, file_suggestions, files: sorted, total_matches, truncated }));
 "#;
 
 #[cfg(test)]

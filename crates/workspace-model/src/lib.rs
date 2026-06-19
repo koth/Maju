@@ -1034,11 +1034,30 @@ pub struct SearchFileResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchFileSuggestion {
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchNotice {
+    pub message: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub url_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SearchResult {
     pub query: String,
+    #[serde(default)]
+    pub file_suggestions: Vec<SearchFileSuggestion>,
     pub files: Vec<SearchFileResult>,
     pub total_matches: u32,
     pub truncated: bool,
+    #[serde(default)]
+    pub notice: Option<SearchNotice>,
 }
 
 // ── App settings types ──

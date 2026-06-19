@@ -309,7 +309,7 @@ export function EditorView({
       if (onAddComposerReferenceRef.current) {
         composerReferenceActionRef.current = editor.addAction({
           id: "kodex.send-selection-to-composer",
-          label: "发送选区到 Composer",
+          label: "发送到上下文",
           precondition: "editorHasSelection",
           contextMenuGroupId: "navigation",
           contextMenuOrder: 1.5,
