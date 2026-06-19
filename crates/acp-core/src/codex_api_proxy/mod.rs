@@ -57,6 +57,8 @@ const MIMO_UPSTREAM_MESSAGES_URL: &str =
     "https://token-plan-cn.xiaomimimo.com/anthropic/v1/messages";
 const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
 const PROVIDER_MODEL_ID_PREFIX: &str = "kodex-provider/";
+const SHELL_TOOL_INSTRUCTIONS: &str = "Shell command compatibility rule: Run project commands from the directory that owns the relevant manifest or toolchain file, such as package.json or Cargo.toml. Prefer local project executables and scripts over bare npx or package-manager commands that may download from the network. When piping output through head, tail, grep, or similar filters, preserve the original failing exit status with set -o pipefail or avoid the pipe. Do not repeatedly retry the exact same failing shell command; inspect the error and change strategy first.";
+const NON_GPT_EDIT_BRIDGE_INSTRUCTIONS: &str = "Editing tool compatibility rule: Prefer the Edit, MultiEdit, and Write tools for file changes when they are available. Kodex converts those Claude-style editing tools into apply_patch internally, so using them satisfies the apply_patch requirement. Use raw apply_patch only as a fallback when the change cannot be represented with Edit, MultiEdit, or Write. Use shell commands only for inspection or validation.";
 
 #[derive(Debug, Clone)]
 struct CodexApiProxyConfig {
@@ -1096,7 +1098,14 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
         "stream": payload.get("stream").and_then(Value::as_bool).unwrap_or(false),
     });
 
-    if let Some(tools) = responses_tools_to_chat_tools(payload.get("tools")) {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let add_edit_bridge_instructions =
+        should_add_non_gpt_edit_bridge_instructions(payload.get("tools"), model);
+
+    if let Some(tools) = responses_tools_to_chat_tools(payload.get("tools"), model) {
         chat["tools"] = tools;
     }
     if let Some(tool_choice) = responses_tool_choice_to_chat_tool_choice(payload.get("tool_choice"))
@@ -1113,6 +1122,9 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
         .or_else(|| payload.get("max_tokens"))
     {
         chat["max_tokens"] = max_tokens.clone();
+    }
+    if add_edit_bridge_instructions {
+        chat = add_non_gpt_edit_bridge_instructions(chat);
     }
 
     Ok(chat)
@@ -1545,6 +1557,35 @@ fn parse_base64_data_url(url: &str) -> Option<(String, String)> {
         return None;
     }
     Some((media_type.to_string(), data.to_string()))
+}
+
+fn add_system_instruction(mut chat: Value, instruction: &str) -> Value {
+    let message = json!({
+        "role": "system",
+        "content": instruction
+    });
+    match chat.get_mut("messages").and_then(Value::as_array_mut) {
+        Some(messages) => {
+            let insert_at = messages
+                .iter()
+                .position(|message| {
+                    !matches!(
+                        message.get("role").and_then(Value::as_str),
+                        Some("system" | "developer")
+                    )
+                })
+                .unwrap_or(messages.len());
+            messages.insert(insert_at, message);
+        }
+        None => {
+            chat["messages"] = Value::Array(vec![message]);
+        }
+    }
+    chat
+}
+
+fn add_non_gpt_edit_bridge_instructions(chat: Value) -> Value {
+    add_system_instruction(chat, NON_GPT_EDIT_BRIDGE_INSTRUCTIONS)
 }
 
 fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
@@ -2216,48 +2257,201 @@ fn parse_tool_arguments(value: Option<&Value>) -> Value {
     }
 }
 
-fn responses_tools_to_chat_tools(value: Option<&Value>) -> Option<Value> {
+fn responses_tools_to_chat_tools(value: Option<&Value>, model: &str) -> Option<Value> {
     let tools = value?.as_array()?;
-    let converted = tools
-        .iter()
-        .filter_map(|tool| {
-            match tool.get("type").and_then(Value::as_str) {
-                Some("function") => {
-                    let name = tool.get("name").and_then(Value::as_str)?;
-                    Some(json!({
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "description": tool.get("description").cloned().unwrap_or(Value::String(String::new())),
-                            "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
-                        }
-                    }))
+    let prefer_claude_edit_tools = model_prefers_claude_edit_tools(model);
+    let mut converted = Vec::new();
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {
+                let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let description = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                converted.push(json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": chat_tool_description(name, description),
+                        "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                    }
+                }));
+            }
+            Some("custom") if tool.get("name").and_then(Value::as_str) == Some("apply_patch") => {
+                if prefer_claude_edit_tools {
+                    converted.extend(claude_edit_chat_tools_for_apply_patch());
                 }
-                Some("custom") if tool.get("name").and_then(Value::as_str) == Some("apply_patch") => {
-                    Some(json!({
-                        "type": "function",
-                        "function": {
-                            "name": "apply_patch",
-                            "description": "Edit files by applying a patch. Put the complete raw patch text in the `patch` string. Do not wrap the patch in shell commands, here-strings, or JSON inside the string.",
-                            "parameters": {
+                converted.push(apply_patch_chat_tool());
+            }
+            _ => {}
+        }
+    }
+    (!converted.is_empty()).then_some(Value::Array(converted))
+}
+
+fn should_add_non_gpt_edit_bridge_instructions(value: Option<&Value>, model: &str) -> bool {
+    model_prefers_claude_edit_tools(model) && responses_tools_include_apply_patch(value)
+}
+
+fn chat_tool_description(name: &str, description: &str) -> String {
+    if !chat_tool_is_shell(name, description) || description.contains(SHELL_TOOL_INSTRUCTIONS) {
+        return description.to_string();
+    }
+    if description.trim().is_empty() {
+        return SHELL_TOOL_INSTRUCTIONS.to_string();
+    }
+    format!("{}\n\n{}", description.trim_end(), SHELL_TOOL_INSTRUCTIONS)
+}
+
+fn chat_tool_is_shell(name: &str, description: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let description = description.to_ascii_lowercase();
+    is_shell_tool_name(&name) || is_shell_tool_description(&description)
+}
+
+fn is_shell_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bash"
+            | "shell"
+            | "terminal"
+            | "exec"
+            | "execute"
+            | "exec_command"
+            | "run_command"
+            | "run_shell_command"
+    ) || name.contains("shell")
+        || name.contains("bash")
+        || name.contains("terminal")
+        || name.contains("exec")
+}
+
+fn is_shell_tool_description(description: &str) -> bool {
+    [
+        "shell command",
+        "bash command",
+        "terminal command",
+        "execute command",
+        "run command",
+        "run commands",
+    ]
+    .iter()
+    .any(|needle| description.contains(needle))
+}
+
+fn responses_tools_include_apply_patch(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_array).is_some_and(|tools| {
+        tools.iter().any(|tool| {
+            tool.get("type").and_then(Value::as_str) == Some("custom")
+                && tool.get("name").and_then(Value::as_str) == Some("apply_patch")
+        })
+    })
+}
+
+fn model_prefers_claude_edit_tools(model: &str) -> bool {
+    !is_gpt_or_codex_model(model)
+}
+
+fn is_gpt_or_codex_model(model: &str) -> bool {
+    let normalized = normalized_model_key(model);
+    let model = normalized
+        .strip_prefix(PROVIDER_MODEL_ID_PREFIX)
+        .and_then(|rest| rest.split_once('/').map(|(_, model)| model))
+        .unwrap_or(normalized.as_str());
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+
+    model.starts_with("gpt") || model.starts_with("chatgpt") || model.starts_with("codex")
+}
+
+fn apply_patch_chat_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Low-level fallback for editing files by applying a raw patch. Prefer Edit, MultiEdit, or Write when those tools are available. Put the complete raw patch text in the `patch` string. Do not wrap the patch in shell commands, here-strings, or JSON inside the string.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "The complete patch text, starting with *** Begin Patch and ending with *** End Patch."
+                    }
+                },
+                "required": ["patch"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+fn claude_edit_chat_tools_for_apply_patch() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "Edit",
+                "description": "Modify an existing text file by replacing old_string with new_string. old_string must match the file exactly. Use MultiEdit for several replacements in one file. Use Write only for new files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path of the file to edit." },
+                        "old_string": { "type": "string", "description": "Exact text to replace." },
+                        "new_string": { "type": "string", "description": "Replacement text." },
+                        "replace_all": { "type": "boolean", "description": "Whether to replace all exact occurrences. Prefer false unless explicitly needed." }
+                    },
+                    "required": ["file_path", "old_string", "new_string"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "MultiEdit",
+                "description": "Apply multiple exact string replacements to one existing text file. Edits are applied in order.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path of the file to edit." },
+                        "edits": {
+                            "type": "array",
+                            "items": {
                                 "type": "object",
                                 "properties": {
-                                    "patch": {
-                                        "type": "string",
-                                        "description": "The complete patch text, starting with *** Begin Patch and ending with *** End Patch."
-                                    }
+                                    "old_string": { "type": "string", "description": "Exact text to replace." },
+                                    "new_string": { "type": "string", "description": "Replacement text." },
+                                    "replace_all": { "type": "boolean", "description": "Whether to replace all exact occurrences. Prefer false unless explicitly needed." }
                                 },
-                                "required": ["patch"],
+                                "required": ["old_string", "new_string"],
                                 "additionalProperties": false
                             }
                         }
-                    }))
+                    },
+                    "required": ["file_path", "edits"],
+                    "additionalProperties": false
                 }
-                _ => None,
             }
-        })
-        .collect::<Vec<_>>();
-    (!converted.is_empty()).then_some(Value::Array(converted))
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "Write",
+                "description": "Create a new text file with the given content. To modify an existing file, use Edit or MultiEdit.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string", "description": "Path of the new file." },
+                        "content": { "type": "string", "description": "Complete file content." }
+                    },
+                    "required": ["file_path", "content"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+    ]
 }
 
 fn responses_tool_choice_to_chat_tool_choice(value: Option<&Value>) -> Option<Value> {
@@ -2348,13 +2542,13 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
         .get("arguments")
         .and_then(Value::as_str)
         .unwrap_or("{}");
-    if name == "apply_patch" {
+    if tool_call_outputs_as_apply_patch(name) {
         return json!({
             "id": id,
             "type": "custom_tool_call",
             "call_id": id,
-            "name": name,
-            "input": apply_patch_input_from_function_arguments(arguments),
+            "name": "apply_patch",
+            "input": apply_patch_input_for_tool_call(name, arguments),
             "status": "completed"
         });
     }
@@ -2385,6 +2579,130 @@ fn apply_patch_input_from_function_arguments(arguments: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+fn tool_call_outputs_as_apply_patch(name: &str) -> bool {
+    name == "apply_patch" || claude_edit_tool_kind(name).is_some()
+}
+
+fn apply_patch_input_for_tool_call(name: &str, arguments: &str) -> String {
+    if name == "apply_patch" {
+        return apply_patch_input_from_function_arguments(arguments);
+    }
+    claude_edit_tool_arguments_to_apply_patch(name, arguments)
+        .unwrap_or_else(|| invalid_apply_patch_input_for_tool_call(name, arguments))
+}
+
+fn claude_edit_tool_arguments_to_apply_patch(name: &str, arguments: &str) -> Option<String> {
+    let input = serde_json::from_str::<Value>(arguments).ok()?;
+    claude_edit_tool_input_to_apply_patch(name, &input)
+}
+
+fn claude_edit_tool_input_to_apply_patch(name: &str, input: &Value) -> Option<String> {
+    match claude_edit_tool_kind(name)? {
+        "edit" => edit_tool_input_to_apply_patch(input),
+        "multiedit" => multi_edit_tool_input_to_apply_patch(input),
+        "write" => write_tool_input_to_apply_patch(input),
+        _ => None,
+    }
+}
+
+fn claude_edit_tool_kind(name: &str) -> Option<&'static str> {
+    let normalized = name
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "edit" => Some("edit"),
+        "multiedit" => Some("multiedit"),
+        "write" => Some("write"),
+        _ => None,
+    }
+}
+
+fn edit_tool_input_to_apply_patch(input: &Value) -> Option<String> {
+    let path = string_field(input, &["file_path", "path", "file"])?;
+    let old_string = string_field(input, &["old_string", "oldText", "old_text"])?;
+    let new_string = string_field(input, &["new_string", "newText", "new_text"])?;
+    replacement_patch(path, &[(old_string, new_string)])
+}
+
+fn multi_edit_tool_input_to_apply_patch(input: &Value) -> Option<String> {
+    let path = string_field(input, &["file_path", "path", "file"])?;
+    let edits = input.get("edits")?.as_array()?;
+    if edits.is_empty() {
+        return None;
+    }
+    let mut replacements = Vec::new();
+    for edit in edits {
+        let old_string = string_field(edit, &["old_string", "oldText", "old_text"])?;
+        let new_string = string_field(edit, &["new_string", "newText", "new_text"])?;
+        replacements.push((old_string, new_string));
+    }
+    replacement_patch(path, &replacements)
+}
+
+fn write_tool_input_to_apply_patch(input: &Value) -> Option<String> {
+    let path = string_field(input, &["file_path", "path", "file"])?;
+    let content = string_field(
+        input,
+        &["content", "text", "new_string", "newText", "new_text"],
+    )?;
+    let mut lines = vec![
+        "*** Begin Patch".to_string(),
+        format!("*** Add File: {path}"),
+    ];
+    let mut body = prefixed_patch_lines('+', content);
+    if body.is_empty() {
+        body.push("+".to_string());
+    }
+    lines.extend(body);
+    lines.push("*** End Patch".to_string());
+    Some(lines.join("\n"))
+}
+
+fn replacement_patch(path: &str, replacements: &[(&str, &str)]) -> Option<String> {
+    if path.trim().is_empty() || replacements.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        "*** Begin Patch".to_string(),
+        format!("*** Update File: {path}"),
+    ];
+    for (old_string, new_string) in replacements {
+        if old_string.is_empty() {
+            return None;
+        }
+        lines.push("@@".to_string());
+        lines.extend(prefixed_patch_lines('-', old_string));
+        lines.extend(prefixed_patch_lines('+', new_string));
+    }
+    lines.push("*** End Patch".to_string());
+    Some(lines.join("\n"))
+}
+
+fn prefixed_patch_lines(prefix: char, text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut parts = text.split('\n').collect::<Vec<_>>();
+    if text.ends_with('\n') {
+        let _ = parts.pop();
+    }
+    parts
+        .into_iter()
+        .map(|line| format!("{prefix}{line}"))
+        .collect()
+}
+
+fn string_field<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str))
+}
+
+fn invalid_apply_patch_input_for_tool_call(name: &str, arguments: &str) -> String {
+    format!("Invalid {name} tool input; expected Claude-style edit JSON but received: {arguments}")
 }
 
 #[cfg(test)]
@@ -2494,13 +2812,13 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
                         .get("input")
                         .map(|input| input.to_string())
                         .unwrap_or_else(|| "{}".to_string());
-                    if name == "apply_patch" {
+                    if tool_call_outputs_as_apply_patch(name) {
                         output.push(json!({
                             "id": id,
                             "type": "custom_tool_call",
                             "call_id": id,
-                            "name": name,
-                            "input": apply_patch_input_from_function_arguments(&arguments),
+                            "name": "apply_patch",
+                            "input": apply_patch_input_for_tool_call(name, &arguments),
                             "status": "completed"
                         }));
                     } else {

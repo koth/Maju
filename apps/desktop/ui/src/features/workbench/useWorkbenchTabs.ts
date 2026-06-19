@@ -51,42 +51,28 @@ function createEditorTab(filePath: string, options: EditorTabOptions = {}): TabD
   };
 }
 
-function canReplaceEditorTab(tab: TabDescriptor | undefined, nextFilePath: string) {
-  return Boolean(
-    tab?.type === "editor" &&
-      tab.ephemeral &&
-      tab.filePath &&
-      tab.filePath !== nextFilePath &&
-      !tab.dirty &&
-      !isModelDirty(tab.filePath),
-  );
-}
-
 function openEditorTab(
   currentTabs: TabDescriptor[],
-  activeTabId: string,
   filePath: string,
   options: EditorTabOptions = {},
 ) {
   const tabId = editorTabId(filePath);
+
+  // If this file is already open, just focus it — don't add a duplicate.
   const existingIndex = currentTabs.findIndex((tab) => tab.id === tabId);
-  const activeIndex = currentTabs.findIndex((tab) => tab.id === activeTabId);
-  const activeTab = activeIndex >= 0 ? currentTabs[activeIndex] : undefined;
-  const canReplaceActiveTab = canReplaceEditorTab(activeTab, filePath);
-
   if (existingIndex >= 0) {
-    return currentTabs
-      .filter((_, index) => !(canReplaceActiveTab && index === activeIndex && index !== existingIndex))
-      .map((tab) => (tab.id === tabId ? { ...tab, ...options } : tab));
+    return currentTabs;
   }
 
-  if (canReplaceActiveTab && activeIndex >= 0) {
-    const nextTabs = [...currentTabs];
-    nextTabs[activeIndex] = createEditorTab(filePath, options);
-    return nextTabs;
-  }
+  // VS Code / JetBrains preview-tab: opening a new file from the tree
+  // re-uses a single ephemeral slot.  The preview tab is replaced
+  // unless the user has interacted with it (scroll, click, type).
+  // Non-ephemeral and dirty tabs are always kept.
+  const kept = currentTabs.filter(
+    (tab) => tab.type !== "editor" || !tab.ephemeral || tab.dirty,
+  );
 
-  return [...currentTabs, createEditorTab(filePath, options)];
+  return [...kept, createEditorTab(filePath, options)];
 }
 
 export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
@@ -139,17 +125,17 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
     [],
   );
 
-  const handleOpenEditorTab = useCallback((filePath: string) => {
-    const tabId = editorTabId(filePath);
-    setTabs((prev) => openEditorTab(prev, activeTabId, filePath));
-    setActiveTabId(tabId);
-  }, [activeTabId]);
+const handleOpenEditorTab = useCallback((filePath: string) => {
+  const tabId = editorTabId(filePath);
+  setTabs((prev) => openEditorTab(prev, filePath));
+  setActiveTabId(tabId);
+ }, []);
 
   const handleSearchResultOpen = useCallback(
     (filePath: string, lineNumber?: number, searchQuery?: string) => {
       const tabId = editorTabId(filePath);
       const token = ++navTokenRef.current;
-      setTabs((prev) => openEditorTab(prev, activeTabId, filePath, {
+      setTabs((prev) => openEditorTab(prev, filePath, {
         lineNumber,
         searchQuery,
         navToken: token,
@@ -197,7 +183,7 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
         filePath: closing.filePath,
       });
     },
-    [closeTabById, tabs],
+    [tabs],
   );
 
   const handleConfirmSaveClose = useCallback(async () => {
@@ -248,7 +234,7 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
     setTabs((prev) =>
       prev.map((tab) =>
         tab.type === "editor" && tab.filePath === filePath && tab.ephemeral
-          ? { ...tab, ephemeral: false }
+          ? { ...tab, ephemeral: false, hasUserInteraction: true }
           : tab,
       ),
     );

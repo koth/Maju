@@ -95,7 +95,7 @@ fn converts_responses_image_input_to_chat_image_content() {
 fn converts_apply_patch_custom_tool_to_chat_function_tool() {
     let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
     let payload = json!({
-        "model": "glm-5.1",
+        "model": "gpt-5.5",
         "input": [
             { "role": "user", "content": "edit" },
             {
@@ -135,6 +135,285 @@ fn converts_apply_patch_custom_tool_to_chat_function_tool() {
     assert_eq!(arguments["patch"], patch);
     assert_eq!(chat["messages"][2]["role"], "tool");
     assert_eq!(chat["messages"][2]["tool_call_id"], "call_patch");
+}
+
+#[test]
+fn kimi_code_expands_apply_patch_tool_to_claude_style_edit_tools() {
+    let payload = json!({
+        "model": "kimi-for-coding",
+        "input": [{ "role": "user", "content": "edit" }],
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Use the `apply_patch` tool to edit files.",
+            "format": { "type": "grammar", "syntax": "lark", "definition": "start: begin_patch" }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "kimi_code").unwrap();
+    let tool_names = chat["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tool_names,
+        vec!["Edit", "MultiEdit", "Write", "apply_patch"]
+    );
+
+    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let anthropic_tool_names = anthropic["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        anthropic_tool_names,
+        vec!["Edit", "MultiEdit", "Write", "apply_patch"]
+    );
+}
+
+#[test]
+fn non_gpt_models_expand_apply_patch_tool_and_get_bridge_instructions() {
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "instructions": "base instructions",
+        "input": [{ "role": "user", "content": "edit" }],
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Use the `apply_patch` tool to edit files.",
+            "format": { "type": "grammar", "syntax": "lark", "definition": "start: begin_patch" }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let tool_names = chat["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tool_names,
+        vec!["Edit", "MultiEdit", "Write", "apply_patch"]
+    );
+    assert_eq!(chat["messages"][0]["content"], "base instructions");
+    assert_eq!(
+        chat["messages"][1]["content"],
+        NON_GPT_EDIT_BRIDGE_INSTRUCTIONS
+    );
+    assert_eq!(chat["messages"][2]["role"], "user");
+
+    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let system = anthropic["system"].as_str().unwrap();
+    assert!(system.contains("base instructions"));
+    assert!(system.contains(NON_GPT_EDIT_BRIDGE_INSTRUCTIONS));
+}
+
+#[test]
+fn gpt_models_keep_apply_patch_as_the_only_edit_tool() {
+    let payload = json!({
+        "model": "openai/gpt-5.5",
+        "input": [{ "role": "user", "content": "edit" }],
+        "tools": [{
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Use the `apply_patch` tool to edit files.",
+            "format": { "type": "grammar", "syntax": "lark", "definition": "start: begin_patch" }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+    let tool_names = chat["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(tool_names, vec!["apply_patch"]);
+    assert_eq!(chat["messages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn gpt_models_get_shell_tool_instructions() {
+    let payload = json!({
+        "model": "openai/gpt-5.5",
+        "instructions": "base instructions",
+        "input": [{ "role": "user", "content": "run validation" }],
+        "tools": [{
+            "type": "function",
+            "name": "bash",
+            "description": "Run a shell command in the project workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"]
+            }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+
+    assert_eq!(chat["messages"][0]["content"], "base instructions");
+    assert_eq!(chat["messages"][1]["role"], "user");
+    assert_eq!(chat["tools"][0]["function"]["name"], "bash");
+    assert!(
+        chat["tools"][0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(SHELL_TOOL_INSTRUCTIONS)
+    );
+}
+
+#[test]
+fn converts_claude_style_edit_tool_call_to_apply_patch_custom_call() {
+    let chat = json!({
+        "id": "chatcmpl_1",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_edit",
+                    "type": "function",
+                    "function": {
+                        "name": "Edit",
+                        "arguments": serde_json::to_string(&json!({
+                            "file_path": "src/lib.rs",
+                            "old_string": "old",
+                            "new_string": "new"
+                        })).unwrap()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = chat_response_to_responses_response(chat).unwrap();
+
+    assert_eq!(response["output"][0]["type"], "custom_tool_call");
+    assert_eq!(response["output"][0]["name"], "apply_patch");
+    let input = response["output"][0]["input"].as_str().unwrap();
+    assert!(input.contains("*** Update File: src/lib.rs"));
+    assert!(input.contains("-old"));
+    assert!(input.contains("+new"));
+}
+
+#[test]
+fn converts_claude_style_multi_edit_and_write_to_apply_patch() {
+    let multi_edit = claude_edit_tool_arguments_to_apply_patch(
+        "MultiEdit",
+        &json!({
+            "file_path": "src/lib.rs",
+            "edits": [
+                { "old_string": "one", "new_string": "two" },
+                { "old_string": "three", "new_string": "four" }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(multi_edit.contains("*** Update File: src/lib.rs"));
+    assert!(multi_edit.contains("-one"));
+    assert!(multi_edit.contains("+two"));
+    assert!(multi_edit.contains("-three"));
+    assert!(multi_edit.contains("+four"));
+
+    let write = claude_edit_tool_arguments_to_apply_patch(
+        "Write",
+        &json!({
+            "file_path": "src/new.rs",
+            "content": "pub fn probe() {}\n"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(write.contains("*** Add File: src/new.rs"));
+    assert!(write.contains("+pub fn probe() {}"));
+}
+
+#[test]
+fn converts_anthropic_edit_tool_use_to_apply_patch_custom_call() {
+    let anthropic = json!({
+        "id": "msg_1",
+        "content": [{
+            "type": "tool_use",
+            "id": "call_edit",
+            "name": "Edit",
+            "input": {
+                "file_path": "src/lib.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }
+        }]
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["output"][0]["type"], "custom_tool_call");
+    assert_eq!(response["output"][0]["call_id"], "call_edit");
+    assert_eq!(response["output"][0]["name"], "apply_patch");
+    assert!(
+        response["output"][0]["input"]
+            .as_str()
+            .unwrap()
+            .contains("*** Update File: src/lib.rs")
+    );
+}
+
+#[test]
+fn converts_streaming_edit_tool_call_to_apply_patch_custom_call() {
+    let arguments = serde_json::to_string(&json!({
+        "file_path": "src/lib.rs",
+        "old_string": "old",
+        "new_string": "new"
+    }))
+    .unwrap();
+    let sse = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "chatcmpl_1",
+            "model": "kimi-for-coding",
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_edit",
+                        "type": "function",
+                        "function": {
+                            "name": "Edit",
+                            "arguments": arguments
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        json!({
+            "id": "chatcmpl_1",
+            "model": "kimi-for-coding",
+            "choices": [{
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }]
+        })
+    );
+
+    let converted = chat_sse_to_responses_sse(sse.as_bytes());
+    let converted = String::from_utf8(converted).unwrap();
+
+    assert!(converted.contains(r#""type":"custom_tool_call""#));
+    assert!(converted.contains(r#""name":"apply_patch""#));
+    assert!(converted.contains("*** Update File: src/lib.rs"));
 }
 
 #[test]

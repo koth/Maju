@@ -548,6 +548,8 @@ export interface TabDescriptor {
   searchQuery?: string;
   /** Incrementing counter to force navigation even when lineNumber is the same */
   navToken?: number;
+  /** Whether the user has interacted with this editor (scrolled, typed, etc.) */
+  hasUserInteraction?: boolean;
 }
 
 export interface FileEntry {

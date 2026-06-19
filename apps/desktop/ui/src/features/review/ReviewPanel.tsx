@@ -228,7 +228,7 @@ interface Props {
   onEditorFileTreeVisibleChange?: (visible: boolean) => void;
   renderFileTab?: (
     path: string,
-    context: { fileTreeVisible: boolean; onToggleFileTree?: () => void },
+    context: { fileTreeVisible: boolean; onToggleFileTree?: () => void; onUserInteraction?: () => void },
   ) => ReactNode;
   activeTab?: ReviewPanelActiveTab;
   openTabs?: ReviewPanelOpenTab[];
@@ -290,6 +290,14 @@ export function ReviewPanel({
       ? `diff:${activeDiffTab.changeSetId}:${activeDiffTab.path}`
       : null;
 
+  // Track which file tabs have been "pinned" by user interaction
+  // (scroll, click, type).  Unpinned file tabs are replaced when
+  // a new file is opened from the tree.
+  const pinnedFilePathsRef = useRef<Set<string>>(new Set());
+  const handleFileInteraction = useCallback((path: string) => {
+    pinnedFilePathsRef.current.add(path);
+  }, []);
+
   const handleRefresh = useCallback(() => {
     if (!workspaceConnected) return;
     if (activeBaseTab === "Diff") {
@@ -310,11 +318,17 @@ export function ReviewPanel({
 
   const handleOpenReviewTab = useCallback((tab: ReviewPanelOpenTab) => {
     const tabId = reviewOpenTabId(tab);
-    setOpenTabs((current) =>
-      current.some((openTab) => reviewOpenTabId(openTab) === tabId)
-        ? current
-        : [...current, tab],
-    );
+    setOpenTabs((current) => {
+      if (current.some((openTab) => reviewOpenTabId(openTab) === tabId)) {
+        return current;
+      }
+      // Ephemeral file tabs: when opening a new file, close all existing
+      // unpinned file tabs so rapid browsing doesn't stack.
+      if (tab.kind === "file") {
+        return [...current.filter((t) => t.kind !== "file" || pinnedFilePathsRef.current.has(t.path)), tab];
+      }
+      return [...current, tab];
+    });
     setActiveTab(tab);
   }, [setActiveTab, setOpenTabs]);
 
@@ -626,6 +640,7 @@ export function ReviewPanel({
             {renderFileTab(activeFilePath, {
               fileTreeVisible: editorFileTreeVisible,
               onToggleFileTree: handleEditorFileTreeToggle,
+              onUserInteraction: () => handleFileInteraction(activeFilePath),
             })}
           </div>
           {editorFileTreeVisible && workspaceConnected && (

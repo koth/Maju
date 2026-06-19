@@ -184,7 +184,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     };
     if !call.added && !call.name.is_empty() {
         call.added = true;
-        if call.name == "apply_patch" {
+        if tool_call_outputs_as_apply_patch(&call.name) {
             push_sse(
                 output,
                 "response.output_item.added",
@@ -195,7 +195,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
                         "id": call.id,
                         "type": "custom_tool_call",
                         "call_id": call.id,
-                        "name": call.name,
+                        "name": "apply_patch",
                         "input": "",
                         "status": "in_progress"
                     }
@@ -222,7 +222,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     }
     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
         call.arguments.push_str(arguments);
-        if call.name != "apply_patch" {
+        if !tool_call_outputs_as_apply_patch(&call.name) {
             push_sse(
                 output,
                 "response.function_call_arguments.delta",
@@ -285,7 +285,7 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
         } else {
             index
         };
-        if !call.arguments.is_empty() && call.name != "apply_patch" {
+        if !call.arguments.is_empty() && !tool_call_outputs_as_apply_patch(&call.name) {
             push_sse(
                 output,
                 "response.function_call_arguments.done",
@@ -297,13 +297,13 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
                 }),
             );
         }
-        let item = if call.name == "apply_patch" {
+        let item = if tool_call_outputs_as_apply_patch(&call.name) {
             json!({
                 "id": call.id,
                 "type": "custom_tool_call",
                 "call_id": call.id,
-                "name": &call.name,
-                "input": apply_patch_input_from_function_arguments(&call.arguments),
+                "name": "apply_patch",
+                "input": apply_patch_input_for_tool_call(&call.name, &call.arguments),
                 "status": "completed"
             })
         } else {

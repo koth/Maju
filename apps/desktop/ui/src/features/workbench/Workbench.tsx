@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+
 import { ListChecks } from "lucide-react";
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
 import {
@@ -515,7 +516,7 @@ export function Workbench() {
 
   const renderReviewFileTab = useCallback((
     path: string,
-    context?: { fileTreeVisible: boolean; onToggleFileTree?: () => void },
+    context?: { fileTreeVisible: boolean; onToggleFileTree?: () => void; onUserInteraction?: () => void },
   ) => (
     <EditorView
       path={path}
@@ -526,8 +527,12 @@ export function Workbench() {
       onToggleFileTree={context?.onToggleFileTree}
       onDirtyChange={handleEditorDirtyChange}
       onSaved={handleEditorSaved}
+      onUserInteraction={(p) => {
+        handleEditorUserInteraction(p);
+        context?.onUserInteraction?.();
+      }}
     />
-  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, snapshot?.workspace.name]);
+  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, handleEditorUserInteraction, snapshot?.workspace.name]);
 
   const allPendingPermissionRequests = useMemo(
     () => (snapshot ? findPendingPermissionRequests(snapshot.tools) : []),
@@ -686,9 +691,9 @@ export function Workbench() {
     />
   );
 
-  return (
-    <div className="workbench">
-      <GlobalChrome
+ return (
+   <div className="workbench">
+     <GlobalChrome
         workspace={snapshot.workspace}
         remoteWorkspace={isRemoteWorkspace}
         sidebarCollapsed={sidebarCollapsed}

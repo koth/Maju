@@ -299,6 +299,11 @@ export function EditorView({
         composerReferenceActionRef.current = null;
         editorDisposedRef.current = true;
       });
+      // Ephemeral preview tab pinning is handled by the outer div's
+      // onWheel / onPointerDown / onKeyDown handlers.  Monaco's internal
+      // scroll events fire during mount and layout so we intentionally
+      // do NOT call handleUserInteraction here — otherwise every opened
+      // file would be immediately pinned as "interacted with".
       composerReferenceActionRef.current?.dispose();
       composerReferenceActionRef.current = null;
       if (onAddComposerReferenceRef.current) {
@@ -524,6 +529,10 @@ export function EditorView({
     onUserInteraction?.(path);
   }, [onUserInteraction, path]);
 
+  const handleScroll = useCallback(() => {
+    onUserInteraction?.(path);
+  }, [onUserInteraction, path]);
+
   if (error) {
     return <div className="editor-error">加载文件失败：{error}</div>;
   }
@@ -537,8 +546,7 @@ export function EditorView({
       className={`editor-view ${fullscreen ? "is-fullscreen" : ""} ${useBreadcrumbToolbar ? "is-breadcrumb-toolbar" : ""}`}
       onKeyDown={handleUserInteraction}
       onPointerDown={handleUserInteraction}
-      onPointerMove={handleUserInteraction}
-      onWheel={handleUserInteraction}
+      onWheel={handleScroll}
     >
       <div className="editor-toolbar">
         <div className="editor-toolbar-main">
