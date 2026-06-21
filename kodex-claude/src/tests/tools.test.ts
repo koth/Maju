@@ -1522,6 +1522,38 @@ describe("toolInfoFromToolUse - AskUserQuestion", () => {
   });
 });
 
+describe("toolInfoFromToolUse - MCP Web tools", () => {
+  it("labels MCP web_search as a web search", () => {
+    const info = toolInfoFromToolUse({
+      type: "mcp_tool_use",
+      id: "toolu_web_search",
+      name: "mcp__kodex-web-tools__web_search",
+      input: { query: "latest rust release" },
+    });
+
+    expect(info).toStrictEqual({
+      title: "Search web: latest rust release",
+      kind: "search",
+      content: [],
+    });
+  });
+
+  it("labels MCP web_fetch as a web fetch", () => {
+    const info = toolInfoFromToolUse({
+      type: "mcp_tool_use",
+      id: "toolu_web_fetch",
+      name: "mcp__kodex-web-tools__web_fetch",
+      input: { url: "https://example.com/docs" },
+    });
+
+    expect(info).toStrictEqual({
+      title: "Fetch web: https://example.com/docs",
+      kind: "fetch",
+      content: [],
+    });
+  });
+});
+
 describe("toolInfoFromToolUse - undefined input regression", () => {
   it("Read with undefined input should not throw", () => {
     const toolUse = { name: "Read", id: "toolu_read_undef", input: undefined };

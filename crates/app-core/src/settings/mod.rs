@@ -45,13 +45,18 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
     AgentCliId, AgentModelOption, AgentProviderFamily, AgentProviderProfile,
     AgentProviderProxyKind, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeProviderSettings,
-    ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
+    ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode, WebToolsSettings,
+    WebToolsSettingsStatus,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
 const PROVIDER_SECRETS_FILE: &str = "provider-secrets.json";
 const PROVIDER_MODELS_FILE: &str = "provider-models.json";
 const PROVIDER_MODELS_VERSION: u32 = 1;
+const WEB_TOOLS_PROVIDER_BRAVE: &str = "brave";
+const WEB_TOOLS_PROVIDER_TAVILY: &str = "tavily";
+const WEB_TOOLS_BRAVE_SECRET_KEY: &str = "web-tools:brave";
+const WEB_TOOLS_TAVILY_SECRET_KEY: &str = "web-tools:tavily";
 const KODEX_MODEL_PROVIDER_MAP_ENV: &str = "KODEX_MODEL_PROVIDER_MAP";
 const CODEX_CONFIG_FILE: &str = "config.toml";
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
@@ -467,6 +472,7 @@ fn default_settings() -> AppSettings {
         selected_codex_provider_profile_id: None,
         selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
         claude: ClaudeProviderSettings::default(),
+        web_tools: WebToolsSettings::default(),
     }
 }
 
@@ -579,6 +585,7 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
     let settings = load_app_settings(paths);
     let agents = agent_statuses(paths, settings.selected_agent);
     AgentSettingsSnapshot {
+        web_tools: web_tools_settings_status(paths, &settings),
         settings,
         agents,
         env_override: std::env::var("ACP_AGENT_COMMAND").ok(),
@@ -603,6 +610,7 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         selected_codex_provider_profile_id: existing.selected_codex_provider_profile_id,
         selected_claude_provider_profile_id: existing.selected_claude_provider_profile_id,
         claude: existing.claude,
+        web_tools: existing.web_tools,
     };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
@@ -811,6 +819,73 @@ fn provider_secret_from_store(
 ) -> Option<String> {
     let mut secrets = load_provider_secrets(paths);
     secrets.remove(&provider_secret_storage_key(family, profile_id))
+}
+
+fn normalize_web_tools_provider(provider: &str) -> Result<&'static str> {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "" | WEB_TOOLS_PROVIDER_BRAVE => Ok(WEB_TOOLS_PROVIDER_BRAVE),
+        WEB_TOOLS_PROVIDER_TAVILY => Ok(WEB_TOOLS_PROVIDER_TAVILY),
+        other => anyhow::bail!("Unsupported web tools provider: {other}"),
+    }
+}
+
+fn web_tools_secret_key(provider: &str) -> Result<&'static str> {
+    match normalize_web_tools_provider(provider)? {
+        WEB_TOOLS_PROVIDER_BRAVE => Ok(WEB_TOOLS_BRAVE_SECRET_KEY),
+        WEB_TOOLS_PROVIDER_TAVILY => Ok(WEB_TOOLS_TAVILY_SECRET_KEY),
+        _ => unreachable!("normalize_web_tools_provider only returns supported providers"),
+    }
+}
+
+pub fn web_tools_provider_secret(paths: &AppPaths, provider: &str) -> Option<String> {
+    let key = web_tools_secret_key(provider).ok()?;
+    let mut secrets = load_provider_secrets(paths);
+    secrets
+        .remove(key)
+        .filter(|secret| !secret.trim().is_empty())
+}
+
+fn web_tools_settings_status(paths: &AppPaths, settings: &AppSettings) -> WebToolsSettingsStatus {
+    let provider = normalize_web_tools_provider(&settings.web_tools.provider)
+        .unwrap_or(WEB_TOOLS_PROVIDER_BRAVE)
+        .to_string();
+    WebToolsSettingsStatus {
+        enabled: settings.web_tools.enabled,
+        configured: web_tools_provider_secret(paths, &provider).is_some(),
+        provider,
+    }
+}
+
+pub fn save_web_tools_settings(
+    paths: &AppPaths,
+    enabled: bool,
+    provider: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let provider = normalize_web_tools_provider(provider)?.to_string();
+    let mut settings = load_app_settings(paths);
+    settings.web_tools.enabled = enabled;
+    settings.web_tools.provider = provider;
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+pub fn save_web_tools_provider_key(
+    paths: &AppPaths,
+    provider: &str,
+    api_key: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let provider = normalize_web_tools_provider(provider)?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        anyhow::bail!("api_key cannot be empty");
+    }
+    let mut secrets = load_provider_secrets(paths);
+    secrets.insert(
+        web_tools_secret_key(provider)?.to_string(),
+        api_key.to_string(),
+    );
+    save_provider_secrets(paths, &secrets)?;
+    Ok(settings_snapshot(paths))
 }
 
 fn save_provider_secret(

@@ -1289,6 +1289,25 @@ describe("session config options", () => {
         { kind: "allow_once", name: "Fast", optionId: "ask_user_question:0:0" },
         { kind: "allow_once", name: "Robust", optionId: "ask_user_question:0:1" },
       ]);
+      expect(capturedPermissionRequest._meta["kodex.ai/permissionInput"]).toEqual({
+        questions: [
+          {
+            id: "Which implementation approach should I use?",
+            header: "Approach",
+            question: "Which implementation approach should I use?",
+            is_other: true,
+            is_secret: false,
+            multi_select: false,
+            options: [
+              { label: "Fast", description: "Smallest viable change" },
+              { label: "Robust", description: "Add tests and validation" },
+            ],
+          },
+        ],
+      });
+      expect(capturedPermissionRequest.toolCall._meta["kodex.ai/permissionInput"]).toEqual(
+        capturedPermissionRequest._meta["kodex.ai/permissionInput"],
+      );
       expect(capturedPermissionRequest.toolCall.title).toBe("Ask user: Approach");
       expect(result.behavior).toBe("allow");
       expect(result.updatedInput.answers).toEqual({

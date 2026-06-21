@@ -81,6 +81,26 @@ pub fn settings_select_theme(
 }
 
 #[tauri::command]
+pub fn settings_save_web_tools_settings(
+    enabled: bool,
+    provider: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_web_tools_settings(&paths, enabled, &provider)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_save_web_tools_provider_key(
+    provider: String,
+    api_key: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_web_tools_provider_key(&paths, &provider, &api_key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn settings_get_remote_profiles() -> Result<RemoteMachineProfilesSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     Ok(app_core::remote_profiles::load_remote_machine_profiles(
@@ -631,6 +651,25 @@ pub(crate) fn install_bundled_claude_agent_acp_if_missing(app: &AppHandle) -> Re
     install_bundled_claude_agent_acp_if_missing_with_paths(&paths, &resource)
 }
 
+pub(crate) fn install_bundled_codex_acp_if_missing(app: &AppHandle) -> Result<(), String> {
+    let Some(resource) = bundled_codex_acp_binary(app) else {
+        return Ok(());
+    };
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    install_bundled_codex_acp_if_missing_with_paths(&paths, &resource)
+}
+
+fn install_bundled_codex_acp_if_missing_with_paths(
+    paths: &app_core::AppPaths,
+    resource: &Path,
+) -> Result<(), String> {
+    if managed_binary_matches_resource(&app_core::settings::codex_acp_binary_path(paths), resource)
+    {
+        return Ok(());
+    }
+    install_codex_acp(paths, Some(resource)).map(|_| ())
+}
+
 fn install_bundled_claude_agent_acp_if_missing_with_paths(
     paths: &app_core::AppPaths,
     resource: &Path,
@@ -913,35 +952,8 @@ fn install_codex_acp_from_npm(paths: &app_core::AppPaths) -> Result<String, Stri
 }
 
 fn install_codex_acp_binary(paths: &app_core::AppPaths, source: &Path) -> Result<PathBuf, String> {
-    let bin_dir = app_core::settings::codex_acp_bin_dir(paths);
-    fs::create_dir_all(&bin_dir).map_err(|e| {
-        format!(
-            "Failed to create Codex install directory {}: {e}",
-            bin_dir.display()
-        )
-    })?;
-
     let target = app_core::settings::codex_acp_binary_path(paths);
-    fs::copy(source, &target).map_err(|e| {
-        format!(
-            "Failed to install codex-acp from {} to {}: {e}",
-            source.display(),
-            target.display()
-        )
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&target)
-            .map_err(|e| format!("Failed to read installed codex-acp permissions: {e}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&target, permissions)
-            .map_err(|e| format!("Failed to mark codex-acp executable: {e}"))?;
-    }
-
-    Ok(target)
+    install_managed_binary(paths, source, &target)
 }
 
 fn install_managed_binary(
@@ -982,7 +994,36 @@ fn install_managed_binary(
         fs::set_permissions(target, permissions)
             .map_err(|e| format!("Failed to mark managed agent executable: {e}"))?;
     }
+    ad_hoc_sign_macos_executable(target, "managed agent")?;
     Ok(target.to_path_buf())
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn ad_hoc_sign_macos_executable(target: &Path, label: &str) -> Result<(), String> {
+    let target_arg = target.to_string_lossy().to_string();
+    let output = Command::new("codesign")
+        .args(["--force", "--sign", "-", target_arg.as_str()])
+        .output()
+        .map_err(|e| format!("Failed to ad-hoc sign {label} {}: {e}", target.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        output.status.to_string()
+    } else {
+        stderr
+    };
+    Err(format!(
+        "Failed to ad-hoc sign {label} {}: {detail}",
+        target.display()
+    ))
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn ad_hoc_sign_macos_executable(_target: &Path, _label: &str) -> Result<(), String> {
+    Ok(())
 }
 
 fn copy_with_retry(source: &Path, target: &Path) -> Result<(), std::io::Error> {
@@ -1293,6 +1334,52 @@ mod tests {
         let target = app_core::settings::codex_acp_binary_path(&paths);
         assert_eq!(fs::read(&target).unwrap(), b"bundled-codex-acp");
         assert!(message.contains("安装包"));
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn codex_acp_startup_seed_installs_bundled_binary_when_missing() {
+        let paths = temp_paths();
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-startup-bundled-codex-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(codex_acp_binary_name());
+        fs::write(&source, b"bundled-codex-acp").unwrap();
+
+        install_bundled_codex_acp_if_missing_with_paths(&paths, &source).unwrap();
+
+        let target = app_core::settings::codex_acp_binary_path(&paths);
+        assert_eq!(fs::read(&target).unwrap(), b"bundled-codex-acp");
+        let _ = fs::remove_dir_all(source_dir);
+    }
+
+    #[test]
+    fn codex_acp_startup_seed_replaces_stale_bundled_binary() {
+        let paths = temp_paths();
+        let target = app_core::settings::codex_acp_binary_path(&paths);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old").unwrap();
+
+        let source_dir = std::env::temp_dir().join(format!(
+            "kodex-startup-refresh-codex-acp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join(codex_acp_binary_name());
+        fs::write(&source, b"new bundled codex-acp").unwrap();
+
+        install_bundled_codex_acp_if_missing_with_paths(&paths, &source).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new bundled codex-acp");
+        assert!(managed_binary_matches_resource(&target, &source));
         let _ = fs::remove_dir_all(source_dir);
     }
 

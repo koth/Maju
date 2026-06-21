@@ -1299,6 +1299,39 @@ fn codebuddy_bash_permission_paths_merge_into_existing_empty_recording_window() 
 }
 
 #[test]
+fn permission_write_baseline_records_missing_file_from_write_file_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "packages/frontend/src/pages/gallery/components/NewChip.tsx";
+    let mut app = test_app(&dir);
+
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolPermissionRequest {
+        id: "fs_write:test".into(),
+        name: "Write".into(),
+        options: vec![
+            workspace_model::PermissionOption {
+                id: "allow".into(),
+                label: "Allow".into(),
+                kind: "AllowOnce".into(),
+            },
+            workspace_model::PermissionOption {
+                id: "reject".into(),
+                label: "Reject".into(),
+                kind: "RejectOnce".into(),
+            },
+        ],
+        details: Some(format!("Write file\n{relative_path}")),
+        input: None,
+    }]);
+
+    assert!(app.start_permission_write_baseline_if_allowed("fs_write:test", Some("allow")));
+    assert_eq!(
+        app.file_tracker
+            .was_missing_at_start("fs_write:test", relative_path),
+        Some(true)
+    );
+}
+
+#[test]
 fn codebuddy_bash_permission_one_tool_records_two_file_changes() {
     let dir = tempfile::tempdir().unwrap();
     let boost_path = "packages/frontend/src/pages/gallery/components/BoostChip.tsx";
@@ -3255,6 +3288,75 @@ fn completed_large_raw_output_change_map_uses_uncapped_payload_for_review() {
     assert_eq!(change.old_text, None);
     assert_eq!(change.new_text, after);
     assert_eq!((change.added_lines, change.removed_lines), (1800, 0));
+}
+
+#[test]
+fn completed_created_raw_output_content_enters_review_without_permission_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "scripts/sample_thingi10k.py";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+
+    let lines = (1..=180)
+        .map(|line| format!("print('sample line {line:03}')"))
+        .collect::<Vec<_>>();
+    let content = format!("{}\n", lines.join("\n"));
+    fs::write(&file_path, &content).unwrap();
+
+    let raw_output = serde_json::json!({
+        "call_id": "call-create-script",
+        "changes": {
+            file_path.display().to_string(): {
+                "content": content,
+                "type": "add"
+            }
+        },
+        "success": true
+    })
+    .to_string();
+
+    let mut app = test_app(&dir);
+    let result = app.apply_runtime_events_with_file_tracking(vec![
+        ClientEvent::ToolStarted {
+            id: "call-create-script".into(),
+            parent_id: None,
+            name: format!("Edit {}", file_path.display()),
+            kind: "edit".into(),
+            summary: format!("Edit {}", file_path.display()),
+            is_subagent: false,
+            raw_input: Some(
+                serde_json::json!({
+                    "file_path": file_path.display().to_string()
+                })
+                .to_string(),
+            ),
+        },
+        ClientEvent::ToolCompleted {
+            id: "call-create-script".into(),
+            name: Some(format!("Edit {}", file_path.display())),
+            outcome: "Success. Updated the following files".into(),
+            raw_output: Some(raw_output),
+            terminal_output: None,
+        },
+    ]);
+
+    assert!(result.had_file_changes);
+    assert_eq!(app.ui.session_changes.len(), 1);
+    assert_eq!(app.ui.review_changes.len(), 1);
+    let change = &app.ui.review_changes[0];
+    assert_eq!(change.path, relative_path);
+    assert_eq!(change.change_type, FileChangeType::Created);
+    assert_eq!(change.old_text, None);
+    assert_eq!(change.new_text, content);
+    assert_eq!((change.added_lines, change.removed_lines), (180, 0));
+
+    let lightweight = app.lightweight_ui_snapshot();
+    let tool = lightweight
+        .tools
+        .iter()
+        .find(|tool| tool.call_id == "call-create-script")
+        .expect("tool should be included in snapshot");
+    assert_eq!(tool.diff_previews.len(), 1);
 }
 
 #[test]

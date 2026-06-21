@@ -1,8 +1,12 @@
-use agent_client_protocol::schema::{PermissionOptionKind, RequestPermissionRequest, ToolKind};
+use agent_client_protocol::schema::{
+    Meta, PermissionOptionKind, RequestPermissionRequest, ToolKind,
+};
 use std::path::{Path, PathBuf};
 
 use super::workspace_paths::paths_are_inside_workspace;
 use crate::events::AgentEditPolicy;
+
+const KODEX_PERMISSION_INPUT_META_KEY: &str = "kodex.ai/permissionInput";
 
 mod broker;
 mod shell;
@@ -195,11 +199,37 @@ fn request_should_retry_with_apply_patch(
 
 fn request_has_user_input_questions(request: &RequestPermissionRequest) -> bool {
     request
-        .tool_call
-        .fields
-        .raw_input
+        .meta
         .as_ref()
-        .and_then(|raw_input| raw_input.get("questions"))
+        .is_some_and(meta_has_user_input_questions)
+        || request
+            .tool_call
+            .meta
+            .as_ref()
+            .is_some_and(meta_has_user_input_questions)
+        || request
+            .tool_call
+            .fields
+            .raw_input
+            .as_ref()
+            .is_some_and(value_has_user_input_questions)
+}
+
+fn meta_has_user_input_questions(meta: &Meta) -> bool {
+    meta.get(KODEX_PERMISSION_INPUT_META_KEY)
+        .is_some_and(value_has_user_input_questions)
+        || meta
+            .get("input")
+            .is_some_and(value_has_user_input_questions)
+        || meta
+            .get("questions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|questions| !questions.is_empty())
+}
+
+fn value_has_user_input_questions(value: &serde_json::Value) -> bool {
+    value
+        .get("questions")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|questions| !questions.is_empty())
 }

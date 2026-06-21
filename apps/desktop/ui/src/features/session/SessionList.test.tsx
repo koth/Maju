@@ -95,6 +95,10 @@ function agentSnapshot(
         available_models: [],
         fast_model: null,
       },
+      web_tools: {
+        enabled: false,
+        provider: "brave",
+      },
     },
     agents: [
       {
@@ -130,6 +134,11 @@ function agentSnapshot(
       ],
       fast_model: null,
       fast_model_options: [],
+    },
+    web_tools: {
+      enabled: false,
+      provider: "brave",
+      configured: false,
     },
   };
 }

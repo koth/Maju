@@ -22,6 +22,7 @@ import {
   getVisibleLogEntries,
   isVagueError,
   rawInputHasEditPayload,
+  rawInputHasReadOnlyParsedCommand,
   sameOrNestedPath,
   statusBullet,
   toolVerb,
@@ -99,9 +100,12 @@ function ToolCallCardImpl({
       : commandApplyPatchPreviews.filter((preview) =>
           commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
         );
+  const readOnlyParsedCommand = rawInputHasReadOnlyParsedCommand(tool);
   const category: ToolCategory =
     rawInputHasEditPayload(tool) || commandEditPaths.length > 0
       ? "editing"
+      : readOnlyParsedCommand
+      ? "exploring"
       : presentation.presentationKind === "command"
       ? classifyCommandPresentation(presentation.command)
       : classifyTool(tool);

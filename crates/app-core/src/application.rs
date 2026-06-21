@@ -2,6 +2,7 @@ use crate::bootstrap::{build_initial_remote_ui, build_initial_ui, update_initial
 use crate::file_tracker::FileChangeTracker;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
+use crate::web_tools_mcp::WebToolsMcpHandle;
 use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, SessionConfig, SessionHandle};
 use git_service::GitService;
 use session_store::SessionStore;
@@ -92,6 +93,7 @@ struct SessionRuntime {
     agent_command: String,
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
+    web_tools_mcp: Option<WebToolsMcpHandle>,
     in_flight_prompt: Option<InFlightPrompt>,
     seq_counter: i64,
     needs_title: bool,
@@ -207,6 +209,7 @@ pub struct Application {
     pub agent_command: String,
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
+    web_tools_mcp: Option<WebToolsMcpHandle>,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,
@@ -477,6 +480,7 @@ impl Application {
         std::mem::swap(&mut self.agent_command, &mut runtime.agent_command);
         std::mem::swap(&mut self.acp_port, &mut runtime.acp_port);
         std::mem::swap(&mut self.remote_ssh, &mut runtime.remote_ssh);
+        std::mem::swap(&mut self.web_tools_mcp, &mut runtime.web_tools_mcp);
         std::mem::swap(&mut self.in_flight_prompt, &mut runtime.in_flight_prompt);
         std::mem::swap(&mut self.seq_counter, &mut runtime.seq_counter);
         std::mem::swap(&mut self.needs_title, &mut runtime.needs_title);

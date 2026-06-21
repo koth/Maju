@@ -117,6 +117,75 @@ describe("ToolCallCard animation states", () => {
     expect(container.querySelector(".tc-cmd")!.textContent).toBe("任务计划");
   });
 
+  it("shows completed AskUserQuestion tools as asked with the selected answer", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "AskUserQuestion",
+      name: "AskUserQuestion",
+      summary: "Permission selected: AI/ML",
+      permission_decision: "Permission selected: AI/ML",
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已提问");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("AI/ML");
+  });
+
+  it("uses a neutral AskUserQuestion title instead of long answer output", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "AskUserQuestion",
+      name: "AskUserQuestion",
+      summary:
+        'User has answered your questions: "你平时更喜欢用哪种编程语言进行开发？"="Rust". You can now continue with the user\'s answers in mind.',
+      raw_input: JSON.stringify({
+        questions: [{ question: "你平时更喜欢用哪种编程语言进行开发？" }],
+        answers: { "你平时更喜欢用哪种编程语言进行开发？": "Rust" },
+      }),
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已提问");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("提问");
+  });
+
+  it("shows running permission input tools as asking", () => {
+    const tool = makeTool({
+      status: "Running",
+      kind: "permission",
+      name: "Permission request",
+      summary: "等待权限 | AI/ML",
+      permission_input: {
+        questions: [
+          {
+            id: "project_type",
+            header: "项目类型",
+            question: "你现在主要在做什么类型的项目？",
+            is_other: false,
+            is_secret: false,
+            multi_select: false,
+            options: [
+              { label: "AI/ML", description: "机器学习、LLM 集成等" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("提问中");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("提问");
+  });
+
   it("does not show CodeBuddy skill tools as edits without edit payloads", () => {
     const tool = makeTool({
       status: "Succeeded",
@@ -669,6 +738,68 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.textContent).not.toContain('"unified_diff"');
   });
 
+  it("classifies parsed read command wrappers as exploration", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "execute",
+      name: "Read UNREAL_SETUP.md",
+      raw_input: JSON.stringify({
+        command: [
+          "/bin/zsh",
+          "-lc",
+          "echo '=== FIRST COPY §3-§5 (155-265) ==='; awk 'NR>=155 && NR<=265' docs/UNREAL_SETUP.md",
+        ],
+        cwd: "/Users/kothchen/code/automesh",
+        file_path: "/Users/kothchen/code/automesh/docs/UNREAL_SETUP.md",
+        parsed_cmd: [
+          {
+            type: "read",
+            path: "/Users/kothchen/code/automesh/docs/UNREAL_SETUP.md",
+            name: "UNREAL_SETUP.md",
+          },
+        ],
+      }),
+      raw_output: JSON.stringify({
+        formatted_output: "=== FIRST COPY §3-§5 (155-265) ===\nline 155\nline 156",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "/Users/kothchen/code/automesh/docs/UNREAL_SETUP.md",
+    );
+    expect(container.querySelector(".tc-diff-added")).toBeNull();
+    expect(container.querySelector(".tc-diff-removed")).toBeNull();
+  });
+
+  it("classifies common read-only shell commands as exploration", () => {
+    const cases = [
+      { command: "awk 'NR>=155 && NR<=265' docs/UNREAL_SETUP.md", title: "docs/UNREAL_SETUP.md" },
+      { command: 'grep -n "^## " docs/UNREAL_SETUP.md', title: "docs/UNREAL_SETUP.md" },
+      { command: "rg --files apps/desktop/ui", title: "apps/desktop/ui" },
+      { command: "sed -n '155,265p' docs/UNREAL_SETUP.md", title: "docs/UNREAL_SETUP.md" },
+    ];
+
+    for (const testCase of cases) {
+      const tool = makeTool({
+        status: "Succeeded",
+        kind: "execute",
+        name: "tool",
+        raw_input: JSON.stringify({ command: testCase.command }),
+      });
+      const { container, unmount } = render(
+        <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+      );
+
+      expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
+      expect(container.querySelector(".tc-cmd")!.textContent).toBe(testCase.title);
+      unmount();
+    }
+  });
+
   it("classifies Get-Content and Test-Path commands as exploration", () => {
     const cases = [
       {
@@ -825,6 +956,35 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
 
     expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+0");
     expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-1");
+  });
+
+  it("shows large added-only stats for confirmed created files", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      diff_paths: ["/test/generated.py"],
+      diff_previews: [
+        {
+          path: "/test/generated.py",
+          hunks: [
+            {
+              heading: "ACP diff",
+              lines: Array.from({ length: 180 }, (_, index) => ({
+                kind: "Added" as const,
+                content: `line ${index + 1}`,
+              })),
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-diff-added")?.textContent).toBe("+180");
+    expect(container.querySelector(".tc-diff-removed")?.textContent).toBe("-0");
   });
 
   it("does not show bogus whole-file addition stats for edit tools", () => {

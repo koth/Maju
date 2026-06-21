@@ -14,18 +14,26 @@ use crate::mapping::{
     session_config_from_options,
 };
 use agent_client_protocol::schema::{
-    CancelNotification, PromptRequest, PromptResponse, SessionNotification,
+    CancelNotification, ContentBlock, PromptRequest, PromptResponse, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
 };
 use agent_client_protocol::{ActiveSession, Agent, Dispatch};
 use anyhow::anyhow;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use workspace_model::PromptInputCapabilities;
+use std::time::{Duration, Instant};
+use workspace_model::{MessageRole, PromptInputCapabilities, UserPromptContent};
 
 const KODEX_PROVIDER_VALUE_PREFIX: &str = "kodex-provider:";
 const KODEX_PROVIDER_SLASH_VALUE_PREFIX: &str = "kodex-provider/";
+const STALE_PROMPT_COMPLETION_GRACE: Duration = Duration::from_millis(750);
+
+struct PromptCompletion {
+    generation: u64,
+    result: Result<StopReason, String>,
+}
 
 pub(super) async fn run_command_loop(
     session: &mut ActiveSession<'static, Agent>,
@@ -59,14 +67,35 @@ pub(super) async fn run_command_loop(
         };
 
         match command {
-            RuntimeCommand::SendPrompt(prompt) => {
+            RuntimeCommand::SendPrompt {
+                prompt,
+                accepted_tx,
+            } => {
+                if let Some(accepted_tx) = accepted_tx {
+                    acknowledge_prompt_acceptance(
+                        Some(accepted_tx),
+                        Err(anyhow!("当前轮次已经结束，追加指令未发送")),
+                    );
+                    emit_steer_feedback(tx_events, "当前轮次已经结束，追加指令未发送");
+                    continue;
+                }
+                let accepted_tx = None;
+
                 if prompt_contains_image(&prompt) && !prompt_capabilities.image {
+                    acknowledge_prompt_acceptance(
+                        accepted_tx,
+                        Err(anyhow!("Active agent does not support image prompts")),
+                    );
                     let _ = tx_events.send(ClientEvent::Interrupted {
                         reason: "Active agent does not support image prompts".into(),
                     });
                     continue;
                 }
                 if prompt_contains_file(&prompt) && !prompt_capabilities.embedded_context {
+                    acknowledge_prompt_acceptance(
+                        accepted_tx,
+                        Err(anyhow!("Active agent does not support file attachments")),
+                    );
                     let _ = tx_events.send(ClientEvent::Interrupted {
                         reason: "Active agent does not support file attachments".into(),
                     });
@@ -74,24 +103,22 @@ pub(super) async fn run_command_loop(
                 }
 
                 let title_source = prompt_title_text(&prompt);
-                let mut content_blocks = Vec::new();
-                let mut prompt_error = None;
-                for content in prompt {
-                    match prompt_content_to_acp(content, &config.workspace_root) {
-                        Ok(blocks) => content_blocks.extend(blocks),
-                        Err(error) => {
-                            prompt_error = Some(error);
-                            break;
-                        }
+                let content_blocks = match prompt_to_content_blocks(prompt, &config.workspace_root)
+                {
+                    Ok(blocks) => blocks,
+                    Err(error) => {
+                        acknowledge_prompt_acceptance(accepted_tx, Err(anyhow!(error.to_string())));
+                        let _ = tx_events.send(ClientEvent::Interrupted {
+                            reason: error.to_string(),
+                        });
+                        continue;
                     }
-                }
-                if let Some(error) = prompt_error {
-                    let _ = tx_events.send(ClientEvent::Interrupted {
-                        reason: error.to_string(),
-                    });
-                    continue;
-                }
+                };
                 if content_blocks.is_empty() {
+                    acknowledge_prompt_acceptance(
+                        accepted_tx,
+                        Err(anyhow!("Prompt cannot be empty")),
+                    );
                     let _ = tx_events.send(ClientEvent::Interrupted {
                         reason: "Prompt cannot be empty".into(),
                     });
@@ -99,25 +126,24 @@ pub(super) async fn run_command_loop(
                 }
 
                 let (stop_tx, stop_rx) = mpsc::channel();
-                session
-                    .connection()
-                    .send_request_to(
-                        Agent,
-                        PromptRequest::new(session.session_id().clone(), content_blocks),
-                    )
-                    .on_receiving_result(async move |result| {
-                        let PromptResponse { stop_reason, .. } = result?;
-                        stop_tx.send(stop_reason).map_err(|_| {
-                            agent_client_protocol::util::internal_error(
-                                "prompt stop channel closed",
-                            )
-                        })?;
-                        Ok(())
-                    })
-                    .map_err(|err| anyhow!(err.to_string()))?;
+                let mut pending_prompt_generations = BTreeSet::new();
+                pending_prompt_generations.insert(0);
+                let mut latest_prompt_generation = 0_u64;
+                let mut next_prompt_generation = 1_u64;
+                let mut stale_successful_completion: Option<(u64, StopReason)> = None;
+                let mut stale_completion_deadline: Option<Instant> = None;
+                if let Err(error) = send_prompt_request(session, content_blocks, 0, stop_tx.clone())
+                {
+                    acknowledge_prompt_acceptance(accepted_tx, Err(anyhow!(error.to_string())));
+                    let _ = tx_events.send(ClientEvent::Interrupted {
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+                acknowledge_prompt_acceptance(accepted_tx, Ok(()));
 
                 let mut cancel_sent = false;
-                loop {
+                'active_prompt: loop {
                     let next_message = tokio::time::timeout(
                         std::time::Duration::from_millis(50),
                         session.read_update(),
@@ -127,7 +153,10 @@ pub(super) async fn run_command_loop(
                     let message = match next_message {
                         Ok(Ok(message)) => Some(message),
                         Ok(Err(err)) => {
-                            if let Some(reason) = recv_stop_reason_with_grace(&stop_rx).await {
+                            if let Some(completion) =
+                                recv_prompt_completion_with_grace(&stop_rx).await
+                                && let Ok(reason) = completion.result
+                            {
                                 append_runtime_event_log(
                                     &config,
                                     "session/read_update_closed_after_stop",
@@ -181,7 +210,24 @@ pub(super) async fn run_command_loop(
                                     cancel_sent = true;
                                     Ok(())
                                 })();
-                                let _ = reply_tx.send(result);
+                                match result {
+                                    Ok(()) => {
+                                        append_runtime_event_log(
+                                            &config,
+                                            "session/stop_reason",
+                                            &json!({ "stopReason": "cancelled" }),
+                                        )?;
+                                        let _ = tx_events.send(ClientEvent::TurnFinished {
+                                            stop_reason: "cancelled".into(),
+                                        });
+                                        tool_execution_registry.clear();
+                                        let _ = reply_tx.send(Ok(()));
+                                        break 'active_prompt;
+                                    }
+                                    Err(error) => {
+                                        let _ = reply_tx.send(Err(error));
+                                    }
+                                }
                             }
                             RuntimeCommand::StopTool {
                                 tool_call_id,
@@ -221,15 +267,147 @@ pub(super) async fn run_command_loop(
                                 );
                                 let _ = reply_tx.send(result);
                             }
-                            RuntimeCommand::SendPrompt(_)
-                            | RuntimeCommand::SetConfigOption { .. }
+                            RuntimeCommand::SendPrompt {
+                                prompt,
+                                accepted_tx,
+                            } => {
+                                if prompt_contains_image(&prompt) && !prompt_capabilities.image {
+                                    let error = anyhow!("当前智能体不支持图片提示");
+                                    acknowledge_prompt_acceptance(
+                                        accepted_tx,
+                                        Err(anyhow!(error.to_string())),
+                                    );
+                                    emit_steer_feedback(tx_events, error.to_string());
+                                    continue;
+                                }
+                                if prompt_contains_file(&prompt)
+                                    && !prompt_capabilities.embedded_context
+                                {
+                                    let error = anyhow!("当前智能体不支持文件附件");
+                                    acknowledge_prompt_acceptance(
+                                        accepted_tx,
+                                        Err(anyhow!(error.to_string())),
+                                    );
+                                    emit_steer_feedback(tx_events, error.to_string());
+                                    continue;
+                                }
+
+                                let content_blocks = match prompt_to_content_blocks(
+                                    prompt,
+                                    &config.workspace_root,
+                                ) {
+                                    Ok(blocks) => blocks,
+                                    Err(error) => {
+                                        acknowledge_prompt_acceptance(
+                                            accepted_tx,
+                                            Err(anyhow!(error.to_string())),
+                                        );
+                                        emit_steer_feedback(tx_events, error.to_string());
+                                        continue;
+                                    }
+                                };
+                                if content_blocks.is_empty() {
+                                    acknowledge_prompt_acceptance(
+                                        accepted_tx,
+                                        Err(anyhow!("提示内容不能为空")),
+                                    );
+                                    emit_steer_feedback(tx_events, "提示内容不能为空");
+                                    continue;
+                                }
+
+                                let generation = next_prompt_generation;
+                                next_prompt_generation = next_prompt_generation.saturating_add(1);
+                                match send_prompt_request(
+                                    session,
+                                    content_blocks,
+                                    generation,
+                                    stop_tx.clone(),
+                                ) {
+                                    Ok(()) => {
+                                        pending_prompt_generations.insert(generation);
+                                        latest_prompt_generation = generation;
+                                        acknowledge_prompt_acceptance(accepted_tx, Ok(()));
+                                    }
+                                    Err(error) => {
+                                        acknowledge_prompt_acceptance(
+                                            accepted_tx,
+                                            Err(anyhow!(error.to_string())),
+                                        );
+                                        emit_steer_feedback(
+                                            tx_events,
+                                            format!("追加指令发送失败：{error}"),
+                                        );
+                                    }
+                                }
+                            }
+                            RuntimeCommand::SetConfigOption { .. }
                             | RuntimeCommand::SetMode { .. }
                             | RuntimeCommand::SetModel { .. } => {}
                         }
                     }
 
                     let Some(message) = message else {
-                        if let Ok(reason) = stop_rx.try_recv() {
+                        let mut finished_reason = None;
+                        while let Ok(completion) = stop_rx.try_recv() {
+                            pending_prompt_generations.remove(&completion.generation);
+                            match completion.result {
+                                Ok(reason) if completion.generation == latest_prompt_generation => {
+                                    finished_reason = Some(reason);
+                                    break;
+                                }
+                                Ok(reason) => {
+                                    stale_successful_completion =
+                                        Some((completion.generation, reason));
+                                    if stale_completion_deadline.is_none() {
+                                        stale_completion_deadline =
+                                            Some(Instant::now() + STALE_PROMPT_COMPLETION_GRACE);
+                                    }
+                                }
+                                Err(error) => {
+                                    emit_steer_feedback(tx_events, error);
+                                    if completion.generation == latest_prompt_generation {
+                                        if let Some(new_latest) =
+                                            pending_prompt_generations.iter().next_back().copied()
+                                        {
+                                            latest_prompt_generation = new_latest;
+                                        } else if let Some((_, reason)) =
+                                            stale_successful_completion.take()
+                                        {
+                                            finished_reason = Some(reason);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if finished_reason.is_none()
+                            && !pending_prompt_generations.contains(&latest_prompt_generation)
+                            && pending_prompt_generations.is_empty()
+                        {
+                            if let Some((_, reason)) = stale_successful_completion.take() {
+                                finished_reason = Some(reason);
+                            }
+                        }
+                        if finished_reason.is_none()
+                            && stale_completion_deadline
+                                .is_some_and(|deadline| Instant::now() >= deadline)
+                        {
+                            if let Some((_, reason)) = stale_successful_completion.take() {
+                                append_runtime_event_log(
+                                    &config,
+                                    "session/stale_prompt_completion_grace_elapsed",
+                                    &json!({
+                                        "pendingGenerations": pending_prompt_generations
+                                            .iter()
+                                            .copied()
+                                            .collect::<Vec<_>>(),
+                                        "latestGeneration": latest_prompt_generation,
+                                    }),
+                                )?;
+                                finished_reason = Some(reason);
+                            }
+                        }
+                        if let Some(reason) = finished_reason {
                             emit_turn_finished(
                                 &config,
                                 &tx_events,
@@ -435,6 +613,55 @@ fn encode_provider_value(value_id: String, provider: Option<String>) -> String {
     format!("{KODEX_PROVIDER_VALUE_PREFIX}{provider}:{value_id}")
 }
 
+fn prompt_to_content_blocks(
+    prompt: Vec<UserPromptContent>,
+    workspace_root: &str,
+) -> anyhow::Result<Vec<ContentBlock>> {
+    let mut content_blocks = Vec::new();
+    for content in prompt {
+        content_blocks.extend(prompt_content_to_acp(content, workspace_root)?);
+    }
+    Ok(content_blocks)
+}
+
+fn send_prompt_request(
+    session: &ActiveSession<'static, Agent>,
+    content_blocks: Vec<ContentBlock>,
+    generation: u64,
+    stop_tx: mpsc::Sender<PromptCompletion>,
+) -> anyhow::Result<()> {
+    session
+        .connection()
+        .send_request_to(
+            Agent,
+            PromptRequest::new(session.session_id().clone(), content_blocks),
+        )
+        .on_receiving_result(async move |result| {
+            let result = result
+                .map(|PromptResponse { stop_reason, .. }| stop_reason)
+                .map_err(|error| error.to_string());
+            let _ = stop_tx.send(PromptCompletion { generation, result });
+            Ok(())
+        })
+        .map_err(|err| anyhow!(err.to_string()))
+}
+
+fn emit_steer_feedback(tx_events: &mpsc::Sender<ClientEvent>, reason: impl Into<String>) {
+    let _ = tx_events.send(ClientEvent::MessageChunk {
+        role: MessageRole::System,
+        content: format!("追加指令未生效：{}", reason.into()),
+    });
+}
+
+fn acknowledge_prompt_acceptance(
+    accepted_tx: Option<mpsc::Sender<anyhow::Result<()>>>,
+    result: anyhow::Result<()>,
+) {
+    if let Some(accepted_tx) = accepted_tx {
+        let _ = accepted_tx.send(result);
+    }
+}
+
 async fn drain_idle_session_state_update(
     session: &mut ActiveSession<'static, Agent>,
     config: &SessionConfig,
@@ -566,10 +793,12 @@ fn is_codebuddy_session_end_update(payload: &Value) -> bool {
         .is_some_and(|kind| kind == "session_end")
 }
 
-async fn recv_stop_reason_with_grace(stop_rx: &mpsc::Receiver<StopReason>) -> Option<StopReason> {
+async fn recv_prompt_completion_with_grace(
+    stop_rx: &mpsc::Receiver<PromptCompletion>,
+) -> Option<PromptCompletion> {
     for attempt in 0..5 {
         match stop_rx.try_recv() {
-            Ok(reason) => return Some(reason),
+            Ok(completion) => return Some(completion),
             Err(mpsc::TryRecvError::Disconnected) => return None,
             Err(mpsc::TryRecvError::Empty) if attempt < 4 => {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;

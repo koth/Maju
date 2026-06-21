@@ -5,6 +5,76 @@ struct PreparedSessionRuntime {
     agent_env: Vec<(String, String)>,
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
+    mcp_servers: Vec<acp_core::McpServer>,
+    web_tools_mcp: Option<crate::web_tools_mcp::WebToolsMcpHandle>,
+}
+
+pub(super) fn prepare_web_tools_mcp(
+    app_paths: &AppPaths,
+    agent_command: &str,
+    remote_session: bool,
+) -> Result<
+    (
+        Vec<acp_core::McpServer>,
+        Option<crate::web_tools_mcp::WebToolsMcpHandle>,
+    ),
+    String,
+> {
+    let is_codex = crate::settings::is_codex_acp_command(agent_command);
+    let is_claude = crate::settings::is_claude_agent_acp_command(agent_command);
+    if remote_session || !(is_codex || is_claude) {
+        crate::startup_perf::mark(
+            "web_tools_mcp/skipped",
+            format!("remote_session={remote_session} is_codex={is_codex} is_claude={is_claude}"),
+        );
+        return Ok((Vec::new(), None));
+    }
+    let settings = crate::settings::load_app_settings(app_paths);
+    if !settings.web_tools.enabled {
+        crate::startup_perf::mark(
+            "web_tools_mcp/disabled",
+            format!("provider={}", settings.web_tools.provider),
+        );
+        return Ok((Vec::new(), None));
+    }
+    let Some(api_key) =
+        crate::settings::web_tools_provider_secret(app_paths, &settings.web_tools.provider)
+    else {
+        crate::startup_perf::mark(
+            "web_tools_mcp/missing_secret",
+            format!("provider={}", settings.web_tools.provider),
+        );
+        return Ok((Vec::new(), None));
+    };
+    crate::startup_perf::mark(
+        "web_tools_mcp/start",
+        format!(
+            "provider={} is_codex={} is_claude={}",
+            settings.web_tools.provider, is_codex, is_claude
+        ),
+    );
+    let config =
+        crate::web_tools::WebToolsConfig::for_provider(&settings.web_tools.provider, api_key)
+            .map_err(|error| format!("failed to prepare Kodex web tools provider: {error}"))?;
+    let handle = crate::web_tools_mcp::start_web_tools_mcp_server(config)
+        .map_err(|error| format!("failed to start Kodex web tools MCP server: {error}"))?;
+    let mcp_server = acp_core::http_mcp_server(
+        "kodex-web-tools",
+        handle.url().to_string(),
+        [(
+            "x-kodex-web-tools-token".to_string(),
+            handle.token().to_string(),
+        )],
+    );
+    crate::startup_perf::mark(
+        "web_tools_mcp/ready",
+        format!(
+            "provider={} url={} servers=1",
+            settings.web_tools.provider,
+            handle.url()
+        ),
+    );
+    Ok((vec![mcp_server], Some(handle)))
 }
 
 fn remote_machine_profile_from_workspace(
@@ -181,11 +251,15 @@ impl Application {
 
         crate::settings::ensure_agent_ready_for_command(agent_command, &self.app_paths)
             .map_err(|e| e.to_string())?;
+        let (mcp_servers, web_tools_mcp) =
+            prepare_web_tools_mcp(&self.app_paths, agent_command, false)?;
         Ok(PreparedSessionRuntime {
             workspace_root: self.session_config_workspace_root(None),
             agent_env: crate::settings::agent_env_for_command(agent_command, &self.app_paths),
             acp_port: self.acp_port,
             remote_ssh: None,
+            mcp_servers,
+            web_tools_mcp,
         })
     }
 
@@ -220,6 +294,8 @@ impl Application {
             agent_env: remote_runtime.agent_env,
             acp_port: local_port,
             remote_ssh: Some(remote_ssh),
+            mcp_servers: Vec::new(),
+            web_tools_mcp: None,
         })
     }
 
@@ -409,16 +485,25 @@ impl Application {
             log_id: make_log_id(),
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
+            mcp_servers: prepared_runtime.mcp_servers.clone(),
         })
         .map_err(|e| e.to_string())?;
         if let Some(acp_id) = resume_id_for_handle {
             session.id = acp_id;
         }
+        let current_mode = self.ui.session.mode.as_deref().unwrap_or("Build");
+        let _ = session.set_permission_mode(current_mode);
+        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+            &mut session,
+            self.is_codex_acp_session(),
+            Some(current_mode),
+        );
 
         self.session = session;
         self.agent_command = agent_command;
         self.acp_port = prepared_runtime.acp_port;
         self.remote_ssh = prepared_runtime.remote_ssh;
+        self.web_tools_mcp = prepared_runtime.web_tools_mcp;
         self.ui.session.status = SessionStatus::Idle;
         self.ui.prompt_capabilities = Default::default();
         self.ui.available_commands.clear();
@@ -503,7 +588,9 @@ impl Application {
 
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
-        let session = SessionHandle::start(SessionConfig {
+        let agent_cli_label =
+            active_agent_label_for_command(&session_agent_command, stored_agent_cli);
+        let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
             model: model.clone(),
@@ -513,9 +600,15 @@ impl Application {
             log_id: make_log_id(),
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
+            mcp_servers: prepared_runtime.mcp_servers.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
+        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+            &mut session,
+            is_codex_agent_label(&agent_cli_label),
+            mode.as_deref(),
+        );
 
         let mut ui = self.ui.clone();
         let pending_model_restore =
@@ -523,10 +616,7 @@ impl Application {
         ui.session.id = uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4());
         ui.session.model = model;
         ui.session.mode = mode;
-        ui.session.agent_cli = Some(active_agent_label_for_command(
-            &session_agent_command,
-            stored_agent_cli,
-        ));
+        ui.session.agent_cli = Some(agent_cli_label);
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();
         ui.available_commands.clear();
@@ -566,6 +656,7 @@ impl Application {
             agent_command: session_agent_command,
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh,
+            web_tools_mcp: prepared_runtime.web_tools_mcp,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -600,7 +691,8 @@ impl Application {
         let agent_command = self.prepare_agent_command_for_new_session(agent)?;
         let prepared_runtime = self.prepare_session_runtime(&agent_command)?;
 
-        let session = SessionHandle::start(SessionConfig {
+        let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
+        let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
             model: initial_model.clone(),
@@ -610,11 +702,16 @@ impl Application {
             log_id: make_log_id(),
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh.clone(),
+            mcp_servers: prepared_runtime.mcp_servers.clone(),
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");
+        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+            &mut session,
+            is_codex_agent_label(&agent_cli_label),
+            Some("Build"),
+        );
 
-        let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
         let mut ui = self.ui.clone();
         ui.session.id = new_id;
         ui.session.title = "新会话".to_string();
@@ -663,6 +760,7 @@ impl Application {
             agent_command,
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh,
+            web_tools_mcp: prepared_runtime.web_tools_mcp,
             in_flight_prompt: None,
             seq_counter: 1,
             needs_title: true,

@@ -23,7 +23,7 @@ import {
   findPlanTerminateOption,
 } from "../composer/AgentPlanPanel";
 import { ReviewPanel } from "../review/ReviewPanel";
-import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "../review/ReviewPanel";
+import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
 import { WelcomeLauncher } from "./WelcomeLauncher";
@@ -207,6 +207,8 @@ export function Workbench() {
     INITIAL_REVIEW_PANEL_ACTIVE_TAB,
   );
   const [reviewPanelOpenTabs, setReviewPanelOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
+  const [reviewPreferredChangeSet, setReviewPreferredChangeSet] =
+    useState<ReviewPreferredChangeSet | null>(null);
   const {
     terminalDockVisible,
     terminalDockMounted,
@@ -286,6 +288,7 @@ export function Workbench() {
   const resetReviewPanelTabs = useCallback(() => {
     setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
     setReviewPanelOpenTabs([]);
+    setReviewPreferredChangeSet(null);
     setExpandedReviewSideTreeVisible(false);
   }, []);
 
@@ -540,7 +543,14 @@ export function Workbench() {
   const handleReviewChangeSetSelect = useCallback((changeSetId: string) => {
     setRightPanelCollapsed(false);
     reviewFocusSeqRef.current += 1;
-    setReviewFocusRequest({ changeSetId, token: reviewFocusSeqRef.current });
+    const token = reviewFocusSeqRef.current;
+    setReviewFocusRequest({ changeSetId, token });
+    setReviewPreferredChangeSet({
+      id: changeSetId,
+      token,
+      consumedSignature: null,
+    });
+    setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
   }, [setRightPanelCollapsed]);
 
   const handleSearchFileOpen = useCallback((filePath: string, lineNumber?: number, searchQuery?: string) => {
@@ -582,10 +592,17 @@ export function Workbench() {
     autoReviewSignatureRef.current = autoReviewSignature;
     setRightPanelCollapsed(false);
     reviewFocusSeqRef.current += 1;
+    const token = reviewFocusSeqRef.current;
     setReviewFocusRequest({
       changeSetId: autoReviewTarget.changeSetId,
-      token: reviewFocusSeqRef.current,
+      token,
     });
+    setReviewPreferredChangeSet({
+      id: autoReviewTarget.changeSetId,
+      token,
+      consumedSignature: null,
+    });
+    setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
   }, [autoReviewSignature, autoReviewTarget, setRightPanelCollapsed]);
 
   const enqueueComposerReference = useCallback(
@@ -823,6 +840,8 @@ export function Workbench() {
       onActiveTabChange={setReviewPanelActiveTab}
       onOpenTabsChange={setReviewPanelOpenTabs}
       focusRequest={reviewFocusRequest}
+      preferredChangeSet={reviewPreferredChangeSet}
+      onPreferredChangeSetChange={setReviewPreferredChangeSet}
     />
   );
 

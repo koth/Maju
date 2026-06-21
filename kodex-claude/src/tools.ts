@@ -186,12 +186,39 @@ function askUserQuestionContent(input: AskUserQuestionInput | undefined): string
     .join("\n\n");
 }
 
+function mcpLeafToolName(name: unknown): string {
+  if (typeof name !== "string") return "";
+  const parts = name.split("__").filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : name;
+}
+
 export function toolInfoFromToolUse(
   toolUse: any,
   supportsTerminalOutput: boolean = false,
   cwd?: string,
 ): ToolInfo {
   const name = toolUse.name;
+  const mcpLeafName = mcpLeafToolName(name);
+
+  if (mcpLeafName === "web_search") {
+    const input = toolUse.input as { query?: unknown } | undefined;
+    const query = typeof input?.query === "string" ? input.query.trim() : "";
+    return {
+      title: query ? `Search web: ${query}` : "Search web",
+      kind: "search",
+      content: [],
+    };
+  }
+
+  if (mcpLeafName === "web_fetch") {
+    const input = toolUse.input as { url?: unknown } | undefined;
+    const url = typeof input?.url === "string" ? input.url.trim() : "";
+    return {
+      title: url ? `Fetch web: ${url}` : "Fetch web",
+      kind: "fetch",
+      content: [],
+    };
+  }
 
   switch (name) {
     case "Agent":

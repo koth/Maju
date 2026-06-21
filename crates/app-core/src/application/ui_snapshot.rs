@@ -1,9 +1,10 @@
-use super::Application;
+use super::{Application, normalize_path_for_storage, normalize_tracked_path};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use workspace_model::{
-    ChatMessageDelta, DiffLineKind, RepositorySnapshot, SessionFileChange, ToolDiffPreview,
-    ToolInvocation, UiSnapshotPatch,
+    ChatMessageDelta, DiffLineKind, FileChangeType, RepositorySnapshot, SessionFileChange,
+    ToolDiffPreview, ToolInvocation, UiSnapshotPatch,
 };
 
 const SNAPSHOT_TOOL_DETAIL_CHARS: usize = 4 * 1024;
@@ -28,7 +29,11 @@ pub enum UiSnapshotUpdate {
     Patch(UiSnapshotPatch),
 }
 
-fn lightweight_tool_invocation(tool: &ToolInvocation) -> ToolInvocation {
+fn lightweight_tool_invocation(
+    tool: &ToolInvocation,
+    created_change_paths: &HashSet<String>,
+    workspace_root: &Path,
+) -> ToolInvocation {
     let mut next = tool.clone();
     cap_string_in_place(&mut next.detail_text, SNAPSHOT_TOOL_DETAIL_CHARS);
     next.raw_input = next
@@ -49,8 +54,12 @@ fn lightweight_tool_invocation(tool: &ToolInvocation) -> ToolInvocation {
     for entry in &mut next.logs {
         cap_string_in_place(&mut entry.body, SNAPSHOT_TOOL_LOG_CHARS);
     }
-    next.diff_previews
-        .retain(|preview| !looks_like_bogus_whole_file_preview(preview));
+    next.diff_previews.retain(|preview| {
+        created_change_paths.contains(&snapshot_path_key(
+            &preview.path.display().to_string(),
+            workspace_root,
+        )) || !looks_like_bogus_whole_file_preview(preview)
+    });
     next
 }
 
@@ -208,6 +217,21 @@ fn looks_like_bogus_whole_file_preview(preview: &ToolDiffPreview) -> bool {
     added >= 100 && (removed == 0 || added > removed * 4)
 }
 
+fn created_change_path_keys(
+    changes: &[SessionFileChange],
+    workspace_root: &Path,
+) -> HashSet<String> {
+    changes
+        .iter()
+        .filter(|change| change.change_type == FileChangeType::Created)
+        .map(|change| snapshot_path_key(&change.path, workspace_root))
+        .collect()
+}
+
+fn snapshot_path_key(path: &str, workspace_root: &Path) -> String {
+    normalize_tracked_path(&normalize_path_for_storage(path, workspace_root))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +272,12 @@ mod tests {
 
 impl Application {
     pub fn lightweight_ui_snapshot(&self) -> workspace_model::UiSnapshot {
+        let mut created_change_paths =
+            created_change_path_keys(&self.ui.session_changes, &self.ui.workspace.root);
+        created_change_paths.extend(created_change_path_keys(
+            &self.ui.review_changes,
+            &self.ui.workspace.root,
+        ));
         workspace_model::UiSnapshot {
             revision: self.ui.revision,
             workspace: self.ui.workspace.clone(),
@@ -263,7 +293,13 @@ impl Application {
                 .ui
                 .tools
                 .iter()
-                .map(lightweight_tool_invocation)
+                .map(|tool| {
+                    lightweight_tool_invocation(
+                        tool,
+                        &created_change_paths,
+                        &self.ui.workspace.root,
+                    )
+                })
                 .collect(),
             repository: self.ui.repository.clone(),
             inspector_tab: self.ui.inspector_tab.clone(),
@@ -342,18 +378,32 @@ impl Application {
         cursor.timeline_len = self.ui.timeline.len();
 
         let mut tools = Vec::new();
+        let mut created_change_paths =
+            created_change_path_keys(&self.ui.session_changes, &self.ui.workspace.root);
+        created_change_paths.extend(created_change_path_keys(
+            &self.ui.review_changes,
+            &self.ui.workspace.root,
+        ));
         let dirty_tool_call_ids = std::mem::take(&mut self.dirty_tool_call_ids);
         let mut emitted_tool_ids = HashSet::new();
         for call_id in dirty_tool_call_ids {
             if let Some(tool) = self.ui.tools.iter().find(|tool| tool.call_id == call_id) {
                 cursor.known_tool_ids.insert(tool.id);
                 emitted_tool_ids.insert(tool.id);
-                tools.push(lightweight_tool_invocation(tool));
+                tools.push(lightweight_tool_invocation(
+                    tool,
+                    &created_change_paths,
+                    &self.ui.workspace.root,
+                ));
             }
         }
         for tool in &self.ui.tools {
             if cursor.known_tool_ids.insert(tool.id) && emitted_tool_ids.insert(tool.id) {
-                tools.push(lightweight_tool_invocation(tool));
+                tools.push(lightweight_tool_invocation(
+                    tool,
+                    &created_change_paths,
+                    &self.ui.workspace.root,
+                ));
             }
         }
         let current_tool_ids = self

@@ -66,6 +66,113 @@ fn converts_responses_request_to_chat_payload() {
 }
 
 #[test]
+fn converts_responses_namespace_tools_to_chat_function_tools() {
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "input": [{ "role": "user", "content": "search the web" }],
+        "tools": [{
+            "type": "namespace",
+            "name": "mcp__kodex_web_tools",
+            "description": "Kodex web tools.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "web_fetch",
+                    "description": "Fetch a web page.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": { "type": "string" }
+                        },
+                        "required": ["url"]
+                    }
+                }
+            ]
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let tools = chat["tools"].as_array().unwrap();
+
+    assert_eq!(
+        tools[0]["function"]["name"],
+        "mcp__kodex_web_tools__web_search"
+    );
+    assert_eq!(tools[0]["function"]["parameters"]["required"][0], "query");
+    assert!(
+        tools[0]["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Namespace `mcp__kodex_web_tools`")
+    );
+    assert_eq!(
+        tools[1]["function"]["name"],
+        "mcp__kodex_web_tools__web_fetch"
+    );
+    assert_eq!(chat["tool_choice"], "auto");
+
+    let anthropic = chat_payload_to_anthropic_payload(chat);
+    assert_eq!(
+        anthropic["tools"][0]["name"],
+        "mcp__kodex_web_tools__web_search"
+    );
+}
+
+#[test]
+fn converts_namespaced_responses_tool_call_history_to_flat_chat_tool_call() {
+    let payload = json!({
+        "model": "deepseek-v4-pro",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_web",
+                "namespace": "mcp__kodex_web_tools",
+                "name": "web_search",
+                "arguments": "{\"query\":\"latest rust\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_web",
+                "output": "{\"results\":[]}"
+            },
+            { "role": "user", "content": "continue" }
+        ],
+        "tools": [{
+            "type": "namespace",
+            "name": "mcp__kodex_web_tools",
+            "description": "Kodex web tools.",
+            "tools": [{
+                "type": "function",
+                "name": "web_search",
+                "description": "Search the web.",
+                "parameters": { "type": "object", "properties": {} }
+            }]
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+
+    assert_eq!(chat["messages"][0]["tool_calls"][0]["id"], "call_web");
+    assert_eq!(
+        chat["messages"][0]["tool_calls"][0]["function"]["name"],
+        "mcp__kodex_web_tools__web_search"
+    );
+    assert_eq!(chat["messages"][1]["tool_call_id"], "call_web");
+}
+
+#[test]
 fn converts_responses_image_input_to_chat_image_content() {
     let payload = json!({
         "model": "glm-5.1",
@@ -977,6 +1084,39 @@ fn converts_apply_patch_chat_function_call_to_custom_tool_call() {
 }
 
 #[test]
+fn converts_flat_chat_mcp_tool_call_to_namespaced_responses_item() {
+    let chat = json!({
+        "id": "chatcmpl_web",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_web",
+                    "type": "function",
+                    "function": {
+                        "name": "mcp__kodex_web_tools__web_search",
+                        "arguments": "{\"query\":\"latest rust\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    let response = chat_response_to_responses_response(chat).unwrap();
+
+    assert_eq!(response["output"][0]["type"], "function_call");
+    assert_eq!(response["output"][0]["call_id"], "call_web");
+    assert_eq!(response["output"][0]["namespace"], "mcp__kodex_web_tools");
+    assert_eq!(response["output"][0]["name"], "web_search");
+    assert_eq!(
+        response["output"][0]["arguments"],
+        "{\"query\":\"latest rust\"}"
+    );
+}
+
+#[test]
 fn converts_chat_payload_to_kimi_anthropic_messages() {
     let chat = json!({
         "model": "kimi-for-coding",
@@ -1254,6 +1394,22 @@ fn converts_chat_stream_to_responses_stream() {
     assert!(text.contains("\"arguments\":\"{\\\"path\\\":\\\".\\\"}\""));
     assert!(text.contains("\"input_tokens\":12"));
     assert!(text.contains("data: [DONE]"));
+}
+
+#[test]
+fn converts_flat_chat_stream_tool_call_to_namespaced_responses_stream() {
+    let body = concat!(
+        "data:{\"id\":\"chatcmpl_web\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_web\",\"type\":\"function\",\"function\":{\"name\":\"mcp__kodex_web_tools__web_search\",\"arguments\":\"{\\\"query\\\":\"}}]}}]}\n\n",
+        "data:{\"id\":\"chatcmpl_web\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"latest rust\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    let normalized = chat_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("\"namespace\":\"mcp__kodex_web_tools\""));
+    assert!(text.contains("\"name\":\"web_search\""));
+    assert!(text.contains("\"arguments\":\"{\\\"query\\\":\\\"latest rust\\\"}\""));
 }
 
 #[test]

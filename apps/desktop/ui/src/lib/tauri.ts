@@ -298,6 +298,14 @@ export async function settingsValidateRemoteProfile(request: RemoteMachineValida
   return invoke<RemoteMachineProfilesSnapshot>("settings_validate_remote_profile", { request });
 }
 
+export async function settingsSaveWebToolsSettings(enabled: boolean, provider: string): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_web_tools_settings", { enabled, provider });
+}
+
+export async function settingsSaveWebToolsProviderKey(provider: string, apiKey: string): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_web_tools_provider_key", { provider, apiKey });
+}
+
 export async function settingsSaveCodexAcpProviderKey(provider: string, apiKey: string, remoteProfileId?: string | null): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_codex_acp_provider_key", { provider, apiKey, remoteProfileId: remoteProfileId ?? null });
 }

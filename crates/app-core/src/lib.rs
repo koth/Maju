@@ -11,6 +11,8 @@ pub mod remote_ssh;
 mod remote_workspace;
 pub mod settings;
 pub mod startup_perf;
+pub mod web_tools;
+pub mod web_tools_mcp;
 mod workspace_files;
 
 pub use application::{

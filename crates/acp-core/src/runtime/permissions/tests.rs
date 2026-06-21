@@ -1,7 +1,7 @@
 use super::*;
 use agent_client_protocol::schema::{
-    PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId, ToolCallLocation,
-    ToolCallUpdate, ToolCallUpdateFields,
+    Meta, PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId,
+    ToolCallLocation, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::json;
 use std::fs;
@@ -355,6 +355,46 @@ fn user_input_questions_are_always_interactive() {
             }
         ]
     }));
+
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),
+        PermissionDecision::Ask,
+    );
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::ReadOnly, "D:/work/repo", &request),
+        PermissionDecision::Ask,
+    );
+}
+
+#[test]
+fn user_input_questions_in_meta_are_always_interactive() {
+    let request = RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            "ask-user",
+            ToolCallUpdateFields::new().title("Ask user".to_string()),
+        ),
+        vec![
+            PermissionOption::new("submit", "Submit", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("cancel", "Cancel", PermissionOptionKind::RejectOnce),
+        ],
+    )
+    .meta(Meta::from_iter([(
+        "kodex.ai/permissionInput".to_string(),
+        json!({
+            "questions": [
+                {
+                    "id": "approach",
+                    "header": "Approach",
+                    "question": "Which implementation approach should I use?",
+                    "options": [
+                        { "label": "Fast", "description": "Smallest viable change" },
+                        { "label": "Robust", "description": "Add tests and validation" }
+                    ]
+                }
+            ]
+        }),
+    )]));
 
     assert_eq!(
         decide_permission(PermissionPolicyMode::Build, "D:/work/repo", &request),

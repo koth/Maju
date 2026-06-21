@@ -37,6 +37,7 @@ use workspace_model::{
 
 const KODEX_PERMISSION_GUIDANCE_META_KEY: &str = "kodex.ai/permissionGuidance";
 const KODEX_USER_INPUT_ANSWERS_META_KEY: &str = "kodex.ai/userInputAnswers";
+const KODEX_PERMISSION_INPUT_META_KEY: &str = "kodex.ai/permissionInput";
 #[derive(Clone, Default)]
 struct CodeBuddyTerminalDenials {
     inner: Arc<Mutex<Vec<CodeBuddyTerminalDenial>>>,
@@ -903,12 +904,45 @@ fn codebuddy_plan_root() -> Option<std::path::PathBuf> {
 }
 
 fn permission_input_request(request: &RequestPermissionRequest) -> Option<PermissionInputRequest> {
-    let raw_input = request.tool_call.fields.raw_input.as_ref()?;
-    permission_input_request_from_value(raw_input)
+    request
+        .meta
+        .as_ref()
+        .and_then(permission_input_request_from_meta)
+        .or_else(|| {
+            request
+                .tool_call
+                .meta
+                .as_ref()
+                .and_then(permission_input_request_from_meta)
+        })
+        .or_else(|| {
+            request
+                .tool_call
+                .fields
+                .raw_input
+                .as_ref()
+                .and_then(permission_input_request_from_value)
+        })
+}
+
+fn permission_input_request_from_meta(meta: &Meta) -> Option<PermissionInputRequest> {
+    meta.get(KODEX_PERMISSION_INPUT_META_KEY)
+        .and_then(permission_input_request_from_value)
+        .or_else(|| {
+            meta.get("input")
+                .and_then(permission_input_request_from_value)
+        })
+        .or_else(|| permission_input_request_from_questions_value(meta.get("questions")?))
 }
 
 fn permission_input_request_from_value(value: &Value) -> Option<PermissionInputRequest> {
-    let questions = value.get("questions")?.as_array()?;
+    permission_input_request_from_questions_value(value.get("questions")?)
+}
+
+fn permission_input_request_from_questions_value(
+    questions_value: &Value,
+) -> Option<PermissionInputRequest> {
+    let questions = questions_value.as_array()?;
     let questions = questions
         .iter()
         .enumerate()
@@ -2278,6 +2312,74 @@ mod tests {
     }
 
     #[test]
+    fn permission_input_request_parses_request_meta_questions() {
+        let request = permission_request_with_raw_input(json!({"tool": "AskUserQuestion"})).meta(
+            Meta::from_iter([(
+                KODEX_PERMISSION_INPUT_META_KEY.to_string(),
+                json!({
+                    "questions": [
+                        {
+                            "id": "approach",
+                            "header": "Approach",
+                            "question": "Which implementation approach should I use?",
+                            "multiSelect": true,
+                            "options": [
+                                { "label": "Fast", "description": "Smallest viable change" },
+                                { "label": "Robust", "description": "Add tests and validation" }
+                            ]
+                        }
+                    ]
+                }),
+            )]),
+        );
+
+        let input = permission_input_request(&request).expect("questions should parse");
+
+        assert_eq!(input.questions.len(), 1);
+        assert_eq!(input.questions[0].id, "approach");
+        assert_eq!(input.questions[0].header, "Approach");
+        assert!(input.questions[0].multi_select);
+        assert_eq!(input.questions[0].options[1].label, "Robust");
+    }
+
+    #[test]
+    fn permission_input_request_parses_tool_call_meta_input_questions() {
+        let request = RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "permission-1",
+                ToolCallUpdateFields::new().title("Ask user".to_string()),
+            )
+            .meta(Meta::from_iter([(
+                "input".to_string(),
+                json!({
+                    "questions": [
+                        {
+                            "header": "Checks",
+                            "question": "Which checks should run?",
+                            "options": [
+                                { "label": "Unit", "description": "Run unit tests" },
+                                { "label": "Build", "description": "Run build" }
+                            ]
+                        }
+                    ]
+                }),
+            )])),
+            vec![
+                PermissionOption::new("submit", "Submit", PermissionOptionKind::AllowOnce),
+                PermissionOption::new("cancel", "Cancel", PermissionOptionKind::RejectOnce),
+            ],
+        );
+
+        let input = permission_input_request(&request).expect("questions should parse");
+
+        assert_eq!(input.questions.len(), 1);
+        assert_eq!(input.questions[0].id, "Which checks should run?");
+        assert_eq!(input.questions[0].header, "Checks");
+        assert_eq!(input.questions[0].options[0].label, "Unit");
+    }
+
+    #[test]
     fn codebuddy_bash_permission_details_include_extracted_write_path() {
         let request = codebuddy_bash_permission_request(json!({
             "command": "python - <<'PY'\nfrom pathlib import Path\np=Path('packages/backend/src/service.ts')\np.write_text('ok')\nPY"
@@ -2712,6 +2814,7 @@ mod tests {
             log_id: "test-log".into(),
             acp_port: 0,
             remote_ssh: None,
+            mcp_servers: Vec::new(),
         }
     }
 

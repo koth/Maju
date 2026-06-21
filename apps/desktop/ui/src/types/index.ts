@@ -149,6 +149,7 @@ export type AgentPlanEntryStatus = "pending" | "in_progress" | "completed" | "ca
 export interface PromptInputCapabilities {
   image: boolean;
   embedded_context: boolean;
+  session_steer: boolean;
 }
 
 export interface AvailableCommand {
@@ -681,11 +682,17 @@ export interface AppSettings {
   selected_codex_provider_profile_id: string | null;
   selected_claude_provider_profile_id: string | null;
   claude: ClaudeProviderSettings;
+  web_tools: WebToolsSettings;
 }
 
 export interface ClaudeProviderSettings {
   available_models: string[];
   fast_model: string | null;
+}
+
+export interface WebToolsSettings {
+  enabled: boolean;
+  provider: "brave" | "tavily" | string;
 }
 
 export interface LspServerSettings {
@@ -741,6 +748,7 @@ export interface AgentSettingsSnapshot {
   env_override: string | null;
   codex_acp: CodexAcpSettingsStatus;
   claude: ClaudeProviderSettingsStatus;
+  web_tools: WebToolsSettingsStatus;
 }
 
 export interface CodexAcpSettingsStatus {
@@ -757,6 +765,12 @@ export interface ClaudeProviderSettingsStatus {
   profiles: AgentProviderProfile[];
   fast_model: string | null;
   fast_model_options: AgentModelOption[];
+}
+
+export interface WebToolsSettingsStatus {
+  enabled: boolean;
+  provider: "brave" | "tavily" | string;
+  configured: boolean;
 }
 
 export interface AgentInstallResult {

@@ -219,6 +219,8 @@ fn missing_settings_default_to_claude_byok() {
         Some(BYOK_PROVIDER_ID)
     );
     assert!(settings.claude.available_models.is_empty());
+    assert!(!settings.web_tools.enabled);
+    assert_eq!(settings.web_tools.provider, WEB_TOOLS_PROVIDER_BRAVE);
 }
 
 #[test]
@@ -237,12 +239,93 @@ fn settings_round_trip() {
             available_models: default_claude_available_models(),
             ..ClaudeProviderSettings::default()
         },
+        web_tools: WebToolsSettings {
+            enabled: true,
+            provider: WEB_TOOLS_PROVIDER_BRAVE.to_string(),
+        },
     };
 
     save_app_settings(&paths, &settings).unwrap();
     let loaded = load_app_settings(&paths);
 
     assert_eq!(loaded, settings);
+}
+
+#[test]
+fn legacy_settings_without_web_tools_default_to_disabled() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    std::fs::create_dir_all(paths.config_dir()).unwrap();
+    std::fs::write(
+        settings_path(&paths),
+        r#"{
+  "selected_agent": "claude-agent-acp",
+  "acp_port": 0,
+  "theme": "graphite",
+  "lsp_servers": {},
+  "codex_connection_mode": "managed",
+  "selected_codex_provider_profile_id": null,
+  "selected_claude_provider_profile_id": "byok",
+  "claude": {"available_models": [], "fast_model": null}
+}"#,
+    )
+    .unwrap();
+
+    let settings = load_app_settings(&paths);
+
+    assert!(!settings.web_tools.enabled);
+    assert_eq!(settings.web_tools.provider, WEB_TOOLS_PROVIDER_BRAVE);
+}
+
+#[test]
+fn web_tools_settings_and_secret_update_snapshot() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    let snapshot = save_web_tools_settings(&paths, true, WEB_TOOLS_PROVIDER_BRAVE).unwrap();
+    assert!(snapshot.settings.web_tools.enabled);
+    assert_eq!(snapshot.web_tools.provider, WEB_TOOLS_PROVIDER_BRAVE);
+    assert!(!snapshot.web_tools.configured);
+
+    let snapshot =
+        save_web_tools_provider_key(&paths, WEB_TOOLS_PROVIDER_BRAVE, "brave-secret").unwrap();
+    assert!(snapshot.web_tools.enabled);
+    assert!(snapshot.web_tools.configured);
+    assert_eq!(
+        web_tools_provider_secret(&paths, WEB_TOOLS_PROVIDER_BRAVE).as_deref(),
+        Some("brave-secret")
+    );
+
+    let content = std::fs::read_to_string(settings_path(&paths)).unwrap();
+    assert!(!content.contains("brave-secret"));
+}
+
+#[test]
+fn web_tools_tavily_secret_is_stored_per_provider() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    let snapshot = save_web_tools_settings(&paths, true, WEB_TOOLS_PROVIDER_TAVILY).unwrap();
+    assert!(snapshot.settings.web_tools.enabled);
+    assert_eq!(snapshot.web_tools.provider, WEB_TOOLS_PROVIDER_TAVILY);
+    assert!(!snapshot.web_tools.configured);
+
+    let snapshot =
+        save_web_tools_provider_key(&paths, WEB_TOOLS_PROVIDER_TAVILY, "tvly-secret").unwrap();
+    assert_eq!(snapshot.web_tools.provider, WEB_TOOLS_PROVIDER_TAVILY);
+    assert!(snapshot.web_tools.configured);
+    assert_eq!(
+        web_tools_provider_secret(&paths, WEB_TOOLS_PROVIDER_TAVILY).as_deref(),
+        Some("tvly-secret")
+    );
+    assert_eq!(
+        web_tools_provider_secret(&paths, WEB_TOOLS_PROVIDER_BRAVE).as_deref(),
+        None
+    );
+
+    let snapshot = save_web_tools_settings(&paths, true, WEB_TOOLS_PROVIDER_BRAVE).unwrap();
+    assert_eq!(snapshot.web_tools.provider, WEB_TOOLS_PROVIDER_BRAVE);
+    assert!(!snapshot.web_tools.configured);
 }
 
 #[test]
@@ -258,6 +341,7 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         selected_codex_provider_profile_id: None,
         selected_claude_provider_profile_id: None,
         claude: ClaudeProviderSettings::default(),
+        web_tools: WebToolsSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -296,6 +380,7 @@ model_provider = "timiai"
         selected_codex_provider_profile_id: Some("woa".to_string()),
         selected_claude_provider_profile_id: Some("legacy-claude".to_string()),
         claude: ClaudeProviderSettings::default(),
+        web_tools: WebToolsSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -602,6 +687,7 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -712,6 +798,7 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             selected_codex_provider_profile_id: Some(TIMIAI_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -766,6 +853,7 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -804,6 +892,7 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -1613,6 +1702,7 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             selected_codex_provider_profile_id: Some(KIMI_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -1706,6 +1796,7 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();
@@ -2228,6 +2319,7 @@ fn env_override_wins_over_persisted_selection() {
             selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
         },
     )
     .unwrap();

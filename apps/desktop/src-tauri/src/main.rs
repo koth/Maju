@@ -9,15 +9,11 @@ mod state;
 
 use app_core::{UiPatchCursor, UiSnapshotUpdate};
 use state::AppState;
-#[cfg(target_os = "macos")]
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::Manager;
 
-#[cfg(target_os = "macos")]
-const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
 
@@ -48,11 +44,10 @@ fn main() {
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
                 app_core::startup_perf::mark("desktop/setup_start", "");
-                if let Err(error) = install_bundled_codex_acp(app) {
-                    app_core::startup_perf::mark(
-                        "desktop/codex_acp_install_failed",
-                        &error.to_string(),
-                    );
+                if let Err(error) =
+                    commands::settings::install_bundled_codex_acp_if_missing(app.handle())
+                {
+                    app_core::startup_perf::mark("desktop/codex_acp_install_failed", &error);
                 }
                 if let Err(error) =
                     commands::settings::install_bundled_claude_agent_acp_if_missing(app.handle())
@@ -125,6 +120,8 @@ fn main() {
             commands::settings::settings_detect_agents,
             commands::settings::settings_select_agent,
             commands::settings::settings_select_theme,
+            commands::settings::settings_save_web_tools_settings,
+            commands::settings::settings_save_web_tools_provider_key,
             commands::settings::settings_get_remote_profiles,
             commands::settings::settings_save_remote_profile,
             commands::settings::settings_delete_remote_profile,
@@ -181,45 +178,6 @@ fn main() {
                 }
             }
         });
-}
-
-#[cfg(target_os = "macos")]
-fn install_bundled_codex_acp(app: &tauri::App) -> anyhow::Result<()> {
-    let paths = app_core::AppPaths::resolve()?;
-    let target = app_core::settings::codex_acp_binary_path(&paths);
-    if target.is_file() {
-        return Ok(());
-    }
-
-    let source = app
-        .path()
-        .resource_dir()?
-        .join(BUNDLED_CODEX_ACP_RESOURCE_DIR)
-        .join("codex-acp");
-    if !source.is_file() {
-        return Ok(());
-    }
-
-    let bin_dir = app_core::settings::codex_acp_bin_dir(&paths);
-    std::fs::create_dir_all(&bin_dir)?;
-    copy_executable(&source, &target)?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn install_bundled_codex_acp(_app: &tauri::App) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn copy_executable(source: &Path, target: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::copy(source, target)?;
-    let mut permissions = std::fs::metadata(target)?.permissions();
-    permissions.set_mode(permissions.mode() | 0o755);
-    std::fs::set_permissions(target, permissions)?;
-    Ok(())
 }
 
 fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {

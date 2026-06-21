@@ -22,6 +22,8 @@ import {
   settingsValidateRemoteProfile,
   settingsSelectAgentProviderProfile,
   settingsSelectClaudeFastModel,
+  settingsSaveWebToolsProviderKey,
+  settingsSaveWebToolsSettings,
 } from "../../lib/tauri";
 import {
   checkForAppUpdate,
@@ -61,6 +63,8 @@ vi.mock("../../lib/tauri", async () => {
     settingsSelectCodexDefaultMode: vi.fn(),
     settingsSelectAgentProviderProfile: vi.fn(),
     settingsSelectClaudeFastModel: vi.fn(),
+    settingsSaveWebToolsProviderKey: vi.fn(),
+    settingsSaveWebToolsSettings: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
@@ -164,6 +168,10 @@ const agentSnapshot: AgentSettingsSnapshot = {
       available_models: ["claude-opus-4-7[1m]", "claude-opus-4-6[1m]"],
       fast_model: null,
     },
+    web_tools: {
+      enabled: false,
+      provider: "brave",
+    },
   },
   agents: [
     {
@@ -218,6 +226,11 @@ const agentSnapshot: AgentSettingsSnapshot = {
         provider_label: "CommandCode",
       },
     ],
+  },
+  web_tools: {
+    enabled: false,
+    provider: "brave",
+    configured: false,
   },
 };
 
@@ -330,6 +343,11 @@ async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
   fireEvent.click(tab);
 }
 
+async function openSettingsPane(label: "通用" | "Web 工具" | "远程" | "已归档" | "LSP") {
+  const paneButton = await screen.findByRole("button", { name: label });
+  fireEvent.click(paneButton);
+}
+
 async function selectByokProvider(name: string | RegExp) {
   const trigger = await screen.findByLabelText("byok_provider_profile");
   fireEvent.click(trigger);
@@ -394,6 +412,36 @@ describe("SettingsPage LSP settings", () => {
       };
     });
     vi.mocked(settingsResetProviderModels).mockResolvedValue(agentSnapshot);
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled,
+          provider,
+        },
+      },
+      web_tools: {
+        ...agentSnapshot.web_tools,
+        enabled,
+        provider,
+      },
+    }));
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled: agentSnapshot.settings.web_tools.enabled,
+          provider,
+        },
+      },
+      web_tools: {
+        enabled: agentSnapshot.web_tools.enabled,
+        provider,
+        configured: true,
+      },
+    }));
     vi.mocked(settingsSelectClaudeFastModel).mockImplementation(async (modelId) => ({
       ...agentSnapshot,
       settings: {
@@ -930,6 +978,108 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("Kimi Code API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("kimi-secret")).not.toBeInTheDocument();
+  });
+
+  it("saves Web tools settings and Brave Search key", async () => {
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled,
+          provider,
+        },
+      },
+      web_tools: {
+        enabled,
+        provider,
+        configured: false,
+      },
+    }));
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled: true,
+          provider,
+        },
+      },
+      web_tools: {
+        enabled: true,
+        provider,
+        configured: true,
+      },
+    }));
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("Web 工具");
+
+    const webSection = (await screen.findByRole("heading", { name: "Web 工具", level: 2 })).closest("section");
+    expect(webSection).not.toBeNull();
+    const webControls = within(webSection as HTMLElement);
+
+    fireEvent.click(webControls.getByRole("checkbox", { name: "已关闭" }));
+
+    await waitFor(() => expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(true, "brave"));
+    await screen.findByText("需要保存 Brave Search API key 后，新会话才会实际获得 Web 工具。");
+
+    fireEvent.change(screen.getByLabelText("web_tools_api_key"), { target: { value: "brave-secret" } });
+    fireEvent.click(webControls.getByRole("button", { name: "保存 key" }));
+
+    await waitFor(() => expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith("brave", "brave-secret"));
+    await screen.findByText("Brave Search API key 已保存，后续新建或重连本机会话生效");
+    expect(screen.getByLabelText("web_tools_api_key")).toHaveValue("");
+  });
+
+  it("switches Web tools provider and saves Tavily key", async () => {
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled,
+          provider,
+        },
+      },
+      web_tools: {
+        enabled,
+        provider,
+        configured: false,
+      },
+    }));
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
+      ...agentSnapshot,
+      settings: {
+        ...agentSnapshot.settings,
+        web_tools: {
+          enabled: false,
+          provider,
+        },
+      },
+      web_tools: {
+        enabled: false,
+        provider,
+        configured: true,
+      },
+    }));
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("Web 工具");
+
+    const webSection = (await screen.findByRole("heading", { name: "Web 工具", level: 2 })).closest("section");
+    expect(webSection).not.toBeNull();
+    const webControls = within(webSection as HTMLElement);
+
+    fireEvent.change(webControls.getByLabelText("web_tools_provider"), { target: { value: "tavily" } });
+
+    await waitFor(() => expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(false, "tavily"));
+    await screen.findByText("Web 工具搜索来源已切换到 Tavily");
+
+    fireEvent.change(screen.getByLabelText("web_tools_api_key"), { target: { value: "tvly-secret" } });
+    fireEvent.click(webControls.getByRole("button", { name: "保存 key" }));
+
+    await waitFor(() => expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith("tavily", "tvly-secret"));
+    await screen.findByText("Tavily API key 已保存，后续新建或重连本机会话生效");
+    expect(screen.getByLabelText("web_tools_api_key")).toHaveValue("");
   });
 
   it("lets BYOK source selection diverge from the current Codex channel", async () => {

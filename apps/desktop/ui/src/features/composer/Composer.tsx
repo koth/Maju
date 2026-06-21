@@ -105,11 +105,30 @@ export function Composer({
   const turnActive = sessionBusy || optimisticTurnActive;
   const imageInputEnabled = snapshot.prompt_capabilities?.image === true;
   const fileInputEnabled = snapshot.prompt_capabilities?.embedded_context === true;
+  const sessionSteerEnabled = snapshot.prompt_capabilities?.session_steer === true;
   const attachmentInputEnabled = imageInputEnabled || fileInputEnabled;
-  const canSend =
-    (input.trim().length > 0 || attachments.length > 0) &&
+  const canSteer = turnActive && sessionSteerEnabled;
+  const textInputEnabled = !turnActive || canSteer;
+  const activeAttachmentInputEnabled = !turnActive && attachmentInputEnabled;
+  const attachmentButtonTitle = turnActive
+    ? "当前轮次运行中暂不支持附件"
+    : attachmentInputEnabled
+      ? "附加图片或文件"
+      : "当前智能体不支持附件";
+  const trimmedInput = input.trim();
+  const canSendIdle =
+    (trimmedInput.length > 0 || attachments.length > 0) &&
     snapshot.session.status === "Idle" &&
     !optimisticTurnActive;
+  const canSendSteer = canSteer && trimmedInput.length > 0;
+  const canSend = canSendIdle || canSendSteer;
+  const primaryActionIsStop = turnActive && !canSendSteer;
+  const primaryActionEnabled = primaryActionIsStop ? !cancelling : canSend;
+  const primaryActionTitle = turnActive
+    ? primaryActionIsStop
+      ? "停止当前轮次"
+      : "追加指令"
+    : "发送提示";
   const activeImagePreview = useMemo(
     () => attachments.find((attachment) => attachment.id === activeImagePreviewId && attachment.previewUrl) ?? null,
     [activeImagePreviewId, attachments],
@@ -141,6 +160,10 @@ export function Composer({
       if (processingReferenceIds.current.has(request.id)) return;
       processingReferenceIds.current.add(request.id);
       try {
+        if (turnActive) {
+          setControlError("当前轮次运行中暂不支持添加引用");
+          return;
+        }
         if (!fileInputEnabled) {
           setControlError("当前智能体不支持文件引用");
           return;
@@ -180,6 +203,7 @@ export function Composer({
     onReferenceRequestConsumed,
     referenceRequests,
     snapshot.workspace.root,
+    turnActive,
   ]);
 
   useEffect(() => {
@@ -201,44 +225,50 @@ export function Composer({
   const handleSend = useCallback(async () => {
     if (!canSend) return;
     const prompt: UserPromptContent[] = [];
-    const text = input.trim();
-    for (const attachment of attachments) {
-      if (attachment.kind !== "workspace_file" || !attachment.path) continue;
-      prompt.push({
-        type: "workspace_file",
-        path: attachment.path,
-        start_line: attachment.startLine,
-        end_line: attachment.endLine,
-      });
-    }
-    if (text.length > 0) {
+    const text = trimmedInput;
+    if (turnActive) {
       prompt.push({ type: "text", text });
-    }
-    for (const attachment of attachments) {
-      if (attachment.kind === "workspace_file") continue;
-      if (attachment.kind === "image") {
-        if (!attachment.data) continue;
+    } else {
+      for (const attachment of attachments) {
+        if (attachment.kind !== "workspace_file" || !attachment.path) continue;
         prompt.push({
-          type: "image",
-          data: attachment.data,
-          mime_type: attachment.mimeType,
-          name: attachment.name,
-          thumbnail_data: attachment.thumbnailData,
-          thumbnail_mime_type: attachment.thumbnailMimeType,
+          type: "workspace_file",
+          path: attachment.path,
+          start_line: attachment.startLine,
+          end_line: attachment.endLine,
         });
-      } else {
-        prompt.push({
-          type: "file",
-          data: attachment.data,
-          text: attachment.text,
-          uri: attachment.uri,
-          mime_type: attachment.mimeType || null,
-          name: attachment.name,
-        });
+      }
+      if (text.length > 0) {
+        prompt.push({ type: "text", text });
+      }
+      for (const attachment of attachments) {
+        if (attachment.kind === "workspace_file") continue;
+        if (attachment.kind === "image") {
+          if (!attachment.data) continue;
+          prompt.push({
+            type: "image",
+            data: attachment.data,
+            mime_type: attachment.mimeType,
+            name: attachment.name,
+            thumbnail_data: attachment.thumbnailData,
+            thumbnail_mime_type: attachment.thumbnailMimeType,
+          });
+        } else {
+          prompt.push({
+            type: "file",
+            data: attachment.data,
+            text: attachment.text,
+            uri: attachment.uri,
+            mime_type: attachment.mimeType || null,
+            name: attachment.name,
+          });
+        }
       }
     }
     setInput("");
-    setAttachments([]);
+    if (!turnActive) {
+      setAttachments([]);
+    }
     setActiveImagePreviewId(null);
     setSlashMenuOpen(false);
     setOptimisticTurnActive(true);
@@ -249,7 +279,7 @@ export function Composer({
       setOptimisticTurnActive(false);
       setControlError(String(error));
     }
-  }, [attachments, canSend, input, onStateChange]);
+  }, [attachments, canSend, onStateChange, trimmedInput, turnActive]);
 
   const handleInputChange = useCallback((value: string) => {
     setInput(value);
@@ -275,7 +305,7 @@ export function Composer({
   }, []);
 
   const handleAttachmentFiles = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0 || !attachmentInputEnabled) return;
+    if (!files || files.length === 0 || !activeAttachmentInputEnabled) return;
     setControlError(null);
     try {
       const selected = Array.from(files).filter((file) =>
@@ -293,10 +323,10 @@ export function Composer({
         attachmentInputRef.current.value = "";
       }
     }
-  }, [attachmentInputEnabled, fileInputEnabled, imageInputEnabled]);
+  }, [activeAttachmentInputEnabled, fileInputEnabled, imageInputEnabled]);
 
   const handlePaste = useCallback(async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!imageInputEnabled) return;
+    if (turnActive || !imageInputEnabled) return;
     const files = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
@@ -311,7 +341,7 @@ export function Composer({
     } catch (error) {
       setControlError(String(error));
     }
-  }, [imageInputEnabled]);
+  }, [imageInputEnabled, turnActive]);
 
   const handleCancel = useCallback(async () => {
     if (!turnActive || cancelling) return;
@@ -325,6 +355,14 @@ export function Composer({
       setCancelling(false);
     }
   }, [turnActive, cancelling, onStateChange]);
+
+  const handlePrimaryAction = useCallback(() => {
+    if (primaryActionIsStop) {
+      void handleCancel();
+      return;
+    }
+    void handleSend();
+  }, [handleCancel, handleSend, primaryActionIsStop]);
 
   const handleReconnect = useCallback(async () => {
     setReconnecting(true);
@@ -514,7 +552,8 @@ export function Composer({
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            placeholder={turnActive ? "补充约束，或停止当前轮次" : "交给 Kodex 一个明确目标"}
+            disabled={!textInputEnabled}
+            placeholder={turnActive ? (sessionSteerEnabled ? "补充约束，继续引导当前轮次" : "当前智能体暂不支持追加指令") : "交给 Kodex 一个明确目标"}
             rows={compact ? 1 : 2}
           />
         </div>
@@ -529,9 +568,9 @@ export function Composer({
           <button
             className="composer-attachment-btn"
             type="button"
-            disabled={!controlsEnabled || !attachmentInputEnabled || pendingControlId !== null}
+            disabled={!controlsEnabled || !activeAttachmentInputEnabled || pendingControlId !== null}
             onClick={() => attachmentInputRef.current?.click()}
-            title={attachmentInputEnabled ? "附加图片或文件" : "当前智能体不支持附件"}
+            title={attachmentButtonTitle}
             aria-label="附加图片或文件"
           >
             <PaperclipIcon />
@@ -587,13 +626,17 @@ export function Composer({
             {snapshot.session.status}
           </span>
           <button
-            className={`composer-send-btn ${canSend ? "composer-send-btn-active" : ""} ${turnActive ? "composer-stop-btn" : ""}`}
-            disabled={turnActive ? cancelling : !canSend}
-            onClick={turnActive ? handleCancel : handleSend}
-            title={turnActive ? "取消当前轮次" : "发送提示"}
-            aria-label={turnActive ? "取消当前轮次" : "发送提示"}
+            className={[
+              "composer-send-btn",
+              canSend ? "composer-send-btn-active" : "",
+              primaryActionIsStop ? "composer-stop-btn" : "",
+            ].filter(Boolean).join(" ")}
+            disabled={!primaryActionEnabled}
+            onClick={handlePrimaryAction}
+            title={primaryActionTitle}
+            aria-label={primaryActionTitle}
           >
-            {turnActive ? <span className="composer-stop-icon" /> : <SendIcon />}
+            {primaryActionIsStop ? <span className="composer-stop-icon" /> : <SendIcon />}
           </button>
         </div>
         {controlError && (

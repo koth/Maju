@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { clearMocks, mockConvertFileSrc } from "@tauri-apps/api/mocks";
 import { ConversationTimeline, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import {
@@ -16,6 +16,7 @@ import type {
 
 afterEach(() => {
   clearMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -33,7 +34,7 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
       status: "Streaming",
     },
     session_config: { hydrated: false, controls: [] },
-    prompt_capabilities: { image: false, embedded_context: false },
+    prompt_capabilities: { image: false, embedded_context: false, session_steer: false },
     available_commands: [],
     agent_plan: [],
     messages: [],
@@ -195,11 +196,11 @@ describe("ThinkingIndicator", () => {
       messages: [{ id: "compact-start", role: "System", body: "正在压缩上下文" }],
     });
 
-    const { container, getByRole, rerender } = render(
+    const { container, rerender } = render(
       <ConversationTimeline snapshot={pending} onPermissionSelect={() => {}} />,
     );
 
-    expect(getByRole("status")).toHaveTextContent("正在压缩上下文");
+    expect(within(container).getByRole("status")).toHaveTextContent("正在压缩上下文");
     expect(container.querySelector(".msg-context-compaction.is-pending")).not.toBeNull();
 
     const completed = makeSnapshot({
@@ -331,16 +332,80 @@ describe("ThinkingIndicator", () => {
       <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
     );
 
-    expect(container.textContent).toContain("已运行 00:01:05");
-    expect(container.textContent).toContain("2 条记录");
+    expect(container.textContent).toContain("已处理 1m 5s");
     expect(container.textContent).toContain("final answer");
     expect(container.textContent).not.toContain("intermediate reply");
     expect(container.textContent).not.toContain("pnpm test");
 
-    fireEvent.click(getByRole("button", { name: "展开已运行上下文" }));
+    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
 
     expect(container.textContent).toContain("intermediate reply");
     expect(container.textContent).toContain("pnpm test");
+  });
+
+  it("shows a completed turn divider even without collapsible tool context", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [{ Message: "user-1" }, { Message: "assistant-final" }],
+      messages: [
+        {
+          id: "user-1",
+          role: "User",
+          body: "hello",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-final",
+          role: "Assistant",
+          body: "hi",
+          created_at: "2026-05-12T00:00:04Z",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".timeline-turn-summary.is-completed")?.textContent).toContain(
+      "已处理 4s",
+    );
+    expect(container.querySelector(".timeline-collapse-toggle")).toBeNull();
+  });
+
+  it("formats completed turn durations from numeric epoch timestamps", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [{ Message: "user-1" }, { Message: "assistant-final" }],
+      messages: [
+        {
+          id: "user-1",
+          role: "User",
+          body: "hello",
+          created_at: "1710000000000",
+        },
+        {
+          id: "assistant-final",
+          role: "Assistant",
+          body: "hi",
+          created_at: "1710000065",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".timeline-turn-summary.is-completed")?.textContent).toContain(
+      "已处理 1m 5s",
+    );
   });
 
   it("keeps active streaming turn context expanded until the turn finishes", async () => {
@@ -387,12 +452,60 @@ describe("ThinkingIndicator", () => {
 
     expect(container.textContent).toContain("live final");
     expect(container.textContent).toContain("cargo test");
-    expect(queryByRole("button", { name: "展开已运行上下文" })).toBeNull();
+    expect(container.textContent).toContain("正在处理");
+    expect(queryByRole("button", { name: "展开已处理上下文" })).toBeNull();
     await waitFor(() => {
       expect(container.querySelector(".msg-streaming-markdown .md-bold")?.textContent).toBe(
         "live",
       );
     });
+  });
+
+  it("updates active turn processing duration while the turn is running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-12T00:00:09Z"));
+    const shellTool = makePermissionTool({
+      id: "tool-active-shell",
+      call_id: "active-shell-1",
+      kind: "execute",
+      name: "`pnpm test`",
+      summary: "pnpm test",
+      status: "Running",
+      raw_input: JSON.stringify({ command: "pnpm test" }),
+      permission_options: [],
+    });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "WaitingForTool",
+      },
+      timeline: [{ Message: "user-active" }, { Tool: shellTool.id }],
+      messages: [
+        {
+          id: "user-active",
+          role: "User",
+          body: "run tests",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+      ],
+      tools: [shellTool],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".timeline-turn-summary.is-active")?.textContent).toContain(
+      "正在处理 9s",
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(52_000);
+    });
+
+    expect(container.querySelector(".timeline-turn-summary.is-active")?.textContent).toContain(
+      "正在处理 1m 1s",
+    );
   });
 
   it("renders the active streaming assistant message as markdown", async () => {
@@ -1185,7 +1298,7 @@ describe("ThinkingIndicator", () => {
     expect(text.indexOf("second turn")).toBeLessThan(text.indexOf("second.ts"));
   });
 
-  it("moves a stale same-turn change set after the later assistant message", () => {
+  it("keeps a stale change set with the assistant message that produced it", () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -1217,8 +1330,50 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
     const text = container.textContent ?? "";
-    expect(text.indexOf("answered only")).toBeLessThan(text.indexOf("changed.ts"));
+    expect(text.indexOf("changed files")).toBeLessThan(text.indexOf("changed.ts"));
+    expect(text.indexOf("changed.ts")).toBeLessThan(text.indexOf("answered only"));
     expect(text.lastIndexOf("changed.ts")).toBe(text.indexOf("changed.ts"));
+  });
+
+  it("does not attach previous turn changes to a later no-change assistant message", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [
+        { Message: "user-1" },
+        { Message: "msg-1" },
+        { Message: "msg-2" },
+      ],
+      messages: [
+        { id: "user-1", role: "User", body: "first prompt" },
+        { id: "msg-1", role: "Assistant", body: "edited previous turn" },
+        { id: "msg-2", role: "Assistant", body: "answered without edits" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("previous.ts", 3, 1, "turn-msg-1"),
+          ]),
+        }}
+      />,
+    );
+
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
+    const text = container.textContent ?? "";
+    expect(text.indexOf("edited previous turn")).toBeLessThan(text.indexOf("previous.ts"));
+    expect(text.indexOf("previous.ts")).toBeLessThan(text.indexOf("answered without edits"));
   });
 
   it("opens timeline changes with the producing change set id", () => {

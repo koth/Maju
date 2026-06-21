@@ -116,6 +116,7 @@ pub(super) fn prompt_capabilities_from_acp(
     PromptInputCapabilities {
         image: capabilities.image,
         embedded_context: capabilities.embedded_context,
+        session_steer: false,
     }
 }
 

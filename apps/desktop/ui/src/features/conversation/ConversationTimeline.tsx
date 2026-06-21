@@ -145,25 +145,58 @@ function TimelineCollapseSummary({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const collapsible = group.itemCount > 0;
+  const content = (
+    <>
+      <span className="timeline-turn-summary-main">
+        <span className="timeline-collapse-label">
+          已处理{group.durationLabel ? ` ${group.durationLabel}` : ""}
+        </span>
+        {collapsible && (
+          <span className="timeline-collapse-chevron" aria-hidden="true">
+            {"\u203A"}
+          </span>
+        )}
+      </span>
+      <span className="timeline-turn-summary-rule" aria-hidden="true" />
+    </>
+  );
+
+  if (!collapsible) {
+    return (
+      <div className="timeline-turn-summary is-completed">
+        {content}
+      </div>
+    );
+  }
+
   return (
     <button
       type="button"
-      className={`timeline-collapse-toggle ${expanded ? "is-expanded" : ""}`}
+      className={`timeline-turn-summary timeline-collapse-toggle is-completed ${expanded ? "is-expanded" : ""}`}
       aria-expanded={expanded}
-      aria-label={expanded ? "收起已运行上下文" : "展开已运行上下文"}
+      aria-label={expanded ? "收起已处理上下文" : "展开已处理上下文"}
       onClick={onToggle}
     >
-      <span className="timeline-collapse-prefix" aria-hidden="true">
-        {"\u2022"}
-      </span>
-      <span className="timeline-collapse-label">
-        已运行{group.durationLabel ? ` ${group.durationLabel}` : ""}
-      </span>
-      <span className="timeline-collapse-count">{group.itemCount} 条记录</span>
-      <span className="timeline-collapse-chevron" aria-hidden="true">
-        {"\u203A"}
-      </span>
+      {content}
     </button>
+  );
+}
+
+function TimelineActiveTurnSummary({ durationLabel }: { durationLabel: string | null }) {
+  return (
+    <div
+      className="timeline-turn-summary is-active"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="timeline-turn-summary-main">
+        <span className="timeline-collapse-label">
+          正在处理{durationLabel ? ` ${durationLabel}` : ""}
+        </span>
+      </span>
+      <span className="timeline-turn-summary-rule" aria-hidden="true" />
+    </div>
   );
 }
 
@@ -500,45 +533,18 @@ function fileUrlToPath(src: string): string | null {
   }
 }
 
-function placeTurnChangeSetsAfterFinalAssistant(
+function visibleTurnChangeSetsByMessageId(
   timeline: UiSnapshot["timeline"],
-  messagesById: Map<string, UiSnapshot["messages"][number]>,
   turnChangeSetsByMessageId: Record<string, TimelineTurnChangeSet>,
 ): Record<string, TimelineTurnChangeSet> {
   const result: Record<string, TimelineTurnChangeSet> = {};
-  let assistantIds: string[] = [];
-  let changeSets: TimelineTurnChangeSet[] = [];
-
-  const flushTurn = () => {
-    if (assistantIds.length === 0 || changeSets.length === 0) {
-      assistantIds = [];
-      changeSets = [];
-      return;
-    }
-    result[assistantIds[assistantIds.length - 1]] = changeSets[changeSets.length - 1];
-    assistantIds = [];
-    changeSets = [];
-  };
-
   for (const item of timeline) {
     if (typeof item !== "object" || !("Message" in item)) continue;
-    const message = messagesById.get(item.Message);
-    if (!message) continue;
-
-    if (message.role === "User") {
-      flushTurn();
-      continue;
-    }
-    if (message.role !== "Assistant") continue;
-
-    assistantIds.push(message.id);
-    const changeSet = turnChangeSetsByMessageId[message.id];
+    const changeSet = turnChangeSetsByMessageId[item.Message];
     if (changeSet?.files.length) {
-      changeSets.push(changeSet);
+      result[item.Message] = changeSet;
     }
   }
-
-  flushTurn();
   return result;
 }
 
@@ -550,6 +556,7 @@ function buildTimelineCollapseState({
   hiddenPermissionRequestIds,
   turnIsActive,
   activeTurnStartIndex,
+  turnChangeSetsByMessageId,
 }: {
   timeline: UiSnapshot["timeline"];
   timelineStart: number;
@@ -558,6 +565,7 @@ function buildTimelineCollapseState({
   hiddenPermissionRequestIds?: ReadonlySet<string>;
   turnIsActive: boolean;
   activeTurnStartIndex: number;
+  turnChangeSetsByMessageId: Record<string, TimelineTurnChangeSet>;
 }): TimelineCollapseState {
   const groupsBySummaryIndex = new Map<number, TimelineCollapseGroup>();
   const hiddenIndexes = new Set<number>();
@@ -565,6 +573,11 @@ function buildTimelineCollapseState({
   let turnItems: TimelineCollapseCandidate[] = [];
 
   const flushTurn = () => {
+    if (!turnStartMessage) {
+      turnItems = [];
+      return;
+    }
+
     const finalAssistant = [...turnItems]
       .reverse()
       .find((candidate) => candidate.kind === "assistant" && candidate.message);
@@ -574,14 +587,16 @@ function buildTimelineCollapseState({
       return;
     }
 
-    const itemsToCollapse = turnItems.filter(
-      (candidate) => candidate.index < finalAssistant.index,
-    );
-    if (itemsToCollapse.length === 0) {
-      turnItems = [];
-      turnStartMessage = null;
-      return;
-    }
+    const itemsToCollapse = turnItems.filter((candidate) => {
+      if (candidate.index >= finalAssistant.index) return false;
+      if (
+        candidate.message &&
+        turnChangeSetsByMessageId[candidate.message.id]?.files.length
+      ) {
+        return false;
+      }
+      return true;
+    });
 
     const isCurrentTurn =
       turnIsActive &&
@@ -655,18 +670,29 @@ function elapsedLabelForTurn(
 
 function parseTimestampMs(value?: string) {
   if (!value) return null;
-  const timestamp = Date.parse(value);
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric >= 1_000_000_000_000 ? numeric : numeric * 1000;
+  }
+  const timestamp = Date.parse(trimmed);
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function formatElapsedDuration(ms: number) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
   const hours = Math.floor(totalSeconds / 3600);
-  return [hours, minutes, seconds]
-    .map((part) => part.toString().padStart(2, "0"))
-    .join(":");
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 export function ConversationTimeline({
@@ -690,6 +716,8 @@ export function ConversationTimeline({
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
     () => new Set(),
   );
+  const activeTurnFallbackStart = useRef<{ key: string; startedAtMs: number } | null>(null);
+  const [durationNowMs, setDurationNowMs] = useState(() => Date.now());
 
   const scrollToBottom = () => {
     scrollElementIntoView(bottomSentinelRef.current);
@@ -818,6 +846,40 @@ export function ConversationTimeline({
     }
     return -1;
   }, [snapshot.messages, snapshot.timeline, turnIsActive]);
+  const activeTurnStartMessage = useMemo(() => {
+    if (!turnIsActive || activeTurnStartIndex < 0) return null;
+    const item = snapshot.timeline[activeTurnStartIndex];
+    if (typeof item !== "object" || !("Message" in item)) return null;
+    return snapshot.messages.find((message) => message.id === item.Message) ?? null;
+  }, [activeTurnStartIndex, snapshot.messages, snapshot.timeline, turnIsActive]);
+  const activeTurnKey = activeTurnStartMessage
+    ? `${snapshot.session.id}:${activeTurnStartMessage.id}`
+    : null;
+  const activeTurnStartedAtMs = (() => {
+    if (!activeTurnKey) return null;
+    const explicitStart = parseTimestampMs(activeTurnStartMessage?.created_at);
+    if (explicitStart != null) return explicitStart;
+    if (activeTurnFallbackStart.current?.key !== activeTurnKey) {
+      activeTurnFallbackStart.current = {
+        key: activeTurnKey,
+        startedAtMs: Date.now(),
+      };
+    }
+    return activeTurnFallbackStart.current.startedAtMs;
+  })();
+  const activeTurnDurationLabel =
+    turnIsActive && activeTurnStartedAtMs != null
+      ? formatElapsedDuration(durationNowMs - activeTurnStartedAtMs)
+      : null;
+
+  useEffect(() => {
+    if (!turnIsActive) return;
+    setDurationNowMs(Date.now());
+    const interval = window.setInterval(() => {
+      setDurationNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [activeTurnKey, turnIsActive]);
 
   const visibleMessageIds = useMemo(() => {
     const ids = new Set<string>();
@@ -853,12 +915,11 @@ export function ConversationTimeline({
 
   const displayTurnChangeSetsByMessageId = useMemo(
     () =>
-      placeTurnChangeSetsAfterFinalAssistant(
+      visibleTurnChangeSetsByMessageId(
         visibleTimeline,
-        messagesById,
         turnChangeSetsByMessageId,
       ),
-    [messagesById, turnChangeSetsByMessageId, visibleTimeline],
+    [turnChangeSetsByMessageId, visibleTimeline],
   );
 
   const { toolsById, childToolsByParent } = useMemo(() => {
@@ -905,6 +966,7 @@ export function ConversationTimeline({
         hiddenPermissionRequestIds,
         turnIsActive,
         activeTurnStartIndex,
+        turnChangeSetsByMessageId,
       }),
     [
       activeTurnStartIndex,
@@ -913,6 +975,7 @@ export function ConversationTimeline({
       timelineStart,
       toolsById,
       turnIsActive,
+      turnChangeSetsByMessageId,
       visibleTimeline,
     ],
   );
@@ -1031,7 +1094,16 @@ export function ConversationTimeline({
           if (collapseState.hiddenIndexes.has(i)) return null;
 
           const group = collapseState.groupsBySummaryIndex.get(i);
-          if (!group) return renderTimelineItem(item, i);
+          if (!group) {
+            const renderedItem = renderTimelineItem(item, i);
+            if (i !== activeTurnStartIndex || !turnIsActive) return renderedItem;
+            return (
+              <Fragment key={`active-turn:${activeTurnKey ?? i}`}>
+                {renderedItem}
+                <TimelineActiveTurnSummary durationLabel={activeTurnDurationLabel} />
+              </Fragment>
+            );
+          }
 
           const expanded = expandedCollapseGroups.has(group.key);
           return (

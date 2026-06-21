@@ -274,10 +274,11 @@ impl AppState {
     }
 
     pub fn shutdown_all(&self) {
-        if let Ok(mut guard) = self.workspaces.lock() {
-            guard.workspaces.clear();
+        let workspaces = self.workspaces.lock().ok().map(|mut guard| {
             guard.active_workspace = None;
-        }
+            std::mem::take(&mut guard.workspaces)
+        });
+        drop(workspaces);
         self.lsp_service.shutdown_all();
         self.terminal_service.shutdown_all();
     }
@@ -764,6 +765,12 @@ impl AppState {
         store
             .delete_all_archived_sessions()
             .map_err(|e| e.to_string())
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.shutdown_all();
     }
 }
 

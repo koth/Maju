@@ -12,6 +12,7 @@ use super::session_titles::{
     select_session_title_for_sync, supports_session_list_title_sync,
 };
 use super::*;
+use crate::SessionHandle;
 use crate::events::{AgentEditPolicy, RemoteSshSessionConfig, agent_edit_policy_for_command};
 use agent_client_protocol::schema::{
     AgentCapabilities, SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities,
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use workspace_model::UserPromptContent;
+use workspace_model::{MessageRole, UserPromptContent};
 
 #[test]
 fn hidden_agent_process_uses_workspace_as_current_dir() {
@@ -244,6 +245,7 @@ fn remote_ssh_agent_process_waits_for_forward_and_finishes_after_tcp_close() {
             ssh_command: Some(fake_ssh.display().to_string()),
             ssh_password: None,
         }),
+        mcp_servers: Vec::new(),
     };
     let agent = RemoteSshAgentProcess::from_config(&config).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -595,6 +597,7 @@ fn test_session_config(agent_command: &str) -> SessionConfig {
         log_id: String::new(),
         acp_port: 0,
         remote_ssh: None,
+        mcp_servers: Vec::new(),
     }
 }
 
@@ -724,4 +727,277 @@ fn prompt_title_text_uses_text_blocks_only() {
         prompt_title_text(&prompt),
         Some("修复登录标题\n\n并更新测试".into())
     );
+}
+
+#[test]
+fn active_send_prompt_uses_latest_accepted_prompt_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mock_agent_session_config(dir.path(), true);
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    session
+        .send_steer_content(vec![UserPromptContent::text("second prompt")])
+        .unwrap();
+
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    session.shutdown();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content,
+            } if content.contains("Steer accepted: second prompt")
+        )),
+        "events: {events:#?}",
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnFinished { .. }))
+            .count(),
+        1,
+        "events: {events:#?}",
+    );
+}
+
+#[test]
+fn active_send_prompt_rejection_emits_feedback_and_keeps_turn_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mock_agent_session_config(dir.path(), true);
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    let error = session
+        .send_steer_content(vec![UserPromptContent::text("   ")])
+        .unwrap_err();
+    assert!(error.to_string().contains("提示内容不能为空"));
+
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    session.shutdown();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::MessageChunk {
+                role: MessageRole::System,
+                content,
+            } if content.contains("追加指令未生效：提示内容不能为空")
+        )),
+        "events: {events:#?}",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::TurnFinished { .. })),
+        "events: {events:#?}",
+    );
+}
+
+#[test]
+fn active_send_prompt_finishes_when_steer_response_never_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mock_agent_session_config_with_steer_options(dir.path(), true, true);
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    session
+        .send_steer_content(vec![UserPromptContent::text("second prompt")])
+        .unwrap();
+
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    session.shutdown();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::MessageChunk {
+                role: MessageRole::Assistant,
+                content,
+            } if content.contains("Steer accepted: second prompt")
+        )),
+        "events: {events:#?}",
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnFinished { .. }))
+            .count(),
+        1,
+        "events: {events:#?}",
+    );
+}
+
+#[test]
+fn cancel_active_prompt_finishes_locally_when_agent_never_responds() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mock_agent_session_config_with_options(dir.path(), false, false, true);
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    session.cancel_prompt().unwrap();
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    session.shutdown();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnFinished { stop_reason } if stop_reason == "cancelled"
+        )),
+        "events: {events:#?}",
+    );
+}
+
+#[test]
+fn late_prompt_response_after_cancel_does_not_disconnect_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = mock_agent_session_config_with_options(dir.path(), false, false, false);
+    config.agent_command = format!(
+        "KODEX_MOCK_ACP_PROMPT_DELAY_MS=200 {}",
+        config.agent_command
+    );
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    session.cancel_prompt().unwrap();
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnFinished { stop_reason } if stop_reason == "cancelled"
+        )),
+        "events: {events:#?}",
+    );
+
+    std::thread::sleep(Duration::from_millis(500));
+    let late_events = task.collect_ready_events(&mut session).unwrap();
+    let last_error = session.last_error();
+    session.shutdown();
+
+    assert!(
+        last_error.is_none(),
+        "unexpected runtime error: {last_error:?}"
+    );
+    assert!(
+        late_events
+            .iter()
+            .all(|event| !matches!(event, ClientEvent::Interrupted { .. })),
+        "late events: {late_events:#?}",
+    );
+}
+
+#[test]
+fn steer_prompt_after_turn_finished_is_rejected_instead_of_starting_new_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mock_agent_session_config(dir.path(), true);
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("first prompt")])
+        .unwrap();
+
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::TurnFinished { .. })),
+        "events: {events:#?}",
+    );
+
+    let error = session
+        .send_steer_content(vec![UserPromptContent::text("late steer")])
+        .unwrap_err();
+    session.shutdown();
+
+    assert!(
+        error.to_string().contains("当前轮次已经结束"),
+        "unexpected error: {error:#}"
+    );
+}
+
+fn mock_agent_session_config(workspace_root: &Path, steer_test: bool) -> SessionConfig {
+    mock_agent_session_config_with_steer_options(workspace_root, steer_test, false)
+}
+
+fn mock_agent_session_config_with_steer_options(
+    workspace_root: &Path,
+    steer_test: bool,
+    steer_never_responds: bool,
+) -> SessionConfig {
+    mock_agent_session_config_with_options(workspace_root, steer_test, steer_never_responds, false)
+}
+
+fn mock_agent_session_config_with_options(
+    workspace_root: &Path,
+    steer_test: bool,
+    steer_never_responds: bool,
+    prompt_never_responds: bool,
+) -> SessionConfig {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/mock-acp-agent/Cargo.toml")
+        .canonicalize()
+        .unwrap();
+    let prompt_never_responds_env = if prompt_never_responds {
+        "KODEX_MOCK_ACP_PROMPT_NEVER_RESPONDS=1 "
+    } else {
+        ""
+    };
+    let agent_command = if steer_test {
+        let never_responds_env = if steer_never_responds {
+            " KODEX_MOCK_ACP_STEER_NEVER_RESPONDS=1"
+        } else {
+            ""
+        };
+        format!(
+            "{prompt_never_responds_env}KODEX_MOCK_ACP_STEER_TEST=1{never_responds_env} cargo run --manifest-path {} -p mock-acp-agent --quiet --",
+            manifest.display()
+        )
+    } else {
+        format!(
+            "{prompt_never_responds_env}cargo run --manifest-path {} -p mock-acp-agent --quiet --",
+            manifest.display()
+        )
+    };
+
+    SessionConfig {
+        workspace_root: workspace_root.display().to_string(),
+        app_data_root: workspace_root.display().to_string(),
+        model: String::new(),
+        agent_command,
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: String::new(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+    }
+}
+
+fn collect_prompt_events_until_finished(
+    session: &mut SessionHandle,
+    task: &mut crate::PromptTask,
+) -> Vec<ClientEvent> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    while !task.is_finished() && std::time::Instant::now() < deadline {
+        events.extend(task.collect_ready_events(session).unwrap());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    events.extend(task.collect_ready_events(session).unwrap());
+    assert!(
+        task.is_finished(),
+        "prompt did not finish; events: {events:#?}"
+    );
+    events
 }

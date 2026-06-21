@@ -4,9 +4,11 @@ use crate::mapping::append_runtime_event_log;
 use futures::channel::mpsc as futures_mpsc;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -92,6 +94,26 @@ pub(in crate::runtime::agent_process) fn trim_line_ending(line: &mut String) {
         }
     }
 }
+
+#[cfg(unix)]
+pub(in crate::runtime::agent_process) fn configure_agent_process_group(command: &mut Command) {
+    // Give each managed ACP agent its own process group so shutdown can reap
+    // shells and descendants, not just the direct child PID.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                let pid = libc::getpid();
+                if libc::setpgid(pid, pid) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+pub(in crate::runtime::agent_process) fn configure_agent_process_group(_command: &mut Command) {}
 
 pub(in crate::runtime::agent_process) struct AgentChildGuard {
     child: Arc<Mutex<Option<Child>>>,
@@ -212,17 +234,32 @@ pub(in crate::runtime) fn kill_child_handle(
 
 #[cfg(unix)]
 fn terminate_child(child: &mut Child) {
-    let pid = child.id().to_string();
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", &pid])
-        .status();
+    let pid = child.id();
+    signal_process_group_and_child(pid, "-TERM");
     for _ in 0..10 {
         if matches!(child.try_wait(), Ok(Some(_))) {
             return;
         }
         thread::sleep(Duration::from_millis(50));
     }
+    signal_process_group_and_child(pid, "-KILL");
     let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn signal_process_group_and_child(pid: u32, signal: &str) {
+    let pid = pid.to_string();
+    let process_group = format!("-{pid}");
+    let _ = std::process::Command::new("kill")
+        .args([signal, process_group.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::process::Command::new("kill")
+        .args([signal, pid.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 #[cfg(not(unix))]

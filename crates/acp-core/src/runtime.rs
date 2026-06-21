@@ -25,7 +25,10 @@ pub(crate) use permissions::PermissionBroker;
 pub(crate) use shutdown::ShutdownSignal;
 
 pub(crate) enum RuntimeCommand {
-    SendPrompt(Vec<UserPromptContent>),
+    SendPrompt {
+        prompt: Vec<UserPromptContent>,
+        accepted_tx: Option<mpsc::Sender<anyhow::Result<()>>>,
+    },
     SetConfigOption {
         config_id: String,
         value_id: String,

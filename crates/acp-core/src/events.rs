@@ -1,3 +1,4 @@
+use agent_client_protocol::schema::McpServer;
 use serde::{Deserialize, Serialize};
 use workspace_model::{
     AgentPlanEntry, AvailableCommand, DiffHunk, MessageRole, PermissionInputRequest,
@@ -51,6 +52,8 @@ pub struct SessionConfig {
     pub acp_port: u16,
     #[serde(default)]
     pub remote_ssh: Option<RemoteSshSessionConfig>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub mcp_servers: Vec<McpServer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

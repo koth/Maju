@@ -47,8 +47,9 @@ pub(super) async fn start_session(
         .await
         .map_err(|err| anyhow!(err.to_string()))?;
 
-    let prompt_capabilities =
+    let mut prompt_capabilities =
         prompt_capabilities_from_acp(&init_response.agent_capabilities.prompt_capabilities);
+    prompt_capabilities.session_steer = command_implies_session_steer_support(config);
     let supports_load_session = init_response.agent_capabilities.load_session;
     let advertised_session_list =
         advertised_session_list_capability(&init_response.agent_capabilities);
@@ -67,6 +68,8 @@ pub(super) async fn start_session(
             "advertisedSessionList": advertised_session_list,
             "codexAcpSessionListFallback": codex_session_list_fallback,
             "supportsSessionList": supports_session_list,
+            "sessionSteer": prompt_capabilities.session_steer,
+            "mcpServers": config.mcp_servers.len(),
         }),
     )?;
     let (mut session, initial_session_config) =
@@ -136,6 +139,19 @@ fn should_advertise_client_fs_read_text_file(config: &SessionConfig) -> bool {
         .contains("codebuddy")
 }
 
+fn command_implies_session_steer_support(config: &SessionConfig) -> bool {
+    let normalized = config.agent_command.to_ascii_lowercase();
+    let basename = normalized
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&normalized)
+        .trim_matches(['"', '\'', '`']);
+
+    basename.contains("codex-acp")
+        || basename.contains("kodex-acp")
+        || basename.contains("claude-agent-acp")
+}
+
 async fn load_existing_session(
     connection: &ConnectionTo<Agent>,
     config: &SessionConfig,
@@ -147,7 +163,8 @@ async fn load_existing_session(
     let session_id: SessionId = session_id_str.clone().into();
 
     let load_req =
-        LoadSessionRequest::new(session_id.clone(), PathBuf::from(&config.workspace_root));
+        LoadSessionRequest::new(session_id.clone(), PathBuf::from(&config.workspace_root))
+            .mcp_servers(config.mcp_servers.clone());
     let load_response = connection
         .send_request(load_req)
         .block_task()
@@ -170,7 +187,8 @@ async fn start_new_session(
     connection: &ConnectionTo<Agent>,
     config: &SessionConfig,
 ) -> anyhow::Result<(ActiveSession<'static, Agent>, SessionConfigState)> {
-    let new_request = NewSessionRequest::new(PathBuf::from(&config.workspace_root));
+    let new_request = NewSessionRequest::new(PathBuf::from(&config.workspace_root))
+        .mcp_servers(config.mcp_servers.clone());
     let new_response = connection
         .send_request_to(Agent, new_request)
         .block_task()
@@ -228,6 +246,7 @@ mod tests {
                 ssh_command: None,
                 ssh_password: None,
             }),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -253,6 +272,34 @@ mod tests {
             "codex-acp --acp",
             true,
         )));
+    }
+
+    #[test]
+    fn mcp_servers_are_attached_to_new_and_load_requests() {
+        let mcp_server = crate::http_mcp_server(
+            "kodex-web-tools",
+            "http://127.0.0.1:12345/mcp",
+            [("x-kodex-web-tools-token", "token")],
+        );
+        let mut config = config("codex-acp --acp", false);
+        config.resume_session_id = Some("session-1".to_string());
+        config.mcp_servers = vec![mcp_server];
+
+        let new_request = NewSessionRequest::new(PathBuf::from(&config.workspace_root))
+            .mcp_servers(config.mcp_servers.clone());
+        let load_request = LoadSessionRequest::new(
+            config.resume_session_id.clone().unwrap(),
+            PathBuf::from(&config.workspace_root),
+        )
+        .mcp_servers(config.mcp_servers.clone());
+
+        let new_request_json = serde_json::to_value(new_request).unwrap();
+        let load_request_json = serde_json::to_value(load_request).unwrap();
+
+        assert_eq!(new_request_json["mcpServers"].as_array().unwrap().len(), 1);
+        assert_eq!(load_request_json["mcpServers"].as_array().unwrap().len(), 1);
+        assert!(new_request_json.to_string().contains("kodex-web-tools"));
+        assert!(load_request_json.to_string().contains("kodex-web-tools"));
     }
 
     #[test]

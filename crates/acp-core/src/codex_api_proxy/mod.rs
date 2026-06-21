@@ -59,6 +59,42 @@ const CODEX_API_PROXY_PORTS: &[u16] = &[17851, 17852, 17853, 17854, 17855];
 const PROVIDER_MODEL_ID_PREFIX: &str = "kodex-provider/";
 const SHELL_TOOL_INSTRUCTIONS: &str = "Shell command compatibility rule: Run project commands from the directory that owns the relevant manifest or toolchain file, such as package.json or Cargo.toml. Prefer local project executables and scripts over bare npx or package-manager commands that may download from the network. When piping output through head, tail, grep, or similar filters, preserve the original failing exit status with set -o pipefail or avoid the pipe. Do not repeatedly retry the exact same failing shell command; inspect the error and change strategy first.";
 const NON_GPT_EDIT_BRIDGE_INSTRUCTIONS: &str = "Editing tool compatibility rule: Prefer the Edit, MultiEdit, and Write tools for file changes when they are available. Kodex converts those Claude-style editing tools into apply_patch internally, so using them satisfies the apply_patch requirement. Use raw apply_patch only as a fallback when the change cannot be represented with Edit, MultiEdit, or Write. Use shell commands only for inspection or validation.";
+const NAMESPACE_TOOL_NAME_SEPARATOR: &str = "__";
+
+fn flattened_namespace_tool_name(namespace: &str, name: &str) -> String {
+    format!("{namespace}{NAMESPACE_TOOL_NAME_SEPARATOR}{name}")
+}
+
+fn split_flattened_namespace_tool_name(name: &str) -> Option<(&str, &str)> {
+    let (namespace, tool_name) = name.rsplit_once(NAMESPACE_TOOL_NAME_SEPARATOR)?;
+    if namespace.is_empty() || tool_name.is_empty() {
+        return None;
+    }
+    Some((namespace, tool_name))
+}
+
+fn namespaced_function_call_item(id: &str, name: &str, arguments: &str, status: &str) -> Value {
+    if let Some((namespace, tool_name)) = split_flattened_namespace_tool_name(name) {
+        json!({
+            "id": id,
+            "type": "function_call",
+            "call_id": id,
+            "namespace": namespace,
+            "name": tool_name,
+            "arguments": arguments,
+            "status": status
+        })
+    } else {
+        json!({
+            "id": id,
+            "type": "function_call",
+            "call_id": id,
+            "name": name,
+            "arguments": arguments,
+            "status": status
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CodexApiProxyConfig {
@@ -1315,6 +1351,11 @@ fn responses_tool_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> 
         .get("name")
         .and_then(Value::as_str)
         .context("function_call input item is missing name")?;
+    let chat_name = item
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(|namespace| flattened_namespace_tool_name(namespace, name))
+        .unwrap_or_else(|| name.to_string());
     let arguments = if item.get("type").and_then(Value::as_str) == Some("custom_tool_call") {
         let input = item.get("input").and_then(Value::as_str).unwrap_or("");
         serde_json::to_string(&json!({ "patch": input })).unwrap_or_else(|_| "{}".to_string())
@@ -1327,7 +1368,7 @@ fn responses_tool_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> 
     Ok(json!({
         "id": call_id,
         "type": "function",
-        "function": { "name": name, "arguments": arguments }
+        "function": { "name": chat_name, "arguments": arguments }
     }))
 }
 
@@ -2280,6 +2321,45 @@ fn responses_tools_to_chat_tools(value: Option<&Value>, model: &str) -> Option<V
                     }
                 }));
             }
+            Some("namespace") => {
+                let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let namespace_description = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let Some(namespace_tools) = tool.get("tools").and_then(Value::as_array) else {
+                    continue;
+                };
+                for namespace_tool in namespace_tools {
+                    if namespace_tool.get("type").and_then(Value::as_str) != Some("function") {
+                        continue;
+                    }
+                    let Some(name) = namespace_tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let chat_name = flattened_namespace_tool_name(namespace, name);
+                    let description = namespaced_chat_tool_description(
+                        namespace,
+                        namespace_description,
+                        name,
+                        namespace_tool
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    );
+                    let description = chat_tool_description(&chat_name, &description);
+                    converted.push(json!({
+                        "type": "function",
+                        "function": {
+                            "name": chat_name,
+                            "description": description,
+                            "parameters": namespace_tool.get("parameters").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+                        }
+                    }));
+                }
+            }
             Some("custom") if tool.get("name").and_then(Value::as_str) == Some("apply_patch") => {
                 if prefer_claude_edit_tools {
                     converted.extend(claude_edit_chat_tools_for_apply_patch());
@@ -2290,6 +2370,28 @@ fn responses_tools_to_chat_tools(value: Option<&Value>, model: &str) -> Option<V
         }
     }
     (!converted.is_empty()).then_some(Value::Array(converted))
+}
+
+fn namespaced_chat_tool_description(
+    namespace: &str,
+    namespace_description: &str,
+    name: &str,
+    description: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if !description.trim().is_empty() {
+        parts.push(description.trim().to_string());
+    }
+    if !namespace_description.trim().is_empty() {
+        parts.push(format!(
+            "Namespace `{namespace}`: {}",
+            namespace_description.trim()
+        ));
+    }
+    parts.push(format!(
+        "This tool is exposed as `{name}` in namespace `{namespace}`."
+    ));
+    parts.join("\n\n")
 }
 
 fn should_add_non_gpt_edit_bridge_instructions(value: Option<&Value>, model: &str) -> bool {
@@ -2467,7 +2569,16 @@ fn responses_tool_choice_to_chat_tool_choice(value: Option<&Value>) -> Option<Va
                         .and_then(|function| function.get("name"))
                 })
                 .and_then(Value::as_str)?;
-            Some(json!({ "type": "function", "function": { "name": name } }))
+            let chat_name = map
+                .get("namespace")
+                .or_else(|| {
+                    map.get("function")
+                        .and_then(|function| function.get("namespace"))
+                })
+                .and_then(Value::as_str)
+                .map(|namespace| flattened_namespace_tool_name(namespace, name))
+                .unwrap_or_else(|| name.to_string());
+            Some(json!({ "type": "function", "function": { "name": chat_name } }))
         }
         _ => None,
     }
@@ -2552,14 +2663,7 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
             "status": "completed"
         });
     }
-    json!({
-        "id": id,
-        "type": "function_call",
-        "call_id": id,
-        "name": name,
-        "arguments": arguments,
-        "status": "completed"
-    })
+    namespaced_function_call_item(id, name, arguments, "completed")
 }
 
 fn apply_patch_input_from_function_arguments(arguments: &str) -> String {
@@ -2822,14 +2926,12 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
                             "status": "completed"
                         }));
                     } else {
-                        output.push(json!({
-                            "id": id,
-                            "type": "function_call",
-                            "call_id": id,
-                            "name": name,
-                            "arguments": arguments,
-                            "status": "completed"
-                        }));
+                        output.push(namespaced_function_call_item(
+                            id,
+                            name,
+                            &arguments,
+                            "completed",
+                        ));
                     }
                 }
                 _ => {}

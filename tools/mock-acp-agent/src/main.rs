@@ -1,5 +1,5 @@
 use agent_client_protocol::schema::{
-    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, ContentChunk, Diff,
+    AgentCapabilities, AvailableCommand, AvailableCommandsUpdate, ContentBlock, ContentChunk, Diff,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, ModelInfo,
     NewSessionRequest, NewSessionResponse, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
     PromptCapabilities, PromptRequest, PromptResponse, SessionModelState, SetSessionModelRequest,
@@ -8,6 +8,8 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Result};
 use std::env;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -57,6 +59,8 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    let prompt_count = Arc::new(AtomicUsize::new(0));
+    let prompt_count_for_handler = prompt_count.clone();
     Agent
         .builder()
         .name("mock-acp-agent")
@@ -130,6 +134,21 @@ where
         .on_receive_request(
             async move |request: PromptRequest, responder, connection: ConnectionTo<Client>| {
                 let session_id = request.session_id.clone();
+                let prompt_index = prompt_count_for_handler.fetch_add(1, Ordering::SeqCst);
+                let steer_test = env::var("KODEX_MOCK_ACP_STEER_TEST").ok().as_deref() == Some("1");
+                let steer_never_responds = env::var("KODEX_MOCK_ACP_STEER_NEVER_RESPONDS")
+                    .ok()
+                    .as_deref()
+                    == Some("1");
+                let prompt_never_responds = env::var("KODEX_MOCK_ACP_PROMPT_NEVER_RESPONDS")
+                    .ok()
+                    .as_deref()
+                    == Some("1");
+                let prompt_delay_ms = env::var("KODEX_MOCK_ACP_PROMPT_DELAY_MS")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let prompt_text = prompt_text(&request.prompt);
 
                 for item in request.prompt {
                     connection.send_notification(
@@ -140,6 +159,34 @@ where
                             ),
                         ),
                     )?;
+                }
+
+                if steer_test {
+                    if prompt_index == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    } else {
+                        connection.send_notification(
+                            agent_client_protocol::schema::SessionNotification::new(
+                                session_id.clone(),
+                                agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(
+                                    ContentChunk::new(
+                                        format!("Steer accepted: {prompt_text}").into(),
+                                    ),
+                                ),
+                            ),
+                        )?;
+                        if steer_never_responds {
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                    return responder.respond(PromptResponse::new(StopReason::EndTurn));
+                }
+
+                if prompt_never_responds {
+                    std::future::pending::<()>().await;
+                }
+                if prompt_delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(prompt_delay_ms)).await;
                 }
 
                 connection.send_notification(
@@ -288,4 +335,16 @@ where
             reader.compat(),
         ))
         .await
+}
+
+fn prompt_text(prompt: &[ContentBlock]) -> String {
+    prompt
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

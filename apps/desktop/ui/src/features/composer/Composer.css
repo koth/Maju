@@ -1165,6 +1165,11 @@
   color: color-mix(in srgb, var(--text-soft) 86%, transparent);
 }
 
+.composer-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .composer-attachment-strip {
   display: flex;
   flex-wrap: wrap;

@@ -2,12 +2,14 @@ use crate::events::{ClientEvent, SessionConfig};
 use crate::runtime::{PermissionBroker, RuntimeCommand, ShutdownSignal, run_session};
 use anyhow::anyhow;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use workspace_model::{PermissionInputResponse, UserPromptContent};
 
 const MAX_READY_EVENTS_PER_COLLECT: usize = 32;
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct PromptTask {
     events: Vec<ClientEvent>,
@@ -73,7 +75,38 @@ impl SessionHandle {
         let _ = self.command_tx.send(RuntimeCommand::Shutdown);
         self.permission_broker.cancel_all().ok();
         self.shutdown_signal.request_shutdown();
-        let _ = self.worker.take();
+        self.join_worker_until(WORKER_SHUTDOWN_TIMEOUT);
+    }
+
+    fn join_worker_until(&mut self, timeout: Duration) {
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        let deadline = Instant::now() + timeout;
+        while !worker.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        if !worker.is_finished() {
+            // Detach as a last resort. At this point shutdown_signal has already
+            // killed registered child processes, so the detached thread should
+            // only be waiting on protocol cleanup or a wedged transport.
+            return;
+        }
+
+        match worker.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if let Ok(mut guard) = self.last_error.lock() {
+                    *guard = Some(err.to_string());
+                }
+            }
+            Err(_) => {
+                if let Ok(mut guard) = self.last_error.lock() {
+                    *guard = Some("ACP runtime thread panicked during shutdown".to_string());
+                }
+            }
+        }
     }
 
     pub fn is_alive(&self) -> bool {
@@ -105,13 +138,34 @@ impl SessionHandle {
         prompt: Vec<UserPromptContent>,
     ) -> anyhow::Result<PromptTask> {
         self.command_tx
-            .send(RuntimeCommand::SendPrompt(prompt))
+            .send(RuntimeCommand::SendPrompt {
+                prompt,
+                accepted_tx: None,
+            })
             .map_err(|_| anyhow!("ACP command channel closed"))?;
 
         Ok(PromptTask {
             events: Vec::new(),
             finished: false,
         })
+    }
+
+    pub fn send_steer_content(&mut self, prompt: Vec<UserPromptContent>) -> anyhow::Result<()> {
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        self.command_tx
+            .send(RuntimeCommand::SendPrompt {
+                prompt,
+                accepted_tx: Some(accepted_tx),
+            })
+            .map_err(|_| anyhow!("ACP command channel closed"))?;
+        accepted_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => {
+                    anyhow!("Timed out waiting for active prompt to accept steering input")
+                }
+                RecvTimeoutError::Disconnected => anyhow!("ACP command reply channel closed"),
+            })?
     }
 
     pub fn set_config_option(

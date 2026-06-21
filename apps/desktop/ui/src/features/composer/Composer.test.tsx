@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Composer } from "./Composer";
-import { editorGetContent, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
+import { editorGetContent, sessionCancel, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
 import type { UiSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", () => ({
@@ -26,7 +26,7 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
       status: "Idle",
     },
     session_config: { hydrated: true, controls: [] },
-    prompt_capabilities: { image: true, embedded_context: true },
+    prompt_capabilities: { image: true, embedded_context: true, session_steer: false },
     available_commands: [],
     agent_plan: [],
     messages: [],
@@ -207,6 +207,112 @@ describe("Composer", () => {
       ]);
     });
     expect(editorGetContent).not.toHaveBeenCalled();
+  });
+
+  it("switches the active primary action from stop to steer when text is present", async () => {
+    vi.mocked(sessionSendPrompt).mockResolvedValue(undefined);
+    const onStateChange = vi.fn();
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      prompt_capabilities: { image: true, embedded_context: true, session_steer: true },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={onStateChange} />);
+
+    const textbox = screen.getByRole("textbox");
+    expect(textbox).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止当前轮次" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "追加指令" })).not.toBeInTheDocument();
+
+    fireEvent.change(textbox, { target: { value: "加一个边界条件" } });
+    const steerButton = screen.getByRole("button", { name: "追加指令" });
+    expect(screen.queryByRole("button", { name: "停止当前轮次" })).not.toBeInTheDocument();
+    fireEvent.click(steerButton);
+
+    await waitFor(() => {
+      expect(sessionSendPrompt).toHaveBeenCalledWith([
+        { type: "text", text: "加一个边界条件" },
+      ]);
+    });
+    expect(sessionCancel).not.toHaveBeenCalled();
+    expect(onStateChange).toHaveBeenCalled();
+  });
+
+  it("stops active turns from the shared primary action when text is empty", async () => {
+    vi.mocked(sessionCancel).mockResolvedValue(undefined);
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "WaitingForTool" },
+      prompt_capabilities: { image: true, embedded_context: true, session_steer: true },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "追加指令" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "停止当前轮次" }));
+
+    await waitFor(() => {
+      expect(sessionCancel).toHaveBeenCalled();
+    });
+    expect(sessionSendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("disables active steer input when the session lacks steering support", () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      prompt_capabilities: { image: true, embedded_context: true, session_steer: false },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "停止当前轮次" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "追加指令" })).not.toBeInTheDocument();
+  });
+
+  it("keeps active turn controls and attachments disabled", () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      prompt_capabilities: { image: true, embedded_context: true, session_steer: true },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "mode",
+            label: "Mode",
+            description: null,
+            category: "Mode",
+            source: "LocalMode",
+            current_value_id: "Build",
+            current_value_label: "Build",
+            enabled: true,
+            choices: [
+              { id: "Build", label: "Build", description: null, provider: null },
+              { id: "Plan", label: "Plan", description: null, provider: null },
+            ],
+          },
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "deepseek-v4-pro",
+            current_value_label: "deepseek-v4-pro",
+            enabled: true,
+            choices: [
+              { id: "deepseek-v4-pro", label: "deepseek-v4-pro", description: null, provider: "deepseek" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: "附加图片或文件" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Build" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Provider.*DeepSeek/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^deepseek-v4-pro/ })).toBeDisabled();
   });
 
   it("splits BYOK model choices by provider in the composer controls", async () => {

@@ -204,6 +204,19 @@ pub(super) fn edit_input_unified_diff_for_path<'a>(
         .and_then(|value| value.as_str())
 }
 
+pub(super) fn edit_input_content_for_path<'a>(
+    input: &'a serde_json::Value,
+    normalized_path: &str,
+    workspace_root: &std::path::Path,
+) -> Option<&'a str> {
+    let change = edit_input_change_entry_for_path(input, normalized_path, workspace_root)?;
+    change
+        .get("content")
+        .or_else(|| change.get("new_text"))
+        .or_else(|| change.get("newText"))
+        .and_then(|value| value.as_str())
+}
+
 pub(super) fn edit_input_change_type_for_path(
     input: &serde_json::Value,
     normalized_path: &str,

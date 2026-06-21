@@ -4,6 +4,7 @@ mod events;
 mod mapping;
 mod runtime;
 
+pub use agent_client_protocol::schema::McpServer;
 pub use client::{PromptTask, SessionHandle};
 pub use codex_api_proxy::{
     clear_codex_api_proxy_model_provider_map, codex_api_proxy_base_url,
@@ -20,4 +21,20 @@ pub fn platform_default_agent_command() -> String {
 
 pub fn resolve_agent_command() -> String {
     std::env::var("ACP_AGENT_COMMAND").unwrap_or_else(|_| platform_default_agent_command())
+}
+
+pub fn http_mcp_server(
+    name: impl Into<String>,
+    url: impl Into<String>,
+    headers: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+) -> McpServer {
+    use agent_client_protocol::schema::{HttpHeader, McpServerHttp};
+    McpServer::Http(
+        McpServerHttp::new(name, url).headers(
+            headers
+                .into_iter()
+                .map(|(name, value)| HttpHeader::new(name, value))
+                .collect(),
+        ),
+    )
 }

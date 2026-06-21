@@ -1,6 +1,16 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Children, isValidElement, memo, useEffect, useState, type ReactNode } from "react";
+import { Check, Copy } from "lucide-react";
+import {
+  Children,
+  isValidElement,
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight, vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { getAppliedAppTheme } from "../../theme";
@@ -34,6 +44,7 @@ function MarkdownBody({ content }: Props) {
               <div className="md-code-block">
                 <div className="md-code-header">
                   <span className="md-code-lang">{match[1]}</span>
+                  <CopyCodeButton text={codeString} />
                 </div>
                 <SyntaxHighlighter
                   style={codeTheme}
@@ -146,6 +157,72 @@ function MarkdownBody({ content }: Props) {
 }
 
 export default memo(MarkdownBody);
+
+function CopyCodeButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = useCallback(async () => {
+    await copyTextToClipboard(text);
+    setCopied(true);
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+    }
+    resetTimerRef.current = window.setTimeout(() => {
+      setCopied(false);
+      resetTimerRef.current = null;
+    }, 1600);
+  }, [text]);
+
+  return (
+    <button
+      type="button"
+      className={copied ? "md-code-copy md-code-copy-copied" : "md-code-copy"}
+      aria-label={copied ? "已复制代码" : "复制代码"}
+      title={copied ? "已复制" : "复制代码"}
+      onClick={handleCopy}
+    >
+      {copied ? (
+        <Check size={14} strokeWidth={2.2} aria-hidden="true" />
+      ) : (
+        <Copy size={14} strokeWidth={2.1} aria-hidden="true" />
+      )}
+    </button>
+  );
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall through to the legacy path for embedded webviews without clipboard permission.
+    }
+  }
+  fallbackCopyText(text);
+}
+
+function fallbackCopyText(text: string) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
 
 function useCurrentAppTheme() {
   const [theme, setTheme] = useState(() => getAppliedAppTheme());

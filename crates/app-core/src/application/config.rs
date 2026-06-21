@@ -1,4 +1,6 @@
-use super::diff_utils::{is_file_write_tool_identity, tool_command_write_hint_paths};
+use super::diff_utils::{
+    is_file_write_tool_identity, tool_command_write_hint_paths, tool_event_hint_paths,
+};
 use super::*;
 
 fn permission_selection_outcome_for_display(
@@ -141,9 +143,15 @@ impl Application {
                 .set_model(value_id.to_string(), selected_provider)
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LocalMode => {
+                let is_codex_agent = self.is_codex_acp_session();
                 self.session
                     .set_permission_mode(value_id)
                     .map_err(|error| error.to_string())?;
+                sync_codex_agent_mode_for_policy_mode(
+                    &mut self.session,
+                    is_codex_agent,
+                    Some(value_id),
+                )?;
                 vec![ClientEvent::SessionConfigValueChanged {
                     control_id: control.id.clone(),
                     value_id: value_id.to_string(),
@@ -247,11 +255,16 @@ impl Application {
             return false;
         }
 
-        let mut paths = tool
-            .raw_input
-            .as_deref()
-            .map(permission_details_write_paths)
-            .unwrap_or_default();
+        let mut paths = Vec::new();
+        if let Some(raw_input) = tool.raw_input.as_deref() {
+            paths.extend(permission_details_write_paths(raw_input));
+            paths.extend(tool_event_hint_paths(Some(raw_input)));
+        }
+        if !tool.detail_text.trim().is_empty() {
+            paths.extend(permission_details_write_paths(&tool.detail_text));
+        }
+        paths.sort();
+        paths.dedup();
         paths.retain(|path| permission_path_is_trackable(path, &self.ui.workspace.root));
         if paths.is_empty() {
             return false;
@@ -376,6 +389,32 @@ impl Application {
             })?;
 
         infer_current_model_provider(model_control)
+    }
+}
+
+pub(super) fn sync_codex_agent_mode_for_policy_mode(
+    session: &mut SessionHandle,
+    is_codex_agent: bool,
+    policy_mode: Option<&str>,
+) -> Result<(), String> {
+    if !is_codex_agent {
+        return Ok(());
+    }
+    let Some(agent_mode) = codex_agent_mode_for_policy_mode(policy_mode.unwrap_or("Build")) else {
+        return Ok(());
+    };
+    session
+        .set_config_option("mode", agent_mode, None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn codex_agent_mode_for_policy_mode(policy_mode: &str) -> Option<&'static str> {
+    match policy_mode.to_ascii_lowercase().as_str() {
+        "plan" | "read-only" | "readonly" => Some("read-only"),
+        "build" | "auto" => Some("auto"),
+        "full-access" | "fullaccess" | "full_access" | "danger-full-access" => Some("full-access"),
+        _ => None,
     }
 }
 
@@ -651,10 +690,23 @@ fn permission_path_is_trackable(path: &str, workspace_root: &std::path::Path) ->
 fn permission_details_write_paths(details: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut in_paths_section = false;
+    let mut previous_was_write_file = false;
 
     for line in details.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            previous_was_write_file = false;
+            continue;
+        }
+        if previous_was_write_file {
+            paths.push(trimmed.to_string());
+            previous_was_write_file = false;
+            in_paths_section = false;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("Write file") {
+            previous_was_write_file = true;
+            in_paths_section = false;
             continue;
         }
         if let Some(path) = trimmed.strip_prefix("Path:") {
@@ -663,14 +715,17 @@ fn permission_details_write_paths(details: &str) -> Vec<String> {
                 paths.push(path.to_string());
             }
             in_paths_section = false;
+            previous_was_write_file = false;
             continue;
         }
         if trimmed.eq_ignore_ascii_case("Paths:") {
             in_paths_section = true;
+            previous_was_write_file = false;
             continue;
         }
         if trimmed.ends_with(':') {
             in_paths_section = false;
+            previous_was_write_file = false;
             continue;
         }
         if in_paths_section && let Some(path) = trimmed.strip_prefix("- ") {
@@ -678,6 +733,7 @@ fn permission_details_write_paths(details: &str) -> Vec<String> {
             if !path.is_empty() {
                 paths.push(path.to_string());
             }
+            previous_was_write_file = false;
         }
     }
 
@@ -688,7 +744,7 @@ fn permission_details_write_paths(details: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::codebuddy_interruption_decision;
+    use super::{codebuddy_interruption_decision, permission_details_write_paths};
 
     #[test]
     fn codebuddy_interruption_decision_normalizes_acp_option_ids() {
@@ -699,5 +755,13 @@ mod tests {
         assert_eq!(codebuddy_interruption_decision(Some("allow")), "allow");
         assert_eq!(codebuddy_interruption_decision(Some("reject")), "deny");
         assert_eq!(codebuddy_interruption_decision(None), "deny");
+    }
+
+    #[test]
+    fn permission_details_write_paths_parses_write_file_details() {
+        assert_eq!(
+            permission_details_write_paths("Write file\n/Users/me/project/src/new_file.rs"),
+            vec!["/Users/me/project/src/new_file.rs"]
+        );
     }
 }

@@ -97,6 +97,8 @@ import {
 import type { Logger } from "./logger.js";
 import {
   ALLOW_BYPASS,
+  KODEX_PERMISSION_INPUT_META_KEY,
+  askUserQuestionPermissionInput,
   askUserQuestionPermissionOptions,
   askUserQuestionSelection,
   describeAlwaysAllow,
@@ -1288,10 +1290,7 @@ export class ClaudeAcpAgent implements Agent {
       this.stoppableToolCalls(session).add(toolCallId);
     }
 
-    if (
-      "status" in update &&
-      (update.status === "completed" || update.status === "failed")
-    ) {
+    if ("status" in update && (update.status === "completed" || update.status === "failed")) {
       this.stoppableToolCalls(session).delete(toolCallId);
     }
   }
@@ -1664,10 +1663,17 @@ export class ClaudeAcpAgent implements Agent {
         }
 
         const options = askUserQuestionPermissionOptions(questions);
+        const permissionInput = askUserQuestionPermissionInput(questions);
         const response = await this.client.requestPermission({
+          _meta: {
+            [KODEX_PERMISSION_INPUT_META_KEY]: permissionInput,
+          },
           options,
           sessionId,
           toolCall: {
+            _meta: {
+              [KODEX_PERMISSION_INPUT_META_KEY]: permissionInput,
+            },
             toolCallId: toolUseID,
             rawInput: toolInput,
             ...toolInfoFromToolUse(

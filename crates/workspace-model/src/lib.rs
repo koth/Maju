@@ -292,6 +292,8 @@ pub struct SessionConfigState {
 pub struct PromptInputCapabilities {
     pub image: bool,
     pub embedded_context: bool,
+    #[serde(default)]
+    pub session_steer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1155,6 +1157,27 @@ pub struct ClaudeProviderSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebToolsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_tools_provider")]
+    pub provider: String,
+}
+
+impl Default for WebToolsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_web_tools_provider(),
+        }
+    }
+}
+
+fn default_web_tools_provider() -> String {
+    "brave".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
     /// Reserved for ACP agents that may require a custom TCP transport.
@@ -1172,6 +1195,8 @@ pub struct AppSettings {
     pub selected_claude_provider_profile_id: Option<String>,
     #[serde(default)]
     pub claude: ClaudeProviderSettings,
+    #[serde(default)]
+    pub web_tools: WebToolsSettings,
 }
 
 fn default_acp_port() -> u16 {
@@ -1245,6 +1270,7 @@ pub struct AgentSettingsSnapshot {
     pub env_override: Option<String>,
     pub codex_acp: CodexAcpSettingsStatus,
     pub claude: ClaudeProviderSettingsStatus,
+    pub web_tools: WebToolsSettingsStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1267,6 +1293,13 @@ pub struct ClaudeProviderSettingsStatus {
     pub fast_model: Option<String>,
     #[serde(default)]
     pub fast_model_options: Vec<AgentModelOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebToolsSettingsStatus {
+    pub enabled: bool,
+    pub provider: String,
+    pub configured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

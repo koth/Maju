@@ -1,11 +1,11 @@
 use super::diff_utils::{
     CanonicalTextDiff, ExactEditText, canonical_text_diff, edit_input_after_text,
-    edit_input_before_text, edit_input_change_type_for_path, edit_input_unified_diff_for_path,
-    is_file_write_tool_identity, looks_like_fragment_to_full_file_text,
-    looks_like_whole_file_addition_hunks, normalize_diff_text_for_session_change,
-    reverse_apply_diff_hunks, reverse_apply_unified_diff, tool_command_write_hint_paths,
-    tool_diff_hunks_for_detected_write, tool_event_change_paths, tool_event_hint_paths,
-    tool_hunks_for_tracker_update,
+    edit_input_before_text, edit_input_change_type_for_path, edit_input_content_for_path,
+    edit_input_unified_diff_for_path, is_file_write_tool_identity,
+    looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
+    normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
+    tool_command_write_hint_paths, tool_diff_hunks_for_detected_write, tool_event_change_paths,
+    tool_event_hint_paths, tool_hunks_for_tracker_update,
 };
 use super::{
     Application, current_timestamp, is_codebuddy_agent_label, normalize_path_for_storage,
@@ -333,6 +333,29 @@ impl Application {
                 });
                 continue;
             }
+            if change_type == FileChangeType::Created
+                && let Some(new_text) =
+                    self.created_edit_content_from_tool_payloads(&tool, &normalized_path)
+            {
+                let Ok(disk_text) =
+                    std::fs::read_to_string(self.ui.workspace.root.join(&normalized_path))
+                else {
+                    continue;
+                };
+                let disk_text = normalize_diff_text_for_session_change(&disk_text);
+                if disk_text != new_text {
+                    continue;
+                }
+                changes.push(crate::file_tracker::VerifiedFileChange {
+                    path: normalized_path,
+                    change_type,
+                    old_text: None,
+                    new_text,
+                    skipped_diff: false,
+                    quality: DiffQuality::Exact,
+                });
+                continue;
+            }
             let Some(exact_edit) = self.exact_edit_text_from_tool_payloads(&tool, &normalized_path)
             else {
                 continue;
@@ -371,6 +394,38 @@ impl Application {
             return false;
         }
         self.apply_tracker_changes(call_id, changes)
+    }
+
+    fn created_edit_content_from_tool_payloads(
+        &self,
+        tool: &ToolInvocation,
+        normalized_path: &str,
+    ) -> Option<String> {
+        tool.raw_input
+            .as_deref()
+            .and_then(|payload| {
+                self.created_edit_content_from_tool_payload(payload, normalized_path)
+            })
+            .or_else(|| {
+                tool.raw_output.as_deref().and_then(|payload| {
+                    self.created_edit_content_from_tool_payload(payload, normalized_path)
+                })
+            })
+    }
+
+    fn created_edit_content_from_tool_payload(
+        &self,
+        payload: &str,
+        normalized_path: &str,
+    ) -> Option<String> {
+        let json = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+        if edit_input_change_type_for_path(&json, normalized_path, &self.ui.workspace.root)
+            != Some(FileChangeType::Created)
+        {
+            return None;
+        }
+        edit_input_content_for_path(&json, normalized_path, &self.ui.workspace.root)
+            .map(normalize_diff_text_for_session_change)
     }
 
     fn deleted_edit_text_from_tool_payloads(

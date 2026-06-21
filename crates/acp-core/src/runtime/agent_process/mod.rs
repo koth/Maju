@@ -11,7 +11,7 @@ use agent_client_protocol::{Client, ConnectTo, Lines, Role};
 use anyhow::anyhow;
 use futures::channel::mpsc as futures_mpsc;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -26,8 +26,8 @@ mod tests;
 
 pub(super) use process_lifecycle::kill_child_handle;
 use process_lifecycle::{
-    AgentChildGuard, monitor_hidden_agent_child, read_agent_stderr, read_agent_stdout,
-    trim_line_ending, write_agent_stdin,
+    AgentChildGuard, configure_agent_process_group, monitor_hidden_agent_child, read_agent_stderr,
+    read_agent_stdout, trim_line_ending, write_agent_stdin,
 };
 #[cfg(test)]
 pub(super) use remote_ssh::REMOTE_AGENT_READY_MARKER;
@@ -42,6 +42,56 @@ pub(super) use remote_ssh::{
     build_remote_streamable_agent_command,
 };
 use streamable_http::{STREAMABLE_HTTP_PATH, connect_streamable_http_endpoint};
+
+fn managed_agent_spawn_command(command_path: &Path, args: &[String]) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        agent_spawn_command(command_path, args)
+    }
+
+    #[cfg(not(windows))]
+    {
+        parent_watchdog_agent_spawn_command(command_path, args, std::process::id())
+    }
+}
+
+#[cfg(not(windows))]
+fn parent_watchdog_agent_spawn_command(
+    command_path: &Path,
+    args: &[String],
+    parent_pid: u32,
+) -> std::process::Command {
+    const SCRIPT: &str = r#"
+parent_pid="$1"
+shift
+agent_pgrp="$$"
+(
+  trap '' TERM
+  while kill -0 "$parent_pid" 2>/dev/null; do
+    sleep 1
+  done
+  kill -TERM "-$agent_pgrp" 2>/dev/null || true
+  sleep 1
+  kill -KILL "-$agent_pgrp" 2>/dev/null || true
+) &
+watchdog_pid="$!"
+"$@"
+status="$?"
+kill -KILL "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
+exit "$status"
+"#;
+
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(SCRIPT)
+        .arg("kodex-agent-watchdog")
+        .arg(parent_pid.to_string())
+        .arg(command_path)
+        .args(args);
+    command
+}
 
 pub(super) struct HiddenAgentProcess {
     pub(super) command: PathBuf,
@@ -109,7 +159,7 @@ impl ConnectTo<Client> for HiddenAgentProcess {
         self,
         client: impl ConnectTo<<Client as Role>::Counterpart>,
     ) -> agent_client_protocol::Result<()> {
-        let mut command = agent_spawn_command(&self.command, &self.args);
+        let mut command = managed_agent_spawn_command(&self.command, &self.args);
         apply_process_cwd_and_pwd(&mut command, &self.current_dir);
         for (name, value) in &self.env {
             command.env(name, value);
@@ -132,6 +182,7 @@ impl ConnectTo<Client> for HiddenAgentProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         hide_console_window(&mut command);
+        configure_agent_process_group(&mut command);
 
         let mut child = command
             .spawn()
@@ -425,8 +476,9 @@ impl ConnectTo<Client> for TcpAgentProcess {
         client: impl ConnectTo<<Client as Role>::Counterpart>,
     ) -> agent_client_protocol::Result<()> {
         // Build the command, appending --port <port>
-        let mut command = agent_spawn_command(&self.command, &self.args);
-        command.args(["--port", &self.port.to_string()]);
+        let mut args = self.args.clone();
+        args.extend(["--port".to_string(), self.port.to_string()]);
+        let mut command = managed_agent_spawn_command(&self.command, &args);
         apply_process_cwd_and_pwd(&mut command, &self.current_dir);
         for (name, value) in &self.env {
             command.env(name, value);
@@ -448,6 +500,7 @@ impl ConnectTo<Client> for TcpAgentProcess {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
         hide_console_window(&mut command);
+        configure_agent_process_group(&mut command);
 
         let mut child = command
             .spawn()

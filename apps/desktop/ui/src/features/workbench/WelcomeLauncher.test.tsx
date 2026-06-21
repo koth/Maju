@@ -84,6 +84,10 @@ function agentSnapshot(): AgentSettingsSnapshot {
         available_models: ["claude-opus-4-7[1m]"],
         fast_model: null,
       },
+      web_tools: {
+        enabled: false,
+        provider: "brave",
+      },
     },
     agents: [
       {
@@ -111,6 +115,11 @@ function agentSnapshot(): AgentSettingsSnapshot {
       ],
       fast_model: null,
       fast_model_options: [],
+    },
+    web_tools: {
+      enabled: false,
+      provider: "brave",
+      configured: false,
     },
   };
 }

@@ -64,7 +64,19 @@ impl Application {
             &app_paths,
             false,
         );
+        crate::startup_perf::mark(
+            "app/bootstrap/restored_agent_command",
+            format!(
+                "is_codex={} is_claude={} command_len={}",
+                crate::settings::is_codex_acp_command(&agent_command),
+                crate::settings::is_claude_agent_acp_command(&agent_command),
+                agent_command.len()
+            ),
+        );
         crate::settings::ensure_agent_ready_for_command(&agent_command, &app_paths)?;
+        let (mcp_servers, web_tools_mcp) =
+            super::sessions::prepare_web_tools_mcp(&app_paths, &agent_command, false)
+                .map_err(anyhow::Error::msg)?;
 
         // Check for an existing local session and its agent-side ACP session ID
         // for session/load. Empty local sessions can have a transient ACP id
@@ -92,7 +104,7 @@ impl Application {
             })
             .unwrap_or_else(|| ui.session.model.clone());
 
-        let session = crate::startup_perf::measure(
+        let mut session = crate::startup_perf::measure(
             "app/bootstrap/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
             || {
@@ -106,6 +118,7 @@ impl Application {
                     log_id: make_log_id(),
                     acp_port,
                     remote_ssh: None,
+                    mcp_servers: mcp_servers.clone(),
                 })
             },
         )?;
@@ -222,6 +235,13 @@ impl Application {
         let _ = crate::startup_perf::measure("app/bootstrap/set_permission_mode", "", || {
             session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"))
         });
+        let _ = crate::startup_perf::measure("app/bootstrap/sync_codex_mode", "", || {
+            super::config::sync_codex_agent_mode_for_policy_mode(
+                &mut session,
+                is_codex_agent_label(&agent_cli_label),
+                ui.session.mode.as_deref(),
+            )
+        });
         let _ = crate::startup_perf::measure("app/bootstrap/update_session_model_mode", "", || {
             store.update_session_model_mode_provider(
                 &ui.session.id.to_string(),
@@ -250,6 +270,7 @@ impl Application {
             agent_command,
             acp_port,
             remote_ssh: None,
+            web_tools_mcp,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -348,7 +369,7 @@ impl Application {
         let remote_runtime = prepare_remote_agent_runtime(&agent_command, &app_paths, &remote_ssh)?;
         remote_ssh.reverse_forwards = remote_runtime.reverse_forwards.clone();
 
-        let session = crate::startup_perf::measure(
+        let mut session = crate::startup_perf::measure(
             "app/bootstrap_remote/session_handle_start",
             format!("resume={}", resume_session_id.is_some()),
             || {
@@ -362,6 +383,7 @@ impl Application {
                     log_id: make_log_id(),
                     acp_port: local_port,
                     remote_ssh: Some(remote_ssh.clone()),
+                    mcp_servers: Vec::new(),
                 })
             },
         )?;
@@ -442,6 +464,11 @@ impl Application {
             }
         }
         let _ = session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"));
+        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+            &mut session,
+            is_codex_agent_label(&agent_cli_label),
+            ui.session.mode.as_deref(),
+        );
         let _ = store.update_session_model_mode_provider(
             &ui.session.id.to_string(),
             &ui.session.model,
@@ -464,6 +491,7 @@ impl Application {
             agent_command,
             acp_port: local_port,
             remote_ssh: Some(remote_ssh),
+            web_tools_mcp: None,
             in_flight_prompt: None,
             seq_counter,
             needs_title,

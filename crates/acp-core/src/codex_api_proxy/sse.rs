@@ -202,20 +202,14 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
                 }),
             );
         } else {
+            let item = namespaced_function_call_item(&call.id, &call.name, "", "in_progress");
             push_sse(
                 output,
                 "response.output_item.added",
                 json!({
                     "type": "response.output_item.added",
                     "output_index": output_index,
-                    "item": {
-                        "id": call.id,
-                        "type": "function_call",
-                        "call_id": call.id,
-                        "name": call.name,
-                        "arguments": "",
-                        "status": "in_progress"
-                    }
+                    "item": item
                 }),
             );
         }
@@ -307,14 +301,16 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
                 "status": "completed"
             })
         } else {
-            json!({
-                "id": call.id,
-                "type": "function_call",
-                "call_id": call.id,
-                "name": if call.name.is_empty() { "unknown" } else { &call.name },
-                "arguments": call.arguments,
-                "status": "completed"
-            })
+            namespaced_function_call_item(
+                &call.id,
+                if call.name.is_empty() {
+                    "unknown"
+                } else {
+                    &call.name
+                },
+                &call.arguments,
+                "completed",
+            )
         };
         push_sse(
             output,

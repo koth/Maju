@@ -71,9 +71,7 @@ impl Application {
         existing_user_message_id: Option<uuid::Uuid>,
     ) -> anyhow::Result<()> {
         if self.in_flight_prompt.is_some() {
-            let error = anyhow::anyhow!("提示请求已在运行中");
-            self.push_system_message(error.to_string());
-            return Err(error);
+            return self.send_steer_content_background_inner(prompt, existing_user_message_id);
         }
 
         if prompt_has_image(&prompt) && !self.ui.prompt_capabilities.image {
@@ -122,46 +120,12 @@ impl Application {
                 .update_message_body(&message_id.to_string(), &display_body);
         }
 
-        if !self.session.is_alive() {
-            if self.session.last_error().is_none() && self.should_auto_reconnect_after_clean_exit()
-            {
-                self.reconnect_session().map_err(anyhow::Error::msg)?;
-            } else {
-                let reason = self
-                    .session
-                    .last_error()
-                    .unwrap_or_else(|| "ACP 子进程意外退出".to_string());
-                let reason = humanize_acp_disconnect_reason(&reason);
-                let error = anyhow::anyhow!(reason);
-                self.push_system_message(format!("会话已断开：{error}"));
-                return Err(error);
-            }
-        }
+        self.ensure_session_available_for_prompt()?;
 
         let message_id = if let Some(message_id) = existing_user_message_id {
             message_id
         } else {
-            let message = ChatMessage {
-                id: uuid::Uuid::new_v4(),
-                role: MessageRole::User,
-                body: display_body,
-                created_at: current_timestamp(),
-            };
-            let message_id = message.id;
-
-            // Persist user message to SQLite
-            let seq = self.next_seq();
-            let _ = self.store.insert_message(
-                &self.ui.session.id.to_string(),
-                &message.id.to_string(),
-                "User",
-                &message.body,
-                seq,
-            );
-
-            self.ui.timeline.push(TimelineItem::Message(message.id));
-            self.ui.messages.push(message);
-            message_id
+            self.append_user_prompt_message(display_body)
         };
         self.ui.agent_plan.clear();
         self.ui.session.status = SessionStatus::Streaming;
@@ -191,6 +155,100 @@ impl Application {
         self.in_flight_prompt = Some(InFlightPrompt { task });
         self.bump_revision();
         Ok(())
+    }
+
+    fn send_steer_content_background_inner(
+        &mut self,
+        mut prompt: Vec<UserPromptContent>,
+        existing_user_message_id: Option<uuid::Uuid>,
+    ) -> anyhow::Result<()> {
+        if existing_user_message_id.is_some() {
+            let error = anyhow::anyhow!("当前轮次运行中，无法重试历史消息");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+        if !self.ui.prompt_capabilities.session_steer {
+            let error = anyhow::anyhow!("当前智能体不支持运行中追加指令");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+        if prompt_has_image(&prompt) && !self.ui.prompt_capabilities.image {
+            let error = anyhow::anyhow!("当前智能体不支持图片提示");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+        if prompt_has_file(&prompt) && !self.ui.prompt_capabilities.embedded_context {
+            let error = anyhow::anyhow!("当前智能体不支持文件附件");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+
+        if prompt_has_image(&prompt) {
+            let _ = crate::attachment_cache::cache_prompt_images(
+                &mut prompt,
+                &self.app_paths.attachments_dir(),
+            );
+        }
+        let display_body = prompt_display_body(&prompt);
+        if display_body.is_empty() {
+            let error = anyhow::anyhow!("提示内容不能为空");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+
+        self.ensure_session_available_for_prompt()?;
+        if let Err(error) = self.session.send_steer_content(prompt) {
+            let error = anyhow::anyhow!("追加指令发送失败：{error}");
+            self.push_system_message(error.to_string());
+            return Err(error);
+        }
+
+        self.append_user_prompt_message(display_body);
+        self.bump_revision();
+        Ok(())
+    }
+
+    fn ensure_session_available_for_prompt(&mut self) -> anyhow::Result<()> {
+        if self.session.is_alive() {
+            return Ok(());
+        }
+
+        if self.session.last_error().is_none() && self.should_auto_reconnect_after_clean_exit() {
+            self.reconnect_session().map_err(anyhow::Error::msg)?;
+            return Ok(());
+        }
+
+        let reason = self
+            .session
+            .last_error()
+            .unwrap_or_else(|| "ACP 子进程意外退出".to_string());
+        let reason = humanize_acp_disconnect_reason(&reason);
+        let error = anyhow::anyhow!(reason);
+        self.push_system_message(format!("会话已断开：{error}"));
+        Err(error)
+    }
+
+    fn append_user_prompt_message(&mut self, body: String) -> uuid::Uuid {
+        let message = ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: MessageRole::User,
+            body,
+            created_at: current_timestamp(),
+        };
+        let message_id = message.id;
+
+        let seq = self.next_seq();
+        let _ = self.store.insert_message(
+            &self.ui.session.id.to_string(),
+            &message.id.to_string(),
+            "User",
+            &message.body,
+            seq,
+        );
+
+        self.ui.timeline.push(TimelineItem::Message(message.id));
+        self.ui.messages.push(message);
+        message_id
     }
 
     pub fn poll_prompt_progress(&mut self) {

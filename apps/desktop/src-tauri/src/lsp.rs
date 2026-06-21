@@ -494,6 +494,7 @@ impl Default for LanguageServerRegistry {
                 selected_codex_provider_profile_id: None,
                 selected_claude_provider_profile_id: None,
                 claude: workspace_model::ClaudeProviderSettings::default(),
+                web_tools: workspace_model::WebToolsSettings::default(),
             })
             .into_iter()
             .map(LanguageServerSpec::from)

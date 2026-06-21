@@ -1526,25 +1526,11 @@ describe("stop reason propagation", () => {
     };
   }
 
-  function injectSession(agent: ClaudeAcpAgent, messages: any[], queryOverrides: object = {}) {
-    const input = new Pushable<any>();
-    async function* messageGenerator() {
-      // Wait for the prompt to push its user message so we can replay it
-      const iter = input[Symbol.asyncIterator]();
-      const { value: userMessage, done } = await iter.next();
-      if (!done && userMessage) {
-        yield {
-          type: "user",
-          message: userMessage.message,
-          parent_tool_use_id: null,
-          uuid: userMessage.uuid,
-          session_id: "test-session",
-          isReplay: true,
-        };
-      }
-      yield* messages;
-    }
-    const queryInstance = Object.assign(messageGenerator(), queryOverrides);
+  function installSession(
+    agent: ClaudeAcpAgent,
+    input: Pushable<any>,
+    queryInstance: AsyncGenerator<any>,
+  ) {
     agent.sessions["test-session"] = {
       query: queryInstance as any,
       input,
@@ -1577,6 +1563,86 @@ describe("stop reason propagation", () => {
       taskState: new Map(),
     };
   }
+
+  function injectSession(agent: ClaudeAcpAgent, messages: any[], queryOverrides: object = {}) {
+    const input = new Pushable<any>();
+    async function* messageGenerator() {
+      // Wait for the prompt to push its user message so we can replay it
+      const iter = input[Symbol.asyncIterator]();
+      const { value: userMessage, done } = await iter.next();
+      if (!done && userMessage) {
+        yield {
+          type: "user",
+          message: userMessage.message,
+          parent_tool_use_id: null,
+          uuid: userMessage.uuid,
+          session_id: "test-session",
+          isReplay: true,
+        };
+      }
+      yield* messages;
+    }
+    const queryInstance = Object.assign(messageGenerator(), queryOverrides);
+    installSession(agent, input, queryInstance);
+    return input;
+  }
+
+  it("hands off prompt-running input to the pending prompt", async () => {
+    const agent = createMockAgent();
+    const input = new Pushable<any>();
+    const replayedTexts: string[] = [];
+
+    async function* messageGenerator() {
+      const iter = input[Symbol.asyncIterator]();
+      const first = await iter.next();
+      if (!first.done && first.value) {
+        replayedTexts.push(first.value.message.content[0].text);
+        yield {
+          type: "user",
+          message: first.value.message,
+          parent_tool_use_id: null,
+          uuid: first.value.uuid,
+          session_id: "test-session",
+          isReplay: true,
+        };
+      }
+
+      const second = await iter.next();
+      if (!second.done && second.value) {
+        replayedTexts.push(second.value.message.content[0].text);
+        yield {
+          type: "user",
+          message: second.value.message,
+          parent_tool_use_id: null,
+          uuid: second.value.uuid,
+          session_id: "test-session",
+          isReplay: true,
+        };
+      }
+
+      yield createResultMessage({ subtype: "success", stop_reason: null, is_error: false });
+      yield { type: "system", subtype: "session_state_changed", state: "idle" };
+    }
+
+    installSession(agent, input, messageGenerator());
+
+    const firstPrompt = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "start work" }],
+    });
+    await Promise.resolve();
+
+    const steerPrompt = agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "add this constraint" }],
+    });
+
+    await expect(firstPrompt).resolves.toMatchObject({ stopReason: "end_turn" });
+    await expect(steerPrompt).resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(replayedTexts).toEqual(["start work", "add this constraint"]);
+    expect(agent.sessions["test-session"]?.promptRunning).toBe(false);
+    expect(agent.sessions["test-session"]?.pendingMessages.size).toBe(0);
+  });
 
   it("emits an explicit custom session title from SDK metadata after the prompt becomes idle", async () => {
     const updates: SessionNotification[] = [];

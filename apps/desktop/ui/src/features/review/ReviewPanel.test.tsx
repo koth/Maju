@@ -3,7 +3,7 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { buildLineDiffRows } from "./ReviewPanel";
 import { ReviewPanel } from "./ReviewPanel";
-import type { ReviewPanelActiveTab, ReviewPanelOpenTab } from "./ReviewPanel";
+import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet } from "./ReviewPanel";
 import type { ChangedFile, ChangeSetSummary, FileChangeRecord, FileChangeSummary, UiSnapshot } from "../../types";
 import {
   fsListDir,
@@ -78,7 +78,7 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
       status: "Idle",
     },
     session_config: { hydrated: true, controls: [] },
-    prompt_capabilities: { image: false, embedded_context: false },
+    prompt_capabilities: { image: false, embedded_context: false, session_steer: false },
     available_commands: [],
     agent_plan: [],
     messages: [],
@@ -955,7 +955,7 @@ describe("ReviewPanel scoped change sets", () => {
     render(
       <ReviewPanel
         snapshot={makeSnapshot({
-          prompt_capabilities: { image: false, embedded_context: true },
+          prompt_capabilities: { image: false, embedded_context: true, session_steer: false },
           repository: {
             branch: "main",
             head: "abc",
@@ -1167,5 +1167,98 @@ describe("ReviewPanel scoped change sets", () => {
     expect(
       screen.getByRole("button", { name: "打开文件 app.ts" }).closest(".review-open-file-tab"),
     ).toHaveClass("review-tab-active");
+  });
+
+  it("does not revive a released historical focus when expanding remounts the panel", async () => {
+    const oldTurn = makeChangeSet("old-turn", "AgentTurn", "2026-05-12T03:00:00Z");
+    const newTurn = makeChangeSet("new-turn", "AgentTurn", "2026-05-12T04:00:00Z");
+    const newerTurn = makeChangeSet("new-turn", "AgentTurn", "2026-05-12T04:01:00Z");
+
+    vi.mocked(sessionListChangeSets)
+      .mockResolvedValueOnce([oldTurn, newTurn])
+      .mockResolvedValue([oldTurn, newerTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files:
+        change_set_id === "old-turn"
+          ? [makeSummary("old-turn", "src/old.ts")]
+          : [makeSummary("new-turn", "src/new.ts")],
+    }));
+
+    function ControlledReviewPanel() {
+      const [expanded, setExpanded] = useState(false);
+      const [revision, setRevision] = useState(1);
+      const [activeTab, setActiveTab] = useState<ReviewPanelActiveTab>({
+        kind: "base",
+        tab: "Review",
+      });
+      const [openTabs, setOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
+      const [preferredChangeSet, setPreferredChangeSet] =
+        useState<ReviewPreferredChangeSet | null>({
+          id: "old-turn",
+          token: 1,
+          consumedSignature: null,
+        });
+      const panel = (
+        <ReviewPanel
+          snapshot={makeSnapshot({
+            revision,
+            messages: [
+              { id: "old-turn-message", role: "Assistant", body: "old edit" },
+              { id: "new-turn-message", role: "Assistant", body: "new edit" },
+            ],
+            timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+          })}
+          refreshing={false}
+          hydrated
+          panelExpanded={expanded}
+          onRefresh={() => {}}
+          onFileSelect={() => {}}
+          onFileOpen={() => {}}
+          onPanelExpandedChange={setExpanded}
+          activeTab={activeTab}
+          openTabs={openTabs}
+          onActiveTabChange={setActiveTab}
+          onOpenTabsChange={setOpenTabs}
+          focusRequest={{ changeSetId: "old-turn", token: 1 }}
+          preferredChangeSet={preferredChangeSet}
+          onPreferredChangeSetChange={setPreferredChangeSet}
+        />
+      );
+
+      return (
+        <>
+          <button type="button" onClick={() => setRevision(2)}>
+            simulate newer changes
+          </button>
+          {expanded ? (
+            <section aria-label="expanded placement">{panel}</section>
+          ) : (
+            <aside aria-label="side placement">{panel}</aside>
+          )}
+        </>
+      );
+    }
+
+    render(<ControlledReviewPanel />);
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/old.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/new.ts")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "simulate newer changes" }));
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/new.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开审查面板" }));
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/new.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "还原审查面板" })).toBeTruthy();
   });
 });

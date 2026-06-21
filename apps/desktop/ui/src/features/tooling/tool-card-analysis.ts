@@ -16,6 +16,10 @@ export interface ExplorationResult {
  * Keeps raw commands in the expanded detail instead of the header.
  */
 export function extractHeaderTitle(tool: ToolInvocation, trackedDiffPaths: string[]): string {
+  if (isQuestionTool(tool)) {
+    return questionToolAnswerTitle(tool) ?? "提问";
+  }
+
   if (isTodoWriteTool(tool)) {
     return "任务计划";
   }
@@ -420,7 +424,7 @@ export function truncate(text: string, max: number): string {
   return firstLine;
 }
 
-export type ToolCategory = "exploring" | "editing" | "executing";
+export type ToolCategory = "exploring" | "editing" | "executing" | "asking";
 
 export function commandHeaderTitle(
   command: string | null,
@@ -428,6 +432,9 @@ export function commandHeaderTitle(
   tool: ToolInvocation,
 ): string {
   if (command && category === "exploring") {
+    const parsedTarget = parsedCommandTarget(tool);
+    if (parsedTarget) return truncate(displayPath(parsedTarget), 96);
+
     const target = extractExplorationCommandTarget(command);
     if (target) return truncate(displayPath(target), 96);
   }
@@ -456,8 +463,32 @@ export function isExplorationCommand(command: string): boolean {
   if (commandWritePaths(command).length > 0 || commandCleanupPaths(command).length > 0) {
     return false;
   }
-  const commandName = firstCommandName(command);
+  const tokens = tokenizeCommandLine(command);
+  const commandName = firstCommandNameFromTokens(tokens);
   return (
+    commandName === "awk" ||
+    commandName === "cut" ||
+    commandName === "egrep" ||
+    commandName === "fgrep" ||
+    commandName === "file" ||
+    commandName === "grep" ||
+    commandName === "head" ||
+    commandName === "less" ||
+    commandName === "more" ||
+    commandName === "pwd" ||
+    commandName === "rg" ||
+    commandName === "ripgrep" ||
+    commandName === "sort" ||
+    commandName === "stat" ||
+    commandName === "tail" ||
+    commandName === "tree" ||
+    commandName === "uniq" ||
+    commandName === "wc" ||
+    commandName === "where" ||
+    commandName === "which" ||
+    (commandName === "find" && findCommandLooksReadOnly(tokens)) ||
+    (commandName === "sed" && sedCommandLooksReadOnly(tokens)) ||
+    (commandName === "git" && gitCommandLooksReadOnly(tokens)) ||
     commandName === "get-content" ||
     commandName === "gc" ||
     commandName === "cat" ||
@@ -466,6 +497,8 @@ export function isExplorationCommand(command: string): boolean {
     commandName === "gci" ||
     commandName === "ls" ||
     commandName === "dir" ||
+    commandName === "select-string" ||
+    commandName === "select-object" ||
     commandName === "test-path"
   );
 }
@@ -473,12 +506,18 @@ export function isExplorationCommand(command: string): boolean {
 export function extractExplorationCommandTarget(command: string): string | null {
   const tokens = tokenizeCommandLine(command);
   if (tokens.length === 0) return null;
+  const commandName = firstCommandNameFromTokens(tokens);
 
   for (let i = 1; i < tokens.length - 1; i += 1) {
     const lower = tokens[i].toLowerCase();
     if (lower === "-path" || lower === "-literalpath") {
       return tokens[i + 1];
     }
+  }
+
+  if (explorationCommandPrefersLastPositionalTarget(commandName)) {
+    const target = lastPositionalCommandToken(tokens);
+    if (target) return target;
   }
 
   for (let i = 1; i < tokens.length; i += 1) {
@@ -495,8 +534,69 @@ export function extractExplorationCommandTarget(command: string): string | null 
 }
 
 export function firstCommandName(command: string): string {
-  const first = tokenizeCommandLine(command)[0] ?? "";
-  return first.toLowerCase();
+  return firstCommandNameFromTokens(tokenizeCommandLine(command));
+}
+
+export function firstCommandNameFromTokens(tokens: string[]): string {
+  const first = tokens[0] ?? "";
+  const base = displayPath(first).split("/").pop() ?? first;
+  return base.replace(/\.exe$/i, "").toLowerCase();
+}
+
+export function findCommandLooksReadOnly(tokens: string[]): boolean {
+  return !tokens.some((token) =>
+    ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(token.toLowerCase()),
+  );
+}
+
+export function sedCommandLooksReadOnly(tokens: string[]): boolean {
+  return !tokens.some((token) => token.toLowerCase().startsWith("-i"));
+}
+
+export function gitCommandLooksReadOnly(tokens: string[]): boolean {
+  const subcommand = tokens.slice(1).find((token) => !token.startsWith("-"))?.toLowerCase();
+  return !!subcommand && [
+    "blame",
+    "diff",
+    "grep",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status",
+  ].includes(subcommand);
+}
+
+export function explorationCommandPrefersLastPositionalTarget(commandName: string): boolean {
+  return [
+    "awk",
+    "cut",
+    "egrep",
+    "fgrep",
+    "file",
+    "grep",
+    "head",
+    "rg",
+    "ripgrep",
+    "sed",
+    "stat",
+    "tail",
+    "wc",
+  ].includes(commandName);
+}
+
+export function lastPositionalCommandToken(tokens: string[]): string | null {
+  let last: string | null = null;
+  for (let i = 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === "|" || token === ";" || token === "&&" || token === "||") break;
+    if (token.startsWith("-")) {
+      i += powershellSwitchLooksValued(token) ? 1 : 0;
+      continue;
+    }
+    last = token;
+  }
+  return last;
 }
 
 export function powershellSwitchLooksValued(token: string): boolean {
@@ -557,6 +657,10 @@ export function classifyTool(tool: ToolInvocation): ToolCategory {
   const identity = `${tool.kind} ${tool.name}`.toLowerCase();
   const subagentType = getSubagentType(tool);
 
+  if (isQuestionTool(tool)) {
+    return "asking";
+  }
+
   if (isTodoWriteTool(tool)) {
     return "executing";
   }
@@ -571,6 +675,10 @@ export function classifyTool(tool: ToolInvocation): ToolCategory {
 
   if (isExplicitEditToolInvocation(tool)) {
     return "editing";
+  }
+
+  if (rawInputHasReadOnlyParsedCommand(tool)) {
+    return "exploring";
   }
 
   if (subagentType === "explore") {
@@ -598,6 +706,7 @@ export function isExplicitEditToolInvocation(tool: ToolInvocation): boolean {
 
 export function rawInputHasEditPayload(tool: ToolInvocation): boolean {
   if (!tool.raw_input) return false;
+  if (rawInputHasReadOnlyParsedCommand(tool)) return false;
   const input = parseJsonValue(tool.raw_input);
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     const path = rawInputFilePath(tool);
@@ -644,6 +753,60 @@ export function rawInputFilePath(tool: ToolInvocation): string | null {
     stringField(input, "file_path", "filePath", "path") ??
     stringFieldFromRawText(tool.raw_input, "file_path", "filePath", "path")
   );
+}
+
+export function rawInputHasReadOnlyParsedCommand(tool: ToolInvocation): boolean {
+  const entries = parsedCommandEntriesFromRawPayload(tool.raw_input);
+  return entries.length > 0 && entries.every(parsedCommandEntryIsReadOnly);
+}
+
+export function parsedCommandTarget(tool: ToolInvocation): string | null {
+  for (const raw of [tool.raw_input, tool.raw_output]) {
+    for (const entry of parsedCommandEntriesFromRawPayload(raw)) {
+      const target = stringField(
+        entry,
+        "path",
+        "file_path",
+        "filePath",
+        "target",
+        "target_path",
+        "targetPath",
+      );
+      if (target && looksLikePath(target)) return target;
+    }
+  }
+  return null;
+}
+
+export function parsedCommandEntriesFromRawPayload(
+  raw: string | null | undefined,
+): Record<string, unknown>[] {
+  if (!raw) return [];
+  const input = parseJsonValue(raw);
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const parsedCmd = (input as Record<string, unknown>).parsed_cmd;
+  if (Array.isArray(parsedCmd)) {
+    return parsedCmd.filter(
+      (entry): entry is Record<string, unknown> =>
+        !!entry && typeof entry === "object" && !Array.isArray(entry),
+    );
+  }
+  if (parsedCmd && typeof parsedCmd === "object") {
+    return [parsedCmd as Record<string, unknown>];
+  }
+  return [];
+}
+
+export function parsedCommandEntryIsReadOnly(entry: Record<string, unknown>): boolean {
+  const type = stringField(entry, "type", "kind")?.toLowerCase();
+  return !!type && [
+    "read",
+    "search",
+    "list",
+    "glob",
+    "inspect",
+    "stat",
+  ].includes(type);
 }
 
 export function isTodoWriteTool(tool: ToolInvocation): boolean {
@@ -1165,9 +1328,31 @@ export function parseCommandValueAt(text: string, start: number): string | null 
 }
 
 export function collectShellRedirectionPaths(command: string, paths: string[]) {
+  let quote: '"' | "'" | null = null;
   for (let i = 0; i < command.length; i += 1) {
-    if (command[i] !== ">") continue;
+    const char = command[i];
+    const next = command[i + 1];
+
+    if (char === "\\" && quote === '"' && next) {
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      if (quote === char) {
+        quote = null;
+        continue;
+      }
+      if (!quote) {
+        quote = char;
+        continue;
+      }
+    }
+
+    if (quote || char !== ">") continue;
+
     if (i > 0 && /\d/.test(command[i - 1])) continue;
+    if (next === "&") continue;
     if (command[i + 1] === ">") i += 1;
     const value = parseCommandValueAt(command, i + 1);
     if (value) paths.push(value);
@@ -1325,7 +1510,25 @@ export function normalizePathSegments(path: string): string {
 
 export function looksLikeBogusWholeFilePreview(preview: ToolDiffPreview): boolean {
   const stats = getDiffStats([preview]);
-  return stats.added >= 100 && (stats.removed === 0 || stats.added > stats.removed * 4);
+  if (!(stats.added >= 100 && (stats.removed === 0 || stats.added > stats.removed * 4))) {
+    return false;
+  }
+  return preview.hunks.some((hunk) => hunkRangeLooksLikeFragmentToWholeFile(hunk.heading));
+}
+
+function hunkRangeLooksLikeFragmentToWholeFile(heading: string): boolean {
+  const range = parseUnifiedHunkRange(heading);
+  if (!range) return false;
+  return range.oldCount > 0 && range.newCount >= 100 && range.newCount > range.oldCount * 4;
+}
+
+function parseUnifiedHunkRange(heading: string): { oldCount: number; newCount: number } | null {
+  const match = heading.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+  if (!match) return null;
+  const oldCount = match[2] == null ? 1 : Number(match[2]);
+  const newCount = match[4] == null ? 1 : Number(match[4]);
+  if (!Number.isFinite(oldCount) || !Number.isFinite(newCount)) return null;
+  return { oldCount, newCount };
 }
 
 export function diffPreviewFromRawInput(tool: ToolInvocation): ToolDiffPreview | null {
@@ -1579,9 +1782,68 @@ export function toolVerb(status: ToolStatus, category: ToolCategory): string {
       return running ? "探索中" : "已探索";
     case "editing":
       return running ? "编辑中" : "已编辑";
+    case "asking":
+      return running ? "提问中" : "已提问";
     case "executing":
       return running ? "运行中" : "已运行";
   }
+}
+
+export function isQuestionTool(tool: ToolInvocation): boolean {
+  if ((tool.permission_input?.questions.length ?? 0) > 0) {
+    return true;
+  }
+
+  const identity = `${tool.kind} ${tool.name}`.toLowerCase();
+  if (
+    identity.includes("askuserquestion") ||
+    identity.includes("request_user_input") ||
+    identity.includes("request user input")
+  ) {
+    return true;
+  }
+
+  const rawInput = tool.raw_input ? parseJsonValue(tool.raw_input) : null;
+  return (
+    !!rawInput &&
+    typeof rawInput === "object" &&
+    !Array.isArray(rawInput) &&
+    Array.isArray((rawInput as Record<string, unknown>).questions)
+  );
+}
+
+function questionToolAnswerTitle(tool: ToolInvocation): string | null {
+  return (
+    answerFromPermissionDecision(tool.permission_decision) ??
+    answerFromPermissionDecision(tool.summary)
+  );
+}
+
+function answerFromPermissionDecision(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = value.trim().match(/^Permission selected:\s*(.+)$/i);
+  const answer = match?.[1]?.trim();
+  if (!answer || isGenericPermissionAnswer(answer)) return null;
+  return truncate(answer, 80);
+}
+
+function isGenericPermissionAnswer(answer: string): boolean {
+  const normalized = answer.trim().toLowerCase();
+  return [
+    "allow",
+    "allow all",
+    "allow once",
+    "approve",
+    "approved",
+    "yes",
+    "reject",
+    "deny",
+    "denied",
+    "no",
+    "cancel",
+    "cancelled",
+    "canceled",
+  ].includes(normalized);
 }
 
 export function statusBullet(

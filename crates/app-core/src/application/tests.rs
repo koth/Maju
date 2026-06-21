@@ -77,6 +77,62 @@ fn mock_agent_command() -> String {
     )
 }
 
+#[test]
+fn web_tools_mcp_injection_respects_settings_key_and_session_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
+
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    assert!(servers.is_empty());
+    assert!(handle.is_none());
+
+    crate::settings::save_web_tools_settings(&app_paths, true, "brave").unwrap();
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    assert!(servers.is_empty(), "missing provider key should not inject");
+    assert!(handle.is_none());
+
+    crate::settings::save_web_tools_provider_key(&app_paths, "brave", "test-secret").unwrap();
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    assert_eq!(servers.len(), 1);
+    let handle = handle.expect("enabled configured web tools should start MCP adapter");
+    assert!(handle.url().starts_with("http://127.0.0.1:"));
+    drop(handle);
+
+    crate::settings::save_web_tools_settings(&app_paths, true, "tavily").unwrap();
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    assert!(
+        servers.is_empty(),
+        "Tavily should require its own provider key"
+    );
+    assert!(handle.is_none());
+
+    crate::settings::save_web_tools_provider_key(&app_paths, "tavily", "tvly-secret").unwrap();
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "claude-agent-acp", false).unwrap();
+    assert_eq!(servers.len(), 1);
+    drop(handle.expect("Tavily-configured web tools should start MCP adapter"));
+
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", true).unwrap();
+    assert!(
+        servers.is_empty(),
+        "remote sessions fail closed for local MCP"
+    );
+    assert!(handle.is_none());
+
+    let (servers, handle) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codebuddy", false).unwrap();
+    assert!(
+        servers.is_empty(),
+        "unsupported agent commands should not receive web tools"
+    );
+    assert!(handle.is_none());
+}
+
 fn remote_workspace_fixture() -> RemoteLinuxWorkspace {
     RemoteLinuxWorkspace {
         profile_id: None,

@@ -640,6 +640,27 @@ body.is-resizing-left-sidebar {
   stroke-linejoin: round;
 }
 
+:root[data-theme="light"] .thread-header-plan-toggle {
+  border-color: #d9d9d7;
+  background: #f0f0ef;
+  color: #202124;
+  box-shadow:
+    0 1px 2px rgba(32, 33, 36, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+:root[data-theme="light"] .thread-header-plan-toggle:hover {
+  border-color: #d0d0ce;
+  background: #e9e9e7;
+  color: #202124;
+}
+
+:root[data-theme="light"] .thread-header-plan-toggle.is-active {
+  border-color: #d9d9d7;
+  background: #f0f0ef;
+  color: #202124;
+}
+
 .session-archive-toast {
   position: absolute;
   top: calc(var(--thread-header-height) + 10px);
@@ -935,6 +956,57 @@ body.is-resizing-left-sidebar {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   line-height: 1.3;
+}
+
+:root[data-theme="light"] .agent-plan-dock {
+  border-color: #e6e6e3;
+  background: #ffffff;
+  box-shadow:
+    0 16px 34px rgba(32, 33, 36, 0.08),
+    0 2px 7px rgba(32, 33, 36, 0.05);
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-environment-title {
+  color: #8a8f95;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-add,
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-chevron {
+  color: #7c8288;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-row {
+  color: #202124;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-row.is-muted {
+  color: #767b80;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-file-count {
+  color: #767b80;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-added {
+  color: #00a83a;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-env-removed {
+  color: #c62828;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-toggle {
+  border-top-color: #ececea;
+  color: #8a8f95;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-toggle:hover {
+  background: #f8f8f7;
+  color: #202124;
+}
+
+:root[data-theme="light"] .agent-plan-dock .agent-plan-toggle-chevron {
+  color: #7c8288;
 }
 
 /*

@@ -19,6 +19,11 @@ export type ReviewPanelActiveTab =
 export type ReviewPanelOpenTab =
   | { kind: "file"; path: string; lineNumber?: number; searchQuery?: string; navToken?: number }
   | { kind: "diff"; path: string; changeSetId: string };
+export interface ReviewPreferredChangeSet {
+  id: string;
+  token: number;
+  consumedSignature: string | null;
+}
 type ReviewScope = "last" | "manual";
 
 export interface InlineDiffLine {
@@ -249,6 +254,8 @@ interface Props {
   onActiveTabChange?: Dispatch<SetStateAction<ReviewPanelActiveTab>>;
   onOpenTabsChange?: Dispatch<SetStateAction<ReviewPanelOpenTab[]>>;
   focusRequest?: { changeSetId: string; token: number } | null;
+  preferredChangeSet?: ReviewPreferredChangeSet | null;
+  onPreferredChangeSetChange?: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
 }
 
 export function ReviewPanel({
@@ -268,12 +275,24 @@ export function ReviewPanel({
   onActiveTabChange,
   onOpenTabsChange,
   focusRequest,
+  preferredChangeSet: controlledPreferredChangeSet,
+  onPreferredChangeSetChange,
 }: Props) {
   const [internalActiveTab, setInternalActiveTab] = useState<ReviewPanelActiveTab>({
     kind: "base",
     tab: "Review",
   });
   const [internalOpenTabs, setInternalOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
+  const [internalPreferredChangeSet, setInternalPreferredChangeSet] =
+    useState<ReviewPreferredChangeSet | null>(() =>
+      focusRequest
+        ? {
+            id: focusRequest.changeSetId,
+            token: focusRequest.token,
+            consumedSignature: null,
+          }
+        : null,
+    );
   const [filter, setFilter] = useState("");
   const [fileTreeRefreshSignal, setFileTreeRefreshSignal] = useState(0);
   const [editorFileTreeVisible, setEditorFileTreeVisible] = useState(false);
@@ -285,6 +304,12 @@ export function ReviewPanel({
   const setActiveTab = onActiveTabChange ?? setInternalActiveTab;
   const openTabs = controlledOpenTabs ?? internalOpenTabs;
   const setOpenTabs = onOpenTabsChange ?? setInternalOpenTabs;
+  const activePreferredChangeSet =
+    controlledPreferredChangeSet !== undefined
+      ? controlledPreferredChangeSet
+      : internalPreferredChangeSet;
+  const setActivePreferredChangeSet =
+    onPreferredChangeSetChange ?? setInternalPreferredChangeSet;
   const resetKeyRef = useRef(`${snapshot.session.id}:${snapshot.workspace.root}`);
   const panelRef = useRef<HTMLDivElement>(null);
   const focusRequestKey = focusRequest
@@ -403,7 +428,14 @@ export function ReviewPanel({
 
     handledFocusRequestKeyRef.current = focusRequestKey;
     setActiveTab({ kind: "base", tab: "Review" });
-  }, [focusRequestKey, setActiveTab]);
+    if (focusRequest) {
+      setActivePreferredChangeSet({
+        id: focusRequest.changeSetId,
+        token: focusRequest.token,
+        consumedSignature: null,
+      });
+    }
+  }, [focusRequest, focusRequestKey, setActivePreferredChangeSet, setActiveTab]);
 
   useEffect(() => {
     const nextResetKey = `${snapshot.session.id}:${snapshot.workspace.root}`;
@@ -584,8 +616,8 @@ export function ReviewPanel({
           lastAssistantMessageId={reviewTargetAssistantMessageId}
           activeTurnOwnerKey={activeTurnOwner}
           appTheme={appTheme}
-          preferredChangeSetId={focusRequest?.changeSetId ?? null}
-          preferredChangeSetToken={focusRequest?.token ?? null}
+          activePreferredChangeSet={activePreferredChangeSet}
+          onActivePreferredChangeSetChange={setActivePreferredChangeSet}
           messageOrder={messageOrder}
         />
       </div>
@@ -985,8 +1017,8 @@ function ReviewChangesView({
   lastAssistantMessageId,
   activeTurnOwnerKey,
   appTheme,
-  preferredChangeSetId,
-  preferredChangeSetToken,
+  activePreferredChangeSet,
+  onActivePreferredChangeSetChange,
   messageOrder,
 }: {
   changeSetState: {
@@ -996,8 +1028,8 @@ function ReviewChangesView({
   lastAssistantMessageId: string | null;
   activeTurnOwnerKey: string | null;
   appTheme: AppTheme;
-  preferredChangeSetId: string | null;
-  preferredChangeSetToken: number | null;
+  activePreferredChangeSet: ReviewPreferredChangeSet | null;
+  onActivePreferredChangeSetChange: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
   messageOrder: Map<string, number>;
 }) {
   const [scope, setScope] = useState<ReviewScope>("last");
@@ -1006,23 +1038,13 @@ function ReviewChangesView({
     () => reviewChangeSetSignature(changeSetState.summaries, changeSetState.filesById),
     [changeSetState.filesById, changeSetState.summaries],
   );
-  const [activePreferredChangeSet, setActivePreferredChangeSet] = useState<{
-    id: string;
-    token: number;
-    consumedSignature: string | null;
-  } | null>(null);
+  const preferredChangeSetToken = activePreferredChangeSet?.token ?? null;
 
   useEffect(() => {
-    if (preferredChangeSetId && preferredChangeSetToken !== null) {
-      setScope("last");
-      setScopeMenuOpen(false);
-      setActivePreferredChangeSet({
-        id: preferredChangeSetId,
-        token: preferredChangeSetToken,
-        consumedSignature: null,
-      });
-    }
-  }, [preferredChangeSetId, preferredChangeSetToken]);
+    if (preferredChangeSetToken === null) return;
+    setScope("last");
+    setScopeMenuOpen(false);
+  }, [preferredChangeSetToken]);
 
   const selectedChangeSet = useMemo(
     () =>
@@ -1051,7 +1073,7 @@ function ReviewChangesView({
     if (selectedChangeSet?.id !== activePreferredChangeSet.id) return;
 
     if (activePreferredChangeSet.consumedSignature === null) {
-      setActivePreferredChangeSet({
+      onActivePreferredChangeSetChange({
         ...activePreferredChangeSet,
         consumedSignature: changeSetSignature,
       });
@@ -1059,9 +1081,14 @@ function ReviewChangesView({
     }
 
     if (activePreferredChangeSet.consumedSignature !== changeSetSignature) {
-      setActivePreferredChangeSet(null);
+      onActivePreferredChangeSetChange(null);
     }
-  }, [activePreferredChangeSet, changeSetSignature, selectedChangeSet?.id]);
+  }, [
+    activePreferredChangeSet,
+    changeSetSignature,
+    onActivePreferredChangeSetChange,
+    selectedChangeSet?.id,
+  ]);
 
   const scopedFiles = selectedChangeSet
     ? changeSetState.filesById[selectedChangeSet.id] ?? []

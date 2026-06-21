@@ -70,6 +70,152 @@ fn streamable_remote_command_does_not_wait_on_requested_port_probe() {
     assert!(!command.contains(REMOTE_AGENT_READY_MARKER));
 }
 
+#[cfg(unix)]
+#[test]
+fn kill_child_handle_terminates_agent_process_group_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("agent-with-descendant.sh");
+    let pid_file = dir.path().join("descendant.pid");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+sleep 30 &
+echo "$!" > "$1"
+wait
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let mut command = Command::new(&script);
+    command.arg(&pid_file);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_agent_process_group(&mut command);
+    let child = Arc::new(Mutex::new(Some(command.spawn().unwrap())));
+    let descendant_pid = wait_for_pid_file(&pid_file);
+
+    kill_child_handle(&child).unwrap();
+
+    wait_for_process_exit(descendant_pid);
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_watchdog_agent_command_terminates_agent_when_parent_exits() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("watchdog-agent.sh");
+    let pid_file = dir.path().join("watchdog-agent.pid");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+echo "$$" > "$1"
+trap 'exit 0' TERM
+while :; do
+  sleep 1
+done
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let mut parent = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut command = parent_watchdog_agent_spawn_command(
+        &script,
+        &[pid_file.display().to_string()],
+        parent.id(),
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_agent_process_group(&mut command);
+    let mut wrapper = command.spawn().unwrap();
+    let agent_pid = wait_for_pid_file(&pid_file);
+
+    assert!(process_exists(agent_pid));
+
+    let _ = parent.kill();
+    let _ = parent.wait();
+    wait_for_process_exit(agent_pid);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if matches!(wrapper.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = wrapper.kill();
+    let _ = wrapper.wait();
+    panic!("watchdog wrapper survived parent exit");
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_watchdog_agent_command_exits_when_agent_exits_normally() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("short-agent.sh");
+    let pid_file = dir.path().join("short-agent.pid");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+echo "$$" > "$1"
+exit 7
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let mut parent = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut command = parent_watchdog_agent_spawn_command(
+        &script,
+        &[pid_file.display().to_string()],
+        parent.id(),
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_agent_process_group(&mut command);
+    let mut wrapper = command.spawn().unwrap();
+    let _ = wait_for_pid_file(&pid_file);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = wrapper.try_wait().unwrap() {
+            let _ = parent.kill();
+            let _ = parent.wait();
+            assert_eq!(status.code(), Some(7));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = wrapper.kill();
+    let _ = wrapper.wait();
+    let _ = parent.kill();
+    let _ = parent.wait();
+    panic!("watchdog wrapper did not exit after agent exited");
+}
+
 #[test]
 fn remote_ssh_forward_args_use_discovered_remote_port() {
     let args = build_remote_ssh_forward_args("root@example.com", Some(2222), 3456, 45913, false);
@@ -83,6 +229,49 @@ fn remote_ssh_forward_args_use_discovered_remote_port() {
     assert!(args.contains(&"ControlMaster=no".to_string()));
     assert!(args.contains(&"ControlPath=none".to_string()));
     assert!(args.contains(&"ControlPersist=no".to_string()));
+}
+
+#[cfg(unix)]
+fn wait_for_pid_file(path: &Path) -> u32 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+        {
+            return pid;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("agent descendant pid file was not written");
+}
+
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid_arg = pid.to_string();
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", pid_arg.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    panic!("agent descendant process {pid} survived shutdown");
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    let pid_arg = pid.to_string();
+    std::process::Command::new("kill")
+        .args(["-0", pid_arg.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[test]

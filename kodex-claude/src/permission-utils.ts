@@ -4,6 +4,7 @@ import type { Logger } from "./logger.js";
 
 const KODEX_PERMISSION_GUIDANCE_META_KEY = "kodex.ai/permissionGuidance";
 const KODEX_USER_INPUT_ANSWERS_META_KEY = "kodex.ai/userInputAnswers";
+export const KODEX_PERMISSION_INPUT_META_KEY = "kodex.ai/permissionInput";
 const ASK_USER_QUESTION_OPTION_PREFIX = "ask_user_question";
 
 interface NormalizedAskUserQuestionOption {
@@ -152,7 +153,9 @@ export function normalizeAskUserQuestions(input: unknown): NormalizedAskUserQues
   return questions.length > 0 ? questions : null;
 }
 
-export function askUserQuestionPermissionOptions(questions: NormalizedAskUserQuestion[]): PermissionOption[] {
+export function askUserQuestionPermissionOptions(
+  questions: NormalizedAskUserQuestion[],
+): PermissionOption[] {
   const includeQuestionPrefix = questions.length > 1;
   const options: PermissionOption[] = [];
 
@@ -167,6 +170,25 @@ export function askUserQuestionPermissionOptions(questions: NormalizedAskUserQue
   });
 
   return options;
+}
+
+export function askUserQuestionPermissionInput(
+  questions: NormalizedAskUserQuestion[],
+): Record<string, unknown> {
+  return {
+    questions: questions.map((question) => ({
+      id: question.question,
+      header: question.header,
+      question: question.question,
+      is_other: true,
+      is_secret: false,
+      multi_select: question.multiSelect,
+      options: question.options.map((option) => ({
+        label: option.label,
+        description: option.description,
+      })),
+    })),
+  };
 }
 
 export function askUserQuestionSelection(
@@ -221,7 +243,7 @@ export function withAskUserQuestionAnswers(
   for (const question of questions) {
     const values = answerMap[question.question] ?? [];
     if (values.length === 0) continue;
-    answers[question.question] = question.multiSelect ? values.join(", ") : values[0] ?? "";
+    answers[question.question] = question.multiSelect ? values.join(", ") : (values[0] ?? "");
 
     const previews = values
       .map((value) => question.options.find((option) => option.label === value)?.preview?.trim())

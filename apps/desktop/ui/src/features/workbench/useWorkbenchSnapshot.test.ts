@@ -17,7 +17,7 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
       status: "Idle",
     },
     session_config: { hydrated: false, controls: [] },
-    prompt_capabilities: { image: false, embedded_context: false },
+    prompt_capabilities: { image: false, embedded_context: false, session_steer: false },
     available_commands: [],
     agent_plan: [],
     messages: [],

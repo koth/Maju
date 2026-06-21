@@ -142,6 +142,103 @@ fn retry_user_message_is_rejected_after_assistant_started() {
 }
 
 #[test]
+fn steer_prompt_appends_user_message_and_preserves_turn_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent_command(&dir, steer_mock_agent_command());
+    app.ui.prompt_capabilities.session_steer = true;
+
+    app.send_prompt_background("first prompt").unwrap();
+    assert!(app.has_in_flight_prompt());
+    let current_turn_user_message_id = app.current_turn_user_message_id;
+    app.ui.session.status = SessionStatus::WaitingForTool;
+    app.ui.agent_plan = vec![workspace_model::AgentPlanEntry {
+        id: Some("plan-1".into()),
+        content: "Keep this plan".into(),
+        priority: workspace_model::AgentPlanEntryPriority::High,
+        status: workspace_model::AgentPlanEntryStatus::InProgress,
+    }];
+    app.review_changes_started = true;
+
+    app.send_prompt_background("second prompt").unwrap();
+
+    assert!(app.has_in_flight_prompt());
+    assert_eq!(
+        app.current_turn_user_message_id,
+        current_turn_user_message_id
+    );
+    assert_eq!(app.ui.session.status, SessionStatus::WaitingForTool);
+    assert_eq!(app.ui.agent_plan.len(), 1);
+    assert!(app.review_changes_started);
+    let user_messages = app
+        .ui
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages.len(), 2);
+    assert_eq!(user_messages[1].body, "second prompt");
+
+    let (messages, _tools, timeline) = app
+        .store
+        .load_session(&app.ui.session.id.to_string())
+        .unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.body == "second prompt")
+    );
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|item| matches!(item, TimelineItem::Message(_)))
+            .count(),
+        2
+    );
+
+    poll_until_prompt_finished(&mut app);
+    assert!(app.ui.messages.iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message.body.contains("Steer accepted: second prompt")
+    }));
+    app.session.shutdown();
+}
+
+#[test]
+fn steer_prompt_is_rejected_when_session_capability_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent_command(&dir, steer_mock_agent_command());
+    app.ui.prompt_capabilities.session_steer = false;
+
+    app.send_prompt_background("first prompt").unwrap();
+    assert!(app.has_in_flight_prompt());
+    let current_turn_user_message_id = app.current_turn_user_message_id;
+    let user_message_count = app
+        .ui
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .count();
+
+    let error = app.send_prompt_background("second prompt").unwrap_err();
+
+    assert!(error.to_string().contains("不支持运行中追加指令"));
+    assert!(app.has_in_flight_prompt());
+    assert_eq!(
+        app.current_turn_user_message_id,
+        current_turn_user_message_id
+    );
+    assert_eq!(
+        app.ui
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .count(),
+        user_message_count
+    );
+    app.session.shutdown();
+}
+
+#[test]
 fn agent_title_matching_prompt_acknowledges_protocol_sync() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -183,6 +280,55 @@ fn agent_title_matching_prompt_acknowledges_protocol_sync() {
 
     assert_eq!(app.ui.session.title, "修复登录");
     app.session.shutdown();
+}
+
+#[test]
+fn cancel_prompt_finishes_after_runtime_local_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent_command(&dir, prompt_never_responds_mock_agent_command());
+
+    app.send_prompt_background("first prompt").unwrap();
+    assert!(app.has_in_flight_prompt());
+
+    app.cancel_prompt().unwrap();
+    app.poll_prompt_progress();
+
+    assert!(!app.has_in_flight_prompt());
+    assert_eq!(app.ui.session.status, SessionStatus::Idle);
+    assert!(app.ui.inspector_sections.iter().any(|section| {
+        section.title == "轮次异常" && section.items.iter().any(|item| item == "cancelled")
+    }));
+    app.session.shutdown();
+}
+
+fn test_app_with_agent_command(dir: &tempfile::TempDir, agent_command: String) -> Application {
+    Application::bootstrap_with_app_paths(
+        dir.path(),
+        agent_command,
+        crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex")),
+    )
+    .unwrap()
+}
+
+fn steer_mock_agent_command() -> String {
+    format!("KODEX_MOCK_ACP_STEER_TEST=1 {}", mock_agent_command())
+}
+
+fn prompt_never_responds_mock_agent_command() -> String {
+    format!(
+        "KODEX_MOCK_ACP_PROMPT_NEVER_RESPONDS=1 {}",
+        mock_agent_command()
+    )
+}
+
+fn poll_until_prompt_finished(app: &mut Application) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while app.has_in_flight_prompt() && std::time::Instant::now() < deadline {
+        app.poll_prompt_progress();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.poll_prompt_progress();
+    assert!(!app.has_in_flight_prompt());
 }
 
 #[test]

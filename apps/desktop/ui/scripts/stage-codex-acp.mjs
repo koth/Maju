@@ -9,6 +9,7 @@ import {
   statSync,
 } from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -110,6 +111,24 @@ function stageBinary(sourcePath, destinationDir, outputName) {
   if (process.platform !== "win32") {
     chmodSync(destination, 0o755);
   }
+  adHocSignMacos(destination);
 
   console.log(`[codex:stage] ${sourcePath} -> ${destination}`);
+}
+
+function adHocSignMacos(binaryPath) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const result = spawnSync("codesign", ["--force", "--sign", "-", binaryPath], {
+    encoding: "utf8",
+  });
+  if (result.status === 0) {
+    return;
+  }
+
+  const stderr = result.stderr?.trim();
+  const detail = stderr ? `: ${stderr}` : "";
+  console.error(`[codex:stage] failed to ad-hoc sign ${binaryPath}${detail}`);
+  process.exit(result.status ?? 1);
 }

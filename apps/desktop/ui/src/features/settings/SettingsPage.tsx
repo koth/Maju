@@ -35,6 +35,8 @@ import {
   settingsSelectAgentProviderProfile,
   settingsSelectAgent,
   settingsSelectTheme,
+  settingsSaveWebToolsProviderKey,
+  settingsSaveWebToolsSettings,
   settingsValidateRemoteProfile,
   sessionDeleteAllArchived,
   sessionDeleteArchived,
@@ -52,7 +54,7 @@ import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
 export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
-export type SettingsPane = "general" | "archive" | "remote" | "lsp";
+export type SettingsPane = "general" | "web" | "archive" | "remote" | "lsp";
 type SettingsScope = "local" | "remote";
 type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "installing" | "installed" | "error";
 type RemoteProfileDraft = {
@@ -91,6 +93,17 @@ const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "codex-acp", label: "Codex" },
   { id: "codebuddy", label: "CodeBuddy" },
 ];
+
+const WEB_TOOL_PROVIDER_OPTIONS = [
+  { id: "brave", label: "Brave Search", apiKeyLabel: "Brave Search API key" },
+  { id: "tavily", label: "Tavily", apiKeyLabel: "Tavily API key" },
+] as const;
+
+function webToolProviderMeta(provider?: string | null) {
+  const id = provider?.trim() || "brave";
+  return WEB_TOOL_PROVIDER_OPTIONS.find((option) => option.id === id)
+    ?? { id, label: id, apiKeyLabel: `${id} API key` };
+}
 
 function modelListLabel(models: string[]): string {
   return `模型：${models.join("、")}`;
@@ -166,8 +179,11 @@ export function SettingsPage({
   const [modelListUrlDraft, setModelListUrlDraft] = useState("");
   const [busyProviderModels, setBusyProviderModels] = useState(false);
   const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
+  const [busyWebTools, setBusyWebTools] = useState(false);
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
   const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok" | "models" | "claude-fast">("channel");
+  const [webToolsApiKey, setWebToolsApiKey] = useState("");
+  const [webToolsMessage, setWebToolsMessage] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -599,6 +615,63 @@ export function SettingsPage({
       setBusyClaudeFastModel(false);
     }
   }, [settingsRemoteProfileId]);
+
+  const handleToggleWebTools = useCallback(async (enabled: boolean) => {
+    const provider = snapshot?.web_tools.provider ?? "brave";
+    setBusyWebTools(true);
+    setError(null);
+    setWebToolsMessage(null);
+    try {
+      const nextSnapshot = await settingsSaveWebToolsSettings(enabled, provider);
+      setSnapshot(nextSnapshot);
+      setWebToolsMessage(enabled ? "Web 工具已启用，后续新建或重连本机会话生效" : "Web 工具已关闭");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyWebTools(false);
+    }
+  }, [snapshot?.web_tools.provider]);
+
+  const handleSelectWebToolsProvider = useCallback(async (provider: string) => {
+    const enabled = snapshot?.web_tools.enabled ?? false;
+    if (provider === snapshot?.web_tools.provider) return;
+    setBusyWebTools(true);
+    setError(null);
+    setWebToolsMessage(null);
+    try {
+      const nextSnapshot = await settingsSaveWebToolsSettings(enabled, provider);
+      setSnapshot(nextSnapshot);
+      setWebToolsApiKey("");
+      setWebToolsMessage(`Web 工具搜索来源已切换到 ${webToolProviderMeta(provider).label}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyWebTools(false);
+    }
+  }, [snapshot?.web_tools.enabled, snapshot?.web_tools.provider]);
+
+  const handleSaveWebToolsKey = useCallback(async () => {
+    const key = webToolsApiKey.trim();
+    const provider = snapshot?.web_tools.provider ?? "brave";
+    const providerMeta = webToolProviderMeta(provider);
+    setError(null);
+    setWebToolsMessage(null);
+    if (!key) {
+      setError(`${providerMeta.apiKeyLabel} 不能为空`);
+      return;
+    }
+    setBusyWebTools(true);
+    try {
+      const nextSnapshot = await settingsSaveWebToolsProviderKey(provider, key);
+      setSnapshot(nextSnapshot);
+      setWebToolsApiKey("");
+      setWebToolsMessage(`${providerMeta.apiKeyLabel} 已保存，后续新建或重连本机会话生效`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyWebTools(false);
+    }
+  }, [snapshot?.web_tools.provider, webToolsApiKey]);
 
   const handleSelectCodexChannel = useCallback(async (channel: "default" | "byok") => {
     const byokProfiles = snapshot?.codex_acp.profiles.filter((profile) => profile.requires_credential) ?? [];
@@ -1049,6 +1122,89 @@ export function SettingsPage({
     );
   };
 
+  const renderWebToolsSection = () => {
+    if (!snapshot) return null;
+    if (editingRemoteSettings) {
+      return (
+        <section className="settings-section">
+          <h2 className="settings-section-title">Web 工具</h2>
+          <p className="settings-section-desc">给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。</p>
+          <div className="settings-warning">远程会话暂不支持注入本地 Web 工具。</div>
+        </section>
+      );
+    }
+    const webTools = snapshot.web_tools;
+    const providerMeta = webToolProviderMeta(webTools.provider);
+    return (
+      <section className="settings-section">
+        <h2 className="settings-section-title">Web 工具</h2>
+        <p className="settings-section-desc">给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。</p>
+        <div className="settings-provider-config">
+          <div className="settings-provider-config-head">
+            <div>
+              <span>{providerMeta.label}</span>
+              <p>通过本地 Kodex MCP server 注入 web_search 和 web_fetch。</p>
+            </div>
+            <label className="settings-switch">
+              <input
+                type="checkbox"
+                checked={webTools.enabled}
+                disabled={busyWebTools}
+                onChange={(event) => handleToggleWebTools(event.currentTarget.checked)}
+              />
+              <span>{webTools.enabled ? "已启用" : "已关闭"}</span>
+            </label>
+          </div>
+          <div className="settings-provider-detail">
+            <span className={`settings-row-badge ${webTools.configured ? "is-installed" : "is-missing"}`}>
+              {webTools.configured ? "已配置" : "未配置"}
+            </span>
+            <span className="settings-provider-config-message">Provider：{providerMeta.label}</span>
+          </div>
+          <label className="settings-field settings-provider-source-field">
+            <span>搜索来源</span>
+            <select
+              aria-label="web_tools_provider"
+              className="settings-provider-native-select"
+              value={webTools.provider}
+              disabled={busyWebTools}
+              onChange={(event) => handleSelectWebToolsProvider(event.currentTarget.value)}
+            >
+              {WEB_TOOL_PROVIDER_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          {webTools.enabled && !webTools.configured && (
+            <div className="settings-warning">需要保存 {providerMeta.apiKeyLabel} 后，新会话才会实际获得 Web 工具。</div>
+          )}
+          <label className="settings-field settings-provider-key-field">
+            <span>API key</span>
+            <input
+              aria-label="web_tools_api_key"
+              type="password"
+              autoComplete="off"
+              placeholder={webTools.configured ? `输入新的 ${providerMeta.apiKeyLabel} 以替换` : `输入 ${providerMeta.apiKeyLabel}`}
+              value={webToolsApiKey}
+              onChange={(event) => setWebToolsApiKey(event.currentTarget.value)}
+            />
+          </label>
+          <div className="settings-provider-config-actions">
+            {webToolsMessage && <span className="settings-provider-config-message">{webToolsMessage}</span>}
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busyWebTools || !webToolsApiKey.trim()}
+              onClick={handleSaveWebToolsKey}
+            >
+              {busyWebTools ? "保存中..." : "保存 key"}
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  };
+
   const renderArchivePane = () => {
     const workspaceOptions = archivedWorkspaceOptions(archivedSessions);
     const normalizedSearch = archivedSearch.trim().toLowerCase();
@@ -1469,6 +1625,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "web" ? "is-active" : ""}`}
+            onClick={() => setActivePane("web")}
+          >
+            Web 工具
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "archive" ? "is-active" : ""}`}
             onClick={() => setActivePane("archive")}
           >
@@ -1719,6 +1882,8 @@ export function SettingsPage({
           </>
         )}
 
+        {activePane === "web" && renderWebToolsSection()}
+
         {activePane === "remote" && renderRemotePane()}
 
         {activePane === "archive" && renderArchivePane()}
@@ -1859,6 +2024,7 @@ function startupNoticeCopyFor(notice: SettingsStartupNotice) {
 function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "archive") return "已归档";
   if (pane === "remote") return "远程";
+  if (pane === "web") return "Web 工具";
   if (pane === "lsp") return "LSP";
   return "通用";
 }
@@ -1866,6 +2032,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
 function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "archive") return "查看、恢复或删除保留在本地的已归档对话。";
   if (pane === "remote") return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
+  if (pane === "web") return "配置 Codex 和 Claude 本机会话可用的搜索与网页抓取能力。";
   if (pane === "lsp") return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";
 }
