@@ -5,6 +5,7 @@ use agent_client_protocol::{Agent, ConnectionTo};
 use anyhow::anyhow;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use workspace_model::PermissionInputResponse;
 
 pub(super) fn send_codebuddy_interruption_resolution(
     config: &SessionConfig,
@@ -13,9 +14,15 @@ pub(super) fn send_codebuddy_interruption_resolution(
     tool_call_id: &str,
     decision: &str,
     guidance: Option<&str>,
+    input_response: Option<&PermissionInputResponse>,
 ) -> anyhow::Result<()> {
-    let payload =
-        codebuddy_interruption_resolution_payload(session_id, tool_call_id, decision, guidance);
+    let payload = codebuddy_interruption_resolution_payload(
+        session_id,
+        tool_call_id,
+        decision,
+        guidance,
+        input_response,
+    );
     append_runtime_event_log(config, "codebuddy/resolve_interruption", &payload)?;
 
     let params: Arc<serde_json::value::RawValue> =
@@ -121,6 +128,7 @@ fn codebuddy_interruption_resolution_payload(
     tool_call_id: &str,
     decision: &str,
     guidance: Option<&str>,
+    input_response: Option<&PermissionInputResponse>,
 ) -> Value {
     let mut payload = json!({
         "sessionId": session_id,
@@ -128,12 +136,42 @@ fn codebuddy_interruption_resolution_payload(
         "interruptionId": codebuddy_interruption_id_for_tool_call(tool_call_id),
         "decision": decision,
     });
-    if let Some(guidance) = guidance.map(str::trim).filter(|value| !value.is_empty())
+    if let Some(answers) = codebuddy_interruption_answers(guidance, input_response)
         && let Value::Object(fields) = &mut payload
     {
-        fields.insert("answers".into(), json!({ "guidance": guidance }));
+        fields.insert("answers".into(), answers);
     }
     payload
+}
+
+fn codebuddy_interruption_answers(
+    guidance: Option<&str>,
+    input_response: Option<&PermissionInputResponse>,
+) -> Option<Value> {
+    let mut answers = serde_json::Map::new();
+    if let Some(guidance) = guidance.map(str::trim).filter(|value| !value.is_empty()) {
+        answers.insert("guidance".into(), Value::String(guidance.to_string()));
+    }
+    if let Some(input_response) = input_response {
+        for (question_id, values) in &input_response.answers {
+            let values = values
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            match values.as_slice() {
+                [] => {}
+                [value] => {
+                    answers.insert(question_id.clone(), Value::String((*value).to_string()));
+                }
+                _ => {
+                    answers.insert(question_id.clone(), json!(values));
+                }
+            }
+        }
+    }
+
+    (!answers.is_empty()).then_some(Value::Object(answers))
 }
 
 fn codebuddy_plan_guidance_payload(session_id: &str, guidance: &str) -> Value {
@@ -162,8 +200,13 @@ mod tests {
 
     #[test]
     fn interruption_resolution_payload_includes_codebuddy_interruption_id() {
-        let payload =
-            codebuddy_interruption_resolution_payload("session-1", "call_00_abc", "allow", None);
+        let payload = codebuddy_interruption_resolution_payload(
+            "session-1",
+            "call_00_abc",
+            "allow",
+            None,
+            None,
+        );
 
         assert_eq!(payload["sessionId"], "session-1");
         assert_eq!(payload["toolCallId"], "call_00_abc");
@@ -173,8 +216,13 @@ mod tests {
 
     #[test]
     fn interruption_resolution_payload_does_not_double_prefix_interruption_id() {
-        let payload =
-            codebuddy_interruption_resolution_payload("session-1", "ir-call_00_abc", "deny", None);
+        let payload = codebuddy_interruption_resolution_payload(
+            "session-1",
+            "ir-call_00_abc",
+            "deny",
+            None,
+            None,
+        );
 
         assert_eq!(payload["toolCallId"], "ir-call_00_abc");
         assert_eq!(payload["interruptionId"], "ir-call_00_abc");
@@ -187,6 +235,7 @@ mod tests {
             "call_00_abc",
             "deny",
             Some("  补充风险和验证步骤  "),
+            None,
         );
 
         assert_eq!(payload["decision"], "deny");
@@ -194,6 +243,28 @@ mod tests {
         assert!(payload.get("guidance").is_none());
     }
 
+    #[test]
+    fn interruption_resolution_payload_includes_user_input_answers() {
+        let mut response = PermissionInputResponse::default();
+        response
+            .answers
+            .insert("approach".into(), vec!["Robust".into()]);
+        response
+            .answers
+            .insert("checks".into(), vec!["Unit".into(), "Build".into()]);
+
+        let payload = codebuddy_interruption_resolution_payload(
+            "session-1",
+            "call_ask",
+            "ask_user_question:0:1",
+            None,
+            Some(&response),
+        );
+
+        assert_eq!(payload["decision"], "ask_user_question:0:1");
+        assert_eq!(payload["answers"]["approach"], "Robust");
+        assert_eq!(payload["answers"]["checks"], json!(["Unit", "Build"]));
+    }
     #[test]
     fn plan_guidance_payload_injects_user_history() {
         let payload = codebuddy_plan_guidance_payload("session-1", "补充风险和验证步骤");

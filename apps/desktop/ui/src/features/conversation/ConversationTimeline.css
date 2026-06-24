@@ -44,11 +44,12 @@
 .timeline-turn-summary {
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   width: 100%;
-  min-height: 30px;
-  margin: 8px 0 4px;
+  min-height: 36px;
+  margin: 8px 0 6px;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -58,17 +59,6 @@
   font-size: 14px;
   line-height: 1.4;
   text-align: left;
-}
-
-.timeline-turn-summary::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 1px;
-  background: color-mix(in srgb, var(--border-subtle) 78%, transparent);
-  transform: translateY(-50%);
 }
 
 .timeline-collapse-toggle {
@@ -86,14 +76,12 @@
 
 .timeline-turn-summary-main {
   position: relative;
-  z-index: 1;
   display: inline-flex;
+  align-self: flex-start;
   align-items: center;
   flex: 0 0 auto;
   gap: 6px;
   min-width: 0;
-  padding-right: 10px;
-  background: var(--app-bg);
 }
 
 .timeline-collapse-label {
@@ -106,10 +94,11 @@
 }
 
 .timeline-turn-summary-rule {
-  display: none;
-  flex: 1 1 auto;
+  display: block;
+  flex: 0 0 auto;
   height: 1px;
-  min-width: 24px;
+  width: 100%;
+  min-width: 0;
   background: color-mix(in srgb, var(--border-subtle) 78%, transparent);
 }
 

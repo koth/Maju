@@ -264,6 +264,7 @@ pub(super) async fn run_command_loop(
                                     &tool_call_id,
                                     &decision,
                                     None,
+                                    None,
                                 );
                                 let _ = reply_tx.send(result);
                             }
@@ -487,7 +488,24 @@ pub(super) async fn run_command_loop(
                     }])
                 }
                 .await;
-                let _ = reply_tx.send(result);
+                if let Some(reply_tx) = reply_tx {
+                    let _ = reply_tx.send(result);
+                } else {
+                    match result {
+                        Ok(events) => {
+                            for event in events {
+                                let _ = tx_events.send(event);
+                            }
+                        }
+                        Err(error) => {
+                            append_runtime_event_log(
+                                &config,
+                                "session/set_config_option_queued_error",
+                                &json!({ "error": error.to_string() }),
+                            )?;
+                        }
+                    }
+                }
             }
             RuntimeCommand::SetMode { mode_id, reply_tx } => {
                 let result = async {
@@ -553,6 +571,7 @@ pub(super) async fn run_command_loop(
                     &session_id,
                     &tool_call_id,
                     &decision,
+                    None,
                     None,
                 );
                 let _ = reply_tx.send(result);

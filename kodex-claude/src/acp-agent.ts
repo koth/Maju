@@ -144,6 +144,16 @@ export { describeAlwaysAllow, resolvePermissionMode } from "./permission-utils.j
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 
+export const KODEX_ENGINEERING_SYSTEM_PROMPT_RULES = `Kodex engineering rules:
+- Do not guess APIs; consult the documentation first.
+- Do not work without clarity; clarify boundaries, constraints, and edge cases upfront.
+- Do not assume business logic; align requirements with humans and record decisions.
+- Do not create new interfaces when existing ones can be reused.
+- Do not skip validation; write test cases before running any code.
+- Do not cross architectural red lines; adhere to established standards and guidelines.
+- Do not pretend to know; admit when you are unsure or don't know.
+- Do not make changes blindly; refactor cautiously and with clear justification.`;
+
 export type ClaudeAcpAgentOptions = {
   logger?: Logger;
   woa?: WoaConfig;
@@ -172,6 +182,28 @@ function mergeEnv(...sources: Array<Record<string, string | undefined> | undefin
     }
   }
   return env;
+}
+
+function appendKodexSystemPromptRules(value: unknown): string {
+  const text = typeof value === "string" ? value.trimEnd() : "";
+  if (text.includes(KODEX_ENGINEERING_SYSTEM_PROMPT_RULES)) {
+    return text;
+  }
+  return text ? `${text}\n\n${KODEX_ENGINEERING_SYSTEM_PROMPT_RULES}` : KODEX_ENGINEERING_SYSTEM_PROMPT_RULES;
+}
+
+function withKodexSystemPromptRules(systemPrompt: Options["systemPrompt"]): Options["systemPrompt"] {
+  if (typeof systemPrompt === "string") {
+    return appendKodexSystemPromptRules(systemPrompt);
+  }
+  if (typeof systemPrompt === "object" && systemPrompt !== null && !Array.isArray(systemPrompt)) {
+    const prompt = systemPrompt as Record<string, unknown>;
+    return {
+      ...prompt,
+      append: appendKodexSystemPromptRules(prompt.append),
+    } as Options["systemPrompt"];
+  }
+  return systemPrompt;
 }
 
 type AccumulatedUsage = {
@@ -777,6 +809,7 @@ export class ClaudeAcpAgent implements Agent {
                     sessionUpdate: "usage_update",
                     used: 0,
                     size: session.contextWindowSize,
+                    _meta: kodexUsageMeta("context_snapshot", lastAssistantModel, null),
                   },
                 });
                 await this.client.sessionUpdate(
@@ -863,9 +896,10 @@ export class ClaudeAcpAgent implements Agent {
                     amount: message.total_cost_usd,
                     currency: "USD",
                   },
-                  ...(message.origin && {
-                    _meta: { "_claude/origin": message.origin },
-                  }),
+                  _meta: {
+                    ...(message.origin ? { "_claude/origin": message.origin } : {}),
+                    ...kodexUsageMeta("turn_delta", lastAssistantModel, snapshotFromUsage(message.usage)),
+                  },
                 },
               });
             }
@@ -1007,6 +1041,7 @@ export class ClaudeAcpAgent implements Agent {
                     sessionUpdate: "usage_update",
                     used: nextUsage,
                     size: session.contextWindowSize,
+                    _meta: kodexUsageMeta("context_snapshot", lastAssistantModel, lastAssistantUsage),
                   },
                 });
               }
@@ -2327,6 +2362,8 @@ export class ClaudeAcpAgent implements Agent {
       userProvidedOptions?.tools ??
       (params._meta?.disableBuiltInTools === true ? [] : { type: "preset", preset: "claude_code" });
 
+    systemPrompt = withKodexSystemPromptRules(userProvidedOptions?.systemPrompt ?? systemPrompt);
+
     const abortController = userProvidedOptions?.abortController || new AbortController();
 
     // Per-session task state. Created here (rather than in the session record
@@ -2343,10 +2380,10 @@ export class ClaudeAcpAgent implements Agent {
     const claudeExecutable = await verifiedClaudeCliPath();
 
     const options: Options = {
-      systemPrompt,
       settingSources: ["user", "project", "local"],
       ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
       ...userProvidedOptions,
+      systemPrompt,
       // CLAUDE_MODEL_CONFIG env var is a fallback for model
       // configuration (e.g. Bedrock model ID overrides). When the caller
       // provides settings via _meta, we intentionally ignore the env var —
@@ -2644,6 +2681,31 @@ function sessionUsage(session: Session) {
  *  turn's output becomes next turn's input. Per the Anthropic API, input_tokens
  *  excludes cache tokens — cache_read and cache_creation are reported
  *  separately — so summing all four is not double-counting. */
+function kodexUsageMeta(
+  scope: "context_snapshot" | "turn_delta" | "session_total",
+  model: string | null,
+  usage: UsageSnapshot | null,
+) {
+  const total = usage ? totalTokens(usage) : undefined;
+  return {
+    "kodex.ai/usage": {
+      scope,
+      agent_cli: "claude-agent-acp",
+      provider: "anthropic",
+      ...(model ? { model } : {}),
+      ...(usage
+        ? {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            cache_write_tokens: usage.cache_creation_input_tokens,
+            total_tokens: total,
+          }
+        : {}),
+    },
+  };
+}
+
 function totalTokens(usage: UsageSnapshot): number {
   return (
     usage.input_tokens +

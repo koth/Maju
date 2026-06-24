@@ -142,6 +142,79 @@ fn retry_user_message_is_rejected_after_assistant_started() {
 }
 
 #[test]
+fn interleaved_assistant_messages_survive_session_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let session_id = app.ui.session.id.to_string();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "先说明一下".into(),
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolStarted {
+        id: "read-file".into(),
+        parent_id: None,
+        name: "Read".into(),
+        kind: "read".into(),
+        summary: "Read source file".into(),
+        is_subagent: false,
+        raw_input: None,
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "中间继续解释".into(),
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolStarted {
+        id: "edit-file".into(),
+        parent_id: None,
+        name: "Edit".into(),
+        kind: "edit".into(),
+        summary: "Edit source file".into(),
+        is_subagent: false,
+        raw_input: None,
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "最后总结".into(),
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::TurnFinished {
+        stop_reason: "end_turn".into(),
+    });
+
+    let (messages, tools, timeline) = app.store.load_session(&session_id).unwrap();
+    let restored = timeline
+        .iter()
+        .map(|item| match item {
+            TimelineItem::Message(id) => messages
+                .iter()
+                .find(|message| message.id == *id)
+                .map(|message| format!("message:{}", message.body))
+                .unwrap(),
+            TimelineItem::Tool(id) => tools
+                .iter()
+                .find(|tool| tool.id == *id)
+                .map(|tool| format!("tool:{}", tool.call_id))
+                .unwrap(),
+            TimelineItem::Thinking => "thinking".into(),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        restored,
+        vec![
+            "message:先说明一下",
+            "tool:read-file",
+            "message:中间继续解释",
+            "tool:edit-file",
+            "message:最后总结",
+        ]
+    );
+    app.session.shutdown();
+}
+#[test]
 fn steer_prompt_appends_user_message_and_preserves_turn_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app_with_agent_command(&dir, steer_mock_agent_command());

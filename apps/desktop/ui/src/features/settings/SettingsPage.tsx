@@ -6,6 +6,7 @@ import type {
   AgentInstallResult,
   AgentProviderProfile,
   AgentSettingsSnapshot,
+  CustomProviderProtocol,
   AppTheme,
   ArchivedSessionListItem,
   LspSettingsSnapshot,
@@ -15,6 +16,8 @@ import type {
   RemoteMachineProfilesSnapshot,
   RemoteValidationPhaseKind,
   RemoteValidationPhaseStatus,
+  UsageSummaryGroupBy,
+  UsageSummaryRow,
 } from "../../types";
 import {
   settingsDetectAgents,
@@ -27,6 +30,7 @@ import {
   settingsResetLspServer,
   settingsSaveAgentProviderSecret,
   settingsResetProviderModels,
+  settingsSaveCustomProvider,
   settingsSaveProviderModels,
   settingsSyncProviderModelsFromUrl,
   settingsSelectClaudeFastModel,
@@ -42,6 +46,7 @@ import {
   sessionDeleteArchived,
   sessionListArchived,
   sessionUnarchive,
+  usageGetSummary,
 } from "../../lib/tauri";
 import {
   checkForAppUpdate,
@@ -54,8 +59,10 @@ import { APP_THEMES, applyAppTheme } from "../../theme";
 import "./SettingsPage.css";
 
 export type AgentSettingsTab = Extract<AgentCliId, "codebuddy" | "codex-acp" | "claude-agent-acp">;
-export type SettingsPane = "general" | "web" | "archive" | "remote" | "lsp";
+export type SettingsPane = "general" | "web" | "archive" | "remote" | "usage" | "lsp";
 type SettingsScope = "local" | "remote";
+type UsageDateRange = "today" | "7d" | "30d" | "all";
+type UsageWorkspaceScope = "current" | "all";
 type UpdateStatus = "idle" | "checking" | "up-to-date" | "available" | "installing" | "installed" | "error";
 type RemoteProfileDraft = {
   id?: string | null;
@@ -177,11 +184,16 @@ export function SettingsPage({
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
   const [providerModelsDraft, setProviderModelsDraft] = useState("");
   const [modelListUrlDraft, setModelListUrlDraft] = useState("");
+  const [customProviderLabel, setCustomProviderLabel] = useState("");
+  const [customProviderEndpoint, setCustomProviderEndpoint] = useState("");
+  const [customProviderProtocol, setCustomProviderProtocol] = useState<CustomProviderProtocol>("chat_completions");
+  const [customProviderApiKey, setCustomProviderApiKey] = useState("");
   const [busyProviderModels, setBusyProviderModels] = useState(false);
+  const [busyCustomProvider, setBusyCustomProvider] = useState(false);
   const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
   const [busyWebTools, setBusyWebTools] = useState(false);
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
-  const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok" | "models" | "claude-fast">("channel");
+  const [codexAcpMessageTarget, setCodexAcpMessageTarget] = useState<"channel" | "byok" | "models" | "custom" | "claude-fast">("channel");
   const [webToolsApiKey, setWebToolsApiKey] = useState("");
   const [webToolsMessage, setWebToolsMessage] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -189,6 +201,13 @@ export function SettingsPage({
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [usageGroupBy, setUsageGroupBy] = useState<UsageSummaryGroupBy>("model");
+  const [usageDateRange, setUsageDateRange] = useState<UsageDateRange>("all");
+  const [usageWorkspaceScope, setUsageWorkspaceScope] = useState<UsageWorkspaceScope>("current");
+  const [usageIncludeArchived, setUsageIncludeArchived] = useState(false);
+  const [usageRows, setUsageRows] = useState<UsageSummaryRow[]>([]);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState<string | null>(null);
   const byokProviderMenuRef = useRef<HTMLDivElement>(null);
   const canUseRemoteSettings = !!remoteContext?.profileId;
   const settingsRemoteProfileId = settingsScope === "remote" ? remoteContext?.profileId ?? null : null;
@@ -250,6 +269,25 @@ export function SettingsPage({
     }
   }, []);
 
+  const loadUsageSummary = useCallback(async () => {
+    setUsageLoading(true);
+    setUsageError(null);
+    try {
+      const range = usageDateRangeBounds(usageDateRange);
+      setUsageRows(await usageGetSummary({
+        group_by: usageGroupBy,
+        all_workspaces: usageWorkspaceScope === "all",
+        include_archived: usageIncludeArchived,
+        from: range.from,
+        to: range.to,
+      }));
+    } catch (e) {
+      setUsageError(String(e));
+    } finally {
+      setUsageLoading(false);
+    }
+  }, [usageDateRange, usageGroupBy, usageIncludeArchived, usageWorkspaceScope]);
+
   useEffect(() => {
     load();
   }, [load]);
@@ -258,6 +296,11 @@ export function SettingsPage({
     if (activePane !== "archive") return;
     loadArchivedSessions();
   }, [activePane, loadArchivedSessions]);
+
+  useEffect(() => {
+    if (activePane !== "usage") return;
+    loadUsageSummary();
+  }, [activePane, loadUsageSummary]);
 
   useEffect(() => {
     if (archivedWorkspaceFilter === "all") return;
@@ -334,6 +377,11 @@ export function SettingsPage({
     if (!profile) return;
     setProviderModelsDraft(profile.models.join("\n"));
     setModelListUrlDraft(profile.model_list_url ?? "");
+    if (profile.custom) {
+      setCustomProviderLabel(profile.label === "Custom Provider" ? "" : profile.label);
+      setCustomProviderEndpoint(profile.base_url ?? "");
+      setCustomProviderProtocol(profile.protocol ?? "chat_completions");
+    }
   }, [byokProfileId, snapshot]);
 
   useEffect(() => {
@@ -591,6 +639,51 @@ export function SettingsPage({
     }
   }, [byokProfileId, modelListUrlDraft, settingsRemoteProfileId]);
 
+  const handleSaveCustomProvider = useCallback(async () => {
+    const label = customProviderLabel.trim();
+    const endpoint = customProviderEndpoint.trim();
+    const apiKey = customProviderApiKey.trim();
+    const modelListUrl = modelListUrlDraft.trim();
+    setError(null);
+    setCodexAcpMessage(null);
+    setCodexAcpMessageTarget("custom");
+    if (!label) {
+      setError("Provider 名称不能为空");
+      return;
+    }
+    if (!endpoint) {
+      setError("Endpoint 不能为空");
+      return;
+    }
+    if (!apiKey) {
+      setError("API key 不能为空");
+      return;
+    }
+    setBusyCustomProvider(true);
+    try {
+      const nextSnapshot = await settingsSaveCustomProvider({
+        label,
+        endpoint,
+        protocol: customProviderProtocol,
+        apiKey,
+        modelListUrl: modelListUrl || null,
+      }, settingsRemoteProfileId);
+      setSnapshot(nextSnapshot);
+      setByokProfileId("custom");
+      setCustomProviderApiKey("");
+      const nextProfile = nextSnapshot.codex_acp.profiles.find((item) => item.id === "custom");
+      if (nextProfile) {
+        setProviderModelsDraft(nextProfile.models.join("\n"));
+        setModelListUrlDraft(nextProfile.model_list_url ?? modelListUrl);
+      }
+      setCodexAcpMessageTarget("custom");
+      setCodexAcpMessage("自定义 provider 已保存，后续新建会话生效");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusyCustomProvider(false);
+    }
+  }, [customProviderApiKey, customProviderEndpoint, customProviderLabel, customProviderProtocol, modelListUrlDraft, settingsRemoteProfileId]);
   const handleSelectByokProfile = useCallback((profileId: string) => {
     setByokProfileId(profileId);
     setByokProviderMenuOpen(false);
@@ -975,6 +1068,7 @@ export function SettingsPage({
     const byokProfiles = snapshot.codex_acp.profiles.filter((profile) => profile.requires_credential);
     const profile = byokProfiles.find((item) => item.id === byokProfileId) ?? byokProfiles[0];
     if (!profile) return null;
+    const isCustomProfile = profile.custom;
     return (
       <section className="settings-provider-config settings-byok-config">
         <div className="settings-provider-config-head">
@@ -1005,13 +1099,13 @@ export function SettingsPage({
               aria-haspopup="listbox"
               aria-expanded={byokProviderMenuOpen}
               aria-controls="byok-provider-profile-listbox"
-              disabled={busyCodexAcp || busyProviderModels}
+              disabled={busyCodexAcp || busyProviderModels || busyCustomProvider}
               onClick={() => setByokProviderMenuOpen((open) => !open)}
             >
               <span>{profile.label}{profile.configured ? " · 已配置" : " · 未配置"}</span>
               <span className="settings-provider-select-chevron" aria-hidden="true">v</span>
             </button>
-            {byokProviderMenuOpen && !(busyCodexAcp || busyProviderModels) && (
+            {byokProviderMenuOpen && !(busyCodexAcp || busyProviderModels || busyCustomProvider) && (
               <div id="byok-provider-profile-listbox" className="settings-provider-select-menu" role="listbox" aria-label="BYOK 模型来源">
                 {byokProfiles.map((item) => {
                   const selected = item.id === profile.id;
@@ -1037,7 +1131,89 @@ export function SettingsPage({
             {profile.configured ? "已配置" : "未配置"}
           </span>
           {renderModelChip(profile.models)}
+          {profile.custom && profile.base_url && <code>{profile.base_url}</code>}
+          {profile.custom && profile.protocol && <span>{customProviderProtocolLabel(profile.protocol)}</span>}
         </div>
+        {isCustomProfile && (
+          <div className="settings-custom-provider-panel">
+            <div className="settings-custom-provider-grid">
+              <label className="settings-field">
+                <span>名称</span>
+                <input
+                  aria-label="custom_provider_label"
+                  value={customProviderLabel}
+                  disabled={busyCustomProvider || editingRemoteSettings}
+                  placeholder="My Provider"
+                  onChange={(event) => {
+                    setCustomProviderLabel(event.currentTarget.value);
+                    setCodexAcpMessage(null);
+                    setCodexAcpMessageTarget("custom");
+                  }}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Endpoint</span>
+                <input
+                  aria-label="custom_provider_endpoint"
+                  type="url"
+                  value={customProviderEndpoint}
+                  disabled={busyCustomProvider || editingRemoteSettings}
+                  placeholder="https://api.example.com/v1/chat/completions"
+                  onChange={(event) => {
+                    setCustomProviderEndpoint(event.currentTarget.value);
+                    setCodexAcpMessage(null);
+                    setCodexAcpMessageTarget("custom");
+                  }}
+                />
+              </label>
+              <label className="settings-field">
+                <span>协议</span>
+                <select
+                  aria-label="custom_provider_protocol"
+                  className="settings-provider-native-select"
+                  value={customProviderProtocol}
+                  disabled={busyCustomProvider || editingRemoteSettings}
+                  onChange={(event) => {
+                    setCustomProviderProtocol(event.currentTarget.value as CustomProviderProtocol);
+                    setCodexAcpMessage(null);
+                    setCodexAcpMessageTarget("custom");
+                  }}
+                >
+                  <option value="chat_completions">Chat Completions</option>
+                  <option value="responses">Responses</option>
+                  <option value="anthropic_messages">Anthropic Messages</option>
+                </select>
+              </label>
+              <label className="settings-field">
+                <span>API key</span>
+                <input
+                  aria-label="custom_provider_api_key"
+                  type="password"
+                  autoComplete="off"
+                  value={customProviderApiKey}
+                  disabled={busyCustomProvider || editingRemoteSettings}
+                  placeholder={profile.configured ? "输入新的 API key 以保存配置" : "输入 API key"}
+                  onChange={(event) => {
+                    setCustomProviderApiKey(event.currentTarget.value);
+                    setCodexAcpMessage(null);
+                    setCodexAcpMessageTarget("custom");
+                  }}
+                />
+              </label>
+            </div>
+            <div className="settings-provider-config-actions">
+              {codexAcpMessageTarget === "custom" && codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}
+              <button
+                type="button"
+                className="settings-btn is-install"
+                disabled={busyCustomProvider || editingRemoteSettings || !customProviderLabel.trim() || !customProviderEndpoint.trim() || !customProviderApiKey.trim()}
+                onClick={handleSaveCustomProvider}
+              >
+                {busyCustomProvider ? "保存中..." : "保存自定义 provider"}
+              </button>
+            </div>
+          </div>
+        )}
         <label className="settings-field settings-provider-models-field">
           <span>模型列表</span>
           <textarea
@@ -1096,28 +1272,32 @@ export function SettingsPage({
             恢复默认
           </button>
         </div>
-        <label className="settings-field settings-provider-key-field">
-          <span>{profile.credential_label ?? `${profile.label} API key`}</span>
-          <input
-            aria-label="byok_api_key"
-            type="password"
-            autoComplete="off"
-            placeholder={profile.configured ? `输入新的 ${profile.label} API key 以替换` : `输入 ${profile.label} API key`}
-            value={codexAcpApiKey}
-            onChange={(event) => setCodexAcpApiKey(event.currentTarget.value)}
-          />
-        </label>
-        <div className="settings-provider-config-actions">
-          {codexAcpMessageTarget === "byok" && codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}
-          <button
-            type="button"
-            className="settings-btn"
-            disabled={busyCodexAcp || !codexAcpApiKey.trim()}
-            onClick={handleSaveByokProviderKey}
-          >
-            {busyCodexAcp ? "保存中..." : `保存 ${profile.label} key`}
-          </button>
-        </div>
+        {!isCustomProfile && (
+          <>
+            <label className="settings-field settings-provider-key-field">
+              <span>{profile.credential_label ?? `${profile.label} API key`}</span>
+              <input
+                aria-label="byok_api_key"
+                type="password"
+                autoComplete="off"
+                placeholder={profile.configured ? `输入新的 ${profile.label} API key 以替换` : `输入 ${profile.label} API key`}
+                value={codexAcpApiKey}
+                onChange={(event) => setCodexAcpApiKey(event.currentTarget.value)}
+              />
+            </label>
+            <div className="settings-provider-config-actions">
+              {codexAcpMessageTarget === "byok" && codexAcpMessage && <span className="settings-provider-config-message">{codexAcpMessage}</span>}
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busyCodexAcp || !codexAcpApiKey.trim()}
+                onClick={handleSaveByokProviderKey}
+              >
+                {busyCodexAcp ? "保存中..." : `保存 ${profile.label} key`}
+              </button>
+            </div>
+          </>
+        )}
       </section>
     );
   };
@@ -1367,6 +1547,127 @@ export function SettingsPage({
             </div>
           )}
         </div>
+      </section>
+    );
+  };
+
+  const renderUsagePane = () => {
+    const totalTokens = usageRows.reduce((sum, row) => sum + usageTokenTotal(row.tokens), 0);
+    const totalEvents = usageRows.reduce((sum, row) => sum + row.event_count, 0);
+    const totalSessions = usageRows.reduce((sum, row) => sum + row.session_count, 0);
+
+    return (
+      <section className="settings-section settings-usage-section">
+        <div className="settings-section-head">
+          <div>
+            <h2 className="settings-section-title">用量</h2>
+            <p className="settings-section-desc">查看当前工作区记录到的上下文和 token 用量，不包含计价。</p>
+          </div>
+          <button type="button" className="settings-btn" disabled={usageLoading} onClick={loadUsageSummary}>
+            {usageLoading ? "刷新中..." : "刷新"}
+          </button>
+        </div>
+
+        <div className="settings-usage-summary-grid" aria-label="用量汇总">
+          <div className="settings-usage-summary-card">
+            <span>总 tokens</span>
+            <strong>{formatUsageTokens(totalTokens)}</strong>
+          </div>
+          <div className="settings-usage-summary-card">
+            <span>事件</span>
+            <strong>{totalEvents.toLocaleString("en-US")}</strong>
+          </div>
+          <div className="settings-usage-summary-card">
+            <span>会话计数</span>
+            <strong>{totalSessions.toLocaleString("en-US")}</strong>
+          </div>
+        </div>
+
+        <div className="settings-usage-filter-stack">
+          <div className="settings-usage-toolbar" role="radiogroup" aria-label="用量分组">
+            {(["model", "agent", "workspace", "session"] as UsageSummaryGroupBy[]).map((group) => (
+              <button
+                key={group}
+                type="button"
+                className={`settings-btn ${usageGroupBy === group ? "is-selected" : ""}`}
+                aria-pressed={usageGroupBy === group}
+                onClick={() => setUsageGroupBy(group)}
+              >
+                {usageGroupLabel(group)}
+              </button>
+            ))}
+          </div>
+
+          <div className="settings-usage-toolbar" role="radiogroup" aria-label="用量时间范围">
+            {(["today", "7d", "30d", "all"] as UsageDateRange[]).map((range) => (
+              <button
+                key={range}
+                type="button"
+                className={`settings-btn ${usageDateRange === range ? "is-selected" : ""}`}
+                aria-pressed={usageDateRange === range}
+                onClick={() => setUsageDateRange(range)}
+              >
+                {usageDateRangeLabel(range)}
+              </button>
+            ))}
+          </div>
+
+          <div className="settings-usage-toolbar" role="group" aria-label="用量范围">
+            {(["current", "all"] as UsageWorkspaceScope[]).map((scope) => (
+              <button
+                key={scope}
+                type="button"
+                className={`settings-btn ${usageWorkspaceScope === scope ? "is-selected" : ""}`}
+                aria-pressed={usageWorkspaceScope === scope}
+                onClick={() => setUsageWorkspaceScope(scope)}
+              >
+                {usageWorkspaceScopeLabel(scope)}
+              </button>
+            ))}
+            <label className="settings-usage-checkbox">
+              <input
+                type="checkbox"
+                checked={usageIncludeArchived}
+                onChange={(event) => setUsageIncludeArchived(event.currentTarget.checked)}
+              />
+              包含已归档
+            </label>
+          </div>
+        </div>
+
+        {usageError && <div className="settings-error">{usageError}</div>}
+        {usageLoading && <div className="settings-status">正在加载用量...</div>}
+        {!usageLoading && usageRows.length === 0 && (
+          <div className="settings-empty-panel">暂无用量记录。</div>
+        )}
+        {!usageLoading && usageRows.length > 0 && (
+          <div className="settings-usage-list">
+            {usageRows.map((row) => {
+              const breakdown = usageBreakdownParts(row.tokens);
+              return (
+                <article key={`${usageGroupBy}:${row.label}:${row.model ?? ""}:${row.agent_cli ?? ""}:${row.workspace_root ?? ""}:${row.session_id ?? ""}`} className="settings-usage-row">
+                  <div className="settings-usage-row-main">
+                    <div className="settings-usage-row-title">{row.label}</div>
+                    <div className="settings-usage-row-meta">{usageRowMeta(row)}</div>
+                    {breakdown.length > 0 && (
+                      <div className="settings-usage-breakdown" aria-label="token 分项">
+                        {breakdown.map((item) => (
+                          <span key={item.label}>{item.label} {formatUsageTokens(item.value)}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="settings-usage-row-stats">
+                    <strong>{formatUsageTokens(usageTokenTotal(row.tokens))}</strong>
+                    {row.context_peak_tokens != null && row.context_peak_tokens > 0 && (
+                      <span>峰值 {formatUsageTokens(row.context_peak_tokens)}</span>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </section>
     );
   };
@@ -1639,6 +1940,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "usage" ? "is-active" : ""}`}
+            onClick={() => setActivePane("usage")}
+          >
+            用量
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "lsp" ? "is-active" : ""}`}
             onClick={() => setActivePane("lsp")}
           >
@@ -1888,6 +2196,8 @@ export function SettingsPage({
 
         {activePane === "archive" && renderArchivePane()}
 
+        {activePane === "usage" && renderUsagePane()}
+
         {activePane === "lsp" && (
         <section className="settings-section">
           <h2 className="settings-section-title">LSP 语言服务</h2>
@@ -2021,10 +2331,76 @@ function startupNoticeCopyFor(notice: SettingsStartupNotice) {
   };
 }
 
+function usageGroupLabel(group: UsageSummaryGroupBy): string {
+  if (group === "agent") return "按智能体";
+  if (group === "workspace") return "按工作区";
+  if (group === "session") return "按会话";
+  return "按模型";
+}
+
+function usageDateRangeLabel(range: UsageDateRange): string {
+  if (range === "today") return "今天";
+  if (range === "7d") return "7 天";
+  if (range === "30d") return "30 天";
+  return "全部";
+}
+
+function usageWorkspaceScopeLabel(scope: UsageWorkspaceScope): string {
+  return scope === "all" ? "全部工作区" : "当前工作区";
+}
+
+function usageDateRangeBounds(range: UsageDateRange): { from?: string; to?: string } {
+  if (range === "all") return {};
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  if (range === "7d") start.setDate(start.getDate() - 6);
+  if (range === "30d") start.setDate(start.getDate() - 29);
+  return { from: start.toISOString(), to: now.toISOString() };
+}
+
+function usageTokenTotal(tokens: UsageSummaryRow["tokens"]): number {
+  return tokens.total_tokens ?? (
+    (tokens.input_tokens ?? 0) +
+    (tokens.output_tokens ?? 0) +
+    (tokens.cache_read_tokens ?? 0) +
+    (tokens.cache_write_tokens ?? 0) +
+    (tokens.reasoning_tokens ?? 0)
+  );
+}
+
+function formatUsageTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
+  return value.toLocaleString("en-US");
+}
+
+function usageBreakdownParts(tokens: UsageSummaryRow["tokens"]): Array<{ label: string; value: number }> {
+  return [
+    { label: "输入", value: tokens.input_tokens },
+    { label: "输出", value: tokens.output_tokens },
+    { label: "缓存读", value: tokens.cache_read_tokens },
+    { label: "缓存写", value: tokens.cache_write_tokens },
+    { label: "推理", value: tokens.reasoning_tokens },
+  ].flatMap((item) => item.value != null ? [{ label: item.label, value: item.value }] : []);
+}
+
+function usageRowMeta(row: UsageSummaryRow): string {
+  const parts = [
+    row.agent_cli,
+    row.provider,
+    row.workspace_root ? workspaceNameFromRoot(row.workspace_root) : null,
+    row.session_count > 0 ? `${row.session_count} 会话` : null,
+    `${row.event_count} 事件`,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "archive") return "已归档";
   if (pane === "remote") return "远程";
   if (pane === "web") return "Web 工具";
+  if (pane === "usage") return "用量";
   if (pane === "lsp") return "LSP";
   return "通用";
 }
@@ -2033,6 +2409,7 @@ function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "archive") return "查看、恢复或删除保留在本地的已归档对话。";
   if (pane === "remote") return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
   if (pane === "web") return "配置 Codex 和 Claude 本机会话可用的搜索与网页抓取能力。";
+  if (pane === "usage") return "查看按模型、智能体、工作区或会话汇总的 token 用量。";
   if (pane === "lsp") return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";
 }
@@ -2158,4 +2535,10 @@ function formatBytes(bytes: number): string {
 
 function providerLabel(profiles: AgentProviderProfile[], profileId: string): string {
   return profiles.find((profile) => profile.id === profileId)?.label ?? profileId;
+}
+
+function customProviderProtocolLabel(protocol: CustomProviderProtocol): string {
+  if (protocol === "responses") return "Responses";
+  if (protocol === "anthropic_messages") return "Anthropic Messages";
+  return "Chat Completions";
 }

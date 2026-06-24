@@ -45,6 +45,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use workspace_model::{
     AgentCliId, AgentModelOption, AgentProviderFamily, AgentProviderProfile,
     AgentProviderProxyKind, AgentSettingsSnapshot, AppSettings, AppTheme, ClaudeProviderSettings,
+    CustomProviderInput, CustomProviderProtocol,
     ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode, WebToolsSettings,
     WebToolsSettingsStatus,
 };
@@ -64,12 +65,16 @@ const CODEX_DEFAULT_PROVIDER_ID: &str = "default";
 const BYOK_PROVIDER_ID: &str = "byok";
 const BYOK_PROVIDER_NAME: &str = "BYOK";
 const BYOK_API_KEY_ENV: &str = "BYOK_API_KEY";
+const CUSTOM_PROVIDER_ID: &str = "custom";
+const CUSTOM_PROVIDER_NAME: &str = "Custom Provider";
+const CUSTOM_PROVIDER_API_KEY_ENV: &str = "CUSTOM_PROVIDER_API_KEY";
 const BYOK_SOURCE_PROVIDER_IDS: &[&str] = &[
     TIMIAI_PROVIDER_ID,
     COMMANDCODE_PROVIDER_ID,
     DEEPSEEK_PROVIDER_ID,
     KIMI_PROVIDER_ID,
     MIMO_PROVIDER_ID,
+    CUSTOM_PROVIDER_ID,
 ];
 const CODEX_PROXY_WIRE_API: &str = "responses";
 const COMMANDCODE_PROVIDER_ID: &str = "commandcode";
@@ -101,6 +106,7 @@ const TIMIAI_BASE_URL: &str = "http://api.timiai.woa.com/ai_api_manage/llmproxy"
 const TIMIAI_CODEX_MODEL: &str = "gpt-5.5";
 const TIMIAI_CLAUDE_MODEL: &str = "claude-opus-4.8";
 const TIMIAI_CATALOG_MODELS: &[&str] = &[
+    "glm-5.2",
     "gpt-5.5",
     "gpt-5.4",
     "claude-opus-4.8",
@@ -134,6 +140,7 @@ const COMMANDCODE_CATALOG_MODELS: &[&str] = &[
     "Qwen/Qwen3.7-Max-Free",
     "moonshotai/Kimi-K2.6",
     "moonshotai/Kimi-K2.5",
+    "zai-org/GLM-5.2",
     "zai-org/GLM-5.1",
     "zai-org/GLM-5",
     "MiniMaxAI/MiniMax-M3",
@@ -163,6 +170,7 @@ const COMMANDCODE_MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("Qwen/Qwen3.7-Max-Free", 1_000_000),
     ("moonshotai/Kimi-K2.6", 256_000),
     ("moonshotai/Kimi-K2.5", 256_000),
+    ("zai-org/GLM-5.2", 1_000_000),
     ("zai-org/GLM-5.1", 200_000),
     ("zai-org/GLM-5", 200_000),
     ("MiniMaxAI/MiniMax-M3", 1_000_000),
@@ -192,6 +200,7 @@ const COMMANDCODE_MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
 const KIMI_CATALOG_MODELS: &[&str] = &[KIMI_MODEL];
 const MIMO_CATALOG_MODELS: &[&str] = &["MiMo-V2.5-Pro", "MiMo-V2.5"];
 const TIMIAI_MODEL_SLUG_MAP: &[(&str, &str)] = &[
+    ("glm-5.2", "glm-5.2"),
     ("gpt-5.2", "gpt-5.2"),
     ("gpt-5.3", "gpt-5.3"),
     ("gpt-5.4", "gpt-5.4"),
@@ -214,6 +223,7 @@ const MODEL_CONTEXT_WINDOWS: &[(&str, i64)] = &[
     ("gpt-5.2-codex", 200_000),
     ("gpt-5.1-codex-max", 1_000_000),
     ("gpt-5.1-codex-mini", 128_000),
+    ("glm-5.2", 1_000_000),
     ("gpt-5.2", 400_000),
     ("gpt-5.3", 128_000),
     ("gpt-5.4", 1_050_000),
@@ -298,6 +308,14 @@ struct ProviderModelsEntry {
     models: Vec<String>,
     #[serde(default)]
     model_list_url: Option<String>,
+    #[serde(default)]
+    custom: bool,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    protocol: Option<CustomProviderProtocol>,
 }
 
 const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
@@ -348,6 +366,18 @@ const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
         credential_label: None,
         requires_credential: false,
         help_text: "用户自带 Key 的共享模型池，通过本机 proxy 按模型路由。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: CUSTOM_PROVIDER_ID,
+        label: CUSTOM_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: None,
+        default_model: None,
+        models: &[],
+        credential_label: Some("API key"),
+        requires_credential: true,
+        help_text: "自定义 BYOK provider，可配置 endpoint 与协议类型。",
     },
     ProviderProfileDefinition {
         family: AgentProviderFamily::Codex,
@@ -423,6 +453,18 @@ const CLAUDE_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
         credential_label: None,
         requires_credential: false,
         help_text: "用户自带 Key 的共享模型池，通过本机 proxy 按模型路由。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: CUSTOM_PROVIDER_ID,
+        label: CUSTOM_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::ClaudeNative,
+        base_url: None,
+        default_model: None,
+        models: &[],
+        credential_label: Some("API key"),
+        requires_credential: true,
+        help_text: "自定义 BYOK provider，可配置 endpoint 与协议类型。",
     },
     ProviderProfileDefinition {
         family: AgentProviderFamily::Claude,
@@ -777,6 +819,9 @@ fn provider_secret_storage_key(family: AgentProviderFamily, profile_id: &str) ->
     if profile_id == TIMIAI_PROVIDER_ID {
         return format!("shared:{TIMIAI_PROVIDER_ID}");
     }
+    if profile_id == CUSTOM_PROVIDER_ID {
+        return format!("shared:{CUSTOM_PROVIDER_ID}");
+    }
     provider_secret_key(family, profile_id)
 }
 
@@ -1010,6 +1055,10 @@ fn provider_profile(
     definition: &ProviderProfileDefinition,
     selected_profile_id: &str,
 ) -> AgentProviderProfile {
+    let custom_entry = (definition.id == CUSTOM_PROVIDER_ID)
+        .then(|| custom_provider_entry(paths))
+        .flatten();
+    let custom_protocol = custom_entry.as_ref().and_then(|entry| entry.protocol);
     let models = if definition.id == BYOK_PROVIDER_ID {
         match definition.family {
             AgentProviderFamily::Codex => configured_codex_byok_models(paths),
@@ -1027,11 +1076,23 @@ fn provider_profile(
     AgentProviderProfile {
         family: definition.family,
         id: definition.id.to_string(),
-        label: definition.label.to_string(),
-        proxy_kind: definition.proxy_kind,
+        label: custom_entry
+            .as_ref()
+            .and_then(|entry| entry.label.as_ref())
+            .filter(|label| !label.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| definition.label.to_string()),
+        proxy_kind: custom_protocol
+            .map(|protocol| custom_provider_proxy_kind(definition.family, protocol))
+            .unwrap_or(definition.proxy_kind),
         selected: definition.id == selected_profile_id,
         configured: provider_profile_configured(paths, definition),
-        base_url: definition.base_url.map(str::to_string),
+        base_url: custom_entry
+            .as_ref()
+            .and_then(|entry| entry.base_url.clone())
+            .or_else(|| definition.base_url.map(str::to_string)),
+        custom: definition.id == CUSTOM_PROVIDER_ID,
+        protocol: custom_protocol,
         default_model: definition.default_model.map(str::to_string),
         models,
         model_list_url: custom_model_list_url_for_provider(paths, definition.id),
@@ -1041,7 +1102,51 @@ fn provider_profile(
     }
 }
 
+fn custom_provider_entry(paths: &AppPaths) -> Option<ProviderModelsEntry> {
+    let entry = load_provider_models_catalog(paths)
+        .providers
+        .remove(CUSTOM_PROVIDER_ID)?;
+    (entry.custom || entry.base_url.is_some() || entry.protocol.is_some()).then_some(entry)
+}
+
+fn custom_provider_protocol_id(protocol: CustomProviderProtocol) -> &'static str {
+    match protocol {
+        CustomProviderProtocol::ChatCompletions => "chat_completions",
+        CustomProviderProtocol::Responses => "responses",
+        CustomProviderProtocol::AnthropicMessages => "anthropic_messages",
+    }
+}
+fn custom_provider_proxy_kind(
+    family: AgentProviderFamily,
+    protocol: CustomProviderProtocol,
+) -> AgentProviderProxyKind {
+    match (family, protocol) {
+        (AgentProviderFamily::Codex, CustomProviderProtocol::Responses) => {
+            AgentProviderProxyKind::Responses
+        }
+        (AgentProviderFamily::Codex, _) => AgentProviderProxyKind::CompletionToResponses,
+        (AgentProviderFamily::Claude, CustomProviderProtocol::AnthropicMessages) => {
+            AgentProviderProxyKind::ClaudeNative
+        }
+        (AgentProviderFamily::Claude, _) => AgentProviderProxyKind::CompletionToClaude,
+    }
+}
 fn provider_profile_configured(paths: &AppPaths, definition: &ProviderProfileDefinition) -> bool {
+    if definition.id == CUSTOM_PROVIDER_ID {
+        let Some(entry) = custom_provider_entry(paths) else {
+            return false;
+        };
+        let has_endpoint = entry
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        return has_endpoint
+            && entry.protocol.is_some()
+            && provider_secret(paths, definition.family, definition.id)
+                .map(|secret| !secret.trim().is_empty())
+                .unwrap_or(false);
+    }
     if definition.id == BYOK_PROVIDER_ID {
         return BYOK_SOURCE_PROVIDER_IDS
             .iter()
@@ -1143,7 +1248,10 @@ pub fn save_agent_provider_secret(
     }
     match family {
         AgentProviderFamily::Codex => {
-            if codex_is_byok_source(definition.id) {
+            if definition.id == CUSTOM_PROVIDER_ID {
+                save_provider_secret(paths, family, definition.id, secret)?;
+                refresh_codex_model_catalog_after_provider_models_change(paths)?;
+            } else if codex_is_byok_source(definition.id) {
                 save_codex_byok_source_secret(paths, definition.id, secret)?;
             } else {
                 save_provider_secret(paths, family, definition.id, secret)?;
@@ -1158,6 +1266,61 @@ pub fn save_agent_provider_secret(
     Ok(settings_snapshot(paths))
 }
 
+pub fn save_custom_provider(
+    paths: &AppPaths,
+    input: CustomProviderInput,
+) -> Result<AgentSettingsSnapshot> {
+    let label = input.label.trim();
+    if label.is_empty() {
+        anyhow::bail!("provider label cannot be empty");
+    }
+    let endpoint = normalize_custom_provider_endpoint(&input.endpoint)?;
+    let api_key = input.api_key.trim();
+    if api_key.is_empty() {
+        anyhow::bail!("api_key cannot be empty");
+    }
+    let model_list_url = input
+        .model_list_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(normalize_model_list_url)
+        .transpose()?;
+
+    let mut catalog = read_provider_models_catalog(paths)?;
+    let existing_models = catalog
+        .providers
+        .get(CUSTOM_PROVIDER_ID)
+        .map(|entry| entry.models.clone())
+        .unwrap_or_default();
+    catalog.version = PROVIDER_MODELS_VERSION;
+    catalog.providers.insert(
+        CUSTOM_PROVIDER_ID.to_string(),
+        ProviderModelsEntry {
+            models: existing_models,
+            model_list_url,
+            custom: true,
+            label: Some(label.to_string()),
+            base_url: Some(endpoint),
+            protocol: Some(input.protocol),
+        },
+    );
+    save_provider_models_catalog(paths, &catalog)?;
+    save_provider_secret(paths, AgentProviderFamily::Codex, CUSTOM_PROVIDER_ID, api_key)?;
+    refresh_codex_model_catalog_after_provider_models_change(paths)?;
+    Ok(settings_snapshot(paths))
+}
+
+fn normalize_custom_provider_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if endpoint.is_empty() {
+        anyhow::bail!("endpoint cannot be empty");
+    }
+    if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
+        anyhow::bail!("endpoint must start with http:// or https://");
+    }
+    Ok(endpoint.to_string())
+}
 pub fn save_provider_models(
     paths: &AppPaths,
     provider: &str,
@@ -1184,13 +1347,10 @@ pub fn save_provider_models_with_model_list_url(
         None => existing_model_list_url,
     };
     catalog.version = PROVIDER_MODELS_VERSION;
-    catalog.providers.insert(
-        provider.to_string(),
-        ProviderModelsEntry {
-            models,
-            model_list_url,
-        },
-    );
+    let mut entry = catalog.providers.remove(provider).unwrap_or_default();
+    entry.models = models;
+    entry.model_list_url = model_list_url;
+    catalog.providers.insert(provider.to_string(), entry);
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
     Ok(settings_snapshot(paths))
@@ -1244,7 +1404,14 @@ pub async fn sync_provider_models_from_url(
 pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSettingsSnapshot> {
     let provider = normalize_model_source_provider(provider)?;
     let mut catalog = read_provider_models_catalog(paths)?;
-    catalog.providers.remove(provider);
+    if provider == CUSTOM_PROVIDER_ID {
+        if let Some(entry) = catalog.providers.get_mut(provider) {
+            entry.models.clear();
+            entry.model_list_url = None;
+        }
+    } else {
+        catalog.providers.remove(provider);
+    }
     catalog.version = PROVIDER_MODELS_VERSION;
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
@@ -1659,7 +1826,7 @@ fn codex_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
     let entries = catalog_models_for_provider_with_paths(paths, &catalog_provider)
         .into_iter()
         .collect::<Vec<_>>();
-    model_provider_map_env_from_entries(entries, catalog_provider == BYOK_PROVIDER_ID)
+    model_provider_map_env_from_entries(paths, entries, catalog_provider == BYOK_PROVIDER_ID)
 }
 
 fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
@@ -1674,10 +1841,11 @@ fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
                 .map(|model| (model, *provider)),
         );
     }
-    model_provider_map_env_from_entries(entries, true)
+    model_provider_map_env_from_entries(paths, entries, true)
 }
 
 fn model_provider_map_env_from_entries(
+    paths: &AppPaths,
     entries: Vec<(String, &'static str)>,
     encode_provider_models: bool,
 ) -> Option<(String, String)> {
@@ -1697,11 +1865,23 @@ fn model_provider_map_env_from_entries(
             } else {
                 model.clone()
             };
-            json!({
+            let mut entry = json!({
                 "model": model_id,
                 "display_name": display_name,
                 "provider": provider,
-            })
+            });
+            if provider == CUSTOM_PROVIDER_ID {
+                if let Some(custom) = custom_provider_entry(paths) {
+                    if let Some(base_url) = custom.base_url.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                        entry["base_url"] = json!(base_url);
+                    }
+                    if let Some(protocol) = custom.protocol {
+                        entry["protocol"] = json!(custom_provider_protocol_id(protocol));
+                    }
+                    entry["env_key"] = json!(env_key_for_provider(provider));
+                }
+            }
+            entry
         })
         .collect::<Vec<_>>();
     serde_json::to_string(&entries)
@@ -1992,6 +2172,7 @@ fn normalize_codex_provider(provider: &str) -> Result<&'static str> {
         DEEPSEEK_PROVIDER_ID => Ok(DEEPSEEK_PROVIDER_ID),
         KIMI_PROVIDER_ID | "kimi" | "kimi-code" => Ok(KIMI_PROVIDER_ID),
         MIMO_PROVIDER_ID | "mimo" | "xiaomi-mimo" => Ok(MIMO_PROVIDER_ID),
+        CUSTOM_PROVIDER_ID | "custom-provider" | "custom_provider" => Ok(CUSTOM_PROVIDER_ID),
         other => anyhow::bail!("Unsupported Codex provider: {other}"),
     }
 }
@@ -2006,6 +2187,7 @@ fn default_model_for_provider(provider: &str) -> &'static str {
         DEEPSEEK_PROVIDER_ID => model_slug_for_provider(DEEPSEEK_MODEL, DEEPSEEK_PROVIDER_ID),
         KIMI_PROVIDER_ID => model_slug_for_provider(KIMI_MODEL, KIMI_PROVIDER_ID),
         MIMO_PROVIDER_ID => model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID),
+        CUSTOM_PROVIDER_ID => "",
         _ => model_slug_for_provider(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID),
     }
 }
@@ -2025,6 +2207,7 @@ fn provider_name(provider: &str) -> &'static str {
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_PROVIDER_NAME,
         KIMI_PROVIDER_ID => KIMI_PROVIDER_NAME,
         MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
+        CUSTOM_PROVIDER_ID => CUSTOM_PROVIDER_NAME,
         _ => TIMIAI_PROVIDER_NAME,
     }
 }
@@ -2037,6 +2220,7 @@ fn provider_label(provider: &str) -> &'static str {
         DEEPSEEK_PROVIDER_ID => "DeepSeek",
         KIMI_PROVIDER_ID => "Kimi Code",
         MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
+        CUSTOM_PROVIDER_ID => CUSTOM_PROVIDER_NAME,
         _ => TIMIAI_PROVIDER_NAME,
     }
 }
@@ -2053,6 +2237,7 @@ fn env_key_for_provider(provider: &str) -> &'static str {
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_API_KEY_ENV,
         KIMI_PROVIDER_ID => KIMI_API_KEY_ENV,
         MIMO_PROVIDER_ID => MIMO_API_KEY_ENV,
+        CUSTOM_PROVIDER_ID => CUSTOM_PROVIDER_API_KEY_ENV,
         _ => TIMIAI_API_KEY_ENV,
     }
 }
@@ -2065,6 +2250,7 @@ fn base_url_for_provider(provider: &str) -> String {
         DEEPSEEK_PROVIDER_ID => codex_proxy_provider_base_url(DEEPSEEK_PROVIDER_ID),
         KIMI_PROVIDER_ID => codex_proxy_provider_base_url(KIMI_PROVIDER_ID),
         MIMO_PROVIDER_ID => codex_proxy_provider_base_url(MIMO_PROVIDER_ID),
+        CUSTOM_PROVIDER_ID => codex_proxy_provider_base_url(CUSTOM_PROVIDER_ID),
         _ => codex_proxy_base_url(),
     }
 }
@@ -2154,6 +2340,7 @@ fn default_catalog_models_for_provider(provider: &str) -> &'static [&'static str
         DEEPSEEK_PROVIDER_ID => DEEPSEEK_CATALOG_MODELS,
         KIMI_PROVIDER_ID => KIMI_CATALOG_MODELS,
         MIMO_PROVIDER_ID => MIMO_CATALOG_MODELS,
+        CUSTOM_PROVIDER_ID => &[],
         _ => TIMIAI_CATALOG_MODELS,
     }
 }

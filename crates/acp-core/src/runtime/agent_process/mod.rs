@@ -284,6 +284,7 @@ fn register_codex_api_proxy_from_env(env: &[(String, String)]) {
         ("DEEPSEEK_API_KEY", "deepseek"),
         ("KIMI_CODE_API_KEY", "kimi_code"),
         ("XIAOMI_MIMO_API_KEY", "xiaomi_mimo"),
+        ("CUSTOM_PROVIDER_API_KEY", "custom"),
     ] {
         if let Some((_, api_key)) = env.iter().find(|(name, _)| name == env_key) {
             ensure_codex_api_proxy(provider, api_key);

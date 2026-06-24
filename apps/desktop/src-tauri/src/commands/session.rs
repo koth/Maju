@@ -5,7 +5,7 @@ use workspace_model::{
     AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
     FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
     ListChangeSetsRequest, PermissionInputResponse, SessionConfigState, SessionFileChange,
-    UiSnapshot, UserPromptContent, WorkspaceSessionList,
+    UiSnapshot, UsageSummaryRequest, UsageSummaryRow, UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -168,6 +168,14 @@ pub fn session_delete_all_archived(state: State<'_, AppState>) -> Result<(), Str
 #[tauri::command]
 pub fn session_get_changes(state: State<'_, AppState>) -> Result<Vec<SessionFileChange>, String> {
     state.with_app(|app| Ok(app.ui.session_changes.clone()))
+}
+
+#[tauri::command]
+pub fn usage_get_summary(
+    state: State<'_, AppState>,
+    request: Option<UsageSummaryRequest>,
+) -> Result<Vec<UsageSummaryRow>, String> {
+    state.with_app(|app| Ok(app.usage_summary(request.unwrap_or_default())))
 }
 
 #[tauri::command]

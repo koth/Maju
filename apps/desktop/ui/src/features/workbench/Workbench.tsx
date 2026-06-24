@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
-import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor } from "../../types";
+import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry } from "../../types";
 import {
   startupPerfMark,
   sessionCancel,
@@ -10,7 +10,7 @@ import {
   sessionUnarchive,
   settingsGetAgentSnapshot,
 } from "../../lib/tauri";
-import { ConversationTimeline } from "../conversation/ConversationTimeline";
+import { ConversationTimeline, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
   AgentPlanPanel,
@@ -63,6 +63,7 @@ const INITIAL_REVIEW_PANEL_ACTIVE_TAB: ReviewPanelActiveTab = {
   tab: "Review",
 };
 const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
+type CenterTabType = "conversation" | "changes" | "diff" | "editor";
 
 function reviewOpenTabKey(tab: ReviewPanelOpenTab) {
   return tab.kind === "diff" ? `diff:${tab.changeSetId}:${tab.path}` : `file:${tab.path}`;
@@ -112,7 +113,132 @@ function buildAgentPlanEnvironmentInfo(
         ? "提交或推送"
         : "工作区干净",
     githubLabel: "GitHub CLI 不可用",
+    usage: snapshot.usage,
   };
+}
+
+export function isActiveTurnStatus(status: UiSnapshot["session"]["status"]) {
+  return status === "Streaming" || status === "WaitingForTool";
+}
+
+export function agentPlanProgressSignature(entries: AgentPlanEntry[]) {
+  return entries
+    .map((entry) =>
+      [
+        entry.id ?? "",
+        entry.content,
+        entry.priority,
+        entry.status,
+      ].join("\u001f"),
+    )
+    .join("\u001e");
+}
+
+function usageTokenTotal(tokens: NonNullable<UiSnapshot["usage"]>["current_turn"] | undefined) {
+  if (!tokens) return 0;
+  return tokens.total_tokens ?? (
+    (tokens.input_tokens ?? 0) +
+    (tokens.output_tokens ?? 0) +
+    (tokens.cache_read_tokens ?? 0) +
+    (tokens.cache_write_tokens ?? 0) +
+    (tokens.reasoning_tokens ?? 0)
+  );
+}
+
+function liveTurnChangeSetSignature(changeSet: TimelineTurnChangeSet | null) {
+  if (!changeSet || changeSet.files.length === 0) return "";
+  return [
+    changeSet.changeSetId,
+    changeSet.updatedAt,
+    ...changeSet.files.map((file) =>
+      [
+        file.path,
+        file.change_type,
+        file.added_lines,
+        file.removed_lines,
+        file.quality,
+        file.updated_at,
+      ].join("\u001f"),
+    ),
+  ].join("\u001e");
+}
+
+function persistedTurnChangesSignature(snapshot: UiSnapshot) {
+  return snapshot.turn_changes
+    .flatMap((turn) => turn.changes.map((change) => [
+      turn.message_id,
+      change.path,
+      change.change_type,
+      change.added_lines,
+      change.removed_lines,
+      change.timestamp,
+    ].join("\u001f")))
+    .join("\u001e");
+}
+
+export function agentPlanDockProgressSignature(
+  snapshot: UiSnapshot,
+  liveTurnChanges?: TimelineTurnChangeSet | null,
+) {
+  const parts: string[] = [];
+  const planSignature = agentPlanProgressSignature(snapshot.agent_plan);
+  if (planSignature) {
+    parts.push(`plan:${planSignature}`);
+  }
+
+  const turnChangeSignature =
+    liveTurnChanges === undefined
+      ? persistedTurnChangesSignature(snapshot)
+      : liveTurnChangeSetSignature(liveTurnChanges);
+  if (turnChangeSignature) {
+    parts.push(`changes:${turnChangeSignature}`);
+  }
+
+  const usage = snapshot.usage;
+  const usageContext = usage?.context;
+  const currentTurnTokens = usageTokenTotal(usage?.current_turn);
+  if (
+    currentTurnTokens > 0 ||
+    usageContext?.used_tokens != null ||
+    usageContext?.window_tokens != null
+  ) {
+    parts.push([
+      "usage",
+      usageContext?.used_tokens ?? "",
+      usageContext?.window_tokens ?? "",
+      usageContext?.updated_at ?? "",
+      currentTurnTokens,
+    ].join("\u001f"));
+  }
+
+  return parts.join("\u001e");
+}
+
+export function shouldAutoOpenAgentPlanDock({
+  entryCount,
+  hasProgress,
+  sessionStatus,
+  activeTabType,
+  reviewPanelExpanded,
+  currentSignature,
+  lastAutoOpenedSignature,
+}: {
+  entryCount: number;
+  hasProgress?: boolean;
+  sessionStatus: UiSnapshot["session"]["status"];
+  activeTabType: CenterTabType;
+  reviewPanelExpanded: boolean;
+  currentSignature: string;
+  lastAutoOpenedSignature: string | null;
+}) {
+  return (
+    (hasProgress ?? entryCount > 0) &&
+    currentSignature.length > 0 &&
+    currentSignature !== lastAutoOpenedSignature &&
+    isActiveTurnStatus(sessionStatus) &&
+    activeTabType === "conversation" &&
+    !reviewPanelExpanded
+  );
 }
 
 export function Workbench() {
@@ -182,6 +308,7 @@ export function Workbench() {
   const searchOpenSeqRef = useRef(0);
   const centerPanelRef = useRef<HTMLElement>(null);
   const contextDockResizeCheckRef = useRef(false);
+  const lastAutoOpenedAgentPlanSignatureRef = useRef<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     leftSidebarWidth,
@@ -698,14 +825,58 @@ export function Workbench() {
       </div>
     </div>
   ) : null;
+  const liveAgentPlanDockSignature = snapshot
+    ? agentPlanDockProgressSignature(snapshot, liveTurnChangeSet)
+    : "";
+
+  useEffect(() => {
+    if (!snapshot) {
+      lastAutoOpenedAgentPlanSignatureRef.current = null;
+      return;
+    }
+
+    if (!isActiveTurnStatus(snapshot.session.status)) {
+      lastAutoOpenedAgentPlanSignatureRef.current = null;
+      return;
+    }
+
+    const scopedSignature = liveAgentPlanDockSignature
+      ? `${snapshot.session.id}\u001e${liveAgentPlanDockSignature}`
+      : "";
+
+    if (!shouldAutoOpenAgentPlanDock({
+      entryCount: snapshot.agent_plan.length,
+      hasProgress: liveAgentPlanDockSignature.length > 0,
+      sessionStatus: snapshot.session.status,
+      activeTabType: activeTab.type,
+      reviewPanelExpanded,
+      currentSignature: scopedSignature,
+      lastAutoOpenedSignature: lastAutoOpenedAgentPlanSignatureRef.current,
+    })) {
+      return;
+    }
+
+    lastAutoOpenedAgentPlanSignatureRef.current = scopedSignature;
+    setContextDockResizeTier("none");
+    setContextDockCollapsed(false);
+  }, [
+    activeTab.type,
+    liveAgentPlanDockSignature,
+    liveTurnChangeSet,
+    reviewPanelExpanded,
+    snapshot?.agent_plan.length,
+    snapshot?.session.id,
+    snapshot?.session.status,
+  ]);
+
   const contextDockBaseOpen = !!snapshot && !reviewPanelExpanded && !contextDockCollapsed;
-  const contextDockResizeCheck =
-    contextDockBaseOpen && rightPanelResizing && activeTab.type === "conversation";
+  const contextDockOverlapCheck = contextDockBaseOpen && activeTab.type === "conversation";
+  const contextDockResizeCheck = contextDockOverlapCheck && rightPanelResizing;
   const agentPlanOverlap = useAgentPlanOverlap(
     centerPanelRef,
-    contextDockResizeCheck,
+    contextDockOverlapCheck,
   );
-  const effectiveContextDockTier = contextDockResizeCheck ? agentPlanOverlap : contextDockResizeTier;
+  const effectiveContextDockTier = contextDockOverlapCheck ? agentPlanOverlap : contextDockResizeTier;
   const contextDockAutoHidden = effectiveContextDockTier === "hidden";
   const contextDockVisible = contextDockBaseOpen && !contextDockAutoHidden;
   const contextDockShouldShift =
@@ -738,6 +909,7 @@ export function Workbench() {
     setContextDockResizeTier("none");
     setContextDockCollapsed((collapsed) => !collapsed);
   }, []);
+
 
   if (settingsOpen) {
     return (
@@ -1436,7 +1608,7 @@ function latestCodeBuddyPlanText(tools: ToolInvocation[], toolIndex: number) {
     if (!looksLikeCodeBuddyPlanWriteTool(tool)) {
       continue;
     }
-    const planText = structuredPlanTextFromTool(tool);
+    const planText = structuredPlanTextFromTool(tool) ?? planTextFromDiffPreviews(tool);
     if (planText) {
       return planText;
     }
@@ -1484,6 +1656,24 @@ function structuredPlanTextFromTool(tool: ToolInvocation) {
   return null;
 }
 
+function planTextFromDiffPreviews(tool: ToolInvocation) {
+  for (const preview of tool.diff_previews) {
+    if (!looksLikeCodeBuddyPlanPath(preview.path)) {
+      continue;
+    }
+    const addedText = preview.hunks
+      .flatMap((hunk) => hunk.lines)
+      .filter((line) => line.kind === "Added")
+      .map((line) => line.content)
+      .join("\n")
+      .trim();
+    if (looksLikePlanBody(addedText)) {
+      return addedText;
+    }
+  }
+  return null;
+}
+
 function extractStructuredPlanText(payload: string | null | undefined) {
   const trimmed = payload?.trim();
   if (!trimmed) {
@@ -1506,14 +1696,21 @@ function extractPlanText(payload: string | null | undefined) {
   try {
     return planTextFromParsedPayload(JSON.parse(trimmed));
   } catch {
-    return trimmed;
+    return planTextCandidate(trimmed);
   }
+}
+
+function planTextCandidate(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  if (!trimmed || isCodeBuddyMissingPlanWarning(trimmed)) {
+    return null;
+  }
+  return trimmed;
 }
 
 function planTextFromParsedPayload(payload: unknown): string | null {
   if (typeof payload === "string") {
-    const trimmed = payload.trim();
-    return trimmed || null;
+    return planTextCandidate(payload);
   }
 
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -1521,14 +1718,14 @@ function planTextFromParsedPayload(payload: unknown): string | null {
   }
 
   const record = payload as Record<string, unknown>;
-  const plan = stringValue(record.plan);
+  const plan = planTextCandidate(stringValue(record.plan));
   if (plan) {
     return plan;
   }
 
   const rawResponse = record["codebuddy.ai/rawResponse"];
   if (rawResponse && typeof rawResponse === "object" && !Array.isArray(rawResponse)) {
-    return stringValue((rawResponse as Record<string, unknown>).plan);
+    return planTextCandidate(stringValue((rawResponse as Record<string, unknown>).plan));
   }
 
   return null;
@@ -1554,7 +1751,7 @@ function structuredPlanTextFromParsedPayload(payload: unknown): string | null {
     return explicitPlan;
   }
 
-  for (const key of ["content", "newText", "new_text", "text", "markdown", "body"]) {
+  for (const key of ["content", "newString", "new_string", "newText", "new_text", "text", "markdown", "body"]) {
     const value = stringValue(record[key]);
     if (value && looksLikePlanBody(value)) {
       return value;
@@ -1584,7 +1781,7 @@ function structuredPlanTextFromParsedPayload(payload: unknown): string | null {
 
 function looksLikePlanBody(value: string) {
   const trimmed = value.trim();
-  if (!trimmed || looksLikeCodeBuddyPlanPath(trimmed)) {
+  if (!trimmed || looksLikeCodeBuddyPlanPath(trimmed) || isCodeBuddyMissingPlanWarning(trimmed)) {
     return false;
   }
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
@@ -1598,6 +1795,10 @@ function looksLikePlanBody(value: string) {
     trimmed.includes("\n") ||
     /计划|实施|步骤|目标|验证|plan|problem|implementation|approach/i.test(trimmed)
   );
+}
+
+function isCodeBuddyMissingPlanWarning(value: string) {
+  return value.toLowerCase().includes("plan file was not found or empty");
 }
 
 function looksLikeCodeBuddyPlanPath(value: string) {

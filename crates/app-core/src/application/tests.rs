@@ -22,6 +22,7 @@ use workspace_model::{
     SessionConfigCategory, SessionConfigChoice, SessionConfigControl, SessionConfigSource,
     SessionConfigState, SessionFileChange, SessionListItem, SessionRuntimeStatus, SessionStatus,
     ThinkingStatus, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
+    UsageContextSnapshot, UsageEvent, UsageEventScope, UsageSummaryRequest, UsageTokenBreakdown,
     WorkspaceLocation,
 };
 
@@ -75,6 +76,82 @@ fn mock_agent_command() -> String {
         shell_words::quote(&cargo),
         shell_words::quote(&manifest)
     )
+}
+
+fn usage_event(model: &str, total_tokens: u64, timestamp: &str) -> UsageEvent {
+    UsageEvent {
+        scope: UsageEventScope::TurnDelta,
+        model: Some(model.into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some(timestamp.into()),
+        tokens: UsageTokenBreakdown {
+            input_tokens: Some(total_tokens / 2),
+            output_tokens: Some(total_tokens / 2),
+            total_tokens: Some(total_tokens),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(total_tokens),
+            window_tokens: Some(128_000),
+            updated_at: Some(timestamp.into()),
+        },
+        raw_json: None,
+    }
+}
+
+#[test]
+fn usage_summary_groups_by_model_and_filters_date_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
+        usage: usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"),
+    });
+    app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
+        usage: usage_event("claude-opus-4.7", 20, "2026-06-02T00:00:00Z"),
+    });
+
+    let rows = app.usage_summary(UsageSummaryRequest {
+        from: Some("2026-06-02T00:00:00Z".into()),
+        to: Some("2026-06-02T23:59:59Z".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model.as_deref(), Some("claude-opus-4.7"));
+    assert_eq!(rows[0].tokens.total_tokens, Some(20));
+}
+
+#[test]
+fn usage_updates_persist_restore_and_delete_with_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let session_id = app.ui.session.id.to_string();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
+        usage: usage_event("gpt-5.1", 120, "2026-06-23T00:00:00Z"),
+    });
+
+    assert_eq!(app.ui.usage.context.used_tokens, Some(120));
+    assert_eq!(app.ui.usage.session_total.total_tokens, Some(120));
+    let stored = app.store.load_session_usage_snapshot(&session_id).unwrap();
+    assert_eq!(stored.context.used_tokens, Some(120));
+    assert_eq!(stored.session_total.total_tokens, Some(120));
+
+    app.session_create(None).unwrap();
+    assert_ne!(app.ui.session.id.to_string(), session_id);
+    app.session_switch(&session_id).unwrap();
+    assert_eq!(app.ui.usage.context.used_tokens, Some(120));
+    assert_eq!(app.ui.usage.session_total.total_tokens, Some(120));
+
+    app.session_delete(&session_id).unwrap();
+    let rows = app.store.query_usage_summary(UsageSummaryRequest {
+        all_workspaces: true,
+        include_archived: true,
+        ..Default::default()
+    }).unwrap();
+    assert!(rows.iter().all(|row| row.session_id.as_deref() != Some(&session_id)));
 }
 
 #[test]

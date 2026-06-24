@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
-    LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
+    CustomProviderInput, LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
     RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
     RemoteMachineValidationRequest,
 };
@@ -237,6 +237,18 @@ pub fn settings_save_agent_provider_secret(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn settings_save_custom_provider(
+    state: State<'_, AppState>,
+    input: CustomProviderInput,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if remote_settings_scope(state.inner(), &paths, remote_profile_id)?.is_some() {
+        return Err("远程机器暂不支持保存自定义 BYOK provider".to_string());
+    }
+    app_core::settings::save_custom_provider(&paths, input).map_err(|e| e.to_string())
+}
 #[tauri::command]
 pub fn settings_save_provider_models(
     state: State<'_, AppState>,

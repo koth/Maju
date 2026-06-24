@@ -383,3 +383,51 @@
   border: 1px solid rgba(255, 80, 80, 0.6);
   border-radius: 2px;
 }
+
+:root[data-theme="light"] .editor-view,
+:root[data-theme="light"] .editor-view.is-breadcrumb-toolbar,
+:root[data-theme="light"] .editor-view.is-fullscreen,
+:root[data-theme="light"] .editor-preview {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .editor-toolbar,
+:root[data-theme="light"] .editor-view.is-breadcrumb-toolbar .editor-toolbar,
+:root[data-theme="light"] .editor-view.is-fullscreen .editor-toolbar {
+  border-bottom-color: #eeeeee;
+  background: #ffffff;
+  box-shadow: none;
+  color: #6b7280;
+}
+
+:root[data-theme="light"] .editor-breadcrumbs,
+:root[data-theme="light"] .editor-toolbar-path {
+  color: #7b8087;
+}
+
+:root[data-theme="light"] .editor-breadcrumb-item:not(.is-current),
+:root[data-theme="light"] .editor-breadcrumb-separator {
+  color: #8b9097;
+}
+
+:root[data-theme="light"] .editor-breadcrumb-item.is-current,
+:root[data-theme="light"] .editor-fullscreen-mode {
+  color: #202124;
+}
+
+:root[data-theme="light"] .editor-action-btn,
+:root[data-theme="light"] .editor-icon-btn {
+  color: #6b7280;
+}
+
+:root[data-theme="light"] .editor-action-btn:hover:not(:disabled),
+:root[data-theme="light"] .editor-icon-btn:hover,
+:root[data-theme="light"] .editor-filetree-toggle.is-active {
+  background: #f2f2f2;
+  color: #202124;
+}
+
+:root[data-theme="light"] .editor-view .monaco-editor .scroll-decoration,
+:root[data-theme="light"] .editor-view .monaco-editor .shadow {
+  box-shadow: none !important;
+}

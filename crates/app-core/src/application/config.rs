@@ -409,6 +409,22 @@ pub(super) fn sync_codex_agent_mode_for_policy_mode(
         .map_err(|error| error.to_string())
 }
 
+pub(super) fn queue_codex_agent_mode_for_policy_mode(
+    session: &mut SessionHandle,
+    is_codex_agent: bool,
+    policy_mode: Option<&str>,
+) -> Result<(), String> {
+    if !is_codex_agent {
+        return Ok(());
+    }
+    let Some(agent_mode) = codex_agent_mode_for_policy_mode(policy_mode.unwrap_or("Build")) else {
+        return Ok(());
+    };
+    session
+        .queue_config_option("mode", agent_mode, None)
+        .map_err(|error| error.to_string())
+}
+
 fn codex_agent_mode_for_policy_mode(policy_mode: &str) -> Option<&'static str> {
     match policy_mode.to_ascii_lowercase().as_str() {
         "plan" | "read-only" | "readonly" => Some("read-only"),

@@ -1007,3 +1007,38 @@
   overflow-y: auto;
   padding-top: 6px;
 }
+
+:root[data-theme="light"] .review-tab-panel-file-editor,
+:root[data-theme="light"] .review-tab-panel-diff-editor,
+:root[data-theme="light"] .review-editor-filetree {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .review-editor-filetree {
+  border-left-color: #eeeeee;
+}
+
+:root[data-theme="light"] .review-git-filetree {
+  background: #ffffff;
+  color: #5f6368;
+}
+
+:root[data-theme="light"] .review-git-filetree-search {
+  border-color: #eeeeee;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #9aa0a6;
+}
+
+:root[data-theme="light"] .review-git-filetree-search:focus-within {
+  border-color: #d6d9de;
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .review-git-filetree-search-input {
+  color: #202124;
+}
+
+:root[data-theme="light"] .review-git-filetree-search-input::placeholder {
+  color: #9aa0a6;
+}

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use workspace_model::{
     AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
-    ToolInvocation, ToolLogEntry, ToolStatus, UserPromptContent,
+    ToolInvocation, ToolLogEntry, ToolStatus, UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
 };
 
 mod bootstrap;
@@ -461,6 +461,10 @@ impl Application {
 
     pub(super) fn runtime_now(&self) -> Instant {
         self.runtime_clock.now()
+    }
+
+    pub fn usage_summary(&self, request: UsageSummaryRequest) -> Vec<UsageSummaryRow> {
+        self.store.query_usage_summary(request).unwrap_or_default()
     }
 
     #[cfg(test)]

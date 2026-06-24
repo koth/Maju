@@ -662,7 +662,7 @@ export function EditorView({
             onMount={handleEditorMount}
             options={{
               readOnly: false,
-              minimap: { enabled: true },
+              minimap: { enabled: false },
               scrollBeyondLastLine: false,
               fontSize: 13,
               fontFamily: "'Consolas', 'Courier New', monospace",

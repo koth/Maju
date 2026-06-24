@@ -1,10 +1,96 @@
 use super::*;
 
+struct MessagePersistenceSnapshot {
+    messages_len: usize,
+    last_message_id: Option<uuid::Uuid>,
+    last_message_body: Option<String>,
+}
+
+fn message_role_label(role: &MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "User",
+        MessageRole::Assistant => "Assistant",
+        MessageRole::System => "System",
+    }
+}
+
 impl Application {
     pub(super) fn next_seq(&mut self) -> i64 {
         let seq = self.seq_counter;
         self.seq_counter += 1;
         seq
+    }
+
+    fn message_persistence_snapshot(&self) -> MessagePersistenceSnapshot {
+        let last_message_id = self.ui.timeline.last().and_then(|item| match item {
+            TimelineItem::Message(id) => Some(*id),
+            TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+        });
+        let last_message_body = last_message_id.and_then(|id| {
+            self.ui
+                .messages
+                .iter()
+                .find(|message| message.id == id)
+                .map(|message| message.body.clone())
+        });
+
+        MessagePersistenceSnapshot {
+            messages_len: self.ui.messages.len(),
+            last_message_id,
+            last_message_body,
+        }
+    }
+
+    fn persist_changed_message(&mut self, role: &MessageRole, before: MessagePersistenceSnapshot) {
+        if self.ui.messages.len() > before.messages_len {
+            let messages = self.ui.messages[before.messages_len..]
+                .iter()
+                .filter(|message| &message.role == role)
+                .cloned()
+                .collect::<Vec<_>>();
+            for message in messages {
+                self.persist_message_record(&message);
+            }
+            return;
+        }
+
+        let Some(message_id) = before.last_message_id else {
+            return;
+        };
+        let message = self
+            .ui
+            .messages
+            .iter()
+            .find(|message| {
+                message.id == message_id
+                    && &message.role == role
+                    && before.last_message_body.as_deref() != Some(message.body.as_str())
+            })
+            .cloned();
+        if let Some(message) = message {
+            self.persist_message_record(&message);
+        }
+    }
+
+    fn persist_message_record(&mut self, message: &ChatMessage) {
+        let session_id = self.ui.session.id.to_string();
+        let role = message_role_label(&message.role);
+        let seq = self.next_seq();
+        if self
+            .store
+            .insert_message(
+                &session_id,
+                &message.id.to_string(),
+                role,
+                &message.body,
+                seq,
+            )
+            .is_err()
+        {
+            let _ = self
+                .store
+                .update_message_body(&message.id.to_string(), &message.body);
+        }
     }
 
     pub(super) fn persist_event(&mut self, event: &ClientEvent) {
@@ -45,24 +131,16 @@ impl Application {
                 }
             }
             ClientEvent::TurnFinished { .. } => {
-                // Persist the final assistant message if not already persisted
-                let msg_data = self
+                // Keep legacy final-message persistence as a fallback for old event flows.
+                let message = self
                     .ui
                     .messages
                     .iter()
                     .rev()
                     .find(|m| m.role == MessageRole::Assistant)
-                    .map(|m| (m.id.to_string(), m.body.clone()));
-
-                if let Some((id_str, body)) = msg_data {
-                    let seq = self.next_seq();
-                    if self
-                        .store
-                        .insert_message(&session_id, &id_str, "Assistant", &body, seq)
-                        .is_err()
-                    {
-                        let _ = self.store.update_message_body(&id_str, &body);
-                    }
+                    .cloned();
+                if let Some(message) = message {
+                    self.persist_message_record(&message);
                 }
                 let _ = self.store.update_session_status(&session_id, "Idle");
             }
@@ -72,6 +150,14 @@ impl Application {
             }
             ClientEvent::SessionTitleUpdated { title } => {
                 let _ = self.store.update_session_title(&session_id, title);
+            }
+            ClientEvent::UsageUpdated { usage } => {
+                let _ = self.store.append_usage_event(
+                    &session_id,
+                    usage,
+                    Some(&self.ui.session.model),
+                    self.ui.session.agent_cli.as_deref(),
+                );
             }
             ClientEvent::ToolStarted { id, .. }
             | ClientEvent::ToolCompleted { id, .. }
@@ -106,8 +192,17 @@ impl Application {
         let Some(event) = self.prepare_event_for_application(event) else {
             return;
         };
+        let message_before = match &event {
+            ClientEvent::MessageChunk { .. } => Some(self.message_persistence_snapshot()),
+            _ => None,
+        };
         self.mark_event_tools_dirty(&event);
         apply_event(&mut self.ui, event.clone());
+        if let (ClientEvent::MessageChunk { role, .. }, Some(message_before)) =
+            (&event, message_before)
+        {
+            self.persist_changed_message(role, message_before);
+        }
         self.persist_event(&event);
     }
 
@@ -179,7 +274,8 @@ impl Application {
             | ClientEvent::AvailableCommandsUpdated { .. }
             | ClientEvent::SessionTitleUpdated { .. }
             | ClientEvent::SessionConfigValueChanged { .. }
-            | ClientEvent::PlanUpdated { .. } => {}
+            | ClientEvent::PlanUpdated { .. }
+            | ClientEvent::UsageUpdated { .. } => {}
         }
     }
 

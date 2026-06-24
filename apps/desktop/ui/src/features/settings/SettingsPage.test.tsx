@@ -24,6 +24,7 @@ import {
   settingsSelectClaudeFastModel,
   settingsSaveWebToolsProviderKey,
   settingsSaveWebToolsSettings,
+  usageGetSummary,
 } from "../../lib/tauri";
 import {
   checkForAppUpdate,
@@ -66,8 +67,10 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveWebToolsProviderKey: vi.fn(),
     settingsSaveWebToolsSettings: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
+    settingsSaveCustomProvider: vi.fn(),
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
+    usageGetSummary: vi.fn(),
   };
 });
 
@@ -107,6 +110,8 @@ function providerProfile(
         ? "https://token-plan-cn.xiaomimimo.com/v1"
         : "https://token-plan-cn.xiaomimimo.com/anthropic"
       : `https://${id}.example/v1/chat/completions`,
+    custom: false,
+    protocol: null,
     default_model: id === "default" || id === "byok"
       ? null
       : isTimiAi
@@ -343,7 +348,7 @@ async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
   fireEvent.click(tab);
 }
 
-async function openSettingsPane(label: "通用" | "Web 工具" | "远程" | "已归档" | "LSP") {
+async function openSettingsPane(label: "通用" | "Web 工具" | "远程" | "已归档" | "用量" | "LSP") {
   const paneButton = await screen.findByRole("button", { name: label });
   fireEvent.click(paneButton);
 }
@@ -378,6 +383,7 @@ describe("SettingsPage LSP settings", () => {
     });
     vi.mocked(settingsSaveLspServer).mockResolvedValue(lspSnapshot("custom-ts-lsp"));
     vi.mocked(settingsResetLspServer).mockResolvedValue(lspSnapshot());
+    vi.mocked(usageGetSummary).mockResolvedValue([]);
     vi.mocked(settingsSaveProviderModels).mockImplementation(async (profileId, models) => ({
       ...agentSnapshot,
       codex_acp: {
@@ -1232,6 +1238,103 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.queryByLabelText("claude_venus_api_key")).not.toBeInTheDocument();
   });
 
+  it("renders usage summaries with token breakdowns and no pricing values", async () => {
+    vi.mocked(usageGetSummary).mockResolvedValue([
+      {
+        label: "gpt-5.1",
+        model: "gpt-5.1",
+        provider: "openai",
+        agent_cli: "codex-acp",
+        workspace_root: "D:\\work\\kodex",
+        session_id: null,
+        tokens: {
+          input_tokens: 1000,
+          output_tokens: 200,
+          cache_read_tokens: 300,
+          cache_write_tokens: 40,
+          reasoning_tokens: 50,
+          total_tokens: 1590,
+        },
+        context_peak_tokens: 128000,
+        event_count: 3,
+        session_count: 2,
+      },
+    ]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openSettingsPane("用量");
+    await screen.findByText("gpt-5.1");
+
+    expect(usageGetSummary).toHaveBeenCalledWith(expect.objectContaining({
+      group_by: "model",
+      all_workspaces: false,
+      include_archived: false,
+    }));
+    expect(screen.getByText("输入 1,000")).toBeInTheDocument();
+    expect(screen.getByText("输出 200")).toBeInTheDocument();
+    expect(screen.getByText("缓存读 300")).toBeInTheDocument();
+    expect(screen.getByText("缓存写 40")).toBeInTheDocument();
+    expect(screen.getByText("推理 50")).toBeInTheDocument();
+    expect(screen.getByText("峰值 128k")).toBeInTheDocument();
+    expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+  });
+
+  it("does not invent token breakdowns when usage rows only have context data", async () => {
+    vi.mocked(usageGetSummary).mockResolvedValue([
+      {
+        label: "context-only",
+        model: null,
+        provider: null,
+        agent_cli: "codex-acp",
+        workspace_root: "D:\\work\\kodex",
+        session_id: "s-1",
+        tokens: {},
+        context_peak_tokens: 64000,
+        event_count: 1,
+        session_count: 1,
+      },
+    ]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openSettingsPane("用量");
+    await screen.findByText("context-only");
+
+    expect(screen.queryByLabelText("token 分项")).not.toBeInTheDocument();
+    expect(screen.getByText("峰值 64k")).toBeInTheDocument();
+    expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+  });
+  it("requests usage summaries by agent, date range, workspace scope, and archived toggle", async () => {
+    vi.mocked(usageGetSummary).mockResolvedValue([]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openSettingsPane("用量");
+    await waitFor(() => expect(usageGetSummary).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "按智能体" }));
+    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
+      group_by: "agent",
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "7 天" }));
+    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
+      group_by: "agent",
+      from: expect.any(String),
+      to: expect.any(String),
+    })));
+
+    fireEvent.click(screen.getByRole("button", { name: "全部工作区" }));
+    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
+      all_workspaces: true,
+    })));
+
+    fireEvent.click(screen.getByLabelText("包含已归档"));
+    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
+      include_archived: true,
+    })));
+  });
   it("saves the shared TimiAI key from the BYOK pool on the Claude tab", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 

@@ -1,6 +1,6 @@
 use super::*;
 use agent_client_protocol::schema::{
-    PlanEntry, SessionMode, SessionModeId, SessionModeState, SessionNotification, TextContent,
+    Cost, PlanEntry, SessionMode, SessionModeId, SessionModeState, SessionNotification, TextContent,
 };
 use std::path::PathBuf;
 
@@ -379,6 +379,86 @@ fn kodex_context_compaction_started_meta_emits_structured_event() {
     assert!(rx.try_recv().is_err());
 }
 
+#[test]
+fn usage_update_maps_context_and_kodex_metadata() {
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(UsageUpdate::new(1200, 128000).meta(serde_json::Map::from_iter([(
+            "kodex.ai/usage".to_string(),
+            serde_json::json!({
+                "scope": "turn_delta",
+                "model": "gpt-5.1",
+                "provider": "openai",
+                "agent_cli": "codex-acp",
+                "input_tokens": 900,
+                "output_tokens": 200,
+                "reasoning_tokens": 100,
+                "total_tokens": 1200
+            }),
+        )]))),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => {
+            assert_eq!(usage.scope, UsageEventScope::TurnDelta);
+            assert_eq!(usage.model.as_deref(), Some("gpt-5.1"));
+            assert_eq!(usage.provider.as_deref(), Some("openai"));
+            assert_eq!(usage.agent_cli.as_deref(), Some("codex-acp"));
+            assert_eq!(usage.context.used_tokens, Some(1200));
+            assert_eq!(usage.context.window_tokens, Some(128000));
+            assert_eq!(usage.tokens.input_tokens, Some(900));
+            assert_eq!(usage.tokens.output_tokens, Some(200));
+            assert_eq!(usage.tokens.reasoning_tokens, Some(100));
+            assert_eq!(usage.tokens.total_tokens, Some(1200));
+            assert!(usage.raw_json.as_deref().unwrap().contains("turn_delta"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(rx.try_recv().is_err());
+}
+#[test]
+fn usage_update_maps_context_with_malformed_metadata_and_ignores_cost() {
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(
+            UsageUpdate::new(33, 4096)
+                .cost(Cost::new(1.23, "USD"))
+                .meta(serde_json::Map::from_iter([(
+                    "kodex.ai/usage".to_string(),
+                    serde_json::json!({
+                        "scope": 7,
+                        "model": "",
+                        "agent_cli": "",
+                        "input_tokens": "not a number",
+                        "total_tokens": -10
+                    }),
+                )])),
+        ),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => {
+            assert_eq!(usage.scope, UsageEventScope::ContextSnapshot);
+            assert_eq!(usage.model, None);
+            assert_eq!(usage.agent_cli, None);
+            assert_eq!(usage.context.used_tokens, Some(33));
+            assert_eq!(usage.context.window_tokens, Some(4096));
+            assert_eq!(usage.tokens.input_tokens, None);
+            assert_eq!(usage.tokens.total_tokens, None);
+            let raw_json = usage.raw_json.as_deref().unwrap();
+            assert!(raw_json.contains("not a number"));
+            assert!(!raw_json.contains("USD"));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(rx.try_recv().is_err());
+}
 #[test]
 fn plan_update_emits_normalized_plan_event() {
     let (tx, rx) = mpsc::channel();

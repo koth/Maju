@@ -5,7 +5,7 @@ use agent_client_protocol::schema::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionInfoUpdate, SessionModeState, SessionModelState,
     SessionNotification, SessionUpdate, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields,
+    ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
 };
 use anyhow::{Context, anyhow};
 use serde_json::Value;
@@ -17,7 +17,7 @@ use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, AvailableCommand, DiffHunk,
     DiffLine, DiffLineKind, MessageRole, PermissionOption, SessionConfigCategory,
     SessionConfigChoice, SessionConfigControl, SessionConfigSource, SessionConfigState,
-    TerminalOutput,
+    TerminalOutput, UsageContextSnapshot, UsageEvent, UsageEventScope, UsageTokenBreakdown,
 };
 
 mod codebuddy;
@@ -80,6 +80,7 @@ pub(crate) fn emit_notification(
         SessionUpdate::CurrentModeUpdate(update) => emit_current_mode_update(tx, update),
         SessionUpdate::Plan(plan) => emit_plan_update(tx, plan),
         SessionUpdate::AvailableCommandsUpdate(update) => emit_available_commands(tx, update),
+        SessionUpdate::UsageUpdate(update) => emit_usage_update(tx, update, &raw_notification),
         SessionUpdate::SessionInfoUpdate(update) => {
             // Emit title update if present
             if let Some(title) = update.title.value() {
@@ -231,6 +232,119 @@ pub fn diff_to_hunks(old_text: Option<&str>, new_text: &str) -> Vec<DiffHunk> {
 
 fn normalize_diff_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn emit_usage_update(
+    tx: &mpsc::Sender<ClientEvent>,
+    update: UsageUpdate,
+    raw_notification: &Value,
+) -> anyhow::Result<()> {
+    let update_meta = update.meta.as_ref().and_then(|meta| meta.get("kodex.ai/usage"));
+    let notification_meta = raw_notification
+        .get("_meta")
+        .and_then(|meta| meta.get("kodex.ai/usage"));
+    let meta = update_meta.or(notification_meta);
+    let tokens = usage_tokens_from_meta(meta);
+    let usage = UsageEvent {
+        scope: meta
+            .and_then(|value| value.get("scope"))
+            .and_then(Value::as_str)
+            .map(usage_scope_from_str)
+            .unwrap_or_default(),
+        model: usage_string_field(meta, "model"),
+        provider: usage_string_field(meta, "provider"),
+        agent_cli: usage_string_field(meta, "agent_cli"),
+        tokens,
+        context: UsageContextSnapshot {
+            used_tokens: Some(update.used),
+            window_tokens: Some(update.size),
+            updated_at: None,
+        },
+        timestamp: None,
+        raw_json: meta.and_then(|value| serde_json::to_string(value).ok()),
+    };
+
+    tx.send(ClientEvent::UsageUpdated { usage })
+        .map_err(|_| anyhow!("failed to emit usage update"))
+}
+
+fn usage_scope_from_str(value: &str) -> UsageEventScope {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "turn_delta" => UsageEventScope::TurnDelta,
+        "session_total" => UsageEventScope::SessionTotal,
+        _ => UsageEventScope::ContextSnapshot,
+    }
+}
+
+fn usage_string_field(meta: Option<&Value>, key: &str) -> Option<String> {
+    meta.and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
+    let Some(meta) = meta else {
+        return UsageTokenBreakdown::default();
+    };
+    let input_tokens = usage_u64_field(meta, &["input_tokens", "inputTokens", "prompt_tokens"]);
+    let output_tokens = usage_u64_field(meta, &["output_tokens", "outputTokens", "completion_tokens"]);
+    let cache_read_tokens = usage_u64_field(
+        meta,
+        &[
+            "cache_read_tokens",
+            "cacheReadTokens",
+            "cached_read_tokens",
+            "cachedReadTokens",
+            "cache_read_input_tokens",
+        ],
+    );
+    let cache_write_tokens = usage_u64_field(
+        meta,
+        &[
+            "cache_write_tokens",
+            "cacheWriteTokens",
+            "cached_write_tokens",
+            "cachedWriteTokens",
+            "cache_creation_input_tokens",
+        ],
+    );
+    let reasoning_tokens = usage_u64_field(meta, &["reasoning_tokens", "reasoningTokens"]);
+    let total_tokens = usage_u64_field(meta, &["total_tokens", "totalTokens", "total"]).or_else(|| {
+        let parts = [
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            reasoning_tokens,
+        ];
+        if parts.iter().any(Option::is_some) {
+            Some(parts.into_iter().flatten().sum())
+        } else {
+            None
+        }
+    });
+
+    UsageTokenBreakdown {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+        total_tokens,
+    }
+}
+
+fn usage_u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|field| {
+            field
+                .as_u64()
+                .or_else(|| field.as_i64().and_then(|value| u64::try_from(value).ok()))
+                .or_else(|| field.as_str().and_then(|value| value.trim().parse().ok()))
+        })
+    })
 }
 
 fn emit_content(

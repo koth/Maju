@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentPlanDockProgressSignature,
+  agentPlanProgressSignature,
   findPendingPermissionRequest,
   findPendingPlanApproval,
   isTerminalDockAvailableForWorkspace,
   pendingPermissionRequestIds,
+  shouldAutoOpenAgentPlanDock,
   shouldRenderTerminalDock,
 } from "./Workbench";
-import type { ToolInvocation, WorkspaceDescriptor } from "../../types";
+import type { AgentPlanEntry, ToolInvocation, UiSnapshot, WorkspaceDescriptor } from "../../types";
+import type { TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 
 describe("findPendingPlanApproval", () => {
   it("recognizes CodeBuddy ExitPlanMode permission options", () => {
@@ -78,6 +82,109 @@ describe("findPendingPlanApproval", () => {
     expect(approval?.planText).toContain("# Negative Terms Plan");
     expect(approval?.planText).not.toContain(".codebuddy/plans");
   });
+
+  it("ignores CodeBuddy missing-plan warning when a recent plan file write exists", () => {
+    const approval = findPendingPlanApproval([
+      tool({
+        call_id: "write-plan",
+        name: "Write implementation plan",
+        status: "Succeeded",
+        raw_input: JSON.stringify({
+          file_path: "C:/Users/yvonchen/.codebuddy/plans/swift-cascade-babbage.md",
+          content: "# Scene Elements Plan\n\n## Goal\nExtract element dimensions.",
+        }),
+      }),
+      tool({
+        name: "ExitPlanMode",
+        detail_text: "Plan mode exited. Warning: Plan file was not found or empty.",
+        raw_input: JSON.stringify({ allowedPrompts: [] }),
+        permission_options: [
+          { id: "default", label: "Default", kind: "AllowOnce" },
+          { id: "plan", label: "Plan", kind: "RejectOnce" },
+          { id: "rejectAndExitPlan", label: "Stop planning", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(approval?.requestId).toBe("call-exit-plan");
+    expect(approval?.planText).toContain("# Scene Elements Plan");
+    expect(approval?.planText).not.toContain("Plan mode exited");
+  });
+
+  it("ignores CodeBuddy missing-plan warning from raw input plan field", () => {
+    const approval = findPendingPlanApproval([
+      tool({
+        call_id: "write-plan",
+        name: "Write implementation plan",
+        status: "Succeeded",
+        raw_input: JSON.stringify({
+          file_path: "C:/Users/yvonchen/.codebuddy/plans/swift-cascade-babbage.md",
+          content: "# Scene Elements Plan\n\n## Goal\nExtract element dimensions.",
+        }),
+      }),
+      tool({
+        name: "ExitPlanMode",
+        raw_input: JSON.stringify({
+          plan: "Plan mode exited. Warning: Plan file was not found or empty.",
+        }),
+        permission_options: [
+          { id: "default", label: "Default", kind: "AllowOnce" },
+          { id: "plan", label: "Plan", kind: "RejectOnce" },
+          { id: "rejectAndExitPlan", label: "Stop planning", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(approval?.requestId).toBe("call-exit-plan");
+    expect(approval?.planText).toContain("# Scene Elements Plan");
+    expect(approval?.planText).not.toContain("Plan mode exited");
+  });
+  it("uses a recent CodeBuddy plan edit as fallback when ExitPlanMode only has a warning", () => {
+    const approval = findPendingPlanApproval([
+      tool({
+        call_id: "edit-plan",
+        name: "Edit",
+        status: "Succeeded",
+        raw_input: JSON.stringify({
+          file_path: "C:/Users/yvonchen/.codebuddy/plans/swift-cascade-babbage.md",
+          old_string: "",
+          new_string: "## 执行细节补充\n\n### A. extractor.ts 的 prompt 与输出契约\n\n输出严格 JSON。",
+        }),
+        diff_previews: [
+          {
+            path: "C:/Users/yvonchen/.codebuddy/plans/swift-cascade-babbage.md",
+            hunks: [
+              {
+                heading: "@@",
+                lines: [
+                  { kind: "Added", content: "## 执行细节补充" },
+                  { kind: "Added", content: "" },
+                  { kind: "Added", content: "### A. extractor.ts 的 prompt 与输出契约" },
+                  { kind: "Added", content: "" },
+                  { kind: "Added", content: "输出严格 JSON。" },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+      tool({
+        name: "ExitPlanMode",
+        detail_text: "Plan mode exited. Warning: Plan file was not found or empty.",
+        raw_input: JSON.stringify({ allowedPrompts: [] }),
+        permission_options: [
+          { id: "default", label: "Default", kind: "AllowOnce" },
+          { id: "plan", label: "Plan", kind: "RejectOnce" },
+          { id: "rejectAndExitPlan", label: "Stop planning", kind: "RejectOnce" },
+        ],
+      }),
+    ]);
+
+    expect(approval?.requestId).toBe("call-exit-plan");
+    expect(approval?.planText).toContain("## 执行细节补充");
+    expect(approval?.planText).toContain("输出严格 JSON");
+    expect(approval?.planText).not.toContain("Plan mode exited");
+  });
 });
 
 describe("terminal dock availability", () => {
@@ -95,6 +202,121 @@ describe("terminal dock availability", () => {
 
     expect(isTerminalDockAvailableForWorkspace(remoteWorkspace)).toBe(true);
     expect(shouldRenderTerminalDock(remoteWorkspace, true)).toBe(true);
+  });
+});
+
+describe("agent plan dock auto-open", () => {
+  const entry: AgentPlanEntry = {
+    id: "task-1",
+    content: "检查现有实现",
+    priority: "medium",
+    status: "pending",
+  };
+
+  it("tracks task content and status changes in the progress signature", () => {
+    const firstSignature = agentPlanProgressSignature([entry]);
+    const completedSignature = agentPlanProgressSignature([
+      { ...entry, status: "completed" },
+    ]);
+    const renamedSignature = agentPlanProgressSignature([
+      { ...entry, content: "补充验证" },
+    ]);
+
+    expect(firstSignature).toBe(agentPlanProgressSignature([entry]));
+    expect(completedSignature).not.toBe(firstSignature);
+    expect(renamedSignature).not.toBe(firstSignature);
+  });
+
+  it("opens for new live progress only while a turn is active in the conversation", () => {
+    const currentSignature = agentPlanProgressSignature([entry]);
+    const base = {
+      entryCount: 1,
+      sessionStatus: "Streaming" as const,
+      activeTabType: "conversation" as const,
+      reviewPanelExpanded: false,
+      currentSignature,
+      lastAutoOpenedSignature: null,
+    };
+
+    expect(shouldAutoOpenAgentPlanDock(base)).toBe(true);
+    expect(shouldAutoOpenAgentPlanDock({ ...base, sessionStatus: "Idle" })).toBe(false);
+    expect(shouldAutoOpenAgentPlanDock({ ...base, activeTabType: "editor" })).toBe(false);
+    expect(shouldAutoOpenAgentPlanDock({ ...base, activeTabType: "changes" })).toBe(false);
+    expect(shouldAutoOpenAgentPlanDock({ ...base, reviewPanelExpanded: true })).toBe(false);
+    expect(shouldAutoOpenAgentPlanDock({ ...base, entryCount: 0 })).toBe(false);
+    expect(shouldAutoOpenAgentPlanDock({
+      ...base,
+      lastAutoOpenedSignature: currentSignature,
+    })).toBe(false);
+  });
+
+  it("opens for live environment progress even when there are no plan entries", () => {
+    const snapshot = makeSnapshot({ agent_plan: [] });
+    const liveTurnChanges: TimelineTurnChangeSet = {
+      changeSetId: "changes-live",
+      updatedAt: "2026-06-23T00:00:00Z",
+      files: [
+        {
+          change_set_id: "changes-live",
+          path: "src/app.ts",
+          change_type: "Modified",
+          added_lines: 2,
+          removed_lines: 1,
+          quality: "Exact",
+          updated_at: "2026-06-23T00:00:00Z",
+        },
+      ],
+    };
+    const currentSignature = agentPlanDockProgressSignature(snapshot, liveTurnChanges);
+
+    expect(currentSignature).toContain("changes:");
+    expect(shouldAutoOpenAgentPlanDock({
+      entryCount: 0,
+      hasProgress: currentSignature.length > 0,
+      sessionStatus: "WaitingForTool",
+      activeTabType: "conversation",
+      reviewPanelExpanded: false,
+      currentSignature,
+      lastAutoOpenedSignature: null,
+    })).toBe(true);
+  });
+
+  it("does not treat persisted turn changes as live dock progress when live changes are absent", () => {
+    const snapshot = makeSnapshot({
+      agent_plan: [],
+      turn_changes: [
+        {
+          message_id: "message-1",
+          changes: [
+            {
+              path: "src/app.ts",
+              change_type: "Modified",
+              old_text: "old",
+              new_text: "new",
+              added_lines: 2,
+              removed_lines: 1,
+              timestamp: "2026-06-23T00:00:00Z",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(agentPlanDockProgressSignature(snapshot, null)).toBe("");
+  });
+
+  it("treats live usage as environment progress for the dock", () => {
+    const snapshot = makeSnapshot({
+      agent_plan: [],
+      usage: {
+        context: { used_tokens: 1200, window_tokens: 128000, updated_at: "2026-06-23T00:00:00Z" },
+        current_turn: { total_tokens: 1200 },
+        session_total: {},
+        by_model: [],
+      },
+    });
+
+    expect(agentPlanDockProgressSignature(snapshot)).toContain("usage");
   });
 });
 
@@ -246,6 +468,36 @@ describe("findPendingPermissionRequest", () => {
   });
 });
 
+function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
+  return {
+    revision: 1,
+    workspace: { id: "ws-1", name: "kodex", root: "D:/work/kodex" },
+    session: {
+      id: "session-1",
+      workspace_id: "ws-1",
+      title: "Session",
+      model: "gpt-5.1",
+      mode: null,
+      agent_cli: null,
+      status: "Streaming",
+    },
+    session_config: { hydrated: true, controls: [] },
+    prompt_capabilities: { image: true, embedded_context: true, session_steer: false },
+    available_commands: [],
+    agent_plan: [],
+    messages: [],
+    timeline: [],
+    tools: [],
+    repository: { branch: "main", head: "abc123", changed_files: [] },
+    inspector_tab: "Activity",
+    inspector_sections: [],
+    session_changes: [],
+    review_changes: [],
+    turn_changes: [],
+    thinking_status: null,
+    ...overrides,
+  };
+}
 function tool(overrides: Partial<ToolInvocation>): ToolInvocation {
   return {
     id: "tool-1",

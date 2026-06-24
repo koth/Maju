@@ -321,6 +321,7 @@ impl Application {
             review_changes: self.ui.review_changes.clone(),
             turn_changes: self.ui.turn_changes.clone(),
             thinking_status: self.ui.thinking_status.clone(),
+            usage: self.ui.usage.clone(),
         }
     }
 
@@ -460,6 +461,7 @@ impl Application {
             review_changes: self.ui.review_changes.clone(),
             turn_changes: self.ui.turn_changes.clone(),
             thinking_status: self.ui.thinking_status.clone(),
+            usage: self.ui.usage.clone(),
         }))
     }
 }

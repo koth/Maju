@@ -33,7 +33,7 @@ pub(crate) enum RuntimeCommand {
         config_id: String,
         value_id: String,
         provider: Option<String>,
-        reply_tx: mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>,
+        reply_tx: Option<mpsc::Sender<anyhow::Result<Vec<ClientEvent>>>>,
     },
     SetMode {
         mode_id: String,

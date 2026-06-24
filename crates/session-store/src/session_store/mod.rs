@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
@@ -24,10 +25,26 @@ use util::{
 use workspace_model::{
     ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
     FileChangeRecord, FileChangeSummary, FileChangeType, MessageRole, SessionFileChange,
-    SessionListItem, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
+    SessionListItem, SessionUsageSnapshot, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
+    TurnFileChanges, UsageContextSnapshot, UsageEvent, UsageEventScope, UsageModelSummary,
+    UsageSummaryGroupBy, UsageSummaryRequest, UsageSummaryRow, UsageTokenBreakdown,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone)]
+struct StoredUsageEvent {
+    session_id: String,
+    session_title: Option<String>,
+    workspace_root: String,
+    agent_cli: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    scope: UsageEventScope,
+    tokens: UsageTokenBreakdown,
+    context: UsageContextSnapshot,
+    created_at: String,
+}
 
 pub struct SessionStore {
     conn: Connection,
@@ -183,6 +200,26 @@ impl SessionStore {
                 PRIMARY KEY (change_set_id, path)
             );
 
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                workspace_root TEXT NOT NULL,
+                agent_cli TEXT,
+                provider TEXT,
+                model TEXT,
+                scope TEXT NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                total_tokens INTEGER,
+                context_used_tokens INTEGER,
+                context_window_tokens INTEGER,
+                raw_json TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_tools_session ON tool_invocations(session_id, seq);
             CREATE INDEX IF NOT EXISTS idx_file_changes_session ON session_file_changes(session_id);
@@ -192,6 +229,8 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_change_sets_session_source ON change_sets(session_id, source, updated_at);
             CREATE INDEX IF NOT EXISTS idx_change_sets_message ON change_sets(message_id);
             CREATE INDEX IF NOT EXISTS idx_change_set_files_change_set ON change_set_files(change_set_id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_workspace ON usage_events(workspace_root, created_at);
             ",
         )?;
 
@@ -826,6 +865,176 @@ impl SessionStore {
             params![status, capped_output, error, id],
         )?;
         Ok(())
+    }
+
+    // ── Usage events ──
+
+    pub fn append_usage_event(
+        &self,
+        session_id: &str,
+        event: &UsageEvent,
+        fallback_model: Option<&str>,
+        fallback_agent_cli: Option<&str>,
+    ) -> Result<()> {
+        let workspace_root = if self.workspace_root.is_empty() {
+            self.conn
+                .query_row(
+                    "SELECT workspace_root FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            self.workspace_root.clone()
+        };
+        let created_at = event.timestamp.clone().unwrap_or_else(now_iso);
+        let model = event
+            .model
+            .as_deref()
+            .or(fallback_model)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let agent_cli = event
+            .agent_cli
+            .as_deref()
+            .or(fallback_agent_cli)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let provider = event
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        self.conn.execute(
+            "INSERT INTO usage_events (
+                id, session_id, workspace_root, agent_cli, provider, model, scope,
+                input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                reasoning_tokens, total_tokens, context_used_tokens, context_window_tokens,
+                raw_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                Uuid::new_v4().to_string(),
+                session_id,
+                workspace_root,
+                agent_cli,
+                provider,
+                model,
+                usage_scope_to_str(&event.scope),
+                opt_i64(event.tokens.input_tokens),
+                opt_i64(event.tokens.output_tokens),
+                opt_i64(event.tokens.cache_read_tokens),
+                opt_i64(event.tokens.cache_write_tokens),
+                opt_i64(event.tokens.reasoning_tokens),
+                opt_i64(event.tokens.total_tokens),
+                opt_i64(event.context.used_tokens),
+                opt_i64(event.context.window_tokens),
+                event.raw_json,
+                created_at,
+            ],
+        )?;
+        self.touch_session(session_id)?;
+        Ok(())
+    }
+
+    pub fn load_session_usage_snapshot(&self, session_id: &str) -> Result<SessionUsageSnapshot> {
+        let events = self.load_usage_events_for_session(session_id)?;
+        Ok(session_usage_snapshot_from_events(&events))
+    }
+
+    pub fn query_usage_summary(
+        &self,
+        request: UsageSummaryRequest,
+    ) -> Result<Vec<UsageSummaryRow>> {
+        let events = self.load_usage_events_for_summary(&request)?;
+        Ok(usage_summary_from_events(&events, request.group_by))
+    }
+
+    fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
+                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
+                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
+                    u.created_at
+             FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id
+             WHERE u.session_id = ?1
+             ORDER BY u.created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], stored_usage_event_from_row)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    fn load_usage_events_for_summary(
+        &self,
+        request: &UsageSummaryRequest,
+    ) -> Result<Vec<StoredUsageEvent>> {
+        let mut sql = String::from(
+            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
+                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
+                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
+                    u.created_at
+             FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id
+             WHERE 1 = 1",
+        );
+        let mut params_vec = Vec::<String>::new();
+        if !request.all_workspaces {
+            let workspace_root = request
+                .workspace_root
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    if self.workspace_root.is_empty() {
+                        None
+                    } else {
+                        Some(self.workspace_root.clone())
+                    }
+                });
+            if let Some(workspace_root) = workspace_root {
+                sql.push_str(" AND u.workspace_root = ?");
+                params_vec.push(workspace_root);
+            }
+        }
+        if !request.include_archived {
+            sql.push_str(" AND s.archived_at IS NULL");
+        }
+        if let Some(session_id) = request
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            sql.push_str(" AND u.session_id = ?");
+            params_vec.push(session_id.to_string());
+        }
+        if let Some(from) = request.from.as_deref().filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND u.created_at >= ?");
+            params_vec.push(from.to_string());
+        }
+        if let Some(to) = request.to.as_deref().filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND u.created_at <= ?");
+            params_vec.push(to.to_string());
+        }
+        sql.push_str(" ORDER BY u.created_at ASC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs = params_vec.iter().map(|value| value as &dyn ToSql);
+        let rows = stmt.query_map(params_from_iter(param_refs), stored_usage_event_from_row)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
     }
 
     // ── Session loading ──
@@ -1775,6 +1984,334 @@ impl SessionStore {
         }
         Ok(items)
     }
+}
+
+fn stored_usage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredUsageEvent> {
+    let scope: String = row.get(6)?;
+    let created_at: String = row.get(15)?;
+    Ok(StoredUsageEvent {
+        session_id: row.get(0)?,
+        session_title: row.get(1)?,
+        workspace_root: row.get(2)?,
+        agent_cli: row.get(3)?,
+        provider: row.get(4)?,
+        model: row.get(5)?,
+        scope: usage_scope_from_str(&scope),
+        tokens: UsageTokenBreakdown {
+            input_tokens: opt_u64(row.get::<_, Option<i64>>(7)?),
+            output_tokens: opt_u64(row.get::<_, Option<i64>>(8)?),
+            cache_read_tokens: opt_u64(row.get::<_, Option<i64>>(9)?),
+            cache_write_tokens: opt_u64(row.get::<_, Option<i64>>(10)?),
+            reasoning_tokens: opt_u64(row.get::<_, Option<i64>>(11)?),
+            total_tokens: opt_u64(row.get::<_, Option<i64>>(12)?),
+        },
+        context: UsageContextSnapshot {
+            used_tokens: opt_u64(row.get::<_, Option<i64>>(13)?),
+            window_tokens: opt_u64(row.get::<_, Option<i64>>(14)?),
+            updated_at: Some(created_at.clone()),
+        },
+        created_at,
+    })
+}
+
+fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsageSnapshot {
+    let mut snapshot = SessionUsageSnapshot::default();
+    for event in events {
+        if event.context.used_tokens.is_some() {
+            snapshot.context.used_tokens = event.context.used_tokens;
+        }
+        if event.context.window_tokens.is_some() {
+            snapshot.context.window_tokens = event.context.window_tokens;
+        }
+        if event.context.updated_at.is_some() {
+            snapshot.context.updated_at = event.context.updated_at.clone();
+        }
+
+        match event.scope {
+            UsageEventScope::TurnDelta => {
+                snapshot.current_turn = event.tokens.clone();
+                add_usage_tokens(&mut snapshot.session_total, &event.tokens);
+            }
+            UsageEventScope::SessionTotal => {
+                if has_usage_tokens(&event.tokens) {
+                    snapshot.session_total = event.tokens.clone();
+                }
+            }
+            UsageEventScope::ContextSnapshot => {
+                if has_usage_tokens(&event.tokens) {
+                    snapshot.current_turn = event.tokens.clone();
+                }
+            }
+        }
+        update_usage_summary_row(
+            &mut snapshot.by_model,
+            None,
+            event.model.clone().or_else(|| Some("Unknown model".into())),
+            event.model.clone(),
+            event.provider.clone(),
+            event.agent_cli.clone(),
+            None,
+            None,
+            event,
+        );
+    }
+    snapshot
+}
+
+fn usage_summary_from_events(
+    events: &[StoredUsageEvent],
+    group_by: UsageSummaryGroupBy,
+) -> Vec<UsageSummaryRow> {
+    let mut rows = Vec::<UsageSummaryRow>::new();
+    let mut sessions_by_key = HashMap::<String, HashSet<String>>::new();
+    for event in events {
+        let (key, label, model, provider, agent_cli, session_id, workspace_root) = match group_by {
+            UsageSummaryGroupBy::Model => {
+                let label = event
+                    .model
+                    .clone()
+                    .or_else(|| event.agent_cli.clone())
+                    .unwrap_or_else(|| "Unknown model".into());
+                (
+                    format!(
+                        "model:{}:{}:{}",
+                        event.model.as_deref().unwrap_or(""),
+                        event.provider.as_deref().unwrap_or(""),
+                        event.agent_cli.as_deref().unwrap_or("")
+                    ),
+                    label.clone(),
+                    event.model.clone(),
+                    event.provider.clone(),
+                    event.agent_cli.clone(),
+                    None,
+                    None,
+                )
+            }
+            UsageSummaryGroupBy::Agent => {
+                let label = event
+                    .agent_cli
+                    .clone()
+                    .unwrap_or_else(|| "Unknown agent".into());
+                (
+                    format!("agent:{}", event.agent_cli.as_deref().unwrap_or("")),
+                    label,
+                    None,
+                    event.provider.clone(),
+                    event.agent_cli.clone(),
+                    None,
+                    None,
+                )
+            }
+            UsageSummaryGroupBy::Workspace => {
+                let label = event.workspace_root.clone();
+                (
+                    format!("workspace:{}", event.workspace_root),
+                    label.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(label),
+                )
+            }
+            UsageSummaryGroupBy::Session => {
+                let label = event
+                    .session_title
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| event.session_id.clone());
+                (
+                    format!("session:{}", event.session_id),
+                    label,
+                    event.model.clone(),
+                    event.provider.clone(),
+                    event.agent_cli.clone(),
+                    Some(event.session_id.clone()),
+                    Some(event.workspace_root.clone()),
+                )
+            }
+        };
+        sessions_by_key
+            .entry(key.clone())
+            .or_default()
+            .insert(event.session_id.clone());
+        update_usage_summary_row(
+            &mut rows,
+            Some(&key),
+            Some(label),
+            model,
+            provider,
+            agent_cli,
+            session_id,
+            workspace_root,
+            event,
+        );
+    }
+
+    for row in &mut rows {
+        let key = usage_summary_key(row, &group_by);
+        row.session_count = sessions_by_key
+            .get(&key)
+            .map(|sessions| sessions.len() as u64)
+            .unwrap_or(row.session_count);
+    }
+    rows.sort_by(|a, b| {
+        usage_total_tokens(&b.tokens)
+            .cmp(&usage_total_tokens(&a.tokens))
+            .then_with(|| b.latest_at.cmp(&a.latest_at))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    rows
+}
+
+fn update_usage_summary_row(
+    rows: &mut Vec<UsageModelSummary>,
+    explicit_key: Option<&str>,
+    label: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    agent_cli: Option<String>,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    event: &StoredUsageEvent,
+) {
+    let key = explicit_key.map(str::to_string).unwrap_or_else(|| {
+        format!(
+            "model:{}:{}:{}",
+            model.as_deref().unwrap_or(""),
+            provider.as_deref().unwrap_or(""),
+            agent_cli.as_deref().unwrap_or("")
+        )
+    });
+    let index = rows.iter().position(|row| usage_row_matches_key(row, &key));
+    let row = if let Some(index) = index {
+        &mut rows[index]
+    } else {
+        rows.push(UsageModelSummary {
+            label: label.unwrap_or_else(|| "Unknown model".into()),
+            model,
+            provider,
+            agent_cli,
+            session_id,
+            workspace_root,
+            event_count: 0,
+            session_count: 1,
+            tokens: UsageTokenBreakdown::default(),
+            context_peak_tokens: None,
+            latest_at: None,
+        });
+        rows.last_mut().expect("usage row just inserted")
+    };
+
+    row.event_count += 1;
+    row.latest_at = Some(
+        row.latest_at
+            .as_ref()
+            .map(|latest| latest.max(&event.created_at).clone())
+            .unwrap_or_else(|| event.created_at.clone()),
+    );
+    if let Some(used) = event.context.used_tokens {
+        row.context_peak_tokens = Some(row.context_peak_tokens.unwrap_or(0).max(used));
+    }
+    match event.scope {
+        UsageEventScope::TurnDelta => add_usage_tokens(&mut row.tokens, &event.tokens),
+        UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
+            row.tokens = event.tokens.clone();
+        }
+        _ => {}
+    }
+}
+
+fn usage_row_matches_key(row: &UsageSummaryRow, key: &str) -> bool {
+    if let Some(session_id) = key.strip_prefix("session:") {
+        return row.session_id.as_deref() == Some(session_id);
+    }
+    if let Some(agent_cli) = key.strip_prefix("agent:") {
+        return row.agent_cli.as_deref().unwrap_or("") == agent_cli;
+    }
+    if let Some(workspace_root) = key.strip_prefix("workspace:") {
+        return row.workspace_root.as_deref().unwrap_or("") == workspace_root;
+    }
+    usage_summary_key_by_values(row) == key
+}
+
+fn usage_summary_key(row: &UsageSummaryRow, group_by: &UsageSummaryGroupBy) -> String {
+    match group_by {
+        UsageSummaryGroupBy::Model => usage_summary_key_by_values(row),
+        UsageSummaryGroupBy::Agent => format!("agent:{}", row.agent_cli.as_deref().unwrap_or("")),
+        UsageSummaryGroupBy::Workspace => format!("workspace:{}", row.workspace_root.as_deref().unwrap_or("")),
+        UsageSummaryGroupBy::Session => format!("session:{}", row.session_id.as_deref().unwrap_or("")),
+    }
+}
+
+fn usage_summary_key_by_values(row: &UsageSummaryRow) -> String {
+    if row.session_id.is_some() {
+        return format!("session:{}", row.session_id.as_deref().unwrap_or(""));
+    }
+    format!(
+        "model:{}:{}:{}",
+        row.model.as_deref().unwrap_or(""),
+        row.provider.as_deref().unwrap_or(""),
+        row.agent_cli.as_deref().unwrap_or("")
+    )
+}
+
+fn usage_scope_to_str(scope: &UsageEventScope) -> &'static str {
+    match scope {
+        UsageEventScope::ContextSnapshot => "context_snapshot",
+        UsageEventScope::TurnDelta => "turn_delta",
+        UsageEventScope::SessionTotal => "session_total",
+    }
+}
+
+fn usage_scope_from_str(value: &str) -> UsageEventScope {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "turn_delta" => UsageEventScope::TurnDelta,
+        "session_total" => UsageEventScope::SessionTotal,
+        _ => UsageEventScope::ContextSnapshot,
+    }
+}
+
+fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
+    tokens.input_tokens.is_some()
+        || tokens.output_tokens.is_some()
+        || tokens.cache_read_tokens.is_some()
+        || tokens.cache_write_tokens.is_some()
+        || tokens.reasoning_tokens.is_some()
+        || tokens.total_tokens.is_some()
+}
+
+fn add_usage_tokens(target: &mut UsageTokenBreakdown, delta: &UsageTokenBreakdown) {
+    add_optional_u64(&mut target.input_tokens, delta.input_tokens);
+    add_optional_u64(&mut target.output_tokens, delta.output_tokens);
+    add_optional_u64(&mut target.cache_read_tokens, delta.cache_read_tokens);
+    add_optional_u64(&mut target.cache_write_tokens, delta.cache_write_tokens);
+    add_optional_u64(&mut target.reasoning_tokens, delta.reasoning_tokens);
+    add_optional_u64(&mut target.total_tokens, delta.total_tokens);
+}
+
+fn add_optional_u64(target: &mut Option<u64>, delta: Option<u64>) {
+    if let Some(delta) = delta {
+        *target = Some(target.unwrap_or(0).saturating_add(delta));
+    }
+}
+
+fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {
+    tokens.total_tokens.unwrap_or_else(|| {
+        tokens.input_tokens.unwrap_or(0)
+            + tokens.output_tokens.unwrap_or(0)
+            + tokens.cache_read_tokens.unwrap_or(0)
+            + tokens.cache_write_tokens.unwrap_or(0)
+            + tokens.reasoning_tokens.unwrap_or(0)
+    })
+}
+
+fn opt_i64(value: Option<u64>) -> Option<i64> {
+    value.map(|value| value.min(i64::MAX as u64) as i64)
+}
+
+fn opt_u64(value: Option<i64>) -> Option<u64> {
+    value.and_then(|value| u64::try_from(value).ok())
 }
 
 #[cfg(test)]

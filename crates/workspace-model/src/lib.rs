@@ -951,6 +951,138 @@ pub struct TurnFileChanges {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageEventScope {
+    ContextSnapshot,
+    TurnDelta,
+    SessionTotal,
+}
+
+impl Default for UsageEventScope {
+    fn default() -> Self {
+        Self::ContextSnapshot
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageTokenBreakdown {
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageContextSnapshot {
+    #[serde(default)]
+    pub used_tokens: Option<u64>,
+    #[serde(default)]
+    pub window_tokens: Option<u64>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageEvent {
+    #[serde(default)]
+    pub scope: UsageEventScope,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<String>,
+    #[serde(default)]
+    pub tokens: UsageTokenBreakdown,
+    #[serde(default)]
+    pub context: UsageContextSnapshot,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub raw_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageModelSummary {
+    pub label: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub agent_cli: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub session_count: u64,
+    #[serde(default)]
+    pub tokens: UsageTokenBreakdown,
+    #[serde(default)]
+    pub context_peak_tokens: Option<u64>,
+    #[serde(default)]
+    pub latest_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionUsageSnapshot {
+    #[serde(default)]
+    pub context: UsageContextSnapshot,
+    #[serde(default)]
+    pub current_turn: UsageTokenBreakdown,
+    #[serde(default)]
+    pub session_total: UsageTokenBreakdown,
+    #[serde(default)]
+    pub by_model: Vec<UsageModelSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSummaryGroupBy {
+    Model,
+    Agent,
+    Workspace,
+    Session,
+}
+
+impl Default for UsageSummaryGroupBy {
+    fn default() -> Self {
+        Self::Model
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageSummaryRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub all_workspaces: bool,
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub group_by: UsageSummaryGroupBy,
+}
+
+pub type UsageSummaryRow = UsageModelSummary;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiSnapshot {
     #[serde(default)]
     pub revision: u64,
@@ -979,6 +1111,8 @@ pub struct UiSnapshot {
     pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
+    #[serde(default)]
+    pub usage: SessionUsageSnapshot,
 }
 
 fn default_true() -> bool {
@@ -1019,6 +1153,8 @@ pub struct UiSnapshotPatch {
     pub turn_changes: Vec<TurnFileChanges>,
     #[serde(default)]
     pub thinking_status: Option<ThinkingStatus>,
+    #[serde(default)]
+    pub usage: SessionUsageSnapshot,
 }
 
 // ── Search types ──
@@ -1121,6 +1257,28 @@ pub enum AgentProviderProxyKind {
     CompletionToClaude,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomProviderProtocol {
+    ChatCompletions,
+    Responses,
+    AnthropicMessages,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomProviderInput {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub endpoint: String,
+    pub protocol: CustomProviderProtocol,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model_list_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProviderProfile {
     pub family: AgentProviderFamily,
@@ -1130,6 +1288,10 @@ pub struct AgentProviderProfile {
     pub selected: bool,
     pub configured: bool,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default)]
+    pub protocol: Option<CustomProviderProtocol>,
     pub default_model: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,

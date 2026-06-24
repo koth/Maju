@@ -6,6 +6,7 @@ import {
   Circle,
   ClipboardList,
   FileDiff,
+  Gauge,
   GitBranch,
   GitCommitHorizontal,
   Laptop,
@@ -19,6 +20,7 @@ import type {
   PermissionInputRequest,
   PermissionInputResponse,
   PermissionOption,
+  SessionUsageSnapshot,
   UiSnapshot,
 } from "../../types";
 import MarkdownBody from "../conversation/MarkdownBody";
@@ -28,6 +30,13 @@ interface Props {
   entries: AgentPlanEntry[];
 }
 
+const EMPTY_USAGE_SNAPSHOT: SessionUsageSnapshot = {
+  context: {},
+  current_turn: {},
+  session_total: {},
+  by_model: [],
+};
+
 export interface AgentPlanEnvironmentInfo {
   changeCount: number;
   addedLines: number;
@@ -36,6 +45,7 @@ export interface AgentPlanEnvironmentInfo {
   branchLabel: string;
   actionLabel: string;
   githubLabel: string;
+  usage?: SessionUsageSnapshot;
 }
 
 export interface PlanApprovalRequest {
@@ -74,7 +84,14 @@ interface PlanApprovalModalProps {
 const AGENT_PLAN_PANEL_ENTRY_LIMIT = 5;
 
 export function AgentPlanPanel({ entries }: Props) {
-  const [expanded, setExpanded] = useState(false);
+  const entrySetKey = entries.map((entry) => entry.id ?? entry.content).join("\n");
+  const [expanded, setExpanded] = useState(entries.length > 0);
+
+  useEffect(() => {
+    if (entries.length > 0) {
+      setExpanded(true);
+    }
+  }, [entries.length, entrySetKey]);
 
   const completed = entries.filter((entry) => entry.status === "completed").length;
   const visibleEntries = sortAgentPlanEntries(entries);
@@ -153,6 +170,32 @@ export function AgentPlanEnvironment({
   const hasLineChanges = environment.addedLines > 0 || environment.removedLines > 0;
   const addedLines = environment.addedLines.toLocaleString("en-US");
   const removedLines = environment.removedLines.toLocaleString("en-US");
+  const usage = environment.usage ?? EMPTY_USAGE_SNAPSHOT;
+  const contextUsed = usage.context.used_tokens ?? null;
+  const contextWindow = usage.context.window_tokens ?? null;
+  const sessionTotal = totalUsageTokens(usage.session_total);
+  const currentTurnTotal = totalUsageTokens(usage.current_turn);
+  const contextOccupancyPercent = contextUsed != null && contextWindow != null && contextWindow > 0
+    ? Math.max(0, Math.min(100, (contextUsed / contextWindow) * 100))
+    : null;
+  const usageBreakdown = [
+    currentTurnTotal > 0 ? `本轮 ${formatTokenCount(currentTurnTotal)}` : null,
+    sessionTotal > 0 ? `会话 ${formatTokenCount(sessionTotal)}` : null,
+  ].filter(Boolean) as string[];
+  const usageLabel = contextUsed != null && contextWindow != null && contextWindow > 0
+    ? `${formatTokenCount(contextUsed)} / ${formatTokenCount(contextWindow)}`
+    : sessionTotal > 0
+      ? formatTokenCount(sessionTotal)
+      : currentTurnTotal > 0
+        ? formatTokenCount(currentTurnTotal)
+        : null;
+  const usageDetail = contextUsed != null && contextWindow != null && contextWindow > 0
+    ? `上下文 ${usageLabel}`
+    : sessionTotal > 0
+      ? `总计 ${formatTokenCount(sessionTotal)}`
+      : currentTurnTotal > 0
+        ? `本轮 ${formatTokenCount(currentTurnTotal)}`
+        : "等待用量";
 
   return (
     <div className="agent-plan-environment" aria-label="环境信息">
@@ -202,6 +245,38 @@ export function AgentPlanEnvironment({
           <span>{environment.actionLabel}</span>
         </span>
       </div>
+      {usageLabel && (
+        <div className="agent-plan-env-usage" aria-label="用量">
+          <div className="agent-plan-env-row">
+            <span className="agent-plan-env-label">
+              <Gauge size={16} strokeWidth={2.1} aria-hidden="true" />
+              <span>用量</span>
+            </span>
+            <span className="agent-plan-env-usage-metrics" title={usageDetail}>
+              <span>{usageLabel}</span>
+            </span>
+          </div>
+          {contextOccupancyPercent != null && (
+            <div
+              className="agent-plan-env-usage-bar"
+              role="meter"
+              aria-label="上下文占用"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(contextOccupancyPercent)}
+            >
+              <span style={{ width: `${contextOccupancyPercent}%` }} />
+            </div>
+          )}
+          {usageBreakdown.length > 0 && (
+            <div className="agent-plan-env-usage-breakdown">
+              {usageBreakdown.map((item) => (
+                <span key={item}>{item}</span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <div className="agent-plan-env-row is-muted">
         <span className="agent-plan-env-label">
           <GithubMark />
@@ -210,6 +285,22 @@ export function AgentPlanEnvironment({
       </div>
     </div>
   );
+}
+
+function totalUsageTokens(tokens: SessionUsageSnapshot["session_total"]) {
+  return tokens.total_tokens ?? (
+    (tokens.input_tokens ?? 0) +
+    (tokens.output_tokens ?? 0) +
+    (tokens.cache_read_tokens ?? 0) +
+    (tokens.cache_write_tokens ?? 0) +
+    (tokens.reasoning_tokens ?? 0)
+  );
+}
+
+function formatTokenCount(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
+  return value.toLocaleString("en-US");
 }
 
 function GithubMark() {

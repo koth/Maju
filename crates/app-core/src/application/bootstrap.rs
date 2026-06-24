@@ -166,6 +166,7 @@ impl Application {
                     ui.session_changes.clear();
                     ui.review_changes.clear();
                     ui.turn_changes.clear();
+                    ui.usage = store.load_session_usage_snapshot(session_id).unwrap_or_default();
                     let seq =
                         crate::startup_perf::measure("app/bootstrap/next_seq", session_id, || {
                             store.next_seq(session_id).unwrap_or(1)
@@ -422,6 +423,7 @@ impl Application {
                     ui.session_changes.clear();
                     ui.review_changes.clear();
                     ui.turn_changes.clear();
+                    ui.usage = store.load_session_usage_snapshot(session_id).unwrap_or_default();
                     let seq = store.next_seq(session_id).unwrap_or(1);
                     let needs_title = is_placeholder_session_title(&recent.title);
                     (needs_title, seq, pending_model_restore)

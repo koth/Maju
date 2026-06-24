@@ -7,6 +7,15 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeAcpAgent as ClaudeAcpAgentType } from "../acp-agent.js";
 
 let capturedOptions: Options | undefined;
+const KODEX_RULES_MARKER = "Do not guess APIs; consult the documentation first.";
+
+function systemPromptAppend(): string {
+  const systemPrompt = capturedOptions!.systemPrompt;
+  if (typeof systemPrompt !== "object" || systemPrompt === null || Array.isArray(systemPrompt)) {
+    throw new Error("Expected object systemPrompt");
+  }
+  return String((systemPrompt as { append?: unknown }).append ?? "");
+}
 vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
   const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
     "@anthropic-ai/claude-agent-sdk",
@@ -268,20 +277,39 @@ describe("createSession options merging", () => {
       expect(capturedOptions!.systemPrompt).toEqual({
         type: "preset",
         preset: "claude_code",
+        append: expect.stringContaining(KODEX_RULES_MARKER),
       });
     });
 
-    it("replaces the preset when a string is provided", async () => {
+    it("preserves custom string prompts and appends Kodex rules", async () => {
       await agent.newSession({
         cwd: "/test",
         mcpServers: [],
         _meta: { systemPrompt: "custom prompt" },
       });
 
-      expect(capturedOptions!.systemPrompt).toBe("custom prompt");
+      expect(capturedOptions!.systemPrompt).toEqual(expect.stringContaining("custom prompt"));
+      expect(capturedOptions!.systemPrompt).toEqual(expect.stringContaining(KODEX_RULES_MARKER));
     });
 
-    it("forwards append", async () => {
+    it("appends Kodex rules to claudeCode option system prompts", async () => {
+      await agent.newSession({
+        cwd: "/test",
+        mcpServers: [],
+        _meta: {
+          claudeCode: {
+            options: {
+              systemPrompt: "sdk option prompt",
+            },
+          },
+        },
+      });
+
+      expect(capturedOptions!.systemPrompt).toEqual(expect.stringContaining("sdk option prompt"));
+      expect(capturedOptions!.systemPrompt).toEqual(expect.stringContaining(KODEX_RULES_MARKER));
+    });
+
+    it("forwards append and adds Kodex rules", async () => {
       await agent.newSession({
         cwd: "/test",
         mcpServers: [],
@@ -291,8 +319,9 @@ describe("createSession options merging", () => {
       expect(capturedOptions!.systemPrompt).toEqual({
         type: "preset",
         preset: "claude_code",
-        append: "extra instructions",
+        append: expect.stringContaining("extra instructions"),
       });
+      expect(systemPromptAppend()).toContain(KODEX_RULES_MARKER);
     });
 
     it("forwards excludeDynamicSections", async () => {
@@ -306,6 +335,7 @@ describe("createSession options merging", () => {
         type: "preset",
         preset: "claude_code",
         excludeDynamicSections: true,
+        append: expect.stringContaining(KODEX_RULES_MARKER),
       });
     });
 
@@ -324,9 +354,10 @@ describe("createSession options merging", () => {
       expect(capturedOptions!.systemPrompt).toEqual({
         type: "preset",
         preset: "claude_code",
-        append: "extra instructions",
+        append: expect.stringContaining("extra instructions"),
         excludeDynamicSections: true,
       });
+      expect(systemPromptAppend()).toContain(KODEX_RULES_MARKER);
     });
 
     it("ignores caller-provided type/preset overrides", async () => {
@@ -345,8 +376,9 @@ describe("createSession options merging", () => {
       expect(capturedOptions!.systemPrompt).toEqual({
         type: "preset",
         preset: "claude_code",
-        append: "extra",
+        append: expect.stringContaining("extra"),
       });
+      expect(systemPromptAppend()).toContain(KODEX_RULES_MARKER);
     });
   });
 

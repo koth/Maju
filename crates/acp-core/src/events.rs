@@ -2,7 +2,7 @@ use agent_client_protocol::schema::McpServer;
 use serde::{Deserialize, Serialize};
 use workspace_model::{
     AgentPlanEntry, AvailableCommand, DiffHunk, MessageRole, PermissionInputRequest,
-    PermissionOption, PromptInputCapabilities, SessionConfigState, TerminalOutput,
+    PermissionOption, PromptInputCapabilities, SessionConfigState, TerminalOutput, UsageEvent,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +189,9 @@ pub enum ClientEvent {
     },
     ThinkingActivity {
         active: bool,
+    },
+    UsageUpdated {
+        usage: UsageEvent,
     },
     TurnFinished {
         stop_reason: String,

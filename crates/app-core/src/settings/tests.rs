@@ -4,7 +4,7 @@ use serde_json::json;
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use workspace_model::{LspServerConfigInput, RemoteMachineProfile};
+use workspace_model::{CustomProviderInput, CustomProviderProtocol, LspServerConfigInput, RemoteMachineProfile};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1045,6 +1045,10 @@ fn codex_acp_commandcode_catalog_uses_provider_specific_model_limits() {
             .unwrap_or_else(|| panic!("missing {display_name} in commandcode catalog"))
     };
 
+    let glm52 = find_model("zai-org/GLM-5.2");
+    assert_eq!(glm52["context_window"].as_i64(), Some(1_000_000));
+    assert_eq!(glm52["max_output_tokens"].as_i64(), Some(DEFAULT_MODEL_MAX_OUTPUT_TOKENS));
+
     let qwen37 = find_model("Qwen/Qwen3.7-Max");
     assert_eq!(qwen37["context_window"].as_i64(), Some(1_000_000));
     assert_eq!(qwen37["max_output_tokens"].as_i64(), Some(65_536));
@@ -1392,6 +1396,67 @@ fn provider_model_catalog_can_override_and_reset_models() {
     assert!(!profile.models.contains(&"gpt-5.7".to_string()));
 }
 
+#[test]
+fn custom_provider_saves_config_and_exports_model_provider_map() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    let snapshot = save_custom_provider(
+        &paths,
+        CustomProviderInput {
+            label: "Lab Provider".to_string(),
+            endpoint: "https://api.lab.test/v1/responses".to_string(),
+            protocol: CustomProviderProtocol::Responses,
+            api_key: "lab-secret".to_string(),
+            model_list_url: Some("https://api.lab.test/v1/models".to_string()),
+        },
+    )
+    .unwrap();
+    let profile = snapshot
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|profile| profile.id == CUSTOM_PROVIDER_ID)
+        .unwrap();
+    assert!(profile.custom);
+    assert!(profile.configured);
+    assert_eq!(profile.label, "Lab Provider");
+    assert_eq!(profile.base_url.as_deref(), Some("https://api.lab.test/v1/responses"));
+    assert_eq!(profile.protocol, Some(CustomProviderProtocol::Responses));
+    assert_eq!(profile.model_list_url.as_deref(), Some("https://api.lab.test/v1/models"));
+
+    save_provider_models(&paths, CUSTOM_PROVIDER_ID, vec!["lab-model".to_string()]).unwrap();
+    let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
+    let env = agent_env_for_command(&command, &paths);
+    assert!(env.contains(&(CUSTOM_PROVIDER_API_KEY_ENV.to_string(), "lab-secret".to_string())));
+    let (_, provider_map) = env
+        .iter()
+        .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
+        .unwrap();
+    let provider_map: serde_json::Value = serde_json::from_str(provider_map).unwrap();
+    let custom_entry = provider_map
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["display_name"].as_str() == Some("lab-model"))
+        .unwrap();
+    assert_eq!(custom_entry["provider"].as_str(), Some(CUSTOM_PROVIDER_ID));
+    assert_eq!(custom_entry["base_url"].as_str(), Some("https://api.lab.test/v1/responses"));
+    assert_eq!(custom_entry["protocol"].as_str(), Some("responses"));
+    assert_eq!(custom_entry["env_key"].as_str(), Some(CUSTOM_PROVIDER_API_KEY_ENV));
+
+    let snapshot = reset_provider_models(&paths, CUSTOM_PROVIDER_ID).unwrap();
+    let profile = snapshot
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|profile| profile.id == CUSTOM_PROVIDER_ID)
+        .unwrap();
+    assert!(profile.custom);
+    assert!(profile.configured);
+    assert_eq!(profile.base_url.as_deref(), Some("https://api.lab.test/v1/responses"));
+    assert!(profile.models.is_empty());
+}
 #[test]
 fn provider_model_catalog_parser_accepts_common_model_list_shapes() {
     let openai_models = parse_provider_models_response(
@@ -1857,6 +1922,8 @@ api_key = "kimi-secret"
 
 #[test]
 fn codex_acp_model_metadata_tracks_individual_model_limits() {
+    assert_eq!(model_context_window("glm-5.2"), 1_000_000);
+    assert_eq!(model_max_output_tokens("glm-5.2"), 128_000);
     assert_eq!(model_context_window("glm-5.1"), 200_000);
     assert_eq!(model_max_output_tokens("glm-5.1"), 128_000);
     assert_eq!(model_context_window("gpt-5.2"), 400_000);
@@ -1890,6 +1957,10 @@ fn codex_acp_model_metadata_tracks_individual_model_limits() {
     assert_eq!(model_max_output_tokens("MiMo-V2.5"), 128_000);
     assert_eq!(model_context_window("mimo-v2.5"), 1_000_000);
     assert_eq!(model_max_output_tokens("mimo-v2.5"), 128_000);
+    assert_eq!(model_context_window_for_provider(
+        "zai-org/GLM-5.2",
+        COMMANDCODE_PROVIDER_ID,
+    ), 1_000_000);
     assert_eq!(model_max_output_tokens("gpt-5.2"), 128_000);
     assert_eq!(model_context_window("gpt-5.3"), 128_000);
     assert_eq!(model_max_output_tokens("gpt-5.3"), 16_384);

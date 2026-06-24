@@ -180,12 +180,28 @@ impl SessionHandle {
                 config_id: config_id.into(),
                 value_id: value_id.into(),
                 provider,
-                reply_tx,
+                reply_tx: Some(reply_tx),
             })
             .map_err(|_| anyhow!("ACP command channel closed"))?;
         reply_rx
             .recv()
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
+    }
+
+    pub fn queue_config_option(
+        &mut self,
+        config_id: impl Into<String>,
+        value_id: impl Into<String>,
+        provider: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.command_tx
+            .send(RuntimeCommand::SetConfigOption {
+                config_id: config_id.into(),
+                value_id: value_id.into(),
+                provider,
+                reply_tx: None,
+            })
+            .map_err(|_| anyhow!("ACP command channel closed"))
     }
 
     pub fn set_mode(&mut self, mode_id: impl Into<String>) -> anyhow::Result<Vec<ClientEvent>> {

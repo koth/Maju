@@ -75,7 +75,7 @@
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-height: min(72vh, 760px);
+  max-height: min(72dvh, 760px);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border-focus) 42%, var(--border-strong));
   border-radius: 12px;
@@ -90,8 +90,13 @@
     inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
 }
 
+.permission-request.is-plan-approval {
+  max-height: min(64dvh, 720px);
+}
+
 .permission-request-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
@@ -152,10 +157,15 @@
 
 .permission-request-plan-list {
   display: flex;
+  flex: 0 1 auto;
   flex-direction: column;
   gap: 4px;
+  max-height: min(24dvh, 260px);
   margin: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
   padding: 0 10px 8px;
+  scrollbar-gutter: stable;
   list-style: none;
 }
 
@@ -212,9 +222,9 @@
 }
 
 .permission-request.is-plan-approval .permission-request-proposal {
-  flex: 1 1 auto;
-  min-height: min(42vh, 420px);
-  max-height: min(58vh, 620px);
+  flex: 1 1 180px;
+  min-height: 140px;
+  max-height: min(36dvh, 420px);
 }
 
 .permission-request-proposal .md-heading:first-child {
@@ -224,6 +234,7 @@
 .permission-request-guidance {
   display: grid;
   gap: 8px;
+  margin: 0 12px 10px;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
@@ -231,7 +242,7 @@
 
 .permission-request.is-plan-approval .permission-request-guidance,
 .plan-approval-modal .permission-request-guidance {
-  margin: 0 12px 10px;
+  flex: 0 0 auto;
 }
 
 .permission-request-guidance textarea {
@@ -350,6 +361,7 @@
 
 .permission-request-actions {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 7px;
   padding: 0 12px 12px;
@@ -613,6 +625,55 @@
   fill: currentColor;
 }
 
+.agent-plan-env-usage-metrics {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+
+.agent-plan-env-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-plan-env-usage-bar {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-subtle) 70%, transparent);
+}
+
+.agent-plan-env-usage-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.agent-plan-env-usage-breakdown {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-left: 28px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.agent-plan-env-usage-breakdown span {
+  white-space: nowrap;
+}
 .agent-plan-env-change-metrics {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1362,7 +1423,8 @@
   display: contents;
 }
 
-.composer.is-compact:not(.has-attachments) .composer-session-state {
+
+.composer-session-state {
   display: none;
 }
 

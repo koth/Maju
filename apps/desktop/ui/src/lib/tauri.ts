@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, ArchivedSessionListItem, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest, PermissionInputResponse } from "../types";
+import type { UiSnapshot, RepositorySnapshot, ChangedFile, RecentWorkspace, SessionFileChange, FileEntry, SessionConfigState, UserPromptContent, SearchResult, AgentCliId, AgentProviderFamily, AgentSettingsSnapshot, AgentInstallResult, OpenWorkspaceItem, WorkspaceSessionList, ArchivedSessionListItem, AppTheme, EditorFileSnapshot, EditorFileVersion, LspServerStatus, LspDiagnostic, LspSettingsSnapshot, LspServerConfigInput, LspProbeResult, ChangeSetSummary, ChangeSetFilesResponse, FileChangeRecord, ListChangeSetsRequest, ListChangeSetFilesRequest, GetChangeSetFileDiffRequest, TerminalOpenRequest, TerminalSession, TerminalWriteRequest, TerminalResizeRequest, TerminalIdRequest, TerminalScrollback, RemoteLinuxWorkspace, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest, RemoteOpenRequest, PermissionInputResponse, UsageSummaryRequest, UsageSummaryRow, CustomProviderInput } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
   await shellOpen(url);
@@ -226,6 +226,10 @@ export async function sessionGetChanges(): Promise<SessionFileChange[]> {
   return invoke<SessionFileChange[]>("session_get_changes");
 }
 
+export async function usageGetSummary(request?: UsageSummaryRequest): Promise<UsageSummaryRow[]> {
+  return invoke<UsageSummaryRow[]>("usage_get_summary", { request: request ?? null });
+}
+
 export async function sessionListChangeSets(request?: ListChangeSetsRequest): Promise<ChangeSetSummary[]> {
   return invoke<ChangeSetSummary[]>("session_list_change_sets", { request: request ?? null });
 }
@@ -335,6 +339,12 @@ export async function settingsSaveAgentProviderSecret(
   return invoke<AgentSettingsSnapshot>("settings_save_agent_provider_secret", { family, profileId, secret, remoteProfileId: remoteProfileId ?? null });
 }
 
+export async function settingsSaveCustomProvider(
+  input: CustomProviderInput,
+  remoteProfileId?: string | null,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_custom_provider", { input, remoteProfileId: remoteProfileId ?? null });
+}
 export async function settingsSaveProviderModels(
   provider: string,
   models: string[],

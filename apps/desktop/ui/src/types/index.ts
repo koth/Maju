@@ -368,6 +368,57 @@ export interface SidebarSection {
   items: string[];
 }
 
+export type UsageEventScope = "context_snapshot" | "turn_delta" | "session_total";
+export type UsageSummaryGroupBy = "model" | "agent" | "workspace" | "session";
+
+export interface UsageTokenBreakdown {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  total_tokens?: number | null;
+}
+
+export interface UsageContextSnapshot {
+  used_tokens?: number | null;
+  window_tokens?: number | null;
+  updated_at?: string | null;
+}
+
+export interface UsageModelSummary {
+  label: string;
+  model?: string | null;
+  provider?: string | null;
+  agent_cli?: string | null;
+  session_id?: string | null;
+  workspace_root?: string | null;
+  event_count: number;
+  session_count: number;
+  tokens: UsageTokenBreakdown;
+  context_peak_tokens?: number | null;
+  latest_at?: string | null;
+}
+
+export interface SessionUsageSnapshot {
+  context: UsageContextSnapshot;
+  current_turn: UsageTokenBreakdown;
+  session_total: UsageTokenBreakdown;
+  by_model: UsageModelSummary[];
+}
+
+export interface UsageSummaryRequest {
+  workspace_root?: string | null;
+  session_id?: string | null;
+  from?: string | null;
+  to?: string | null;
+  all_workspaces?: boolean;
+  include_archived?: boolean;
+  group_by?: UsageSummaryGroupBy;
+}
+
+export type UsageSummaryRow = UsageModelSummary;
+
 export interface UiSnapshot {
   revision: number;
   workspace: WorkspaceDescriptor;
@@ -387,6 +438,7 @@ export interface UiSnapshot {
   review_changes: SessionFileChange[];
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
+  usage?: SessionUsageSnapshot;
 }
 
 export interface UiSnapshotPatch {
@@ -408,6 +460,7 @@ export interface UiSnapshotPatch {
   review_changes: SessionFileChange[];
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
+  usage?: SessionUsageSnapshot;
 }
 
 export interface TurnFileChanges {
@@ -649,6 +702,15 @@ export type AgentProviderProxyKind =
   | "completion_to_responses"
   | "claude_native"
   | "completion_to_claude";
+export type CustomProviderProtocol = "chat_completions" | "responses" | "anthropic_messages";
+
+export interface CustomProviderInput {
+  label: string;
+  endpoint: string;
+  protocol: CustomProviderProtocol;
+  apiKey: string;
+  modelListUrl?: string | null;
+}
 
 export interface AgentProviderProfile {
   family: AgentProviderFamily;
@@ -658,6 +720,8 @@ export interface AgentProviderProfile {
   selected: boolean;
   configured: boolean;
   base_url: string | null;
+  custom: boolean;
+  protocol: CustomProviderProtocol | null;
   default_model: string | null;
   models: string[];
   model_list_url: string | null;

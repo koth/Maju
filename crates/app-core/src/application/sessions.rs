@@ -628,6 +628,7 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
+        ui.usage = self.store.load_session_usage_snapshot(id).unwrap_or_default();
 
         let sessions = self.store.list_sessions().unwrap_or_default();
         if let Some(s) = sessions.iter().find(|s| s.id == id) {
@@ -706,7 +707,7 @@ impl Application {
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode("Build");
-        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+        let _ = super::config::queue_codex_agent_mode_for_policy_mode(
             &mut session,
             is_codex_agent_label(&agent_cli_label),
             Some("Build"),
@@ -737,6 +738,7 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
+        ui.usage = Default::default();
 
         let _ = self.store.update_session_model_mode(
             &new_id.to_string(),

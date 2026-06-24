@@ -279,6 +279,21 @@ pub(super) async fn connect_agent_client(
                     }
                 };
                 let selected_option_id = permission_resolution.option_id.as_deref();
+                let ask_user_question_option_id = codebuddy_ask_user_question_response_option(
+                    &permission_log_config.agent_command,
+                    &request,
+                    &request_payload,
+                    &permission_resolution,
+                );
+                let codebuddy_decision_option_id = ask_user_question_option_id
+                    .as_deref()
+                    .or(selected_option_id);
+                let codebuddy_interruption_decision =
+                    codebuddy_interruption_decision_for_permission(
+                        &permission_log_config.agent_command,
+                        &request_payload,
+                        codebuddy_decision_option_id,
+                    );
                 let response_option_id = codebuddy_bash_soft_reject_response_option(
                     &request,
                     &request_payload,
@@ -286,6 +301,14 @@ pub(super) async fn connect_agent_client(
                     &permission_terminal_denials,
                     &permission_log_config,
                 )?
+                .or_else(|| ask_user_question_option_id.clone())
+                .or_else(|| {
+                    codebuddy_exit_plan_replan_response_option_id(
+                        &request,
+                        &request_payload,
+                        codebuddy_interruption_decision.as_deref(),
+                    )
+                })
                 .or_else(|| permission_resolution.option_id.clone());
                 register_codebuddy_bash_terminal_approval(
                     &request,
@@ -318,17 +341,11 @@ pub(super) async fn connect_agent_client(
                     None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
                 };
                 let response = attach_permission_meta(response, &permission_resolution);
-                let codebuddy_interruption_decision =
-                    codebuddy_interruption_decision_for_permission(
-                        &permission_log_config.agent_command,
-                        &request_payload,
-                        selected_option_id,
-                    );
 
                 let outcome = permission_resolution_outcome_for_display(
                     &request_payload,
                     &options,
-                    selected_option_id,
+                    codebuddy_decision_option_id,
                     codebuddy_interruption_decision.as_deref(),
                     permission_resolution.guidance.as_deref(),
                 );
@@ -344,7 +361,7 @@ pub(super) async fn connect_agent_client(
                 }
 
                 let should_forward_codebuddy_plan_guidance =
-                    codebuddy_interruption_decision.as_deref() == Some("deny")
+                    codebuddy_interruption_decision.as_deref() == Some("plan")
                         && is_codebuddy_exit_plan_permission(&request_payload)
                         && permission_resolution
                             .guidance
@@ -388,6 +405,7 @@ pub(super) async fn connect_agent_client(
                             "sessionId": request.session_id.0.as_ref(),
                             "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
                             "selectedOptionId": selected_option_id,
+                            "responseOptionId": response_option_id.as_deref(),
                         }),
                     )?,
                     Err(error) => append_runtime_event_log(
@@ -397,6 +415,7 @@ pub(super) async fn connect_agent_client(
                             "sessionId": request.session_id.0.as_ref(),
                             "toolCallId": request.tool_call.tool_call_id.0.as_ref(),
                             "selectedOptionId": selected_option_id,
+                            "responseOptionId": response_option_id.as_deref(),
                             "error": error.to_string(),
                         }),
                     )?,
@@ -410,6 +429,7 @@ pub(super) async fn connect_agent_client(
                         request.tool_call.tool_call_id.0.as_ref(),
                         &decision,
                         permission_resolution.guidance.as_deref(),
+                        permission_resolution.input_response.as_ref(),
                     )
                 {
                     let _ = append_runtime_event_log(
@@ -777,6 +797,13 @@ pub(super) async fn connect_agent_client(
 }
 
 fn permission_request_details(request: &RequestPermissionRequest) -> Option<String> {
+    permission_request_details_with_latest_plan(request, latest_codebuddy_plan_file_content)
+}
+
+fn permission_request_details_with_latest_plan(
+    request: &RequestPermissionRequest,
+    latest_plan_file_content: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     let mut parts = Vec::new();
     let request_payload = serde_json::to_value(request).ok();
     let is_exit_plan_request = request_payload
@@ -804,9 +831,10 @@ fn permission_request_details(request: &RequestPermissionRequest) -> Option<Stri
     }
 
     if is_exit_plan_request
-        && parts.is_empty()
-        && let Some(plan) = latest_codebuddy_plan_file_content()
+        && codebuddy_plan_details_should_use_latest_file(&parts)
+        && let Some(plan) = latest_plan_file_content()
     {
+        parts.clear();
         parts.push(plan);
     }
 
@@ -834,6 +862,19 @@ fn permission_request_details(request: &RequestPermissionRequest) -> Option<Stri
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
+fn codebuddy_plan_details_should_use_latest_file(parts: &[String]) -> bool {
+    parts.is_empty()
+        || parts
+            .iter()
+            .all(|part| codebuddy_missing_plan_warning(part))
+}
+
+fn codebuddy_missing_plan_warning(text: &str) -> bool {
+    text.trim()
+        .to_ascii_lowercase()
+        .contains("plan file was not found or empty")
+}
+
 fn codebuddy_plan_content(value: &Value) -> Option<String> {
     match value {
         Value::Object(object) => {
@@ -857,7 +898,7 @@ fn codebuddy_plan_content(value: &Value) -> Option<String> {
 
 fn latest_codebuddy_plan_file_content() -> Option<String> {
     let root = codebuddy_plan_root()?;
-    latest_codebuddy_plan_file_content_from_root(&root, Duration::from_secs(30 * 60))
+    latest_codebuddy_plan_file_content_from_root(&root, Duration::MAX)
 }
 
 fn latest_codebuddy_plan_file_content_from_root(root: &Path, max_age: Duration) -> Option<String> {
@@ -1505,6 +1546,19 @@ fn request_allow_option_id(request: &RequestPermissionRequest) -> Option<String>
         .map(|option| option.option_id.0.to_string())
 }
 
+fn codebuddy_exit_plan_replan_response_option_id(
+    request: &RequestPermissionRequest,
+    request_payload: &Value,
+    codebuddy_interruption_decision: Option<&str>,
+) -> Option<String> {
+    if codebuddy_interruption_decision != Some("plan")
+        || !is_codebuddy_exit_plan_permission(request_payload)
+    {
+        return None;
+    }
+    request_allow_option_id(request)
+}
+
 fn codebuddy_bash_permission_command(request: &RequestPermissionRequest) -> Option<String> {
     let command = request
         .tool_call
@@ -1860,6 +1914,79 @@ fn codebuddy_permission_tool_name(request: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn codebuddy_ask_user_question_response_option(
+    agent_command: &str,
+    request: &RequestPermissionRequest,
+    request_payload: &Value,
+    resolution: &PermissionResolution,
+) -> Option<String> {
+    if !is_codebuddy_ask_user_question_permission(agent_command, request, request_payload) {
+        return None;
+    }
+    let input_response = resolution.input_response.as_ref()?;
+    let selected_answers = input_response
+        .answers
+        .values()
+        .flat_map(|values| values.iter())
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let [answer] = selected_answers.as_slice() else {
+        return None;
+    };
+    let normalized_answer = normalize_codebuddy_tool_token(answer);
+
+    request
+        .options
+        .iter()
+        .find(|option| {
+            option.option_id.0.as_ref() == *answer
+                || option.name.trim().eq_ignore_ascii_case(answer)
+                || normalize_codebuddy_tool_token(&option.name) == normalized_answer
+        })
+        .map(|option| option.option_id.0.to_string())
+}
+
+fn is_codebuddy_ask_user_question_permission(
+    agent_command: &str,
+    request: &RequestPermissionRequest,
+    request_payload: &Value,
+) -> bool {
+    if !agent_command_is_codebuddy(agent_command) {
+        return false;
+    }
+    codebuddy_permission_tool_name(request_payload)
+        .or_else(|| {
+            request
+                .tool_call
+                .fields
+                .raw_input
+                .as_ref()
+                .and_then(raw_input_tool_name)
+        })
+        .as_deref()
+        .is_some_and(|tool_name| normalize_codebuddy_tool_token(tool_name) == "askuserquestion")
+}
+
+fn raw_input_tool_name(value: &Value) -> Option<String> {
+    ["tool", "toolName", "name"].iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn normalize_codebuddy_tool_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !matches!(*ch, '_' | '-' | ' '))
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
 fn codebuddy_interruption_decision_for_permission(
     agent_command: &str,
     request: &Value,
@@ -1906,7 +2033,7 @@ fn permission_resolution_outcome_for_display(
 ) -> String {
     if is_codebuddy_exit_plan_permission(request) {
         match codebuddy_interruption_decision {
-            Some("deny") => {
+            Some("plan") => {
                 if guidance
                     .map(str::trim)
                     .is_some_and(|value| !value.is_empty())
@@ -1975,9 +2102,8 @@ fn normalize_codebuddy_exit_plan_decision(option_id: Option<&str>) -> String {
     match normalized.as_str() {
         "allowalways" | "alwaysallow" | "allowall" => "allowAll".into(),
         "allowonce" | "allow" | "default" => "allow".into(),
-        "plan" | "rejectonce" | "reject" | "deny" | "cancel" | "cancelled" | "canceled" => {
-            "deny".into()
-        }
+        "plan" | "rejectonce" | "reject" | "deny" => "plan".into(),
+        "cancel" | "cancelled" | "canceled" => "deny".into(),
         "rejectandexitplan" | "denyandexitplan" => "rejectAndExitPlan".into(),
         _ => option_id.to_string(),
     }
@@ -1993,7 +2119,7 @@ fn is_codebuddy_exit_plan_permission(request: &Value) -> bool {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::{
-        PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId,
+        PermissionOption, PermissionOptionKind, RequestPermissionRequest, SessionId, TextContent,
         ToolCallUpdate, ToolCallUpdateFields,
     };
     use serde_json::json;
@@ -2086,7 +2212,7 @@ mod tests {
                 Some("reject")
             )
             .as_deref(),
-            Some("deny")
+            Some("plan")
         );
         assert_eq!(
             codebuddy_interruption_decision_for_permission(
@@ -2104,7 +2230,7 @@ mod tests {
                 Some("plan")
             )
             .as_deref(),
-            Some("deny")
+            Some("plan")
         );
         assert_eq!(
             codebuddy_interruption_decision_for_permission(
@@ -2138,10 +2264,64 @@ mod tests {
                 &payload,
                 &options,
                 Some("reject"),
-                Some("deny"),
+                Some("plan"),
                 Some(" 补充风险和验证步骤 ")
             ),
             "继续规划：已发送调整要求"
+        );
+    }
+
+    #[test]
+    fn codebuddy_exit_plan_replan_permission_response_uses_allow_option() {
+        let request = RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "call_exit_plan",
+                ToolCallUpdateFields::new()
+                    .title("ExitPlanMode".to_string())
+                    .raw_input(json!({
+                        "allowedPrompts": []
+                    })),
+            ),
+            vec![
+                PermissionOption::new("default", "Accept plan", PermissionOptionKind::AllowOnce),
+                PermissionOption::new(
+                    "reject",
+                    "Continue planning",
+                    PermissionOptionKind::RejectOnce,
+                ),
+                PermissionOption::new(
+                    "reject_and_exit_plan",
+                    "Stop planning",
+                    PermissionOptionKind::RejectOnce,
+                ),
+            ],
+        );
+        let mut payload = serde_json::to_value(&request).expect("request should serialize");
+        insert_codebuddy_tool_meta(
+            &mut payload,
+            json!({
+                "codebuddy.ai/toolName": "ExitPlanMode"
+            }),
+        );
+        let request = serde_json::from_value(payload.clone()).expect("request should deserialize");
+
+        assert_eq!(
+            codebuddy_exit_plan_replan_response_option_id(&request, &payload, Some("plan"))
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            codebuddy_exit_plan_replan_response_option_id(
+                &request,
+                &payload,
+                Some("rejectAndExitPlan")
+            ),
+            None
+        );
+        assert_eq!(
+            codebuddy_exit_plan_replan_response_option_id(&request, &payload, Some("allow")),
+            None
         );
     }
 
@@ -2379,6 +2559,80 @@ mod tests {
         assert_eq!(input.questions[0].options[0].label, "Unit");
     }
 
+    #[test]
+    fn codebuddy_ask_user_question_uses_selected_answer_option_for_response() {
+        let request = RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "ask-user",
+                ToolCallUpdateFields::new()
+                    .title("Ask user".to_string())
+                    .raw_input(json!({
+                        "tool": "AskUserQuestion",
+                        "questions": [
+                            {
+                                "id": "approach",
+                                "header": "Approach",
+                                "question": "Which implementation approach should I use?",
+                                "options": [
+                                    { "label": "Fast", "description": "Smallest viable change" },
+                                    { "label": "Robust", "description": "Add tests and validation" }
+                                ]
+                            }
+                        ]
+                    })),
+            ),
+            vec![
+                PermissionOption::new(
+                    "ask_user_question:0:0",
+                    "Fast",
+                    PermissionOptionKind::AllowOnce,
+                ),
+                PermissionOption::new(
+                    "ask_user_question:0:1",
+                    "Robust",
+                    PermissionOptionKind::AllowOnce,
+                ),
+            ],
+        );
+        let mut payload = serde_json::to_value(&request).expect("request should serialize");
+        insert_codebuddy_tool_meta(
+            &mut payload,
+            json!({
+                "codebuddy.ai/toolName": "AskUserQuestion"
+            }),
+        );
+        let request = serde_json::from_value(payload.clone()).expect("request should deserialize");
+        let mut input_response = workspace_model::PermissionInputResponse::default();
+        input_response
+            .answers
+            .insert("approach".into(), vec!["Robust".into()]);
+        let resolution = PermissionResolution::new(
+            Some("ask_user_question:0:0".into()),
+            None,
+            Some(input_response),
+        );
+
+        assert_eq!(
+            codebuddy_ask_user_question_response_option(
+                "codebuddy --acp",
+                &request,
+                &payload,
+                &resolution,
+            )
+            .as_deref(),
+            Some("ask_user_question:0:1")
+        );
+        assert_eq!(
+            codebuddy_ask_user_question_response_option(
+                "codex-acp",
+                &request,
+                &payload,
+                &resolution
+            ),
+            None
+        );
+    }
     #[test]
     fn codebuddy_bash_permission_details_include_extracted_write_path() {
         let request = codebuddy_bash_permission_request(json!({
@@ -2667,6 +2921,47 @@ mod tests {
 
         assert!(details.contains("# Negative Terms Plan"));
         assert!(!details.contains("allowedPrompts"));
+    }
+
+    #[test]
+    fn codebuddy_exit_plan_details_replaces_missing_file_warning_with_latest_plan() {
+        let request = RequestPermissionRequest::new(
+            SessionId::new("session-1"),
+            ToolCallUpdate::new(
+                "call_exit_plan",
+                ToolCallUpdateFields::new()
+                    .title("ExitPlanMode".to_string())
+                    .raw_input(json!({
+                        "allowedPrompts": []
+                    }))
+                    .content(vec![ToolCallContent::from(ContentBlock::Text(
+                        TextContent::new(
+                            "Plan mode exited. Warning: Plan file was not found or empty.",
+                        ),
+                    ))]),
+            ),
+            vec![PermissionOption::new(
+                "default",
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+        );
+        let mut payload = serde_json::to_value(&request).expect("request should serialize");
+        insert_codebuddy_tool_meta(
+            &mut payload,
+            json!({
+                "codebuddy.ai/toolName": "ExitPlanMode"
+            }),
+        );
+        let request = serde_json::from_value(payload).expect("request should deserialize");
+
+        let details = permission_request_details_with_latest_plan(&request, || {
+            Some("# Actual Plan\n\nUse the markdown plan file.".into())
+        })
+        .unwrap();
+
+        assert!(details.contains("# Actual Plan"));
+        assert!(!details.contains("Plan file was not found or empty"));
     }
 
     #[test]

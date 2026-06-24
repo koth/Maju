@@ -3987,7 +3987,7 @@ describe("result origin handling", () => {
     };
   }
 
-  it("forwards origin in usage_update _meta", async () => {
+  it("forwards origin and Kodex usage metadata in usage_update _meta", async () => {
     const { agent, updates } = createMockAgentWithCapture();
     injectSession(agent, [
       createAssistantMessage(),
@@ -4001,14 +4001,25 @@ describe("result origin handling", () => {
     expect(usageUpdate).toBeDefined();
     expect(usageUpdate.update._meta).toEqual({
       "_claude/origin": { kind: "channel", server: "acp" },
+      "kodex.ai/usage": {
+        scope: "turn_delta",
+        agent_cli: "claude-agent-acp",
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: 15,
+      },
     });
   });
 
-  it("omits _meta when origin is absent", async () => {
+  it("emits Kodex usage metadata when origin is absent", async () => {
     const { agent, updates } = createMockAgentWithCapture();
     injectSession(agent, [
       createAssistantMessage(),
-      createResult(),
+      createResult({ total_cost_usd: undefined }),
       { type: "system", subtype: "session_state_changed", state: "idle" },
     ]);
 
@@ -4016,7 +4027,18 @@ describe("result origin handling", () => {
 
     const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
     expect(usageUpdate).toBeDefined();
-    expect(usageUpdate.update._meta).toBeUndefined();
+    expect(usageUpdate.update.cost?.amount).toBeUndefined();
+    expect(usageUpdate.update._meta).toEqual({
+      "kodex.ai/usage": expect.objectContaining({
+        scope: "turn_delta",
+        agent_cli: "claude-agent-acp",
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+      }),
+    });
   });
 
   it("task-notification result with max_tokens does not override the user-turn stopReason", async () => {

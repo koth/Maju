@@ -621,6 +621,7 @@ export function Composer({
               {displayModelValue(snapshot.session.model)}
             </span>
           )}
+
           <span className="composer-session-state">
             <span className="composer-session-state-dot" />
             {snapshot.session.status}
@@ -953,6 +954,7 @@ function decodeProviderModelValue(value: string) {
 
   return null;
 }
+
 
 function displayModelValue(value: string) {
   return decodeProviderModelValue(value)?.model ?? value;

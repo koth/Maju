@@ -61,6 +61,8 @@ function profile(
     selected,
     configured,
     base_url: null,
+    custom: false,
+    protocol: null,
     default_model: null,
     models: [],
     model_list_url: null,

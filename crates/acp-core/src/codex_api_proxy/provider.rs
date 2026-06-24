@@ -21,6 +21,7 @@ pub(super) fn normalize_proxy_provider(provider: &str) -> &'static str {
         "deepseek" => "deepseek",
         "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
         "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
+        "custom" | "custom_provider" | "custom-provider" => "custom",
         _ => "timiai",
     }
 }
@@ -98,6 +99,7 @@ pub(super) fn upstream_chat_completions_url(provider: &str) -> &'static str {
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
         "kimi_code" => KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_CHAT_COMPLETIONS_URL,
+        "custom" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
         _ => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
     }
 }
@@ -138,6 +140,7 @@ pub(super) fn upstream_messages_url(provider: &str) -> &'static str {
         "commandcode" => COMMANDCODE_UPSTREAM_MESSAGES_URL,
         "kimi_code" => KIMI_UPSTREAM_MESSAGES_URL,
         "xiaomi_mimo" => MIMO_UPSTREAM_MESSAGES_URL,
+        "custom" => KIMI_UPSTREAM_MESSAGES_URL,
         _ => KIMI_UPSTREAM_MESSAGES_URL,
     }
 }

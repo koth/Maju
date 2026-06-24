@@ -633,13 +633,34 @@ fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
         }
     ]);
 
-    let (map, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
+    let (map, provider_configs, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(
         map.get("deepseek-v4-pro-r1").map(String::as_str),
         Some("timiai")
     );
+    assert!(provider_configs.is_empty());
     assert_eq!(duplicate_count, 3);
+}
+
+#[test]
+fn model_provider_map_parser_reads_custom_provider_config() {
+    let value = json!([
+        {
+            "model": "my-model",
+            "provider": "custom",
+            "base_url": "https://api.example.com/v1/chat/completions",
+            "protocol": "chat_completions"
+        }
+    ]);
+
+    let (map, provider_configs, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
+
+    assert_eq!(map.get("my-model").map(String::as_str), Some("custom"));
+    let config = provider_configs.get("custom").expect("custom provider config");
+    assert_eq!(config.base_url, "https://api.example.com/v1/chat/completions");
+    assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
+    assert_eq!(duplicate_count, 0);
 }
 
 #[test]
@@ -928,6 +949,7 @@ fn timiai_session_id_is_reused_from_proxy_config() {
         api_keys: BTreeMap::new(),
         session_ids,
         model_providers: BTreeMap::new(),
+        provider_configs: BTreeMap::new(),
     };
 
     assert_eq!(

@@ -53,6 +53,25 @@ fn make_file_record(
     }
 }
 
+fn make_usage_event(model: &str, total_tokens: u64, timestamp: &str) -> UsageEvent {
+    UsageEvent {
+        scope: UsageEventScope::TurnDelta,
+        model: Some(model.into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some(timestamp.into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(total_tokens),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(total_tokens),
+            window_tokens: Some(128000),
+            updated_at: Some(timestamp.into()),
+        },
+        raw_json: None,
+    }
+}
 #[test]
 fn test_create_and_list_sessions() {
     let dir = tempfile::tempdir().unwrap();
@@ -770,6 +789,123 @@ fn test_change_set_snapshots_survive_workspace_drift() {
     assert_eq!(stored.quality, DiffQuality::Exact);
 }
 
+#[test]
+fn test_usage_events_round_trip_and_summarize() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("10".into()),
+                tokens: UsageTokenBreakdown {
+                    input_tokens: Some(100),
+                    output_tokens: Some(20),
+                    reasoning_tokens: Some(5),
+                    total_tokens: Some(125),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot {
+                    used_tokens: Some(125),
+                    window_tokens: Some(128000),
+                    updated_at: Some("10".into()),
+                },
+                raw_json: Some("{\"ok\":true}".into()),
+            },
+            Some("fallback-model"),
+            Some("fallback-agent"),
+        )
+        .unwrap();
+
+    let snapshot = store.load_session_usage_snapshot("s1").unwrap();
+    assert_eq!(snapshot.context.used_tokens, Some(125));
+    assert_eq!(snapshot.session_total.total_tokens, Some(125));
+    assert_eq!(snapshot.by_model.len(), 1);
+    assert_eq!(snapshot.by_model[0].label, "gpt-5.1");
+
+    let by_model = store.query_usage_summary(UsageSummaryRequest::default()).unwrap();
+    assert_eq!(by_model.len(), 1);
+    assert_eq!(by_model[0].tokens.total_tokens, Some(125));
+    assert_eq!(by_model[0].session_count, 1);
+
+    let by_agent = store
+        .query_usage_summary(UsageSummaryRequest {
+            group_by: UsageSummaryGroupBy::Agent,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(by_agent.len(), 1);
+    assert_eq!(by_agent[0].label, "codex-acp");
+}
+#[test]
+fn test_usage_summary_filters_workspace_and_archived_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_data = dir.path().join("app");
+    let workspace_a = dir.path().join("workspace-a");
+    let workspace_b = dir.path().join("workspace-b");
+    std::fs::create_dir_all(&workspace_a).unwrap();
+    std::fs::create_dir_all(&workspace_b).unwrap();
+
+    let store_a = SessionStore::open(&app_data, &workspace_a).unwrap();
+    let store_b = SessionStore::open(&app_data, &workspace_b).unwrap();
+
+    store_a.create_session("a1", "gpt-5.1").unwrap();
+    store_a
+        .append_usage_event("a1", &make_usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"), None, None)
+        .unwrap();
+    store_a.create_session("a2", "gpt-5.1").unwrap();
+    store_a
+        .append_usage_event("a2", &make_usage_event("gpt-5.1", 20, "2026-06-02T00:00:00Z"), None, None)
+        .unwrap();
+    store_a.archive_session("a2").unwrap();
+
+    store_b.create_session("b1", "claude-opus-4.7").unwrap();
+    store_b
+        .append_usage_event("b1", &make_usage_event("claude-opus-4.7", 30, "2026-06-03T00:00:00Z"), None, None)
+        .unwrap();
+
+    let current_workspace = store_a.query_usage_summary(UsageSummaryRequest::default()).unwrap();
+    assert_eq!(current_workspace.len(), 1);
+    assert_eq!(current_workspace[0].tokens.total_tokens, Some(10));
+
+    let with_archived = store_a
+        .query_usage_summary(UsageSummaryRequest {
+            include_archived: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(with_archived.len(), 1);
+    assert_eq!(with_archived[0].tokens.total_tokens, Some(30));
+
+    let all_workspaces = store_a
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            group_by: UsageSummaryGroupBy::Workspace,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(all_workspaces.len(), 2);
+    assert!(all_workspaces.iter().any(|row| row.workspace_root.as_deref() == Some(store_a.workspace_root()) && row.tokens.total_tokens == Some(10)));
+    assert!(all_workspaces.iter().any(|row| row.workspace_root.as_deref() == Some(store_b.workspace_root()) && row.tokens.total_tokens == Some(30)));
+
+    let date_filtered = store_a
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            include_archived: true,
+            from: Some("2026-06-02T00:00:00Z".into()),
+            to: Some("2026-06-02T23:59:59Z".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(date_filtered.len(), 1);
+    assert_eq!(date_filtered[0].tokens.total_tokens, Some(20));
+}
 #[test]
 fn test_legacy_change_sets_wrap_existing_tables() {
     let dir = tempfile::tempdir().unwrap();

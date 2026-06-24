@@ -21,7 +21,7 @@ function expandProgress() {
 }
 
 describe("AgentPlanPanel", () => {
-  it("renders collapsed progress and expands the current task list", () => {
+  it("auto-expands progress when plan tasks exist", () => {
     render(
       <AgentPlanPanel
         entries={[
@@ -35,11 +35,12 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
-    expandProgress();
     expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("检查现有实现")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "接受计划" })).toBeNull();
+
+    expandProgress();
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("renders environment information independently from progress", () => {
@@ -65,14 +66,113 @@ describe("AgentPlanPanel", () => {
     expect(screen.getByText("master")).toBeTruthy();
     expect(screen.queryByText("来源")).toBeNull();
     expect(screen.queryByText("暂无来源")).toBeNull();
+    expect(screen.queryByLabelText("用量")).toBeNull();
   });
 
+  it("renders live usage with context occupancy and no pricing", () => {
+    render(
+      <AgentPlanEnvironment
+        environment={{
+          changeCount: 2,
+          addedLines: 34,
+          removedLines: 5,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "提交或推送",
+          githubLabel: "GitHub CLI 不可用",
+          usage: {
+            context: { used_tokens: 12345, window_tokens: 128000, updated_at: "2026-06-23T00:00:00Z" },
+            current_turn: { total_tokens: 1200 },
+            session_total: { total_tokens: 12345 },
+            by_model: [
+              {
+                label: "gpt-5.1",
+                model: "gpt-5.1",
+                provider: "openai",
+                agent_cli: "codex-acp",
+                workspace_root: null,
+                session_id: "s-1",
+                tokens: { total_tokens: 12345 },
+                context_peak_tokens: 12345,
+                event_count: 1,
+                session_count: 1,
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("用量")).toBeTruthy();
+    expect(screen.getByText("12k / 128k")).toBeTruthy();
+    expect(screen.queryByText("gpt-5.1")).not.toBeInTheDocument();
+    expect(screen.getByText("本轮 1,200")).toBeTruthy();
+    expect(screen.getByText("会话 12k")).toBeTruthy();
+    expect(screen.getByRole("meter", { name: "上下文占用" })).toHaveAttribute("aria-valuenow", "10");
+    expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+  });
   it("renders an empty progress state when there are no plan entries", () => {
     render(<AgentPlanPanel entries={[]} />);
 
     expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
     expandProgress();
     expect(screen.getByText("暂无进度")).toBeTruthy();
+  });
+
+  it("auto-expands when plan tasks appear after initial render", () => {
+    const { rerender } = render(<AgentPlanPanel entries={[]} />);
+
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
+
+    rerender(
+      <AgentPlanPanel
+        entries={[
+          {
+            id: "1",
+            content: "检查现有实现",
+            priority: "medium",
+            status: "in_progress",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("检查现有实现")).toBeTruthy();
+  });
+
+  it("re-expands when a new plan replaces a manually collapsed task list", () => {
+    const { rerender } = render(
+      <AgentPlanPanel
+        entries={[
+          {
+            id: "old-plan-task",
+            content: "旧计划任务",
+            priority: "medium",
+            status: "pending",
+          },
+        ]}
+      />,
+    );
+
+    expandProgress();
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "false");
+
+    rerender(
+      <AgentPlanPanel
+        entries={[
+          {
+            id: "new-plan-task",
+            content: "新计划任务",
+            priority: "medium",
+            status: "pending",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "进度" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("新计划任务")).toBeTruthy();
   });
 
   it("orders active tasks first, pending next, and completed last", () => {
@@ -113,7 +213,6 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
-    expandProgress();
     const contents = screen
       .getAllByRole("listitem")
       .map((item) => item.querySelector(".agent-plan-content")?.textContent);
@@ -147,7 +246,6 @@ describe("AgentPlanPanel", () => {
       />,
     );
 
-    expandProgress();
     expect(screen.getAllByRole("listitem")).toHaveLength(5);
     expect(screen.getByText("还有 2 个任务")).toBeTruthy();
     expect(screen.queryByText("Task 7")).toBeNull();

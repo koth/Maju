@@ -588,7 +588,7 @@ function buildTimelineCollapseState({
     }
 
     const itemsToCollapse = turnItems.filter((candidate) => {
-      if (candidate.index >= finalAssistant.index) return false;
+      if (candidate.index === finalAssistant.index) return false;
       if (
         candidate.message &&
         turnChangeSetsByMessageId[candidate.message.id]?.files.length
@@ -835,9 +835,16 @@ export function ConversationTimeline({
   const turnIsActive =
     snapshot.session.status === "Streaming" ||
     snapshot.session.status === "WaitingForTool";
+  const allMessagesById = useMemo(
+    () => new Map(snapshot.messages.map((message) => [message.id, message])),
+    [snapshot.messages],
+  );
+  const allToolsById = useMemo(
+    () => new Map(snapshot.tools.map((tool) => [tool.id, tool])),
+    [snapshot.tools],
+  );
   const activeTurnStartIndex = useMemo(() => {
     if (!turnIsActive) return -1;
-    const allMessagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
     for (let index = snapshot.timeline.length - 1; index >= 0; index -= 1) {
       const item = snapshot.timeline[index];
       if (typeof item !== "object" || !("Message" in item)) continue;
@@ -845,13 +852,13 @@ export function ConversationTimeline({
       if (message?.role === "User") return index;
     }
     return -1;
-  }, [snapshot.messages, snapshot.timeline, turnIsActive]);
+  }, [allMessagesById, snapshot.timeline, turnIsActive]);
   const activeTurnStartMessage = useMemo(() => {
     if (!turnIsActive || activeTurnStartIndex < 0) return null;
     const item = snapshot.timeline[activeTurnStartIndex];
     if (typeof item !== "object" || !("Message" in item)) return null;
-    return snapshot.messages.find((message) => message.id === item.Message) ?? null;
-  }, [activeTurnStartIndex, snapshot.messages, snapshot.timeline, turnIsActive]);
+    return allMessagesById.get(item.Message) ?? null;
+  }, [activeTurnStartIndex, allMessagesById, snapshot.timeline, turnIsActive]);
   const activeTurnKey = activeTurnStartMessage
     ? `${snapshot.session.id}:${activeTurnStartMessage.id}`
     : null;
@@ -959,10 +966,10 @@ export function ConversationTimeline({
   const collapseState = useMemo(
     () =>
       buildTimelineCollapseState({
-        timeline: visibleTimeline,
-        timelineStart,
-        messagesById,
-        toolsById,
+        timeline: snapshot.timeline,
+        timelineStart: 0,
+        messagesById: allMessagesById,
+        toolsById: allToolsById,
         hiddenPermissionRequestIds,
         turnIsActive,
         activeTurnStartIndex,
@@ -970,13 +977,12 @@ export function ConversationTimeline({
       }),
     [
       activeTurnStartIndex,
+      allMessagesById,
+      allToolsById,
       hiddenPermissionRequestIds,
-      messagesById,
-      timelineStart,
-      toolsById,
+      snapshot.timeline,
       turnIsActive,
       turnChangeSetsByMessageId,
-      visibleTimeline,
     ],
   );
   const retryableMessages = useMemo(() => retryableUserMessageIds(snapshot), [snapshot]);
@@ -1106,6 +1112,19 @@ export function ConversationTimeline({
           }
 
           const expanded = expandedCollapseGroups.has(group.key);
+          const expandedBeforeItems = group.items.filter((candidate) => candidate.index < i);
+          const expandedAfterItems = group.items.filter((candidate) => candidate.index > i);
+          const renderExpandedItems = (items: TimelineCollapseCandidate[]) =>
+            items.length > 0 ? (
+              <div className="timeline-collapse-content">
+                {items.map((candidate) =>
+                  renderTimelineItem(candidate.item, candidate.index, {
+                    keyPrefix: `collapsed:${group.key}:`,
+                    renderChanges: false,
+                  }),
+                )}
+              </div>
+            ) : null;
           return (
             <Fragment key={`collapse:${group.key}`}>
               <TimelineCollapseSummary
@@ -1113,17 +1132,9 @@ export function ConversationTimeline({
                 expanded={expanded}
                 onToggle={() => toggleCollapseGroup(group.key)}
               />
-              {expanded && (
-                <div className="timeline-collapse-content">
-                  {group.items.map((candidate) =>
-                    renderTimelineItem(candidate.item, candidate.index, {
-                      keyPrefix: `collapsed:${group.key}:`,
-                      renderChanges: false,
-                    }),
-                  )}
-                </div>
-              )}
+              {expanded && renderExpandedItems(expandedBeforeItems)}
               {renderTimelineItem(item, i)}
+              {expanded && renderExpandedItems(expandedAfterItems)}
             </Fragment>
           );
         })}

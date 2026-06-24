@@ -343,6 +343,136 @@ describe("ThinkingIndicator", () => {
     expect(container.textContent).toContain("pnpm test");
   });
 
+  it("collapses tool calls that arrive after the final assistant response", () => {
+    const editTool = makePermissionTool({
+      id: "tool-edit-after-final",
+      call_id: "edit-after-final",
+      kind: "execute",
+      name: "Edit package.json",
+      summary: "edit package.json",
+      status: "Succeeded",
+      raw_input: JSON.stringify({ command: "edit package.json" }),
+      raw_output: "ok",
+      permission_options: [],
+    });
+    const testTool = makePermissionTool({
+      id: "tool-test-after-final",
+      call_id: "test-after-final",
+      kind: "execute",
+      name: "`pnpm test`",
+      summary: "pnpm test",
+      status: "Succeeded",
+      raw_input: JSON.stringify({ command: "pnpm test" }),
+      raw_output: "ok",
+      permission_options: [],
+    });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [
+        { Message: "user-after-tools" },
+        { Message: "assistant-final" },
+        { Tool: editTool.id },
+        { Tool: testTool.id },
+      ],
+      messages: [
+        {
+          id: "user-after-tools",
+          role: "User",
+          body: "fix it",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-final",
+          role: "Assistant",
+          body: "final answer",
+          created_at: "2026-05-12T00:01:05Z",
+        },
+      ],
+      tools: [editTool, testTool],
+    });
+
+    const { container, getByRole } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "assistant-final": makeTurnChangeSet("turn-final", [
+            makeFileSummary("package.json", 2, 1, "turn-final"),
+          ]),
+        }}
+      />,
+    );
+
+    const collapsedText = container.textContent ?? "";
+    expect(collapsedText).toContain("final answer");
+    expect(collapsedText).toContain("已编辑 1 个文件");
+    expect(collapsedText).not.toContain("edit package.json");
+    expect(collapsedText).not.toContain("pnpm test");
+    expect(collapsedText.indexOf("final answer")).toBeLessThan(
+      collapsedText.indexOf("已编辑 1 个文件"),
+    );
+
+    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
+
+    const expandedText = container.textContent ?? "";
+    expect(expandedText).toContain("edit package.json");
+    expect(expandedText).toContain("pnpm test");
+    expect(expandedText.indexOf("final answer")).toBeLessThan(
+      expandedText.indexOf("edit package.json"),
+    );
+  });
+
+  it("collapses completed turns when the user prompt is outside the visible window", () => {
+    const intermediateMessages = Array.from({ length: 83 }, (_, index) => ({
+      id: `assistant-mid-${index}`,
+      role: "Assistant" as const,
+      body: `visible intermediate ${index}`,
+    }));
+    const timeline: TimelineItem[] = [
+      { Message: "user-long" },
+      ...intermediateMessages.map((message): TimelineItem => ({ Message: message.id })),
+      { Message: "assistant-final" },
+    ];
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline,
+      messages: [
+        {
+          id: "user-long",
+          role: "User",
+          body: "run a long task",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        ...intermediateMessages,
+        {
+          id: "assistant-final",
+          role: "Assistant",
+          body: "final long answer",
+          created_at: "2026-05-12T00:01:30Z",
+        },
+      ],
+    });
+
+    const { container, getByRole, unmount } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.textContent).toContain("已处理 1m 30s");
+    expect(container.textContent).toContain("final long answer");
+    expect(container.textContent).not.toContain("visible intermediate 10");
+
+    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
+
+    expect(container.textContent).toContain("visible intermediate 10");
+    unmount();
+  });
+
   it("shows a completed turn divider even without collapsible tool context", () => {
     const snapshot = makeSnapshot({
       session: {

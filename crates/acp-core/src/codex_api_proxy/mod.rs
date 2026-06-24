@@ -103,6 +103,20 @@ struct CodexApiProxyConfig {
     api_keys: BTreeMap<String, String>,
     session_ids: BTreeMap<String, String>,
     model_providers: BTreeMap<String, String>,
+    provider_configs: BTreeMap<String, ProxyProviderConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyProviderProtocol {
+    ChatCompletions,
+    Responses,
+    AnthropicMessages,
+}
+
+#[derive(Debug, Clone)]
+struct ProxyProviderConfig {
+    base_url: String,
+    protocol: ProxyProviderProtocol,
 }
 
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
@@ -135,6 +149,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 api_keys: BTreeMap::new(),
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
             }))
         })
         .clone();
@@ -176,7 +191,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
 }
 
 pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
-    let (model_providers, duplicate_count) = match parse_model_provider_map(value) {
+    let (model_providers, provider_configs, duplicate_count) = match parse_model_provider_map(value) {
         Ok(parsed) => parsed,
         Err(error) => {
             append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
@@ -192,12 +207,14 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
                 api_keys: BTreeMap::new(),
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
             }))
         })
         .clone();
     let count = model_providers.len();
     if let Ok(mut current) = config.write() {
         current.model_providers = model_providers;
+        current.provider_configs = provider_configs;
     }
     append_codex_api_proxy_log(&format!(
         "model_provider_map_configured entries={count} duplicates={duplicate_count}"
@@ -213,22 +230,31 @@ pub fn clear_codex_api_proxy_model_provider_map() {
                 api_keys: BTreeMap::new(),
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
             }))
         })
         .clone();
     if let Ok(mut current) = config.write() {
         current.model_providers.clear();
+        current.provider_configs.clear();
     }
     append_codex_api_proxy_log("model_provider_map_cleared");
 }
 
-fn parse_model_provider_map(value: &str) -> anyhow::Result<(BTreeMap<String, String>, usize)> {
+fn parse_model_provider_map(
+    value: &str,
+) -> anyhow::Result<(
+    BTreeMap<String, String>,
+    BTreeMap<String, ProxyProviderConfig>,
+    usize,
+)> {
     let parsed: Value = serde_json::from_str(value)?;
     let Some(entries) = parsed.as_array() else {
         anyhow::bail!("expected_array");
     };
     let mut duplicate_count = 0usize;
     let mut model_providers = BTreeMap::new();
+    let mut provider_configs = BTreeMap::new();
     for entry in entries {
         let provider = entry
             .get("provider")
@@ -236,6 +262,22 @@ fn parse_model_provider_map(value: &str) -> anyhow::Result<(BTreeMap<String, Str
             .map(normalize_proxy_provider)
             .unwrap_or("timiai")
             .to_string();
+        if let (Some(base_url), Some(protocol)) = (
+            entry
+                .get("base_url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            entry
+                .get("protocol")
+                .and_then(Value::as_str)
+                .and_then(parse_proxy_provider_protocol),
+        ) {
+            provider_configs.entry(provider.clone()).or_insert_with(|| ProxyProviderConfig {
+                base_url: base_url.to_string(),
+                protocol,
+            });
+        }
         for field in ["model", "display_name"] {
             if let Some(model) = entry
                 .get(field)
@@ -254,7 +296,20 @@ fn parse_model_provider_map(value: &str) -> anyhow::Result<(BTreeMap<String, Str
             }
         }
     }
-    Ok((model_providers, duplicate_count))
+    Ok((model_providers, provider_configs, duplicate_count))
+}
+
+fn parse_proxy_provider_protocol(protocol: &str) -> Option<ProxyProviderProtocol> {
+    match protocol.trim().to_ascii_lowercase().as_str() {
+        "chat_completions" | "chat-completions" | "chat" => {
+            Some(ProxyProviderProtocol::ChatCompletions)
+        }
+        "responses" | "response" => Some(ProxyProviderProtocol::Responses),
+        "anthropic_messages" | "anthropic-messages" | "messages" => {
+            Some(ProxyProviderProtocol::AnthropicMessages)
+        }
+        _ => None,
+    }
 }
 
 fn set_codex_api_proxy_port(port: u16) {
@@ -387,6 +442,7 @@ async fn proxy_codex_api_request(
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
+            provider_configs: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
@@ -423,6 +479,16 @@ async fn proxy_codex_api_request(
                 .to_string(),
             "application/json",
         ));
+    }
+    if let Some(custom_config) = config.provider_configs.get(&provider).cloned() {
+        return proxy_custom_codex_responses_request(
+            payload,
+            &api_key,
+            &provider,
+            &custom_config,
+            requested_stream,
+        )
+        .await;
     }
     let chat_payload = match responses_payload_to_chat_payload(payload, &provider) {
         Ok(payload) => payload,
@@ -471,6 +537,145 @@ async fn proxy_codex_api_request(
     .await
 }
 
+async fn proxy_custom_codex_responses_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    custom_config: &ProxyProviderConfig,
+    requested_stream: bool,
+) -> anyhow::Result<Response<ProxyBody>> {
+    match custom_config.protocol {
+        ProxyProviderProtocol::Responses => {
+            proxy_native_responses_request(
+                payload,
+                api_key,
+                provider,
+                &custom_config.base_url,
+            )
+            .await
+        }
+        ProxyProviderProtocol::ChatCompletions => {
+            let chat_payload = responses_payload_to_chat_payload(payload, provider)?;
+            let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
+            proxy_chat_completions_codex_responses_request(
+                chat_payload,
+                api_key,
+                provider,
+                &custom_config.base_url,
+                requested_stream,
+                None,
+            )
+            .await
+        }
+        ProxyProviderProtocol::AnthropicMessages => {
+            let chat_payload = responses_payload_to_chat_payload(payload, provider)?;
+            proxy_anthropic_messages_codex_responses_request(
+                chat_payload,
+                api_key,
+                provider,
+                &custom_config.base_url,
+                requested_stream,
+            )
+            .await
+        }
+    }
+}
+
+async fn proxy_native_responses_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    upstream_url: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .bearer_auth(api_key)
+        .body(serde_json::to_vec(&payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    append_codex_api_proxy_log(&format!(
+        "native_responses_upstream_response provider={} url={} status={} content_type={}",
+        normalize_proxy_provider(provider),
+        upstream_url,
+        status.as_u16(),
+        content_type,
+    ));
+    if is_event_stream(&content_type) {
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
+    }
+    let body = upstream.bytes().await?;
+    let status = normalize_upstream_error_status(status, body.as_ref());
+    let mut response = Response::new(full_body(body));
+    *response.status_mut() = status;
+    if let Ok(value) = content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
+async fn proxy_anthropic_messages_codex_responses_request(
+    chat_payload: Value,
+    api_key: &str,
+    provider: &str,
+    upstream_url: &str,
+    requested_stream: bool,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload);
+    log_anthropic_payload_summary(
+        &format!("{}_request", normalize_proxy_provider(provider)),
+        &anthropic_payload,
+    );
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header("User-Agent", "claude-code/0.2.0")
+        .header("x-api-key", api_key)
+        .body(serde_json::to_vec(&anthropic_payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = upstream.bytes().await?;
+    let mut response_content_type = content_type.clone();
+    let body = if status.is_success() {
+        let anthropic_response: Value = serde_json::from_slice(body.as_ref())?;
+        let response = anthropic_response_to_responses_response(anthropic_response);
+        if requested_stream {
+            response_content_type = "text/event-stream".to_string();
+            responses_response_to_sse(&response)
+        } else {
+            serde_json::to_vec(&response)?
+        }
+    } else {
+        log_suspicious_upstream_response(status, &content_type, body.as_ref());
+        body.to_vec()
+    };
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = response_content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
 async fn proxy_chat_completions_codex_responses_request(
     chat_payload: Value,
     api_key: &str,
@@ -564,6 +769,7 @@ async fn proxy_native_codex_responses_compact_request(
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
+            provider_configs: BTreeMap::new(),
         });
     let provider = explicit_provider
         .map(str::to_string)
@@ -627,6 +833,7 @@ async fn proxy_anthropic_messages_request(
             api_keys: BTreeMap::new(),
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
+            provider_configs: BTreeMap::new(),
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_model = payload
@@ -664,6 +871,16 @@ async fn proxy_anthropic_messages_request(
     }
 
     let session_id = session_id_for_proxy_provider(&config, &provider);
+    if let Some(custom_config) = config.provider_configs.get(&provider).cloned() {
+        return proxy_custom_anthropic_messages_request(
+            payload,
+            &api_key,
+            &provider,
+            &session_id,
+            &custom_config,
+        )
+        .await;
+    }
     if should_bridge_anthropic_messages_to_chat_completions(&provider, routing_model) {
         return proxy_completion_to_anthropic_messages_request(
             payload,
@@ -689,6 +906,99 @@ async fn proxy_anthropic_messages_request(
     }
 }
 
+async fn proxy_custom_anthropic_messages_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    session_id: &str,
+    custom_config: &ProxyProviderConfig,
+) -> anyhow::Result<Response<ProxyBody>> {
+    match custom_config.protocol {
+        ProxyProviderProtocol::AnthropicMessages => {
+            proxy_native_anthropic_messages_request_with_url(
+                payload,
+                api_key,
+                provider,
+                session_id,
+                &custom_config.base_url,
+            )
+            .await
+        }
+        ProxyProviderProtocol::ChatCompletions => {
+            proxy_completion_to_anthropic_messages_request_with_url(
+                payload,
+                api_key,
+                provider,
+                session_id,
+                &custom_config.base_url,
+            )
+            .await
+        }
+        ProxyProviderProtocol::Responses => {
+            proxy_responses_to_anthropic_messages_request(
+                payload,
+                api_key,
+                provider,
+                &custom_config.base_url,
+            )
+            .await
+        }
+    }
+}
+
+async fn proxy_responses_to_anthropic_messages_request(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    upstream_url: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+    let requested_stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let responses_payload = anthropic_payload_to_responses_payload(payload);
+    let client = reqwest::Client::new();
+    let upstream = client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .bearer_auth(api_key)
+        .body(serde_json::to_vec(&responses_payload)?)
+        .send()
+        .await?;
+    let status = StatusCode::from_u16(upstream.status().as_u16())?;
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let body = upstream.bytes().await?;
+    let mut response_content_type = content_type.clone();
+    let body = if status.is_success() {
+        let responses_response: Value = serde_json::from_slice(body.as_ref())?;
+        let anthropic_response = responses_response_to_anthropic_response(responses_response);
+        if requested_stream {
+            response_content_type = "text/event-stream".to_string();
+            anthropic_response_to_sse(&anthropic_response)
+        } else {
+            serde_json::to_vec(&anthropic_response)?
+        }
+    } else {
+        append_codex_api_proxy_log(&format!(
+            "responses_to_anthropic_upstream_error provider={} url={} status={}",
+            normalize_proxy_provider(provider),
+            upstream_url,
+            status.as_u16()
+        ));
+        body.to_vec()
+    };
+    let mut response = Response::new(full_body(Bytes::from(body)));
+    *response.status_mut() = status;
+    if let Ok(value) = response_content_type.parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
 async fn proxy_native_anthropic_messages_request(
     payload: Value,
     api_key: &str,
@@ -696,6 +1006,23 @@ async fn proxy_native_anthropic_messages_request(
     session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let upstream_url = upstream_messages_url(provider);
+    proxy_native_anthropic_messages_request_with_url(
+        payload,
+        api_key,
+        provider,
+        session_id,
+        upstream_url,
+    )
+    .await
+}
+
+async fn proxy_native_anthropic_messages_request_with_url(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    session_id: &str,
+    upstream_url: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
         .and_then(Value::as_bool)
@@ -815,6 +1142,24 @@ async fn proxy_completion_to_anthropic_messages_request(
     provider: &str,
     session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
+    let upstream_url = upstream_chat_completions_url(provider);
+    proxy_completion_to_anthropic_messages_request_with_url(
+        payload,
+        api_key,
+        provider,
+        session_id,
+        upstream_url,
+    )
+    .await
+}
+
+async fn proxy_completion_to_anthropic_messages_request_with_url(
+    payload: Value,
+    api_key: &str,
+    provider: &str,
+    session_id: &str,
+    upstream_url: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
         .and_then(Value::as_bool)
@@ -829,7 +1174,6 @@ async fn proxy_completion_to_anthropic_messages_request(
         &chat_payload,
     );
     let client = reqwest::Client::new();
-    let upstream_url = upstream_chat_completions_url(provider);
     let request = client
         .post(upstream_url)
         .header(CONTENT_TYPE, "application/json");
@@ -1730,7 +2074,6 @@ fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
     payload
 }
 
-#[cfg(test)]
 fn anthropic_payload_to_responses_payload(anthropic: Value) -> Value {
     let mut input = Vec::new();
     if let Some(messages) = anthropic.get("messages").and_then(Value::as_array) {
@@ -1779,7 +2122,6 @@ fn anthropic_payload_to_responses_payload(anthropic: Value) -> Value {
     payload
 }
 
-#[cfg(test)]
 fn append_anthropic_message_to_responses_input(message: &Value, input: &mut Vec<Value>) {
     let role = message
         .get("role")
@@ -1843,7 +2185,6 @@ fn append_anthropic_message_to_responses_input(message: &Value, input: &mut Vec<
     flush_responses_text_message(input, role, &mut pending_text);
 }
 
-#[cfg(test)]
 fn flush_responses_text_message(
     input: &mut Vec<Value>,
     role: &str,
@@ -1857,7 +2198,6 @@ fn flush_responses_text_message(
     push_responses_text_message(input, role, &text);
 }
 
-#[cfg(test)]
 fn push_responses_text_message(input: &mut Vec<Value>, role: &str, text: &str) {
     if text.trim().is_empty() {
         return;
@@ -1879,7 +2219,6 @@ fn push_responses_text_message(input: &mut Vec<Value>, role: &str, text: &str) {
     }));
 }
 
-#[cfg(test)]
 fn anthropic_tools_to_responses_tools(value: Option<&Value>) -> Option<Value> {
     let tools = value?.as_array()?;
     let converted = tools
@@ -1903,7 +2242,6 @@ fn anthropic_tools_to_responses_tools(value: Option<&Value>) -> Option<Value> {
     (!converted.is_empty()).then(|| Value::Array(converted))
 }
 
-#[cfg(test)]
 fn anthropic_tool_choice_to_responses_tool_choice(value: Option<&Value>) -> Option<Value> {
     let value = value?;
     match value.get("type").and_then(Value::as_str) {
@@ -2809,7 +3147,6 @@ fn invalid_apply_patch_input_for_tool_call(name: &str, arguments: &str) -> Strin
     format!("Invalid {name} tool input; expected Claude-style edit JSON but received: {arguments}")
 }
 
-#[cfg(test)]
 fn responses_response_to_anthropic_response(response: Value) -> Value {
     let mut content = Vec::new();
     let mut stop_reason = "end_turn";
@@ -2845,7 +3182,6 @@ fn responses_response_to_anthropic_response(response: Value) -> Value {
     })
 }
 
-#[cfg(test)]
 fn responses_message_item_to_anthropic_content(item: &Value) -> Vec<Value> {
     item.get("content")
         .and_then(Value::as_array)
@@ -2864,7 +3200,6 @@ fn responses_message_item_to_anthropic_content(item: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
 fn responses_tool_call_item_to_anthropic_content(item: &Value) -> Value {
     let id = item
         .get("call_id")

@@ -4,7 +4,8 @@ use serde_json::{Map, Value};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
     DiffLineKind, SessionStatus, SidebarSection, TerminalOutput, ThinkingStatus, TimelineItem,
-    ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
+    ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot, UsageEvent,
+    UsageEventScope, UsageModelSummary, UsageTokenBreakdown,
 };
 
 const MAX_TOOL_DETAIL_CHARS: usize = 32 * 1024;
@@ -24,6 +25,9 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             } else {
                 ui.thinking_status = Some(ThinkingStatus::Completed);
             }
+        }
+        ClientEvent::UsageUpdated { usage } => {
+            apply_usage_update(ui, usage);
         }
         ClientEvent::TurnFinished { stop_reason } => {
             finalize_open_tools(ui, &stop_reason);
@@ -1432,6 +1436,121 @@ fn last_message_id(item: &TimelineItem) -> Option<uuid::Uuid> {
     }
 }
 
+fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
+    if usage.timestamp.is_none() {
+        usage.timestamp = Some(chrono_now_iso());
+    }
+    if usage.context.updated_at.is_none()
+        && (usage.context.used_tokens.is_some() || usage.context.window_tokens.is_some())
+    {
+        usage.context.updated_at = usage.timestamp.clone();
+    }
+    if usage.model.is_none() && !ui.session.model.trim().is_empty() {
+        usage.model = Some(ui.session.model.clone());
+    }
+    if usage.agent_cli.is_none() {
+        usage.agent_cli = ui.session.agent_cli.clone();
+    }
+
+    if usage.context.used_tokens.is_some() {
+        ui.usage.context.used_tokens = usage.context.used_tokens;
+    }
+    if usage.context.window_tokens.is_some() {
+        ui.usage.context.window_tokens = usage.context.window_tokens;
+    }
+    if usage.context.updated_at.is_some() {
+        ui.usage.context.updated_at = usage.context.updated_at.clone();
+    }
+
+    match usage.scope {
+        UsageEventScope::TurnDelta => {
+            ui.usage.current_turn = usage.tokens.clone();
+            add_usage_tokens(&mut ui.usage.session_total, &usage.tokens);
+        }
+        UsageEventScope::SessionTotal => {
+            if has_usage_tokens(&usage.tokens) {
+                ui.usage.session_total = usage.tokens.clone();
+            }
+        }
+        UsageEventScope::ContextSnapshot => {
+            if has_usage_tokens(&usage.tokens) {
+                ui.usage.current_turn = usage.tokens.clone();
+            }
+        }
+    }
+
+    update_usage_model_summary(ui, &usage);
+}
+
+fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
+    let label = usage
+        .model
+        .clone()
+        .or_else(|| usage.agent_cli.clone())
+        .unwrap_or_else(|| "Unknown model".into());
+    let index = ui.usage.by_model.iter().position(|summary| {
+        summary.model == usage.model
+            && summary.provider == usage.provider
+            && summary.agent_cli == usage.agent_cli
+            && summary.session_id.is_none()
+    });
+    let summary = if let Some(index) = index {
+        &mut ui.usage.by_model[index]
+    } else {
+        ui.usage.by_model.push(UsageModelSummary {
+            label,
+            model: usage.model.clone(),
+            provider: usage.provider.clone(),
+            agent_cli: usage.agent_cli.clone(),
+            session_id: None,
+            workspace_root: None,
+            event_count: 0,
+            session_count: 1,
+            tokens: UsageTokenBreakdown::default(),
+            context_peak_tokens: None,
+            latest_at: None,
+        });
+        ui.usage.by_model.last_mut().expect("summary just inserted")
+    };
+
+    summary.event_count += 1;
+    summary.latest_at = usage.timestamp.clone().or_else(|| summary.latest_at.clone());
+    if let Some(used) = usage.context.used_tokens {
+        summary.context_peak_tokens = Some(summary.context_peak_tokens.unwrap_or(0).max(used));
+    }
+    match usage.scope {
+        UsageEventScope::TurnDelta => add_usage_tokens(&mut summary.tokens, &usage.tokens),
+        UsageEventScope::SessionTotal if has_usage_tokens(&usage.tokens) => {
+            summary.tokens = usage.tokens.clone();
+        }
+        _ => {}
+    }
+}
+
+fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
+    tokens.input_tokens.is_some()
+        || tokens.output_tokens.is_some()
+        || tokens.cache_read_tokens.is_some()
+        || tokens.cache_write_tokens.is_some()
+        || tokens.reasoning_tokens.is_some()
+        || tokens.total_tokens.is_some()
+}
+
+fn add_usage_tokens(target: &mut UsageTokenBreakdown, delta: &UsageTokenBreakdown) {
+    add_optional_u64(&mut target.input_tokens, delta.input_tokens);
+    add_optional_u64(&mut target.output_tokens, delta.output_tokens);
+    add_optional_u64(&mut target.cache_read_tokens, delta.cache_read_tokens);
+    add_optional_u64(&mut target.cache_write_tokens, delta.cache_write_tokens);
+    add_optional_u64(&mut target.reasoning_tokens, delta.reasoning_tokens);
+    add_optional_u64(&mut target.total_tokens, delta.total_tokens);
+}
+
+fn add_optional_u64(target: &mut Option<u64>, delta: Option<u64>) {
+    if let Some(delta) = delta {
+        *target = Some(target.unwrap_or(0).saturating_add(delta));
+    }
+}
+
 fn chrono_now_iso() -> String {
     use std::time::SystemTime;
     let now = SystemTime::now()
@@ -1489,6 +1608,7 @@ mod tests {
             review_changes: Vec::new(),
             turn_changes: Vec::new(),
             thinking_status: None,
+            usage: Default::default(),
         }
     }
 
