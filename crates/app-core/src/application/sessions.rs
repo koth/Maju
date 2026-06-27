@@ -471,7 +471,9 @@ impl Application {
             item.attention_state = SessionAttentionState::NeedsAttention;
         }
 
-        item.runtime_status = if self.in_flight_prompt.is_some() {
+        item.runtime_status = if self.in_flight_prompt.is_some()
+            || self.pending_image_degradation.is_some()
+        {
             SessionRuntimeStatus::BackgroundRunning
         } else {
             SessionRuntimeStatus::BackgroundIdle
@@ -493,7 +495,9 @@ impl Application {
 
         let background_runtime = self.install_runtime_as_visible(target_runtime);
         self.runtime_registry.insert(background_runtime);
-        self.ui.session.status = if self.in_flight_prompt.is_some() {
+        self.ui.session.status = if self.in_flight_prompt.is_some()
+            || self.pending_image_degradation.is_some()
+        {
             SessionStatus::Streaming
         } else {
             self.ui.session.status.clone()
@@ -783,6 +787,7 @@ impl Application {
             idle_since: None,
             runtime_status: SessionRuntimeStatus::Active,
             attention_state: SessionAttentionState::None,
+            pending_image_degradation: None,
         })
     }
 
@@ -890,6 +895,7 @@ impl Application {
             idle_since: None,
             runtime_status: SessionRuntimeStatus::Active,
             attention_state: SessionAttentionState::None,
+            pending_image_degradation: None,
         })
     }
 }

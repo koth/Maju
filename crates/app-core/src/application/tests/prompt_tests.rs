@@ -1,4 +1,5 @@
 use super::*;
+use workspace_model::UserPromptContent;
 
 #[test]
 fn inline_think_filter_strips_complete_blocks_from_visible_text() {
@@ -635,4 +636,118 @@ fn streamable_http_connection_not_found_reason_is_human_readable() {
     assert!(reason.contains("CodeBuddy ACP 连接状态已失效"));
     assert!(!reason.contains("connection_id=Some"));
     assert!(!reason.contains("jsonrpc"));
+}
+
+fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::PathBuf) {
+    let service = crate::image_mcp::ImageMcpService::new(
+        workspace_model::ImageCapabilities {
+            native_view: false,
+            native_generate: false,
+            native_edit: false,
+            view_fallback: true,
+        },
+        crate::image_mcp::ImageMcpConfig {
+            workspace_root,
+            settings: workspace_model::ImageSettings::default(),
+            view_api_key: None,
+            generate_api_key: None,
+        },
+    );
+    let handle = crate::image_mcp::start_image_mcp_server(service).unwrap();
+    app.image_mcp = Some(handle);
+    app.ui.image_capabilities.native_view = false;
+    app.ui.image_capabilities.view_fallback = true;
+    app.ui.prompt_capabilities.image = true;
+}
+
+/// Sending an image to a text-only model must show the user message
+/// immediately with the original image (not the degraded text), and the image
+/// degradation must run asynchronously so the send call returns without
+/// blocking. After polling, the degraded prompt reaches the agent.
+#[test]
+fn image_prompt_to_text_only_model_shows_original_then_degrades_async() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    attach_text_only_image_mcp(&mut app, dir.path().to_path_buf());
+
+    let prompt = vec![
+        UserPromptContent::text("这张图里是什么"),
+        UserPromptContent::Image {
+            data: "aW1hZ2U=".into(),
+            mime_type: "image/png".into(),
+            name: Some("cat.png".into()),
+            display_url: None,
+            thumbnail_data: None,
+            thumbnail_mime_type: None,
+        },
+    ];
+
+    // The send must return immediately (no blocking view-model call). The user
+    // message body renders the original image, identical to a multimodal model.
+    app.send_prompt_content_background(prompt).unwrap();
+    assert!(app.has_in_flight_prompt());
+
+    let user_body = app
+        .ui
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.body.clone())
+        .expect("user message appended");
+    assert!(
+        user_body.contains("cat.png"),
+        "user message should render the original image: {user_body}"
+    );
+    assert!(
+        !user_body.contains("view_image"),
+        "user message must not leak the degraded tool hint: {user_body}"
+    );
+
+    // Poll until the background degradation completes and dispatches to the
+    // agent. The agent then receives the degraded prompt (tool hint), but the
+    // already-displayed user message keeps showing the original image.
+    poll_until_prompt_finished(&mut app);
+    assert!(!app.has_in_flight_prompt());
+    let user_body_after = app
+        .ui
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.body.clone())
+        .expect("user message appended");
+    assert!(
+        user_body_after.contains("cat.png"),
+        "displayed user message keeps the original image after degradation: {user_body_after}"
+    );
+
+    app.session.shutdown();
+}
+
+/// Cancelling while an image degradation is pending must drop the pending
+/// degradation and return the session to idle without dispatching to the agent.
+#[test]
+fn cancel_during_image_degradation_aborts_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    attach_text_only_image_mcp(&mut app, dir.path().to_path_buf());
+
+    let prompt = vec![
+        UserPromptContent::text("描述这张图"),
+        UserPromptContent::Image {
+            data: "aW1hZ2U=".into(),
+            mime_type: "image/png".into(),
+            name: Some("cat.png".into()),
+            display_url: None,
+            thumbnail_data: None,
+            thumbnail_mime_type: None,
+        },
+    ];
+    app.send_prompt_content_background(prompt).unwrap();
+    assert!(app.has_in_flight_prompt());
+
+    app.cancel_prompt().unwrap();
+    assert!(!app.has_in_flight_prompt());
+    assert_eq!(app.ui.session.status, SessionStatus::Idle);
+
+    app.session.shutdown();
 }

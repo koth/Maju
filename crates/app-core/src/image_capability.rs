@@ -20,18 +20,23 @@ use workspace_model::ImageCapabilities;
 use crate::settings::{is_claude_agent_acp_command, is_codex_acp_command};
 
 /// Model name substrings that indicate a text-only model (no image input).
-const TEXT_ONLY_MODEL_KEYWORDS: &[&str] = &["deepseek"];
+/// Plain GLM-5.x text models are text-only; only GLM-*V* (vision) variants
+/// accept images (matched by the `glm-v` multimodal keyword below).
+const TEXT_ONLY_MODEL_KEYWORDS: &[&str] = &["deepseek", "glm-5"];
 
 /// Model name substrings that indicate a multimodal model (image input).
 /// Mirrors the models present in the BYOK catalogs that carry image
 /// `input_modalities` in the generated codex-acp model catalog.
+///
+/// Note: only GLM-*V* (vision) variants accept image input; plain GLM-5.x
+/// text models do not, so `"glm-v"` (not `"glm-5"`) is the multimodal signal.
 const MULTIMODAL_MODEL_KEYWORDS: &[&str] = &[
     "gpt-5",
     "gpt-4o",
     "claude-opus",
     "claude-sonnet",
     "gemini",
-    "glm-5",
+    "glm-v",
     "kimi",
     "mimo",
 ];
@@ -82,17 +87,19 @@ pub fn resolve_image_capabilities(
 /// multimodal models are never误降级 (mis-degraded) through the tool path.
 pub fn model_supports_image_input(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
-    if TEXT_ONLY_MODEL_KEYWORDS
-        .iter()
-        .any(|keyword| lower.contains(keyword))
-    {
-        return false;
-    }
+    // Multimodal (vision) variants are checked first so a name like `GLM-5V`
+    // is recognized as image-capable even though plain `glm-5` is text-only.
     if MULTIMODAL_MODEL_KEYWORDS
         .iter()
         .any(|keyword| lower.contains(keyword))
     {
         return true;
+    }
+    if TEXT_ONLY_MODEL_KEYWORDS
+        .iter()
+        .any(|keyword| lower.contains(keyword))
+    {
+        return false;
     }
     // Unknown model: default to capable to avoid forcing multimodal models
     // through the fallback tool path (D12).
@@ -111,11 +118,15 @@ pub fn decode_byok_identifier(
 ) -> (String, Option<String>) {
     let lower = model.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("kodex-provider/byok/") {
-        let mut parts = rest.split('/');
-        let provider_part = parts.next().map(str::to_string);
-        let model_part = parts.next().map(str::to_string);
-        if let (Some(provider_part), Some(model_part)) = (provider_part, model_part) {
-            return (model_part, Some(provider_part));
+        // The slug is `kodex-provider/byok/{source_provider}/{model_slug}`,
+        // and `model_slug` may itself contain slashes (e.g. `zai-org/GLM-5.2`).
+        // Only the first segment is the provider; everything after it is the
+        // model id, so split once and keep the remainder verbatim.
+        if let Some((provider_part, model_part)) = rest.split_once('/') {
+            let model_part = model_part.trim();
+            if !provider_part.is_empty() && !model_part.is_empty() {
+                return (model_part.to_string(), Some(provider_part.to_string()));
+            }
         }
     }
     (model.to_string(), provider.map(str::to_string))
@@ -188,8 +199,40 @@ mod tests {
     }
 
     #[test]
-    fn glm_kimi_mimo_are_multimodal() {
-        for model in &["glm-5.2", "kimi-for-coding", "MiMo-V2.5-Pro"] {
+    fn byok_slug_commandcode_glm_with_slash_decodes_to_text_only() {
+        // The commandcode model slug `zai-org/GLM-5.2` contains a slash; the
+        // decoder must keep the full model id and not truncate it to `zai-org`
+        // (which would fall through to the unknown-model default and wrongly
+        // appear image-capable).
+        let (model, provider) =
+            decode_byok_identifier("kodex-provider/byok/commandcode/zai-org/GLM-5.2", Some("byok"));
+        assert_eq!(model, "zai-org/glm-5.2");
+        assert_eq!(provider.as_deref(), Some("commandcode"));
+        let caps = resolve_image_capabilities(
+            "kodex-provider/byok/commandcode/zai-org/GLM-5.2",
+            Some("byok"),
+            CODEX_CMD,
+        );
+        assert!(!caps.native_view, "GLM-5.2 via commandcode must be text-only");
+        assert!(!caps.native_generate);
+    }
+
+    #[test]
+    fn glm_v_is_multimodal_but_plain_glm_is_text_only() {
+        // Only GLM-*V* (vision) variants accept image input; plain GLM-5.x
+        // text models do not.
+        assert!(model_supports_image_input("glm-v4-plus"));
+        assert!(model_supports_image_input("glm-v4"));
+        assert!(
+            !model_supports_image_input("glm-5.2"),
+            "plain GLM-5.2 must not be treated as image-capable"
+        );
+        assert!(!model_supports_image_input("zai-org/GLM-5.1"));
+    }
+
+    #[test]
+    fn kimi_and_mimo_are_multimodal() {
+        for model in &["kimi-for-coding", "MiMo-V2.5-Pro"] {
             assert!(
                 model_supports_image_input(model),
                 "{model} should be image-capable"

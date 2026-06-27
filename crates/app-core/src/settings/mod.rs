@@ -2918,6 +2918,11 @@ fn codex_acp_model_catalog_entry(
     let context_window = model_context_window_for_provider(model, provider);
     let max_output_tokens = model_max_output_tokens_for_provider(model, provider);
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
+    // Image input capability mirrors `image_capability::model_supports_image_input`
+    // so the catalog's `input_modalities` stays in sync with the prompt
+    // degradation gate. Plain GLM-5.x text models are text-only; only GLM-*V*
+    // (vision) variants accept images.
+    let supports_image_input = crate::image_capability::model_supports_image_input(model);
     let apply_patch_tool_type = apply_patch_tool_type_for_provider(provider);
     let catalog_provider = if encode_provider_models {
         BYOK_PROVIDER_ID
@@ -2961,7 +2966,7 @@ fn codex_acp_model_catalog_entry(
             "limit": 10000
         },
         "supports_parallel_tool_calls": !is_deepseek,
-        "supports_image_detail_original": !is_deepseek,
+        "supports_image_detail_original": supports_image_input,
         "provider": catalog_provider,
         "_meta": {
             "provider": catalog_provider,
@@ -2974,7 +2979,7 @@ fn codex_acp_model_catalog_entry(
         "max_output_tokens": max_output_tokens,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": ["request_user_input"],
-        "input_modalities": if is_deepseek { json!(["text"]) } else { json!(["text", "image"]) },
+        "input_modalities": if supports_image_input { json!(["text", "image"]) } else { json!(["text"]) },
         "supports_search_tool": !is_deepseek
     })
 }

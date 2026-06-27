@@ -91,14 +91,14 @@ impl Application {
                 &self.app_paths.attachments_dir(),
             );
         }
-        // Bug 2: when the active model cannot natively view images, degrade
-        // image attachments into text descriptions via the configured view
-        // model (or fall back to a passive `view_image` tool hint). This makes
-        // the `view_image` fallback actually engage on send instead of being
-        // dead code.
-        if prompt_has_image(&prompt) && !self.ui.image_capabilities.native_view {
-            self.degrade_prompt_images(&mut prompt);
-        }
+        // Display the prompt verbatim (images included) so the timeline looks
+        // identical regardless of whether the active model supports image
+        // input. When the model cannot view images natively, the image→text
+        // degradation runs on a background thread and the *agent* receives the
+        // degraded prompt — this keeps the long blocking view-model call off
+        // the send path so the user message appears immediately.
+        let needs_image_degradation =
+            prompt_has_image(&prompt) && !self.ui.image_capabilities.native_view;
         let display_body = prompt_display_body(&prompt);
         let title_source = prompt_text(&prompt).unwrap_or_else(|| "图片提示".into());
         if display_body.is_empty() {
@@ -159,6 +159,15 @@ impl Application {
             self.skip_replay = false;
         }
 
+        if needs_image_degradation {
+            // Spawn the image degradation on a background thread so the user
+            // message is shown immediately. `poll_prompt_progress` picks up the
+            // result and dispatches the (degraded) prompt to the agent.
+            self.spawn_image_degradation(prompt);
+            self.bump_revision();
+            return Ok(());
+        }
+
         let task = self.session.send_prompt_content_async(prompt)?;
         self.in_flight_prompt = Some(InFlightPrompt { task });
         self.bump_revision();
@@ -197,12 +206,13 @@ impl Application {
                 &self.app_paths.attachments_dir(),
             );
         }
-        // Bug 2: degrade image attachments for text-only models (see
-        // `send_prompt_content_background_inner`).
+        // Display the prompt verbatim (images included) so the steer message
+        // looks identical regardless of model image support; only the prompt
+        // sent to the agent is degraded for text-only models.
+        let display_body = prompt_display_body(&prompt);
         if prompt_has_image(&prompt) && !self.ui.image_capabilities.native_view {
             self.degrade_prompt_images(&mut prompt);
         }
-        let display_body = prompt_display_body(&prompt);
         if display_body.is_empty() {
             let error = anyhow::anyhow!("提示内容不能为空");
             self.push_system_message(error.to_string());
@@ -257,6 +267,97 @@ impl Application {
         degrade_prompt_for_image_fallback(prompt, &config, view_cache);
     }
 
+    /// Spawn image degradation on a background thread so the user message is
+    /// shown immediately. The cloned prompt is degraded (image blocks replaced
+    /// by view-model descriptions or a `view_image` hint) and the result is
+    /// delivered to `poll_prompt_progress`, which dispatches it to the agent.
+    /// On failure the original prompt is sent unchanged so the turn still runs.
+    fn spawn_image_degradation(&mut self, prompt: Vec<UserPromptContent>) {
+        let Some(handle) = self.image_mcp.as_ref() else {
+            // No image MCP server attached (image attachments are gated out
+            // before this path): send the original prompt immediately.
+            match self.session.send_prompt_content_async(prompt) {
+                Ok(task) => self.in_flight_prompt = Some(InFlightPrompt { task }),
+                Err(error) => self.push_system_message(format!("提示发送失败：{error}")),
+            }
+            return;
+        };
+
+        let config = handle.config();
+        let view_cache = handle.view_cache();
+        let (result_tx, result_rx) =
+            std::sync::mpsc::channel::<anyhow::Result<Vec<UserPromptContent>>>();
+        let moved_prompt = prompt.clone();
+        std::thread::spawn(move || {
+            let mut degraded = moved_prompt;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                degrade_prompt_for_image_fallback(&mut degraded, &config, view_cache);
+            }));
+            let result = match result {
+                Ok(()) => Ok(degraded),
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("image degradation panicked");
+                    Err(anyhow::anyhow!(message.to_string()))
+                }
+            };
+            let _ = result_tx.send(result);
+        });
+
+        self.pending_image_degradation = Some(PendingImageDegradation {
+            result_rx,
+            fallback_prompt: prompt,
+        });
+    }
+
+    /// Non-blocking check for a pending image degradation. When the background
+    /// thread has produced a result, this dispatches the (degraded) prompt to
+    /// the agent and installs the resulting `InFlightPrompt`. Returns true when
+    /// a result was consumed (so the caller can bump revision and return); the
+    /// caller should keep polling while it returns false.
+    fn try_complete_image_degradation(&mut self) -> bool {
+        let pending = match self.pending_image_degradation.as_ref() {
+            Some(pending) => pending,
+            None => return false,
+        };
+        // Borrow the receiver via a raw take so we can move it without
+        // disturbing the borrow of `self` for the dispatch below.
+        let result_rx = &pending.result_rx;
+        let result = match result_rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(anyhow::anyhow!("image degradation worker exited unexpectedly"))
+            }
+        };
+        let pending = self
+            .pending_image_degradation
+            .take()
+            .expect("pending checked above");
+
+        // On degradation failure (e.g. worker panic), fall back to the original
+        // prompt so the agent turn still runs; surface the failure to the user.
+        let prompt = result.unwrap_or_else(|error| {
+            self.push_system_message(format!("图片识别预处理失败，已使用原始提示：{error}"));
+            pending.fallback_prompt.clone()
+        });
+
+        match self.session.send_prompt_content_async(prompt) {
+            Ok(task) => {
+                self.in_flight_prompt = Some(InFlightPrompt { task });
+            }
+            Err(error) => {
+                self.ui.session.status = SessionStatus::Interrupted;
+                self.push_system_message(format!("提示发送失败：{error}"));
+                self.current_turn_user_message_id = None;
+            }
+        }
+        true
+    }
+
     fn append_user_prompt_message(&mut self, body: String) -> uuid::Uuid {
         let message = ChatMessage {
             id: uuid::Uuid::new_v4(),
@@ -289,6 +390,7 @@ impl Application {
     pub(super) fn poll_current_runtime_progress(&mut self) {
         // Detect subprocess crash even when no prompt is in flight
         if self.in_flight_prompt.is_none()
+            && self.pending_image_degradation.is_none()
             && !self.session.is_alive()
             && self.ui.session.status != SessionStatus::Interrupted
         {
@@ -316,7 +418,20 @@ impl Application {
             return;
         }
 
+
         let pending_retry_changed = self.retry_pending_tool_write_detections();
+
+        // Drain a completed background image degradation before doing anything
+        // else: it produces the (degraded) prompt that this turn actually sends
+        // to the agent. While a degradation is pending the user message is
+        // already visible (with original images), so we just wait for the
+        // background thread.
+        if self.pending_image_degradation.is_some()
+            && self.try_complete_image_degradation()
+        {
+            self.bump_revision();
+            return;
+        }
 
         let Some(in_flight) = self.in_flight_prompt.as_mut() else {
             let events = self.session.collect_pending_events();
@@ -864,7 +979,7 @@ impl Application {
     }
 
     pub fn has_in_flight_prompt(&self) -> bool {
-        self.in_flight_prompt.is_some()
+        self.in_flight_prompt.is_some() || self.pending_image_degradation.is_some()
     }
 
     fn retryable_user_message_index(&self, message_id: uuid::Uuid) -> anyhow::Result<usize> {
@@ -942,6 +1057,15 @@ impl Application {
     }
 
     pub fn cancel_prompt(&mut self) -> Result<(), String> {
+        // Cancel a pending image degradation: the background thread's result
+        // is dropped on next poll, and the turn ends without dispatching.
+        if self.pending_image_degradation.is_some() {
+            self.pending_image_degradation = None;
+            self.ui.session.status = SessionStatus::Idle;
+            self.current_turn_user_message_id = None;
+            self.bump_revision();
+            return Ok(());
+        }
         if self.in_flight_prompt.is_none() {
             return Ok(());
         }

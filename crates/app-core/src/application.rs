@@ -69,6 +69,24 @@ struct InFlightPrompt {
     task: PromptTask,
 }
 
+/// A pending image-degradation pass for a turn whose user message has already
+/// been rendered to the UI with the original image attachments.
+///
+/// When the active model cannot natively view images, the prompt is shown to
+/// the user verbatim (images included, identical to a multimodal model), while
+/// the actual image→text degradation runs on a background thread. Once it
+/// completes, the degraded prompt is sent to the agent. This keeps the display
+/// path uniform across model types and avoids the long blocking wait that used
+/// to happen before the message appeared.
+struct PendingImageDegradation {
+    /// Receives the degraded prompt from the background thread. Polled from
+    /// `poll_prompt_progress`.
+    result_rx: std::sync::mpsc::Receiver<anyhow::Result<Vec<UserPromptContent>>>,
+    /// Original prompt retained as a fallback when the background degradation
+    /// fails or panics, so the agent turn still runs.
+    fallback_prompt: Vec<UserPromptContent>,
+}
+
 struct PendingToolWriteDetection {
     call_id: String,
     turn_user_message_id: Option<uuid::Uuid>,
@@ -118,11 +136,12 @@ struct SessionRuntime {
     idle_since: Option<Instant>,
     runtime_status: SessionRuntimeStatus,
     attention_state: SessionAttentionState,
+    pending_image_degradation: Option<PendingImageDegradation>,
 }
 
 impl SessionRuntime {
     fn is_in_flight(&self) -> bool {
-        self.in_flight_prompt.is_some()
+        self.in_flight_prompt.is_some() || self.pending_image_degradation.is_some()
     }
 }
 
@@ -236,6 +255,7 @@ pub struct Application {
     current_turn_user_message_id: Option<uuid::Uuid>,
     pending_tool_write_detections: Vec<PendingToolWriteDetection>,
     inline_think_filter: InlineThinkFilter,
+    pending_image_degradation: Option<PendingImageDegradation>,
 }
 
 fn current_timestamp() -> String {
@@ -533,6 +553,10 @@ impl Application {
         std::mem::swap(
             &mut self.inline_think_filter,
             &mut runtime.inline_think_filter,
+        );
+        std::mem::swap(
+            &mut self.pending_image_degradation,
+            &mut runtime.pending_image_degradation,
         );
     }
 

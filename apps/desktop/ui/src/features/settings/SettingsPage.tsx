@@ -1217,17 +1217,27 @@ export function SettingsPage({
     imageGenDraftApiKeyEnv !== "";
 
   const handleSaveImageGenerate = useCallback(async () => {
+    if (!imageGenerateDirty && !imageGenApiKey.trim()) return;
     setBusyImage(true);
     setImageMessage(null);
     try {
-      const next = await settingsSaveImageGenerateSettings(
-        imageGenDraftProtocol,
-        imageGenDraftBaseUrl,
-        imageGenDraftModel,
-        imageGenDraftSize,
-        imageGenDraftApiKeyEnv,
-      );
-      setSnapshot(next);
+      let next = snapshot;
+      if (imageGenerateDirty) {
+        next = await settingsSaveImageGenerateSettings(
+          imageGenDraftProtocol,
+          imageGenDraftBaseUrl,
+          imageGenDraftModel,
+          imageGenDraftSize,
+          imageGenDraftApiKeyEnv,
+        );
+        setSnapshot(next);
+      }
+      const key = imageGenApiKey.trim();
+      if (key) {
+        next = await settingsSaveImageGenerateApiKey(key);
+        setSnapshot(next);
+        setImageGenApiKey("");
+      }
       setImageMessage("生/改图配置已保存。");
     } catch (e) {
       setError(String(e));
@@ -1236,30 +1246,15 @@ export function SettingsPage({
       setBusyImage(false);
     }
   }, [
+    imageGenerateDirty,
+    imageGenApiKey,
     imageGenDraftProtocol,
     imageGenDraftBaseUrl,
     imageGenDraftModel,
     imageGenDraftSize,
     imageGenDraftApiKeyEnv,
+    snapshot,
   ]);
-
-  const handleSaveImageGenerateKey = useCallback(async () => {
-    const key = imageGenApiKey.trim();
-    if (!key) return;
-    setBusyImage(true);
-    setImageMessage(null);
-    try {
-      const next = await settingsSaveImageGenerateApiKey(key);
-      setSnapshot(next);
-      setImageGenApiKey("");
-      setImageMessage("生/改图 API key 已保存。");
-    } catch (e) {
-      setError(String(e));
-      setImageMessage(String(e));
-    } finally {
-      setBusyImage(false);
-    }
-  }, [imageGenApiKey]);
 
   const handleSelectCodexChannel = useCallback(
     async (channel: "default" | "byok") => {
@@ -2400,21 +2395,6 @@ export function SettingsPage({
               }
             />
           </label>
-          <div className="settings-provider-config-actions">
-            <button
-              type="button"
-              className="settings-btn"
-            disabled={
-              busyImage ||
-              !imageGenDraftBaseUrl ||
-              !imageGenDraftModel ||
-              !imageGenerateDirty
-            }
-              onClick={handleSaveImageGenerate}
-            >
-              {busyImage ? "保存中..." : "保存生/改图配置"}
-            </button>
-          </div>
           <label className="settings-field settings-provider-key-field">
             <span>API key</span>
             <input
@@ -2426,27 +2406,30 @@ export function SettingsPage({
                   ? "输入新的 key 以替换"
                   : "输入生/改图模型 API key"
               }
-              value={imageGenApiKey}
-              disabled={busyImage}
-              onChange={(event) =>
-                setImageGenApiKey(event.currentTarget.value)
-              }
-            />
+             value={imageGenApiKey}
+             disabled={busyImage}
+             onChange={(event) => setImageGenApiKey(event.currentTarget.value)}
+           />
           </label>
           <div className="settings-provider-config-actions">
             <button
               type="button"
               className="settings-btn"
-              disabled={busyImage || !imageGenApiKey.trim()}
-              onClick={handleSaveImageGenerateKey}
+              disabled={
+                busyImage ||
+                !imageGenDraftBaseUrl ||
+                !imageGenDraftModel ||
+                (!imageGenerateDirty && !imageGenApiKey.trim())
+              }
+              onClick={handleSaveImageGenerate}
             >
-              {busyImage ? "保存中..." : "保存 key"}
+              {busyImage ? "保存中..." : "保存生/改图配置"}
             </button>
           </div>
-        </div>
-      </section>
-    );
-  };
+      </div>
+    </section>
+  );
+};
 
   const renderArchivePane = () => {
     const workspaceOptions = archivedWorkspaceOptions(archivedSessions);
