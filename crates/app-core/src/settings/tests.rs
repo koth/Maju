@@ -243,6 +243,7 @@ fn settings_round_trip() {
             enabled: true,
             provider: WEB_TOOLS_PROVIDER_BRAVE.to_string(),
         },
+        image: ImageSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -342,7 +343,7 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         selected_claude_provider_profile_id: None,
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
-    };
+        image: ImageSettings::default(),    };
 
     save_app_settings(&paths, &settings).unwrap();
     let loaded = load_app_settings(&paths);
@@ -381,7 +382,7 @@ model_provider = "timiai"
         selected_claude_provider_profile_id: Some("legacy-claude".to_string()),
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
-    };
+        image: ImageSettings::default(),    };
 
     save_app_settings(&paths, &settings).unwrap();
     let loaded = load_app_settings(&paths);
@@ -688,7 +689,7 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
 
@@ -799,7 +800,7 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
     write_codex_acp_provider_config(&paths, TIMIAI_PROVIDER_ID, "timiai-secret").unwrap();
@@ -854,7 +855,7 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
     save_agent_provider_secret(
@@ -893,7 +894,7 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
     save_agent_provider_secret(
@@ -1404,6 +1405,7 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
     let snapshot = save_custom_provider(
         &paths,
         CustomProviderInput {
+            provider_id: None,
             label: "Lab Provider".to_string(),
             endpoint: "https://api.lab.test/v1/responses".to_string(),
             protocol: CustomProviderProtocol::Responses,
@@ -1768,7 +1770,7 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
     std::fs::write(
@@ -1862,7 +1864,7 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
     std::fs::create_dir_all(paths.root()).unwrap();
@@ -2391,7 +2393,7 @@ fn env_override_wins_over_persisted_selection() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-        },
+            image: ImageSettings::default(),        },
     )
     .unwrap();
 

@@ -69,7 +69,7 @@ fn prune_expired_attachments_at(attachments_dir: &Path, now: SystemTime) -> Resu
     Ok(())
 }
 
-fn extension_for_mime_type(mime_type: &str) -> &'static str {
+pub(crate) fn extension_for_mime_type(mime_type: &str) -> &'static str {
     match mime_type
         .split(';')
         .next()
@@ -90,13 +90,73 @@ fn extension_for_mime_type(mime_type: &str) -> &'static str {
     }
 }
 
-fn file_uri(path: &Path) -> String {
+pub(crate) fn file_uri(path: &Path) -> String {
     let path = absolute_path(path);
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.starts_with('/') {
         format!("file://{}", percent_encode_path(&normalized))
     } else {
         format!("file:///{}", percent_encode_path(&normalized))
+    }
+}
+
+/// Inverse of [`file_uri`]: parse a `file://` URI (or accept a plain path)
+/// back into a local [`PathBuf`]. Percent-decodes `%XX` escapes and strips a
+/// leading `/` before a Windows drive letter so URIs produced by `file_uri`
+/// round-trip on all platforms.
+pub(crate) fn local_path_from_uri(uri: &str) -> Option<PathBuf> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("file://")
+        .or_else(|| trimmed.strip_prefix("file:"))
+        .unwrap_or(trimmed);
+    let decoded = percent_decode_path(stripped);
+    let normalized = decoded.replace('\\', "/");
+    // `file:///D:/path` -> `D:/path` (strip one leading slash before a drive
+    // letter on Windows). `file:///path` -> `/path` stays absolute on Unix.
+    let path = if normalized.len() >= 3
+        && normalized.starts_with('/')
+        && normalized.as_bytes()[1].is_ascii_alphabetic()
+        && normalized.as_bytes()[2] == b':'
+    {
+        normalized[1..].to_string()
+    } else {
+        normalized
+    };
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn percent_decode_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(path.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+            {
+                out.push(((hi << 4) | lo) as char);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index] as char);
+        index += 1;
+    }
+    out
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

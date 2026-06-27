@@ -14,20 +14,26 @@ fn session_config_options_preserve_model_provider_meta() {
         "name": "Model",
         "category": "model",
         "type": "select",
-        "currentValue": "kodex-provider/timiai/claude-opus-4.8",
+        "currentValue": "kodex-provider/byok/claude-opus-4.8",
         "options": [
             {
-                "value": "kodex-provider/timiai/claude-opus-4.8",
+                "value": "kodex-provider/byok/claude-opus-4.8",
                 "name": "claude-opus-4.8",
                 "_meta": {
-                    "provider": "timiai"
+                    "provider": "byok",
+                    "provider_label": "BYOK",
+                    "source_provider": "timiai",
+                    "source_provider_label": "TimiAI"
                 }
             },
             {
-                "value": "kodex-provider/commandcode/claude-opus-4.8",
+                "value": "kodex-provider/byok/claude-opus-4.8",
                 "name": "claude-opus-4.8",
                 "_meta": {
-                    "provider": "commandcode"
+                    "provider": "byok",
+                    "provider_label": "BYOK",
+                    "source_provider": "commandcode",
+                    "source_provider_label": "CommandCode"
                 }
             }
         ]
@@ -48,6 +54,14 @@ fn session_config_options_preserve_model_provider_meta() {
             .map(|choice| choice.provider.as_deref())
             .collect::<Vec<_>>(),
         vec![Some("timiai"), Some("commandcode")]
+    );
+    assert_eq!(
+        model
+            .choices
+            .iter()
+            .map(|choice| choice.provider_label.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("TimiAI"), Some("CommandCode")]
     );
 }
 
@@ -384,19 +398,21 @@ fn usage_update_maps_context_and_kodex_metadata() {
     let (tx, rx) = mpsc::channel();
     let notification = SessionNotification::new(
         "session-1",
-        SessionUpdate::UsageUpdate(UsageUpdate::new(1200, 128000).meta(serde_json::Map::from_iter([(
-            "kodex.ai/usage".to_string(),
-            serde_json::json!({
-                "scope": "turn_delta",
-                "model": "gpt-5.1",
-                "provider": "openai",
-                "agent_cli": "codex-acp",
-                "input_tokens": 900,
-                "output_tokens": 200,
-                "reasoning_tokens": 100,
-                "total_tokens": 1200
-            }),
-        )]))),
+        SessionUpdate::UsageUpdate(UsageUpdate::new(1200, 128000).meta(
+            serde_json::Map::from_iter([(
+                "kodex.ai/usage".to_string(),
+                serde_json::json!({
+                    "scope": "turn_delta",
+                    "model": "gpt-5.1",
+                    "provider": "openai",
+                    "agent_cli": "codex-acp",
+                    "input_tokens": 900,
+                    "output_tokens": 200,
+                    "reasoning_tokens": 100,
+                    "total_tokens": 1200
+                }),
+            )]),
+        )),
     );
 
     emit_notification(&tx, "", notification).unwrap();

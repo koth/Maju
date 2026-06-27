@@ -70,6 +70,24 @@ describe("Composer", () => {
     expect(container.querySelector(".composer")).toHaveClass("is-compact");
   });
 
+  it("waits for the model list before enabling prompt input", () => {
+    const snapshot = makeSnapshot({
+      session_config: { hydrated: false, controls: [] },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("status", { name: "模型加载中" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByPlaceholderText("正在加载模型列表...")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "附加图片或文件" })).toBeDisabled();
+    const sendButton = screen.getByRole("button", { name: "正在加载模型列表" });
+    expect(sendButton).toBeDisabled();
+
+    fireEvent.click(sendButton);
+    expect(sessionSendPrompt).not.toHaveBeenCalled();
+  });
+
   it("keeps compact composer controls on the input row", () => {
     const snapshot = makeSnapshot({
       session_config: {
@@ -350,15 +368,16 @@ describe("Composer", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Kimi Code" }));
 
     await waitFor(() =>
-      expect(sessionSetConfigControl).toHaveBeenCalledWith("model", "kimi-for-coding", "kimi_code"),
+      expect(sessionSetConfigControl).toHaveBeenCalledWith("model", "kodex-provider/byok/kimi_code/kimi-for-coding", null),
     );
   });
 
-  it("selects the provider encoded in the current model value", () => {
+  it("resubmits the visible provider when reselecting an ambiguous bare model", async () => {
+    vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
     const snapshot = makeSnapshot({
       session: {
         ...makeSnapshot().session,
-        model: "kodex-provider/kimi_code/kimi-for-coding",
+        model: "gpt-5.4",
       },
       session_config: {
         hydrated: true,
@@ -369,8 +388,156 @@ describe("Composer", () => {
             description: null,
             category: "Model",
             source: "SessionModel",
-            current_value_id: "kodex-provider/kimi_code/kimi-for-coding",
-            current_value_label: "kodex-provider/kimi_code/kimi-for-coding",
+            current_value_id: "gpt-5.4",
+            current_value_label: "gpt-5.4",
+            enabled: true,
+            choices: [
+              { id: "gpt-5.4", label: "gpt-5.4", description: null, provider: "commandcode" },
+              { id: "gpt-5.4", label: "gpt-5.4", description: null, provider: "custom", provider_label: "Lab Provider" },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /Provider.*CommandCode/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^gpt-5\.4/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "gpt-5.4" }));
+
+    await waitFor(() =>
+      expect(sessionSetConfigControl).toHaveBeenCalledWith("model", "kodex-provider/byok/commandcode/gpt-5.4", null),
+    );
+  });
+  it("shows the saved custom provider label and selects its encoded model", async () => {
+    vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kodex-provider/byok/commandcode/gpt-5.4",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kodex-provider/byok/commandcode/gpt-5.4",
+            current_value_label: "kodex-provider/byok/commandcode/gpt-5.4",
+            enabled: true,
+            choices: [
+              {
+                id: "kodex-provider/byok/commandcode/gpt-5.4",
+                label: "kodex-provider/byok/commandcode/gpt-5.4",
+                description: null,
+                provider: "commandcode",
+                provider_label: "CommandCode",
+              },
+              {
+                id: "kodex-provider/byok/custom/lab-model",
+                label: "kodex-provider/byok/custom/lab-model",
+                description: null,
+                provider: "custom",
+                provider_label: "Lab Provider",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider.*CommandCode/ }));
+
+    expect(await screen.findByRole("option", { name: "Lab Provider" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /^custom$/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("option", { name: "Lab Provider" }));
+
+    await waitFor(() =>
+      expect(sessionSetConfigControl).toHaveBeenCalledWith(
+        "model",
+        "kodex-provider/byok/custom/lab-model",
+        null,
+      ),
+    );
+  });
+  it("encodes bare custom provider model choices before updating the session", async () => {
+    vi.mocked(sessionSetConfigControl).mockResolvedValue({ hydrated: true, controls: [] });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kodex-provider/byok/commandcode/gpt-5.4",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kodex-provider/byok/commandcode/gpt-5.4",
+            current_value_label: "kodex-provider/byok/commandcode/gpt-5.4",
+            enabled: true,
+            choices: [
+              {
+                id: "kodex-provider/byok/commandcode/gpt-5.4",
+                label: "kodex-provider/byok/commandcode/gpt-5.4",
+                description: null,
+                provider: "commandcode",
+                provider_label: "CommandCode",
+              },
+              {
+                id: "lab-model",
+                label: "lab-model",
+                description: null,
+                provider: "custom",
+                provider_label: "Lab Provider",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Provider.*CommandCode/ }));
+    fireEvent.click(await screen.findByRole("option", { name: "Lab Provider" }));
+
+    await waitFor(() =>
+      expect(sessionSetConfigControl).toHaveBeenCalledWith(
+        "model",
+        "kodex-provider/byok/custom/lab-model",
+        null,
+      ),
+    );
+  });
+  it("selects the provider encoded in the current model value", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        model: "kodex-provider/byok/kimi_code/kimi-for-coding",
+      },
+      session_config: {
+        hydrated: true,
+        controls: [
+          {
+            id: "model",
+            label: "Model",
+            description: null,
+            category: "Model",
+            source: "SessionModel",
+            current_value_id: "kodex-provider/byok/kimi_code/kimi-for-coding",
+            current_value_label: "kodex-provider/byok/kimi_code/kimi-for-coding",
             enabled: true,
             choices: [
               { id: "agent-default", label: "Agent default", description: null, provider: null },
@@ -468,7 +635,7 @@ describe("Composer", () => {
     const snapshot = makeSnapshot({
       session: {
         ...makeSnapshot().session,
-        model: "kodex-provider/commandcode/gpt-5.5",
+        model: "kodex-provider/byok/commandcode/gpt-5.5",
       },
       session_config: {
         hydrated: true,
@@ -479,13 +646,13 @@ describe("Composer", () => {
             description: null,
             category: "Model",
             source: "SessionModel",
-            current_value_id: "kodex-provider/commandcode/gpt-5.5",
-            current_value_label: "kodex-provider/commandcode/gpt-5.5",
+            current_value_id: "kodex-provider/byok/commandcode/gpt-5.5",
+            current_value_label: "kodex-provider/byok/commandcode/gpt-5.5",
             enabled: true,
             choices: [
               { id: "agent-default", label: "Agent default", description: null, provider: null },
-              { id: "kodex-provider/commandcode/gpt-5.5", label: "kodex-provider/commandcode/gpt-5.5", description: null, provider: null },
-              { id: "kodex-provider/kimi_code/kimi-for-coding", label: "kodex-provider/kimi_code/kimi-for-coding", description: null, provider: null },
+              { id: "kodex-provider/byok/commandcode/gpt-5.5", label: "kodex-provider/byok/commandcode/gpt-5.5", description: null, provider: null },
+              { id: "kodex-provider/byok/kimi_code/kimi-for-coding", label: "kodex-provider/byok/kimi_code/kimi-for-coding", description: null, provider: null },
             ],
           },
         ],
@@ -509,7 +676,7 @@ describe("Composer", () => {
     await waitFor(() =>
       expect(sessionSetConfigControl).toHaveBeenCalledWith(
         "model",
-        "kodex-provider/kimi_code/kimi-for-coding",
+        "kodex-provider/byok/kimi_code/kimi-for-coding",
         null,
       ),
     );

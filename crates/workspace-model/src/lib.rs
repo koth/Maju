@@ -267,6 +267,8 @@ pub struct SessionConfigChoice {
     pub description: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub provider_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +296,71 @@ pub struct PromptInputCapabilities {
     pub embedded_context: bool,
     #[serde(default)]
     pub session_steer: bool,
+}
+
+/// Native image capabilities resolved for a session's active model/provider.
+///
+/// Pure DTO: `app-core` resolves these from model/provider/agent signals, and
+/// `acp-core` consumes them on `SessionConfig` to override prompt capabilities.
+/// `native_edit` is always `false` because Kodex has no native image-editing
+/// capability; editing is always delivered through the image MCP `edit_image`
+/// tool.
+///
+/// `view_fallback` is `true` when the `kodex-image` MCP server is attached and
+/// offers an image-understanding fallback (`view_image`). It is independent of
+/// `native_view`: a text-only model with `view_fallback == true` still allows
+/// image attachments — the prompt is degraded through `view_image` before
+/// reaching the model. The prompt-capability gate is therefore
+/// `native_view || view_fallback`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageCapabilities {
+    /// Whether the active model can natively understand image input.
+    pub native_view: bool,
+    /// Whether the current provider can natively generate images
+    /// (codex-acp default provider only).
+    pub native_generate: bool,
+    /// Whether the active model/provider can natively edit images.
+    /// Always `false`; editing is always MCP-backed.
+    pub native_edit: bool,
+    /// Whether an image-understanding fallback (`view_image`) is available.
+    /// `true` iff the `kodex-image` MCP server is attached for this session.
+    pub view_fallback: bool,
+}
+
+impl ImageCapabilities {
+    /// Returns `true` when every native capability is present and no image
+    /// MCP fallback tool is required.
+    pub fn all_native(&self) -> bool {
+        self.native_view && self.native_generate && self.native_edit
+    }
+
+    /// The prompt-capability gate: image attachments are allowed when the
+    /// model natively understands images or a `view_image` fallback is attached.
+    pub fn image_capable(&self) -> bool {
+        self.native_view || self.view_fallback
+    }
+
+ /// The safe default: assume every native capability is present so that no
+    /// fallback override fires when image fallback is inactive or a session's
+    /// capabilities have not been resolved yet. (`native_edit` stays `false`
+    /// because there is no native editing path, but that only matters once a
+    /// session has resolved real capabilities and an image MCP is attached.)
+    /// `view_fallback` defaults to `false`; it flips to `true` once the
+    /// `kodex-image` MCP server is actually attached.
+    pub fn assumed_native() -> Self {
+        Self {
+            native_view: true,
+            native_generate: true,
+            native_edit: false,
+            view_fallback: false,
+        }
+    }
+}
+
+impl Default for ImageCapabilities {
+    fn default() -> Self {
+        Self::assumed_native()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1094,6 +1161,11 @@ pub struct UiSnapshot {
     pub session_config: SessionConfigState,
     #[serde(default)]
     pub prompt_capabilities: PromptInputCapabilities,
+    /// Resolved native image capabilities for the session's active
+    /// model/provider. The reducer uses `native_view` to override
+    /// `prompt_capabilities.image` for text-only models.
+    #[serde(default)]
+    pub image_capabilities: ImageCapabilities,
     #[serde(default)]
     pub available_commands: Vec<AvailableCommand>,
     #[serde(default)]
@@ -1269,6 +1341,8 @@ pub enum CustomProviderProtocol {
 #[serde(rename_all = "camelCase")]
 pub struct CustomProviderInput {
     #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
     pub label: String,
     #[serde(default)]
     pub endpoint: String,
@@ -1288,6 +1362,8 @@ pub struct AgentProviderProfile {
     pub selected: bool,
     pub configured: bool,
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub custom: bool,
     #[serde(default)]
@@ -1339,6 +1415,115 @@ fn default_web_tools_provider() -> String {
     "brave".to_string()
 }
 
+/// Image-understanding fallback configuration. `view` selects a multimodal
+/// model from the existing model catalog used by the `view_image` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageViewSettings {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for ImageViewSettings {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+/// Image generation/edit configuration. `generate_image` and `edit_image`
+/// share this one independently-configured generation model (e.g.
+/// `nana-banana`), which is not part of the text-model catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageGenerateSettings {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_env: String,
+    #[serde(default = "default_image_generate_protocol")]
+    pub protocol: ImageGenerateProtocol,
+    #[serde(default = "default_image_generate_size")]
+    pub default_size: String,
+}
+
+impl Default for ImageGenerateSettings {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            base_url: String::new(),
+            api_key_env: String::new(),
+            protocol: default_image_generate_protocol(),
+            default_size: default_image_generate_size(),
+        }
+    }
+}
+
+/// Wire protocol spoken by the independently-configured image generation
+/// model. `generate_image` and `edit_image` dispatch on this.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageGenerateProtocol {
+    /// OpenAI-compatible `POST /images/generations` + `POST /images/edits`.
+    #[default]
+    OpenaiImages,
+    /// OpenAI-compatible `POST /chat/completions` where the model returns
+    /// image output inline (e.g. multimodal generation models that emit
+    /// `image_url` content parts).
+    ChatCompletions,
+    /// Google Gemini `POST /models/{model}:generateContent` with
+    /// `responseModalities` including `IMAGE`.
+    Gemini,
+}
+
+impl ImageGenerateProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiImages => "openai_images",
+            Self::ChatCompletions => "chat_completions",
+            Self::Gemini => "gemini",
+        }
+    }
+}
+
+fn default_image_generate_protocol() -> ImageGenerateProtocol {
+    ImageGenerateProtocol::default()
+}
+
+fn default_image_generate_size() -> String {
+    "1024x1024".to_string()
+}
+
+/// Unified image capability fallback settings. When `enabled`/`auto_enable`
+/// are true and a native image capability is missing, the `kodex-image` MCP
+/// server is injected with the corresponding fallback tool(s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub view: ImageViewSettings,
+    #[serde(default)]
+    pub generate: ImageGenerateSettings,
+}
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            view: ImageViewSettings::default(),
+            generate: ImageGenerateSettings::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub selected_agent: AgentCliId,
@@ -1359,6 +1544,8 @@ pub struct AppSettings {
     pub claude: ClaudeProviderSettings,
     #[serde(default)]
     pub web_tools: WebToolsSettings,
+    #[serde(default)]
+    pub image: ImageSettings,
 }
 
 fn default_acp_port() -> u16 {
@@ -1433,6 +1620,8 @@ pub struct AgentSettingsSnapshot {
     pub codex_acp: CodexAcpSettingsStatus,
     pub claude: ClaudeProviderSettingsStatus,
     pub web_tools: WebToolsSettingsStatus,
+    #[serde(default)]
+    pub image: ImageSettingsStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1464,6 +1653,25 @@ pub struct WebToolsSettingsStatus {
     pub configured: bool,
 }
 
+/// UI-facing image capability fallback status. `view_models` lists catalog
+/// models the user can pick for `view_image` (filtered to image-capable
+/// providers); `generate_configured` reports whether the generation model has
+/// a key resolved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSettingsStatus {
+    pub enabled: bool,
+    pub view_provider: String,
+    pub view_model: String,
+    pub view_configured: bool,
+    /// Catalog models available for the configured view provider, so the UI
+    /// picker can list them. Each entry is a plain model id.
+    pub view_models: Vec<String>,
+    pub generate_protocol: ImageGenerateProtocol,
+    pub generate_model: String,
+    pub generate_base_url: String,
+    pub generate_default_size: String,
+    pub generate_configured: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentInstallResult {
     pub agent: AgentCliId,

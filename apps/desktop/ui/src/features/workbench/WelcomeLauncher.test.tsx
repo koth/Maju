@@ -75,7 +75,7 @@ function profile(
 function agentSnapshot(): AgentSettingsSnapshot {
   return {
     settings: {
-      selected_agent: "claude-agent-acp",
+      selected_agent: "codex-acp",
       acp_port: 0,
       theme: "graphite",
       lsp_servers: {},
@@ -93,12 +93,20 @@ function agentSnapshot(): AgentSettingsSnapshot {
     },
     agents: [
       {
+        id: "codex-acp",
+        label: "Codex",
+        binary: "codex-acp",
+        installed: true,
+        detected_path: "C:\\tools\\codex-acp.exe",
+        selected: true,
+      },
+      {
         id: "claude-agent-acp",
         label: "Claude",
         binary: "claude-agent-acp",
         installed: true,
         detected_path: "C:\\tools\\claude-agent-acp.exe",
-        selected: true,
+        selected: false,
       },
     ],
     env_override: null,
@@ -172,10 +180,12 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     vi.clearAllMocks();
   });
 
-  it("opens Codex BYOK settings when no provider is configured", async () => {
+  it("opens Codex BYOK settings when no provider is configured and no workspace can be opened", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([]);
     const onOpenSettings = vi.fn();
     render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
 
+    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
     await waitFor(() => expect(settingsSelectAgent).toHaveBeenCalledWith("codex-acp"));
     await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "byok"));
     await waitFor(() =>
@@ -184,8 +194,20 @@ describe("WelcomeLauncher BYOK onboarding", () => {
         initialAgentTab: "codex-acp",
       }),
     );
-    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
     expect(workspaceOpen).not.toHaveBeenCalled();
+  });
+
+  it("opens a recent workspace before loading agent settings", async () => {
+    const onOpenSettings = vi.fn();
+    const onWorkspaceOpened = vi.fn();
+    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+
+    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
+    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
+    expect(settingsGetAgentSnapshot).not.toHaveBeenCalled();
+    expect(settingsSelectAgent).not.toHaveBeenCalled();
+    expect(onOpenSettings).not.toHaveBeenCalled();
   });
 
   it("auto-opens an internal workspace when TimiAI is configured", async () => {
@@ -272,7 +294,7 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     const openRemote = within(panel).getByRole("button", { name: "打开目录" });
     expect(await screen.findByText(/Devbox/)).toBeInTheDocument();
     const agentGroup = screen.getByRole("radiogroup", { name: "remote_open_agent" });
-    expect(within(agentGroup).getByRole("radio", { name: /Claude/ })).toHaveAttribute("aria-checked", "true");
+    expect(within(agentGroup).getByRole("radio", { name: /Codex/ })).toHaveAttribute("aria-checked", "true");
     fireEvent.change(screen.getByLabelText("remote_open_path"), { target: { value: "/root/kodex-remote-acp-test" } });
     fireEvent.change(screen.getByLabelText("remote_open_password"), { target: { value: "ssh-secret" } });
 
@@ -285,7 +307,7 @@ describe("WelcomeLauncher BYOK onboarding", () => {
         profile_id: "remote-1",
         remote_path: "/root/kodex-remote-acp-test",
         ssh_password: "ssh-secret",
-        agent_cli: "claude-agent-acp",
+        agent_cli: "codex-acp",
       })),
     );
     await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());

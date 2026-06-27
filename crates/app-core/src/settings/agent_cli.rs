@@ -17,15 +17,15 @@ pub(super) struct AgentCliDefinition {
 
 pub(super) const AGENTS: &[AgentCliDefinition] = &[
     AgentCliDefinition {
-        id: AgentCliId::ClaudeAgentAcp,
-        label: "Claude",
-        binary: "claude-agent-acp",
-        acp_arg: "",
-    },
-    AgentCliDefinition {
         id: AgentCliId::CodexAcp,
         label: "Codex",
         binary: "codex-acp",
+        acp_arg: "",
+    },
+    AgentCliDefinition {
+        id: AgentCliId::ClaudeAgentAcp,
+        label: "Claude",
+        binary: "claude-agent-acp",
         acp_arg: "",
     },
     AgentCliDefinition {
@@ -209,6 +209,7 @@ pub fn agent_env_for_command(command: &str, paths: &AppPaths) -> Vec<(String, St
         return Vec::new();
     }
 
+    let _ = refresh_codex_acp_config_for_launch(paths);
     let config_path = codex_config_path(paths);
     let _ = ensure_codex_acp_env_key(&config_path);
     let provider_keys = codex_provider_keys(paths);
@@ -279,6 +280,10 @@ pub fn remote_codex_proxy_config(
 
 pub fn ensure_agent_ready_for_command(command: &str, paths: &AppPaths) -> Result<()> {
     let settings = load_app_settings(paths);
+    if is_codex_acp_command(command) {
+        refresh_codex_acp_config_for_launch(paths)?;
+        return Ok(());
+    }
     if !is_claude_agent_acp_command(command) {
         return Ok(());
     }

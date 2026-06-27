@@ -239,7 +239,10 @@ fn emit_usage_update(
     update: UsageUpdate,
     raw_notification: &Value,
 ) -> anyhow::Result<()> {
-    let update_meta = update.meta.as_ref().and_then(|meta| meta.get("kodex.ai/usage"));
+    let update_meta = update
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("kodex.ai/usage"));
     let notification_meta = raw_notification
         .get("_meta")
         .and_then(|meta| meta.get("kodex.ai/usage"));
@@ -289,7 +292,10 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
         return UsageTokenBreakdown::default();
     };
     let input_tokens = usage_u64_field(meta, &["input_tokens", "inputTokens", "prompt_tokens"]);
-    let output_tokens = usage_u64_field(meta, &["output_tokens", "outputTokens", "completion_tokens"]);
+    let output_tokens = usage_u64_field(
+        meta,
+        &["output_tokens", "outputTokens", "completion_tokens"],
+    );
     let cache_read_tokens = usage_u64_field(
         meta,
         &[
@@ -311,20 +317,21 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
         ],
     );
     let reasoning_tokens = usage_u64_field(meta, &["reasoning_tokens", "reasoningTokens"]);
-    let total_tokens = usage_u64_field(meta, &["total_tokens", "totalTokens", "total"]).or_else(|| {
-        let parts = [
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            reasoning_tokens,
-        ];
-        if parts.iter().any(Option::is_some) {
-            Some(parts.into_iter().flatten().sum())
-        } else {
-            None
-        }
-    });
+    let total_tokens =
+        usage_u64_field(meta, &["total_tokens", "totalTokens", "total"]).or_else(|| {
+            let parts = [
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                reasoning_tokens,
+            ];
+            if parts.iter().any(Option::is_some) {
+                Some(parts.into_iter().flatten().sum())
+            } else {
+                None
+            }
+        });
 
     UsageTokenBreakdown {
         input_tokens,

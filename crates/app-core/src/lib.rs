@@ -3,6 +3,9 @@ mod attachment_cache;
 mod bootstrap;
 mod editor_files;
 mod file_tracker;
+mod image_api;
+mod image_capability;
+mod image_mcp;
 mod paths;
 mod reducer;
 pub mod remote_bootstrap;
@@ -1797,6 +1800,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                     label: (*choice).into(),
                     description: None,
                     provider: None,
+                    provider_label: None,
                 })
                 .collect(),
             enabled: true,
@@ -1823,12 +1827,14 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
                 label: "Plan".into(),
                 description: None,
                 provider: None,
+                provider_label: None,
             },
             SessionConfigChoice {
                 id: "build".into(),
                 label: "Build".into(),
                 description: None,
                 provider: None,
+                provider_label: None,
             },
         ];
         let current_value_label = choices

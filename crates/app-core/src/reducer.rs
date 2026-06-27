@@ -280,7 +280,15 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             ui.session_config = state;
             sync_session_summary_from_config(ui);
         }
-        ClientEvent::PromptCapabilitiesUpdated { capabilities } => {
+        ClientEvent::PromptCapabilitiesUpdated { mut capabilities } => {
+            // The agent handshake reports a hardcoded `image` capability, but
+            // the actual image-attachment gate is `native_view || view_fallback`:
+            // a text-only model still accepts images when a `view_image`
+            // fallback is attached (the prompt is degraded through `view_image`
+            // in `prompting.rs` before reaching the model). When neither holds,
+            // force the gate closed so the attachment guard in `prompting.rs`
+            // rejects image prompts (Bug 1 / Bug 3).
+            capabilities.image = ui.image_capabilities.image_capable();
             ui.prompt_capabilities = capabilities;
         }
         ClientEvent::AvailableCommandsUpdated { commands } => {
@@ -1514,7 +1522,10 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
     };
 
     summary.event_count += 1;
-    summary.latest_at = usage.timestamp.clone().or_else(|| summary.latest_at.clone());
+    summary.latest_at = usage
+        .timestamp
+        .clone()
+        .or_else(|| summary.latest_at.clone());
     if let Some(used) = usage.context.used_tokens {
         summary.context_peak_tokens = Some(summary.context_peak_tokens.unwrap_or(0).max(used));
     }
@@ -1592,6 +1603,7 @@ mod tests {
             },
             session_config: Default::default(),
             prompt_capabilities: Default::default(),
+            image_capabilities: Default::default(),
             available_commands: Vec::new(),
             agent_plan: Vec::new(),
             messages: Vec::new(),

@@ -25,9 +25,10 @@ use util::{
 use workspace_model::{
     ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
     FileChangeRecord, FileChangeSummary, FileChangeType, MessageRole, SessionFileChange,
-    SessionListItem, SessionUsageSnapshot, TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus,
-    TurnFileChanges, UsageContextSnapshot, UsageEvent, UsageEventScope, UsageModelSummary,
-    UsageSummaryGroupBy, UsageSummaryRequest, UsageSummaryRow, UsageTokenBreakdown,
+    SessionListItem, SessionUsageSnapshot, TimelineItem, ToolDiffPreview, ToolInvocation,
+    ToolStatus, TurnFileChanges, UsageContextSnapshot, UsageEvent, UsageEventScope,
+    UsageModelSummary, UsageSummaryGroupBy, UsageSummaryRequest, UsageSummaryRow,
+    UsageTokenBreakdown,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
@@ -1017,11 +1018,19 @@ impl SessionStore {
             sql.push_str(" AND u.session_id = ?");
             params_vec.push(session_id.to_string());
         }
-        if let Some(from) = request.from.as_deref().filter(|value| !value.trim().is_empty()) {
+        if let Some(from) = request
+            .from
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             sql.push_str(" AND u.created_at >= ?");
             params_vec.push(from.to_string());
         }
-        if let Some(to) = request.to.as_deref().filter(|value| !value.trim().is_empty()) {
+        if let Some(to) = request
+            .to
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             sql.push_str(" AND u.created_at <= ?");
             params_vec.push(to.to_string());
         }
@@ -2239,8 +2248,12 @@ fn usage_summary_key(row: &UsageSummaryRow, group_by: &UsageSummaryGroupBy) -> S
     match group_by {
         UsageSummaryGroupBy::Model => usage_summary_key_by_values(row),
         UsageSummaryGroupBy::Agent => format!("agent:{}", row.agent_cli.as_deref().unwrap_or("")),
-        UsageSummaryGroupBy::Workspace => format!("workspace:{}", row.workspace_root.as_deref().unwrap_or("")),
-        UsageSummaryGroupBy::Session => format!("session:{}", row.session_id.as_deref().unwrap_or("")),
+        UsageSummaryGroupBy::Workspace => {
+            format!("workspace:{}", row.workspace_root.as_deref().unwrap_or(""))
+        }
+        UsageSummaryGroupBy::Session => {
+            format!("session:{}", row.session_id.as_deref().unwrap_or(""))
+        }
     }
 }
 

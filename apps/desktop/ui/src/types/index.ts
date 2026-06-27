@@ -1,16 +1,26 @@
-export type SessionStatus = "Idle" | "Streaming" | "WaitingForTool" | "Interrupted";
-export type ToolStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "Interrupted";
+export type SessionStatus =
+  | "Idle"
+  | "Streaming"
+  | "WaitingForTool"
+  | "Interrupted";
+export type ToolStatus =
+  | "Pending"
+  | "Running"
+  | "Succeeded"
+  | "Failed"
+  | "Interrupted";
 export type PatchStatus = "Proposed" | "Applied" | "Staged" | "Discarded";
 export type ChangeSection = "Staged" | "Unstaged" | "Untracked";
 export type MessageRole = "User" | "Assistant" | "System";
 export type InspectorTab = "Activity" | "Diff" | "Files" | "Sources";
 export type SessionConfigCategory = "Model" | "Mode" | "ThoughtLevel" | "Other";
-export type SessionConfigSource = "ConfigOption" | "SessionModel" | "LegacyMode" | "LocalMode";
+export type SessionConfigSource =
+  | "ConfigOption"
+  | "SessionModel"
+  | "LegacyMode"
+  | "LocalMode";
 
-export type TimelineItem =
-  | { Message: string }
-  | { Tool: string }
-  | "Thinking";
+export type TimelineItem = { Message: string } | { Tool: string } | "Thinking";
 
 export type ThinkingStatus = "Active" | "Completed";
 
@@ -23,7 +33,17 @@ export interface WorkspaceDescriptor {
 
 export type WorkspaceLocation =
   | { kind: "local" }
-  | { kind: "remote_linux"; profile_id?: string | null; ssh_target: string; ssh_port?: number | null; remote_path: string; agent_cli?: AgentCliId | null; agent_command?: string | null; local_port?: number | null; remote_port?: number | null };
+  | {
+      kind: "remote_linux";
+      profile_id?: string | null;
+      ssh_target: string;
+      ssh_port?: number | null;
+      remote_path: string;
+      agent_cli?: AgentCliId | null;
+      agent_command?: string | null;
+      local_port?: number | null;
+      remote_port?: number | null;
+    };
 
 export interface RemoteLinuxWorkspace {
   profile_id?: string | null;
@@ -58,7 +78,11 @@ export interface RemoteMachineProfilesSnapshot {
   profiles: RemoteMachineProfile[];
 }
 
-export type RemoteValidationPhaseKind = "ssh" | "remote_path" | "agent_command" | "acp_ready";
+export type RemoteValidationPhaseKind =
+  | "ssh"
+  | "remote_path"
+  | "agent_command"
+  | "acp_ready";
 export type RemoteValidationPhaseStatus = "succeeded" | "failed" | "skipped";
 
 export interface RemoteMachineValidationPhase {
@@ -99,7 +123,11 @@ export type RemoteOpenPhaseKind =
   | "agent_install"
   | "agent_verify"
   | "acp_launch";
-export type RemoteOpenPhaseStatus = "running" | "succeeded" | "failed" | "skipped";
+export type RemoteOpenPhaseStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "skipped";
 
 export interface RemoteOpenProgressEvent {
   request_id: string;
@@ -124,6 +152,7 @@ export interface SessionConfigChoice {
   label: string;
   description: string | null;
   provider: string | null;
+  provider_label?: string | null;
 }
 
 export interface SessionConfigControl {
@@ -144,7 +173,11 @@ export interface SessionConfigState {
 }
 
 export type AgentPlanEntryPriority = "high" | "medium" | "low";
-export type AgentPlanEntryStatus = "pending" | "in_progress" | "completed" | "cancelled";
+export type AgentPlanEntryStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
 
 export interface PromptInputCapabilities {
   image: boolean;
@@ -368,7 +401,10 @@ export interface SidebarSection {
   items: string[];
 }
 
-export type UsageEventScope = "context_snapshot" | "turn_delta" | "session_total";
+export type UsageEventScope =
+  | "context_snapshot"
+  | "turn_delta"
+  | "session_total";
 export type UsageSummaryGroupBy = "model" | "agent" | "workspace" | "session";
 
 export interface UsageTokenBreakdown {
@@ -523,7 +559,11 @@ export type ChangeSetSource =
   | "ManualEdit"
   | "GitWorktree"
   | "ToolPreview";
-export type ChangeSetStatus = "Pending" | "Complete" | "Live" | "LegacyIncomplete";
+export type ChangeSetStatus =
+  | "Pending"
+  | "Complete"
+  | "Live"
+  | "LegacyIncomplete";
 export type DiffQuality =
   | "Exact"
   | "LargeFileSkipped"
@@ -692,8 +732,17 @@ export interface SearchResult {
 
 // App settings types
 
-export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp";
-export type AppTheme = "kodex_dark" | "midnight" | "graphite" | "forest" | "light";
+export type AgentCliId =
+  | "codebuddy"
+  | "goose"
+  | "codex-acp"
+  | "claude-agent-acp";
+export type AppTheme =
+  | "kodex_dark"
+  | "midnight"
+  | "graphite"
+  | "forest"
+  | "light";
 export type CodexConnectionMode = "managed" | "default";
 export type AgentProviderFamily = "codex" | "claude";
 export type AgentProviderProxyKind =
@@ -702,9 +751,13 @@ export type AgentProviderProxyKind =
   | "completion_to_responses"
   | "claude_native"
   | "completion_to_claude";
-export type CustomProviderProtocol = "chat_completions" | "responses" | "anthropic_messages";
+export type CustomProviderProtocol =
+  | "chat_completions"
+  | "responses"
+  | "anthropic_messages";
 
 export interface CustomProviderInput {
+  providerId?: string | null;
   label: string;
   endpoint: string;
   protocol: CustomProviderProtocol;
@@ -720,6 +773,7 @@ export interface AgentProviderProfile {
   selected: boolean;
   configured: boolean;
   base_url: string | null;
+  hidden?: boolean;
   custom: boolean;
   protocol: CustomProviderProtocol | null;
   default_model: string | null;
@@ -813,6 +867,7 @@ export interface AgentSettingsSnapshot {
   codex_acp: CodexAcpSettingsStatus;
   claude: ClaudeProviderSettingsStatus;
   web_tools: WebToolsSettingsStatus;
+  image?: ImageSettingsStatus;
 }
 
 export interface CodexAcpSettingsStatus {
@@ -835,6 +890,24 @@ export interface WebToolsSettingsStatus {
   enabled: boolean;
   provider: "brave" | "tavily" | string;
   configured: boolean;
+}
+
+export type ImageGenerateProtocol =
+  | "openai_images"
+  | "chat_completions"
+  | "gemini";
+
+export interface ImageSettingsStatus {
+  enabled: boolean;
+  view_provider: string;
+  view_model: string;
+  view_configured: boolean;
+  view_models: string[];
+  generate_protocol: ImageGenerateProtocol;
+  generate_model: string;
+  generate_base_url: string;
+  generate_default_size: string;
+  generate_configured: boolean;
 }
 
 export interface AgentInstallResult {

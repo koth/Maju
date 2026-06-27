@@ -285,6 +285,7 @@ impl Application {
             session: self.ui.session.clone(),
             session_config: self.ui.session_config.clone(),
             prompt_capabilities: self.ui.prompt_capabilities.clone(),
+            image_capabilities: self.ui.image_capabilities,
             available_commands: self.ui.available_commands.clone(),
             agent_plan: self.ui.agent_plan.clone(),
             messages: self.ui.messages.clone(),

@@ -98,14 +98,19 @@ impl Application {
         if !control.enabled {
             return Err(format!("会话控件不可用：{}", control.label));
         }
+        let is_model_control = control.category == workspace_model::SessionConfigCategory::Model;
         let selected_choice = control
             .choices
             .iter()
             .find(|choice| {
-                choice.id == value_id
-                    && provider.map_or(true, |provider| {
-                        choice.provider.as_deref() == Some(provider)
-                    })
+                if is_model_control {
+                    model_choice_matches_request(choice, value_id, provider)
+                } else {
+                    choice.id == value_id
+                        && provider.map_or(true, |provider| {
+                            choice_provider(choice).as_deref() == Some(provider)
+                        })
+                }
             })
             .cloned()
             .or_else(|| {
@@ -121,18 +126,27 @@ impl Application {
             return Err(format!("{} 的值未知：{value_id}", control.label));
         };
 
-        let is_model_control = control.category == workspace_model::SessionConfigCategory::Model;
         let selected_control_id = control.id.clone();
         let selected_label = Some(selected_choice.label.clone());
         let selected_provider = provider
             .map(str::to_string)
-            .or_else(|| selected_choice.provider.clone());
+            .or_else(|| provider_from_model_value(value_id).map(str::to_string))
+            .or_else(|| choice_provider(&selected_choice));
         let selected_provider_for_state = selected_provider.clone();
+        let (request_value_id, request_provider) = if is_model_control {
+            model_request_value_and_provider(value_id, selected_provider.clone())
+        } else {
+            (value_id.to_string(), selected_provider.clone())
+        };
 
         let events = match control.source.clone() {
             SessionConfigSource::ConfigOption => self
                 .session
-                .set_config_option(control.id.clone(), value_id.to_string(), selected_provider)
+                .set_config_option(
+                    control.id.clone(),
+                    request_value_id.clone(),
+                    request_provider,
+                )
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LegacyMode => self
                 .session
@@ -140,7 +154,7 @@ impl Application {
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::SessionModel => self
                 .session
-                .set_model(value_id.to_string(), selected_provider)
+                .set_model(request_value_id.clone(), request_provider)
                 .map_err(|error| error.to_string())?,
             SessionConfigSource::LocalMode => {
                 let is_codex_agent = self.is_codex_acp_session();
@@ -169,10 +183,15 @@ impl Application {
         }
         if is_model_control {
             self.pending_model_restore = None;
-            self.authoritative_model_selection =
-                Some(ModelSelection::new(value_id, selected_provider_for_state));
+            // Capture the provider for image-capability re-resolution before it
+            // is moved into the authoritative model selection below.
+            let caps_provider = selected_provider_for_state.clone();
+            self.authoritative_model_selection = Some(ModelSelection::new(
+                request_value_id.clone(),
+                selected_provider_for_state,
+            ));
             let ui_value_id = provider_qualified_model_value(
-                value_id,
+                &request_value_id,
                 self.current_model_provider_for_persistence().as_deref(),
             );
             self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
@@ -180,11 +199,44 @@ impl Application {
                 value_id: ui_value_id,
                 value_label: selected_label,
             });
+            // A model switch can change native image understanding/generation.
+            // Re-resolve capabilities and update the running image MCP server's
+            // offered tool set (and the prompt-capability gate) without
+            // restarting the server (design D10).
+            self.reapply_image_capabilities(&request_value_id, caps_provider.as_deref());
         }
         self.persist_session_model_mode();
         self.bump_revision();
 
         Ok(self.ui.session_config.clone())
+    }
+
+    /// Re-resolve native image capabilities after a model switch and propagate
+    /// the result to the running image MCP server's `tools/list` trim and to
+    /// the prompt-capability gate, without restarting the server.
+    ///
+    /// `native_view` is always re-resolved from the model name so text-only
+    /// models gate image attachments correctly even when no fallback MCP is
+    /// attached (Bug 1). `view_fallback` reflects whether the `kodex-image`
+    /// MCP server is currently attached. The prompt gate becomes
+    /// `native_view || view_fallback`, allowing text-only models to accept
+    /// image attachments that are degraded through `view_image` (Bug 3).
+    pub(super) fn reapply_image_capabilities(&mut self, model: &str, provider: Option<&str>) {
+        let mut caps = crate::image_capability::resolve_image_capabilities(
+            model,
+            provider,
+            &self.agent_command,
+        );
+        caps.view_fallback = self.image_mcp.is_some();
+        self.ui.image_capabilities = caps;
+        // `prompt_capabilities.image` is normally derived from the agent
+        // handshake in the reducer's `PromptCapabilitiesUpdated` handler; a
+        // model switch does not re-run the handshake, so set it directly from
+        // the freshly resolved capabilities.
+        self.ui.prompt_capabilities.image = caps.image_capable();
+        if let Some(handle) = self.image_mcp.as_ref() {
+            handle.update_capabilities(caps);
+        }
     }
 
     pub fn resolve_tool_permission(
@@ -336,18 +388,20 @@ impl Application {
             .clone()
             .or_else(|| provider_from_model_value(&saved_model.value).map(str::to_string))
             .or_else(|| choice_provider(&choice));
+        let (request_value_id, request_provider) =
+            model_request_value_and_provider(&value_id, value_provider.clone());
         let result = match model_control.source {
             SessionConfigSource::ConfigOption => self.session.set_config_option(
                 control_id.clone(),
-                value_id.clone(),
-                value_provider.clone(),
+                request_value_id.clone(),
+                request_provider.clone(),
             ),
             SessionConfigSource::SessionModel => self
                 .session
-                .set_model(value_id.clone(), value_provider.clone()),
+                .set_model(request_value_id.clone(), request_provider.clone()),
             SessionConfigSource::LegacyMode | SessionConfigSource::LocalMode => self
                 .session
-                .set_model(value_id.clone(), value_provider.clone()),
+                .set_model(request_value_id.clone(), request_provider.clone()),
         };
         let Ok(events) = result else {
             return;
@@ -357,12 +411,12 @@ impl Application {
             self.apply_event_with_dirty_tracking(&event);
         }
         self.authoritative_model_selection = Some(ModelSelection::new(
-            value_id.clone(),
+            request_value_id.clone(),
             value_provider.clone(),
         ));
         self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
             control_id,
-            value_id: provider_qualified_model_value(&value_id, value_provider.as_deref()),
+            value_id: provider_qualified_model_value(&request_value_id, value_provider.as_deref()),
             value_label: Some(value_label),
         });
     }
@@ -432,6 +486,52 @@ fn codex_agent_mode_for_policy_mode(policy_mode: &str) -> Option<&'static str> {
         "full-access" | "fullaccess" | "full_access" | "danger-full-access" => Some("full-access"),
         _ => None,
     }
+}
+
+fn model_choice_matches_request(
+    choice: &workspace_model::SessionConfigChoice,
+    value_id: &str,
+    provider: Option<&str>,
+) -> bool {
+    let request_value = model_from_provider_value(value_id).unwrap_or(value_id);
+    let choice_id = model_from_provider_value(&choice.id).unwrap_or(&choice.id);
+    let choice_label = model_from_provider_value(&choice.label).unwrap_or(&choice.label);
+    let value_matches = choice.id == value_id
+        || choice.label == value_id
+        || choice.id == request_value
+        || choice.label == request_value
+        || choice_id == value_id
+        || choice_label == value_id
+        || choice_id == request_value
+        || choice_label == request_value;
+    if !value_matches {
+        return false;
+    }
+
+    let Some(provider) = provider.or_else(|| provider_from_model_value(value_id)) else {
+        return true;
+    };
+    if provider == "byok" {
+        return true;
+    }
+
+    choice_provider(choice).is_some_and(|candidate| candidate == provider)
+}
+
+fn model_request_value_and_provider(
+    value_id: &str,
+    provider: Option<String>,
+) -> (String, Option<String>) {
+    if provider_from_model_value(value_id).is_some() {
+        return (value_id.to_string(), None);
+    }
+    if provider.as_deref() == Some("custom") {
+        return (
+            provider_qualified_model_value(value_id, Some("custom")),
+            None,
+        );
+    }
+    (value_id.to_string(), provider)
 }
 
 pub(super) fn choice_matches_model_selection(
@@ -505,6 +605,9 @@ pub(super) fn choice_provider(choice: &workspace_model::SessionConfigChoice) -> 
 pub(super) fn provider_qualified_model_value(value: &str, provider: Option<&str>) -> String {
     if let Some(provider) = provider {
         if provider_from_model_value(value).is_none() {
+            if byok_source_provider_id(provider).is_some() {
+                return format!("kodex-provider/byok/{provider}/{value}");
+            }
             return format!("kodex-provider/{provider}/{value}");
         }
     }
@@ -591,7 +694,15 @@ fn inferred_provider_for_model_name(model: &str) -> Option<&'static str> {
 pub(super) fn provider_from_model_value(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if let Some(rest) = trimmed.strip_prefix("kodex-provider/") {
-        return rest.split_once('/').map(|(provider, _)| provider);
+        let (provider, model) = rest.split_once('/')?;
+        if provider == "byok" {
+            if let Some((source_provider, _)) = model.split_once('/') {
+                if byok_source_provider_id(source_provider).is_some() {
+                    return Some(source_provider);
+                }
+            }
+        }
+        return Some(provider);
     }
     if let Some(rest) = trimmed.strip_prefix("kodex-provider:") {
         return rest.split_once(':').map(|(provider, _)| provider);
@@ -602,12 +713,29 @@ pub(super) fn provider_from_model_value(value: &str) -> Option<&str> {
 fn model_from_provider_value(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if let Some(rest) = trimmed.strip_prefix("kodex-provider/") {
-        return rest.split_once('/').map(|(_, model)| model);
+        let (provider, model) = rest.split_once('/')?;
+        if provider == "byok" {
+            if let Some((source_provider, source_model)) = model.split_once('/') {
+                if byok_source_provider_id(source_provider).is_some() {
+                    return Some(source_model);
+                }
+            }
+        }
+        return Some(model);
     }
     if let Some(rest) = trimmed.strip_prefix("kodex-provider:") {
         return rest.split_once(':').map(|(_, model)| model);
     }
     None
+}
+
+fn byok_source_provider_id(provider: &str) -> Option<&str> {
+    match provider {
+        "timiai" | "commandcode" | "deepseek" | "kimi_code" | "xiaomi_mimo" | "custom" => {
+            Some(provider)
+        }
+        _ => None,
+    }
 }
 
 fn permission_selection_is_allow(
@@ -779,5 +907,36 @@ mod tests {
             permission_details_write_paths("Write file\n/Users/me/project/src/new_file.rs"),
             vec!["/Users/me/project/src/new_file.rs"]
         );
+    }
+}
+
+#[cfg(test)]
+mod model_config_tests {
+    use super::*;
+
+    #[test]
+    fn custom_model_request_uses_slash_encoded_value() {
+        let (value_id, provider) =
+            model_request_value_and_provider("lab-model", Some("custom".to_string()));
+
+        assert_eq!(value_id, "kodex-provider/byok/lab-model");
+        assert_eq!(provider, None);
+    }
+
+    #[test]
+    fn model_choice_request_matches_encoded_custom_value_to_bare_choice() {
+        let choice = workspace_model::SessionConfigChoice {
+            id: "lab-model".into(),
+            label: "lab-model".into(),
+            description: None,
+            provider: Some("custom".into()),
+            provider_label: Some("Lab Provider".into()),
+        };
+
+        assert!(model_choice_matches_request(
+            &choice,
+            "kodex-provider/byok/lab-model",
+            None,
+        ));
     }
 }

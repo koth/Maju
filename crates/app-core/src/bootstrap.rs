@@ -68,6 +68,7 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         },
         session_config: Default::default(),
         prompt_capabilities: Default::default(),
+        image_capabilities: Default::default(),
         available_commands: Vec::new(),
         agent_plan: Vec::new(),
         messages: vec![welcome_message.clone(), system_message.clone()],

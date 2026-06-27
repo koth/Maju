@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { SettingsPage } from "./SettingsPage";
@@ -10,12 +17,15 @@ import {
   settingsGetAgentSnapshot,
   settingsGetLspSnapshot,
   settingsGetRemoteProfiles,
+  settingsClearProviderConfiguration,
   settingsProbeLspServer,
   settingsResetLspServer,
   settingsResetProviderModels,
+  settingsRemoveCustomProvider,
   settingsSaveAgentProviderSecret,
   settingsSaveLspServer,
   settingsSaveProviderModels,
+  settingsSaveCustomProvider,
   settingsSyncProviderModelsFromUrl,
   settingsSaveRemoteProfile,
   settingsDeleteRemoteProfile,
@@ -24,6 +34,7 @@ import {
   settingsSelectClaudeFastModel,
   settingsSaveWebToolsProviderKey,
   settingsSaveWebToolsSettings,
+  settingsSaveImageViewSettings,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -31,14 +42,21 @@ import {
   getCurrentAppVersion,
   installPendingAppUpdate,
 } from "../../lib/updater";
-import type { AgentProviderProfile, AgentSettingsSnapshot, ArchivedSessionListItem, LspSettingsSnapshot, RemoteMachineProfilesSnapshot } from "../../types";
+import type {
+  AgentProviderProfile,
+  AgentSettingsSnapshot,
+  ArchivedSessionListItem,
+  LspSettingsSnapshot,
+  RemoteMachineProfilesSnapshot,
+} from "../../types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
 }));
 
 vi.mock("../../lib/tauri", async () => {
-  const actual = await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
+  const actual =
+    await vi.importActual<typeof import("../../lib/tauri")>("../../lib/tauri");
   return {
     ...actual,
     settingsGetAgentSnapshot: vi.fn(),
@@ -59,6 +77,8 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveProviderModels: vi.fn(),
     settingsSyncProviderModelsFromUrl: vi.fn(),
     settingsResetProviderModels: vi.fn(),
+    settingsClearProviderConfiguration: vi.fn(),
+    settingsRemoveCustomProvider: vi.fn(),
     settingsSaveCodexAcpProviderKey: vi.fn(),
     settingsSelectCodexAcpProvider: vi.fn(),
     settingsSelectCodexDefaultMode: vi.fn(),
@@ -66,6 +86,7 @@ vi.mock("../../lib/tauri", async () => {
     settingsSelectClaudeFastModel: vi.fn(),
     settingsSaveWebToolsProviderKey: vi.fn(),
     settingsSaveWebToolsSettings: vi.fn(),
+    settingsSaveImageViewSettings: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
     settingsSaveCustomProvider: vi.fn(),
     settingsSaveLspServer: vi.fn(),
@@ -92,6 +113,8 @@ function providerProfile(
   const isXiaomiTokenPlan = id === "xiaomi_mimo";
   const isTimiAi = id === "timiai";
   const isCommandCode = id === "commandcode";
+  const isCustom = id === "custom";
+  const customConfigured = isCustom && configured;
   return {
     family,
     id,
@@ -99,64 +122,211 @@ function providerProfile(
     proxy_kind: proxyKind,
     selected,
     configured,
-    base_url: id === "default" || id === "byok"
-      ? null
+    base_url:
+      id === "default" || id === "byok"
+        ? null
+        : isCustom
+          ? customConfigured
+            ? "https://api.custom.test/v1/chat/completions"
+            : null
+          : isTimiAi
+            ? "http://api.timiai.woa.com/ai_api_manage/llmproxy"
+            : isCommandCode
+              ? "https://api.commandcode.ai/provider/v1"
+              : isXiaomiTokenPlan
+                ? family === "codex"
+                  ? "https://token-plan-cn.xiaomimimo.com/v1"
+                  : "https://token-plan-cn.xiaomimimo.com/anthropic"
+                : `https://${id}.example/v1/chat/completions`,
+    custom: isCustom,
+    protocol: isCustom ? "chat_completions" : null,
+    default_model:
+      id === "default" || id === "byok"
+        ? null
+        : isCustom
+          ? customConfigured
+            ? "custom-model"
+            : null
+          : isTimiAi
+            ? family === "codex"
+              ? "gpt-5.5"
+              : "claude-opus-4.8"
+            : isCommandCode
+              ? "claude-sonnet-4-6"
+              : isXiaomiTokenPlan
+                ? "MiMo-V2.5-Pro"
+                : `${id}-model`,
+    models: isCustom
+      ? customConfigured
+        ? ["custom-model"]
+        : []
       : isTimiAi
-      ? "http://api.timiai.woa.com/ai_api_manage/llmproxy"
-      : isCommandCode
-      ? "https://api.commandcode.ai/provider/v1"
-      : isXiaomiTokenPlan
-      ? family === "codex"
-        ? "https://token-plan-cn.xiaomimimo.com/v1"
-        : "https://token-plan-cn.xiaomimimo.com/anthropic"
-      : `https://${id}.example/v1/chat/completions`,
-    custom: false,
-    protocol: null,
-    default_model: id === "default" || id === "byok"
-      ? null
-      : isTimiAi
-      ? family === "codex"
-        ? "gpt-5.5"
-        : "claude-opus-4.8"
-      : isCommandCode
-      ? "claude-sonnet-4-6"
-      : isXiaomiTokenPlan
-      ? "MiMo-V2.5-Pro"
-      : `${id}-model`,
-    models: isTimiAi
-      ? ["gpt-5.5", "gpt-5.4", "claude-opus-4.8"]
-      : isCommandCode
-        ? ["claude-sonnet-4-6", "claude-opus-4-8", "deepseek/deepseek-v4-pro"]
-      : isXiaomiTokenPlan
-        ? ["MiMo-V2.5-Pro", "MiMo-V2.5"]
-        : [],
-    model_list_url: isCommandCode ? "https://api.commandcode.ai/provider/v1/models" : null,
+        ? ["gpt-5.5", "gpt-5.4", "claude-opus-4.8"]
+        : isCommandCode
+          ? ["claude-sonnet-4-6", "claude-opus-4-8", "deepseek/deepseek-v4-pro"]
+          : isXiaomiTokenPlan
+            ? ["MiMo-V2.5-Pro", "MiMo-V2.5"]
+            : [],
+    model_list_url:
+      isCustom && customConfigured
+        ? "https://api.custom.test/v1/models"
+        : isCommandCode
+          ? "https://api.commandcode.ai/provider/v1/models"
+          : null,
     credential_label: requiresCredential ? `${label} API key` : null,
     requires_credential: requiresCredential,
     help_text: `${label} help`,
   };
 }
 
-function codexProfiles(selected = "byok", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
+function codexProfiles(
+  selected = "byok",
+  configured: Partial<Record<string, boolean>> = {},
+): AgentProviderProfile[] {
   return [
-    providerProfile("codex", "default", "默认", "codex_default", selected === "default", true, false),
-    providerProfile("codex", "byok", "BYOK", "completion_to_responses", selected === "byok", true, false),
-    providerProfile("codex", "timiai", "TimiAI", "responses", selected === "timiai", !!configured.timiai, true),
-    providerProfile("codex", "commandcode", "CommandCode", "completion_to_responses", selected === "commandcode", !!configured.commandcode, true),
-    providerProfile("codex", "deepseek", "DeepSeek", "completion_to_responses", selected === "deepseek", !!configured.deepseek, true),
-    providerProfile("codex", "kimi_code", "Kimi Code", "completion_to_responses", selected === "kimi_code", !!configured.kimi_code, true),
-    providerProfile("codex", "xiaomi_mimo", "Xiaomi Token Plan", "completion_to_responses", selected === "xiaomi_mimo", !!configured.xiaomi_mimo, true),
+    providerProfile(
+      "codex",
+      "default",
+      "默认",
+      "codex_default",
+      selected === "default",
+      true,
+      false,
+    ),
+    providerProfile(
+      "codex",
+      "byok",
+      "BYOK",
+      "completion_to_responses",
+      selected === "byok",
+      true,
+      false,
+    ),
+    providerProfile(
+      "codex",
+      "timiai",
+      "TimiAI",
+      "responses",
+      selected === "timiai",
+      !!configured.timiai,
+      true,
+    ),
+    providerProfile(
+      "codex",
+      "commandcode",
+      "CommandCode",
+      "completion_to_responses",
+      selected === "commandcode",
+      !!configured.commandcode,
+      true,
+    ),
+    providerProfile(
+      "codex",
+      "deepseek",
+      "DeepSeek",
+      "completion_to_responses",
+      selected === "deepseek",
+      !!configured.deepseek,
+      true,
+    ),
+    providerProfile(
+      "codex",
+      "kimi_code",
+      "Kimi Code",
+      "completion_to_responses",
+      selected === "kimi_code",
+      !!configured.kimi_code,
+      true,
+    ),
+    providerProfile(
+      "codex",
+      "xiaomi_mimo",
+      "Xiaomi Token Plan",
+      "completion_to_responses",
+      selected === "xiaomi_mimo",
+      !!configured.xiaomi_mimo,
+      true,
+    ),
+    providerProfile(
+      "codex",
+      "custom",
+      configured.custom ? "Lab Provider" : "Custom Provider",
+      "completion_to_responses",
+      selected === "custom",
+      !!configured.custom,
+      true,
+    ),
   ];
 }
 
-function claudeProfiles(selected = "byok", configured: Partial<Record<string, boolean>> = {}): AgentProviderProfile[] {
+function claudeProfiles(
+  selected = "byok",
+  configured: Partial<Record<string, boolean>> = {},
+): AgentProviderProfile[] {
   return [
-    providerProfile("claude", "byok", "BYOK", "claude_native", selected === "byok", true, false),
-    providerProfile("claude", "timiai", "TimiAI", "claude_native", selected === "timiai", !!configured.timiai, true),
-    providerProfile("claude", "commandcode", "CommandCode", "claude_native", selected === "commandcode", !!configured.commandcode, true),
-    providerProfile("claude", "deepseek", "DeepSeek", "completion_to_claude", selected === "deepseek", !!configured.deepseek, true),
-    providerProfile("claude", "kimi_code", "Kimi Code", "claude_native", selected === "kimi_code", !!configured.kimi_code, true),
-    providerProfile("claude", "xiaomi_mimo", "Xiaomi Token Plan", "claude_native", selected === "xiaomi_mimo", !!configured.xiaomi_mimo, true),
+    providerProfile(
+      "claude",
+      "byok",
+      "BYOK",
+      "claude_native",
+      selected === "byok",
+      true,
+      false,
+    ),
+    providerProfile(
+      "claude",
+      "timiai",
+      "TimiAI",
+      "claude_native",
+      selected === "timiai",
+      !!configured.timiai,
+      true,
+    ),
+    providerProfile(
+      "claude",
+      "commandcode",
+      "CommandCode",
+      "claude_native",
+      selected === "commandcode",
+      !!configured.commandcode,
+      true,
+    ),
+    providerProfile(
+      "claude",
+      "deepseek",
+      "DeepSeek",
+      "completion_to_claude",
+      selected === "deepseek",
+      !!configured.deepseek,
+      true,
+    ),
+    providerProfile(
+      "claude",
+      "kimi_code",
+      "Kimi Code",
+      "claude_native",
+      selected === "kimi_code",
+      !!configured.kimi_code,
+      true,
+    ),
+    providerProfile(
+      "claude",
+      "xiaomi_mimo",
+      "Xiaomi Token Plan",
+      "claude_native",
+      selected === "xiaomi_mimo",
+      !!configured.xiaomi_mimo,
+      true,
+    ),
+    providerProfile(
+      "claude",
+      "custom",
+      configured.custom ? "Lab Provider" : "Custom Provider",
+      "completion_to_claude",
+      selected === "custom",
+      !!configured.custom,
+      true,
+    ),
   ];
 }
 
@@ -219,13 +389,13 @@ const agentSnapshot: AgentSettingsSnapshot = {
     fast_model: null,
     fast_model_options: [
       {
-        id: "kodex-provider/commandcode/claude-haiku-4-5-20251001",
+        id: "kodex-provider/byok/commandcode/claude-haiku-4-5-20251001",
         label: "claude-haiku-4-5-20251001",
         provider_id: "commandcode",
         provider_label: "CommandCode",
       },
       {
-        id: "kodex-provider/commandcode/Qwen/Qwen3.7-Max",
+        id: "kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max",
         label: "Qwen/Qwen3.7-Max",
         provider_id: "commandcode",
         provider_label: "CommandCode",
@@ -237,9 +407,24 @@ const agentSnapshot: AgentSettingsSnapshot = {
     provider: "brave",
     configured: false,
   },
+  image: {
+    enabled: false,
+    view_provider: "timiai",
+    view_model: "gpt-5.5",
+    view_configured: true,
+    view_models: ["gpt-5.5", "gpt-5.4", "claude-opus-4.8"],
+    generate_protocol: "openai_images",
+    generate_model: "",
+    generate_base_url: "",
+    generate_default_size: "1024x1024",
+    generate_configured: false,
+  },
 };
 
-function lspSnapshot(command = "typescript-language-server", enabled = true): LspSettingsSnapshot {
+function lspSnapshot(
+  command = "typescript-language-server",
+  enabled = true,
+): LspSettingsSnapshot {
   return {
     servers: [
       {
@@ -260,7 +445,9 @@ function lspSnapshot(command = "typescript-language-server", enabled = true): Ls
   };
 }
 
-function remoteProfilesSnapshot(validated = false): RemoteMachineProfilesSnapshot {
+function remoteProfilesSnapshot(
+  validated = false,
+): RemoteMachineProfilesSnapshot {
   return {
     profiles: [
       {
@@ -276,10 +463,30 @@ function remoteProfilesSnapshot(validated = false): RemoteMachineProfilesSnapsho
               checked_at_ms: 1_700_000_000_000,
               remote_path: "/srv/project",
               phases: [
-                { phase: "ssh", status: "succeeded", elapsed_ms: 12, message: null },
-                { phase: "remote_path", status: "succeeded", elapsed_ms: 10, message: null },
-                { phase: "agent_command", status: "skipped", elapsed_ms: 0, message: "No agent selected" },
-                { phase: "acp_ready", status: "skipped", elapsed_ms: 0, message: "ACP readiness probe not requested" },
+                {
+                  phase: "ssh",
+                  status: "succeeded",
+                  elapsed_ms: 12,
+                  message: null,
+                },
+                {
+                  phase: "remote_path",
+                  status: "succeeded",
+                  elapsed_ms: 10,
+                  message: null,
+                },
+                {
+                  phase: "agent_command",
+                  status: "skipped",
+                  elapsed_ms: 0,
+                  message: "No agent selected",
+                },
+                {
+                  phase: "acp_ready",
+                  status: "skipped",
+                  elapsed_ms: 0,
+                  message: "ACP readiness probe not requested",
+                },
               ],
             }
           : null,
@@ -316,10 +523,30 @@ function remoteProfilesValidationFailed(): RemoteMachineProfilesSnapshot {
           checked_at_ms: 1_700_000_000_000,
           remote_path: "/srv/missing",
           phases: [
-            { phase: "ssh", status: "succeeded", elapsed_ms: 12, message: null },
-            { phase: "remote_path", status: "failed", elapsed_ms: 9, message: "No such directory" },
-            { phase: "agent_command", status: "skipped", elapsed_ms: 0, message: "Skipped after remote path failure" },
-            { phase: "acp_ready", status: "skipped", elapsed_ms: 0, message: "ACP readiness probe not requested" },
+            {
+              phase: "ssh",
+              status: "succeeded",
+              elapsed_ms: 12,
+              message: null,
+            },
+            {
+              phase: "remote_path",
+              status: "failed",
+              elapsed_ms: 9,
+              message: "No such directory",
+            },
+            {
+              phase: "agent_command",
+              status: "skipped",
+              elapsed_ms: 0,
+              message: "Skipped after remote path failure",
+            },
+            {
+              phase: "acp_ready",
+              status: "skipped",
+              elapsed_ms: 0,
+              message: "ACP readiness probe not requested",
+            },
           ],
         },
       },
@@ -327,7 +554,9 @@ function remoteProfilesValidationFailed(): RemoteMachineProfilesSnapshot {
   };
 }
 
-function archivedSession(overrides: Partial<ArchivedSessionListItem> = {}): ArchivedSessionListItem {
+function archivedSession(
+  overrides: Partial<ArchivedSessionListItem> = {},
+): ArchivedSessionListItem {
   return {
     id: "archived-1",
     title: "Fix codex-acp bundle error",
@@ -348,7 +577,16 @@ async function openAgentSettingsTab(label: "CodeBuddy" | "Codex" | "Claude") {
   fireEvent.click(tab);
 }
 
-async function openSettingsPane(label: "通用" | "Web 工具" | "远程" | "已归档" | "用量" | "LSP") {
+async function openSettingsPane(
+  label:
+    | "通用"
+    | "Web 工具"
+    | "图像能力"
+    | "远程"
+    | "已归档"
+    | "用量"
+    | "LSP",
+) {
   const paneButton = await screen.findByRole("button", { name: label });
   fireEvent.click(paneButton);
 }
@@ -356,7 +594,8 @@ async function openSettingsPane(label: "通用" | "Web 工具" | "远程" | "已
 async function selectByokProvider(name: string | RegExp) {
   const trigger = await screen.findByLabelText("byok_provider_profile");
   fireEvent.click(trigger);
-  fireEvent.click(await screen.findByRole("option", { name }));
+  const option = await screen.findByRole("option", { name });
+  fireEvent.click(within(option).getByRole("button", { name }));
   return screen.getByLabelText("byok_provider_profile");
 }
 
@@ -373,141 +612,247 @@ describe("SettingsPage LSP settings", () => {
     vi.mocked(sessionUnarchive).mockResolvedValue(undefined);
     vi.mocked(sessionDeleteArchived).mockResolvedValue(undefined);
     vi.mocked(sessionDeleteAllArchived).mockResolvedValue(undefined);
-    vi.mocked(settingsSaveRemoteProfile).mockResolvedValue(remoteProfilesSnapshot());
+    vi.mocked(settingsSaveRemoteProfile).mockResolvedValue(
+      remoteProfilesSnapshot(),
+    );
     vi.mocked(settingsDeleteRemoteProfile).mockResolvedValue({ profiles: [] });
-    vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesSnapshot(true));
+    vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(
+      remoteProfilesSnapshot(true),
+    );
     vi.mocked(settingsProbeLspServer).mockResolvedValue({
       available: true,
       resolvedPath: "C:\\tools\\custom-ts-lsp.cmd",
       message: null,
     });
-    vi.mocked(settingsSaveLspServer).mockResolvedValue(lspSnapshot("custom-ts-lsp"));
+    vi.mocked(settingsSaveLspServer).mockResolvedValue(
+      lspSnapshot("custom-ts-lsp"),
+    );
     vi.mocked(settingsResetLspServer).mockResolvedValue(lspSnapshot());
     vi.mocked(usageGetSummary).mockResolvedValue([]);
-    vi.mocked(settingsSaveProviderModels).mockImplementation(async (profileId, models) => ({
-      ...agentSnapshot,
-      codex_acp: {
-        ...agentSnapshot.codex_acp,
-        profiles: codexProfiles("byok").map((profile) =>
-          profile.id === profileId ? { ...profile, models } : profile,
-        ),
-      },
-      claude: {
-        ...agentSnapshot.claude,
-        profiles: claudeProfiles("byok").map((profile) =>
-          profile.id === profileId ? { ...profile, models } : profile,
-        ),
-      },
-    }));
-    vi.mocked(settingsSyncProviderModelsFromUrl).mockImplementation(async (profileId, modelListUrl) => {
-      const models = ["Qwen/Qwen3.8-Max", "MiniMaxAI/MiniMax-M4"];
-      return {
+    vi.mocked(settingsSaveProviderModels).mockImplementation(
+      async (profileId, models) => ({
         ...agentSnapshot,
         codex_acp: {
           ...agentSnapshot.codex_acp,
           profiles: codexProfiles("byok").map((profile) =>
-            profile.id === profileId ? { ...profile, models, model_list_url: modelListUrl } : profile,
+            profile.id === profileId ? { ...profile, models } : profile,
           ),
         },
         claude: {
           ...agentSnapshot.claude,
           profiles: claudeProfiles("byok").map((profile) =>
-            profile.id === profileId ? { ...profile, models, model_list_url: modelListUrl } : profile,
+            profile.id === profileId ? { ...profile, models } : profile,
           ),
         },
-      };
-    });
-    vi.mocked(settingsResetProviderModels).mockResolvedValue(agentSnapshot);
-    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
-        web_tools: {
-          enabled,
-          provider,
-        },
-      },
-      web_tools: {
-        ...agentSnapshot.web_tools,
-        enabled,
-        provider,
-      },
-    }));
-    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
-        web_tools: {
-          enabled: agentSnapshot.settings.web_tools.enabled,
-          provider,
-        },
-      },
-      web_tools: {
-        enabled: agentSnapshot.web_tools.enabled,
-        provider,
-        configured: true,
-      },
-    }));
-    vi.mocked(settingsSelectClaudeFastModel).mockImplementation(async (modelId) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
-        claude: {
-          ...agentSnapshot.settings.claude,
-          fast_model: modelId,
-        },
-      },
-      claude: {
-        ...agentSnapshot.claude,
-        fast_model: modelId,
-      },
-    }));
-    vi.mocked(settingsSaveAgentProviderSecret).mockImplementation(async (family, profileId) => {
-      if (family === "codex") {
-        const selectedProfileId = profileId === "default" ? "default" : "byok";
+      }),
+    );
+    vi.mocked(settingsSyncProviderModelsFromUrl).mockImplementation(
+      async (profileId, modelListUrl) => {
+        const models = ["Qwen/Qwen3.8-Max", "MiniMaxAI/MiniMax-M4"];
         return {
           ...agentSnapshot,
           codex_acp: {
             ...agentSnapshot.codex_acp,
-            provider: selectedProfileId,
-            selected_profile_id: selectedProfileId,
-            profiles: codexProfiles(selectedProfileId, { [profileId]: true }),
-            deepseek_key_configured: profileId === "deepseek",
+            profiles: codexProfiles("byok").map((profile) =>
+              profile.id === profileId
+                ? { ...profile, models, model_list_url: modelListUrl }
+                : profile,
+            ),
+          },
+          claude: {
+            ...agentSnapshot.claude,
+            profiles: claudeProfiles("byok").map((profile) =>
+              profile.id === profileId
+                ? { ...profile, models, model_list_url: modelListUrl }
+                : profile,
+            ),
           },
         };
-      }
-      return {
-        ...agentSnapshot,
-        claude: {
-          ...agentSnapshot.claude,
-          selected_profile_id: profileId,
-          profiles: claudeProfiles(profileId, { [profileId]: true }),
-        },
-      };
-    });
-    vi.mocked(settingsSelectAgentProviderProfile).mockImplementation(async (family, profileId) => {
-      const selectedCodexProfile = family === "codex" ? profileId : agentSnapshot.settings.selected_codex_provider_profile_id;
-      const selectedClaudeProfile = family === "claude" ? profileId : agentSnapshot.settings.selected_claude_provider_profile_id;
-      return {
+      },
+    );
+    vi.mocked(settingsSaveCustomProvider).mockImplementation(async (input) => ({
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        selected_profile_id: "byok",
+        profiles: codexProfiles("byok", { custom: true }).map((profile) =>
+          profile.id === "custom"
+            ? {
+                ...profile,
+                label: input.label,
+                configured: true,
+                base_url: input.endpoint,
+                protocol: input.protocol,
+                models: [],
+                model_list_url: input.modelListUrl ?? null,
+                credential_label: `${input.label} API key`,
+              }
+            : profile,
+        ),
+      },
+      claude: {
+        ...agentSnapshot.claude,
+        profiles: claudeProfiles("byok", { custom: true }).map((profile) =>
+          profile.id === "custom"
+            ? {
+                ...profile,
+                label: input.label,
+                configured: true,
+                base_url: input.endpoint,
+                protocol: input.protocol,
+                models: [],
+                model_list_url: input.modelListUrl ?? null,
+                credential_label: `${input.label} API key`,
+              }
+            : profile,
+        ),
+      },
+    }));
+    vi.mocked(settingsResetProviderModels).mockResolvedValue(agentSnapshot);
+    vi.mocked(settingsClearProviderConfiguration).mockResolvedValue(
+      agentSnapshot,
+    );
+    vi.mocked(settingsRemoveCustomProvider).mockResolvedValue(agentSnapshot);
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(
+      async (enabled, provider) => ({
         ...agentSnapshot,
         settings: {
           ...agentSnapshot.settings,
-          selected_codex_provider_profile_id: selectedCodexProfile,
-          selected_claude_provider_profile_id: selectedClaudeProfile,
+          web_tools: {
+            enabled,
+            provider,
+          },
         },
-        codex_acp: {
-          ...agentSnapshot.codex_acp,
-          provider: family === "codex" ? profileId : agentSnapshot.codex_acp.provider,
-          selected_profile_id: family === "codex" ? profileId : agentSnapshot.codex_acp.selected_profile_id,
-          profiles: family === "codex" ? codexProfiles(profileId) : agentSnapshot.codex_acp.profiles,
+        web_tools: {
+          ...agentSnapshot.web_tools,
+          enabled,
+          provider,
+        },
+      }),
+    );
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(
+      async (provider) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          web_tools: {
+            enabled: agentSnapshot.settings.web_tools.enabled,
+            provider,
+          },
+        },
+       web_tools: {
+         enabled: agentSnapshot.web_tools.enabled,
+         provider,
+         configured: true,
+       },
+     }),
+   );
+    vi.mocked(settingsSaveImageViewSettings).mockImplementation(
+      async (enabled, provider, model) => ({
+        ...agentSnapshot,
+        image: {
+          enabled,
+          view_provider: provider,
+          view_model: model,
+          view_configured: true,
+          view_models:
+            agentSnapshot.codex_acp.profiles.find(
+              (profile) => profile.id === provider,
+            )?.models ?? agentSnapshot.image?.view_models ?? [],
+          generate_protocol: "openai_images",
+          generate_model: "",
+          generate_base_url: "",
+          generate_default_size: "1024x1024",
+          generate_configured: false,
+        },
+      }),
+    );
+    vi.mocked(settingsSelectClaudeFastModel).mockImplementation(
+      async (modelId) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          claude: {
+            ...agentSnapshot.settings.claude,
+            fast_model: modelId,
+          },
         },
         claude: {
           ...agentSnapshot.claude,
-          selected_profile_id: family === "claude" ? profileId : agentSnapshot.claude.selected_profile_id,
-          profiles: family === "claude" ? claudeProfiles(profileId) : agentSnapshot.claude.profiles,
+          fast_model: modelId,
         },
-      };
-    });
+      }),
+    );
+    vi.mocked(settingsSaveAgentProviderSecret).mockImplementation(
+      async (family, profileId) => {
+        if (family === "codex") {
+          const selectedProfileId =
+            profileId === "default" ? "default" : "byok";
+          return {
+            ...agentSnapshot,
+            codex_acp: {
+              ...agentSnapshot.codex_acp,
+              provider: selectedProfileId,
+              selected_profile_id: selectedProfileId,
+              profiles: codexProfiles(selectedProfileId, { [profileId]: true }),
+              deepseek_key_configured: profileId === "deepseek",
+            },
+          };
+        }
+        return {
+          ...agentSnapshot,
+          claude: {
+            ...agentSnapshot.claude,
+            selected_profile_id: profileId,
+            profiles: claudeProfiles(profileId, { [profileId]: true }),
+          },
+        };
+      },
+    );
+    vi.mocked(settingsSelectAgentProviderProfile).mockImplementation(
+      async (family, profileId) => {
+        const selectedCodexProfile =
+          family === "codex"
+            ? profileId
+            : agentSnapshot.settings.selected_codex_provider_profile_id;
+        const selectedClaudeProfile =
+          family === "claude"
+            ? profileId
+            : agentSnapshot.settings.selected_claude_provider_profile_id;
+        return {
+          ...agentSnapshot,
+          settings: {
+            ...agentSnapshot.settings,
+            selected_codex_provider_profile_id: selectedCodexProfile,
+            selected_claude_provider_profile_id: selectedClaudeProfile,
+          },
+          codex_acp: {
+            ...agentSnapshot.codex_acp,
+            provider:
+              family === "codex" ? profileId : agentSnapshot.codex_acp.provider,
+            selected_profile_id:
+              family === "codex"
+                ? profileId
+                : agentSnapshot.codex_acp.selected_profile_id,
+            profiles:
+              family === "codex"
+                ? codexProfiles(profileId)
+                : agentSnapshot.codex_acp.profiles,
+          },
+          claude: {
+            ...agentSnapshot.claude,
+            selected_profile_id:
+              family === "claude"
+                ? profileId
+                : agentSnapshot.claude.selected_profile_id,
+            profiles:
+              family === "claude"
+                ? claudeProfiles(profileId)
+                : agentSnapshot.claude.profiles,
+          },
+        };
+      },
+    );
   });
 
   afterEach(() => {
@@ -520,7 +865,11 @@ describe("SettingsPage LSP settings", () => {
 
     const tabs = await screen.findAllByRole("tab");
 
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["Claude", "Codex", "CodeBuddy"]);
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      "Claude",
+      "Codex",
+      "CodeBuddy",
+    ]);
   });
 
   it("shows a startup warning and keeps the user on the requested settings tab", async () => {
@@ -534,14 +883,23 @@ describe("SettingsPage LSP settings", () => {
       />,
     );
 
-    const dialog = await screen.findByRole("alertdialog", { name: "模型来源还没设置好" });
-    expect(within(dialog).getByText(/还没有可用于新建会话的 provider/)).toBeInTheDocument();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "模型来源还没设置好",
+    });
+    expect(
+      within(dialog).getByText(/还没有可用于新建会话的 provider/),
+    ).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "去设置" }));
 
-    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
     expect(onStartupNoticeDismissed).toHaveBeenCalled();
-    expect(screen.getByRole("tab", { name: "Codex" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Codex" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.getByText("Codex 通道")).toBeInTheDocument();
   });
 
@@ -561,11 +919,25 @@ describe("SettingsPage LSP settings", () => {
       date: null,
       body: "Release notes",
     });
-    vi.mocked(installPendingAppUpdate).mockImplementationOnce(async (onProgress) => {
-      onProgress?.({ phase: "started", downloadedBytes: 0, contentLength: 2048 });
-      onProgress?.({ phase: "progress", downloadedBytes: 1024, contentLength: 2048 });
-      onProgress?.({ phase: "finished", downloadedBytes: 2048, contentLength: 2048 });
-    });
+    vi.mocked(installPendingAppUpdate).mockImplementationOnce(
+      async (onProgress) => {
+        onProgress?.({
+          phase: "started",
+          downloadedBytes: 0,
+          contentLength: 2048,
+        });
+        onProgress?.({
+          phase: "progress",
+          downloadedBytes: 1024,
+          contentLength: 2048,
+        });
+        onProgress?.({
+          phase: "finished",
+          downloadedBytes: 2048,
+          contentLength: 2048,
+        });
+      },
+    );
     render(<SettingsPage onBack={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "检查更新" }));
@@ -595,28 +967,53 @@ describe("SettingsPage LSP settings", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "已归档" }));
 
-    expect(await screen.findByText("Fix codex-acp bundle error")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Fix codex-acp bundle error"),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("Kodex").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Bluedot").length).toBeGreaterThan(0);
 
-    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), { target: { value: "bluedot" } });
+    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), {
+      target: { value: "bluedot" },
+    });
     expect(screen.getByText("开发 bluedot 应用")).toBeInTheDocument();
-    expect(screen.queryByText("Fix codex-acp bundle error")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Fix codex-acp bundle error"),
+    ).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), { target: { value: "" } });
-    fireEvent.change(screen.getByLabelText("归档项目筛选"), { target: { value: "/Users/kothchen/code/Kodex" } });
+    fireEvent.change(screen.getByLabelText("搜索已归档聊天"), {
+      target: { value: "" },
+    });
+    fireEvent.change(screen.getByLabelText("归档项目筛选"), {
+      target: { value: "/Users/kothchen/code/Kodex" },
+    });
     expect(screen.getByText("Fix codex-acp bundle error")).toBeInTheDocument();
     expect(screen.queryByText("开发 bluedot 应用")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "恢复对话 Fix codex-acp bundle error" }));
-    await waitFor(() =>
-      expect(sessionUnarchive).toHaveBeenCalledWith("archived-1", "/Users/kothchen/code/Kodex"),
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "恢复对话 Fix codex-acp bundle error",
+      }),
     );
-    expect(await screen.findByText("已恢复 Fix codex-acp bundle error")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(sessionUnarchive).toHaveBeenCalledWith(
+        "archived-1",
+        "/Users/kothchen/code/Kodex",
+      ),
+    );
+    expect(
+      await screen.findByText("已恢复 Fix codex-acp bundle error"),
+    ).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("归档项目筛选"), { target: { value: "all" } });
-    fireEvent.click(screen.getByRole("button", { name: "删除对话 开发 bluedot 应用" }));
-    await waitFor(() => expect(sessionDeleteArchived).toHaveBeenCalledWith("archived-2"));
+    fireEvent.change(screen.getByLabelText("归档项目筛选"), {
+      target: { value: "all" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "删除对话 开发 bluedot 应用" }),
+    );
+    await waitFor(() =>
+      expect(sessionDeleteArchived).toHaveBeenCalledWith("archived-2"),
+    );
   });
 
   it("deletes all archived sessions after confirmation", async () => {
@@ -629,7 +1026,9 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "全部删除" }));
 
     await waitFor(() =>
-      expect(confirm).toHaveBeenCalledWith("确定删除所有已归档对话？此操作不可撤销。"),
+      expect(confirm).toHaveBeenCalledWith(
+        "确定删除所有已归档对话？此操作不可撤销。",
+      ),
     );
     await waitFor(() => expect(sessionDeleteAllArchived).toHaveBeenCalled());
     expect(await screen.findByText("已删除所有已归档对话")).toBeInTheDocument();
@@ -644,33 +1043,46 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.change(commandInput, { target: { value: "custom-ts-lsp" } });
     fireEvent.click(screen.getByText("探测"));
 
-    await waitFor(() => expect(settingsProbeLspServer).toHaveBeenCalledWith("custom-ts-lsp", null));
+    await waitFor(() =>
+      expect(settingsProbeLspServer).toHaveBeenCalledWith(
+        "custom-ts-lsp",
+        null,
+      ),
+    );
     await screen.findByText("已找到：C:\\tools\\custom-ts-lsp.cmd");
 
     fireEvent.click(screen.getByText("保存"));
     await waitFor(() =>
-      expect(settingsSaveLspServer).toHaveBeenCalledWith({
-        languageId: "typescript",
-        enabled: true,
-        command: "custom-ts-lsp",
-        args: ["--stdio"],
-      }, null),
+      expect(settingsSaveLspServer).toHaveBeenCalledWith(
+        {
+          languageId: "typescript",
+          enabled: true,
+          command: "custom-ts-lsp",
+          args: ["--stdio"],
+        },
+        null,
+      ),
     );
 
     const enableToggle = screen.getByRole("checkbox", { name: "启用" });
     fireEvent.click(enableToggle);
     fireEvent.click(screen.getByText("保存"));
     await waitFor(() =>
-      expect(settingsSaveLspServer).toHaveBeenLastCalledWith({
-        languageId: "typescript",
-        enabled: false,
-        command: "custom-ts-lsp",
-        args: ["--stdio"],
-      }, null),
+      expect(settingsSaveLspServer).toHaveBeenLastCalledWith(
+        {
+          languageId: "typescript",
+          enabled: false,
+          command: "custom-ts-lsp",
+          args: ["--stdio"],
+        },
+        null,
+      ),
     );
 
     fireEvent.click(screen.getByText("重置"));
-    await waitFor(() => expect(settingsResetLspServer).toHaveBeenCalledWith("typescript", null));
+    await waitFor(() =>
+      expect(settingsResetLspServer).toHaveBeenCalledWith("typescript", null),
+    );
   });
 
   it("creates, validates, and deletes a remote machine profile", async () => {
@@ -680,12 +1092,24 @@ describe("SettingsPage LSP settings", () => {
     expect(await screen.findByText("还没有远程机器")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "添加远程机器" })[0]);
-    expect(screen.queryByLabelText("remote_profile_agent")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("remote_profile_agent_command")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("remote_profile_auth_hint")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("remote_profile_name"), { target: { value: "Devbox" } });
-    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), { target: { value: "root@devbox" } });
-    fireEvent.change(screen.getByLabelText("remote_profile_ssh_port"), { target: { value: "36000" } });
+    expect(
+      screen.queryByLabelText("remote_profile_agent"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("remote_profile_agent_command"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("remote_profile_auth_hint"),
+    ).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("remote_profile_name"), {
+      target: { value: "Devbox" },
+    });
+    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), {
+      target: { value: "root@devbox" },
+    });
+    fireEvent.change(screen.getByLabelText("remote_profile_ssh_port"), {
+      target: { value: "36000" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存远程机器" }));
 
     await waitFor(() =>
@@ -697,9 +1121,13 @@ describe("SettingsPage LSP settings", () => {
       }),
     );
     expect(await screen.findByText("Devbox")).toBeInTheDocument();
-    expect(screen.getByLabelText("remote_validate_path_remote-1")).toHaveAttribute("placeholder", "~");
+    expect(
+      screen.getByLabelText("remote_validate_path_remote-1"),
+    ).toHaveAttribute("placeholder", "~");
 
-    fireEvent.change(screen.getByLabelText("remote_validate_path_remote-1"), { target: { value: "/srv/project" } });
+    fireEvent.change(screen.getByLabelText("remote_validate_path_remote-1"), {
+      target: { value: "/srv/project" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "验证" }));
     await waitFor(() =>
       expect(settingsValidateRemoteProfile).toHaveBeenCalledWith({
@@ -711,15 +1139,21 @@ describe("SettingsPage LSP settings", () => {
     expect(await screen.findByText("SSH · 通过")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    await waitFor(() => expect(settingsDeleteRemoteProfile).toHaveBeenCalledWith("remote-1"));
+    await waitFor(() =>
+      expect(settingsDeleteRemoteProfile).toHaveBeenCalledWith("remote-1"),
+    );
   });
 
   it("passes a one-time SSH password for remote profile validation", async () => {
-    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(
+      remoteProfilesSnapshot(),
+    );
     render(<SettingsPage onBack={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "远程" }));
-    const passwordInput = await screen.findByLabelText("remote_validate_password_remote-1");
+    const passwordInput = await screen.findByLabelText(
+      "remote_validate_password_remote-1",
+    );
     fireEvent.change(passwordInput, { target: { value: "ssh-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "验证" }));
 
@@ -735,7 +1169,9 @@ describe("SettingsPage LSP settings", () => {
   });
 
   it("does not connect SSH when settings opens with an active remote context", async () => {
-    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot(true));
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(
+      remoteProfilesSnapshot(true),
+    );
 
     render(
       <SettingsPage
@@ -760,12 +1196,18 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.getByText("project · root@devbox:36000")).toBeInTheDocument();
     expect(screen.getByText("/srv/project")).toBeInTheDocument();
     expect(screen.getAllByText("CodeBuddy").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "编辑远程 Claude" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑远程 Codex" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "编辑远程 Claude" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "编辑远程 Codex" }),
+    ).toBeInTheDocument();
   });
 
   it("loads remote runtime settings only after an explicit remote edit action", async () => {
-    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot(true));
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(
+      remoteProfilesSnapshot(true),
+    );
 
     render(
       <SettingsPage
@@ -782,11 +1224,17 @@ describe("SettingsPage LSP settings", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "编辑远程 Codex" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑远程 Codex" }),
+    );
 
-    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"));
+    await waitFor(() =>
+      expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"),
+    );
     expect(settingsGetLspSnapshot).toHaveBeenCalledWith("remote-1");
-    expect(await screen.findByText("正在编辑 project 的远程运行时设置。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("正在编辑 project 的远程运行时设置。"),
+    ).toBeInTheDocument();
   });
 
   it("writes runtime settings to the active remote profile", async () => {
@@ -805,10 +1253,16 @@ describe("SettingsPage LSP settings", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "编辑远程 Codex" }));
-    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑远程 Codex" }),
+    );
+    await waitFor(() =>
+      expect(settingsGetAgentSnapshot).toHaveBeenCalledWith("remote-1"),
+    );
     await selectByokProvider(/TimiAI/);
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "remote-timiai-secret" } });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "remote-timiai-secret" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存 TimiAI key" }));
 
     await waitFor(() =>
@@ -830,7 +1284,9 @@ describe("SettingsPage LSP settings", () => {
   });
 
   it("edits a remote profile and warns about duplicate SSH targets", async () => {
-    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesWithDuplicateTarget());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(
+      remoteProfilesWithDuplicateTarget(),
+    );
     vi.mocked(settingsSaveRemoteProfile).mockResolvedValue({
       profiles: [
         {
@@ -847,11 +1303,19 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.click(await screen.findByRole("button", { name: "远程" }));
     await screen.findByText("Devbox");
     fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
-    fireEvent.change(screen.getByLabelText("remote_profile_name"), { target: { value: "Devbox Renamed" } });
-    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), { target: { value: "root@staging" } });
-    fireEvent.change(screen.getByLabelText("remote_profile_ssh_port"), { target: { value: "22" } });
+    fireEvent.change(screen.getByLabelText("remote_profile_name"), {
+      target: { value: "Devbox Renamed" },
+    });
+    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), {
+      target: { value: "root@staging" },
+    });
+    fireEvent.change(screen.getByLabelText("remote_profile_ssh_port"), {
+      target: { value: "22" },
+    });
 
-    expect(await screen.findByText("已有同一 SSH 目标：Staging")).toBeInTheDocument();
+    expect(
+      await screen.findByText("已有同一 SSH 目标：Staging"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存远程机器" }));
 
     await waitFor(() =>
@@ -866,15 +1330,22 @@ describe("SettingsPage LSP settings", () => {
   });
 
   it("renders remote validation failures with phase diagnostics", async () => {
-    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(remoteProfilesSnapshot());
-    vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(remoteProfilesValidationFailed());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue(
+      remoteProfilesSnapshot(),
+    );
+    vi.mocked(settingsValidateRemoteProfile).mockResolvedValue(
+      remoteProfilesValidationFailed(),
+    );
 
     render(<SettingsPage onBack={vi.fn()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "远程" }));
-    fireEvent.change(await screen.findByLabelText("remote_validate_path_remote-1"), {
-      target: { value: "/srv/missing" },
-    });
+    fireEvent.change(
+      await screen.findByLabelText("remote_validate_path_remote-1"),
+      {
+        target: { value: "/srv/missing" },
+      },
+    );
     fireEvent.click(screen.getByRole("button", { name: "验证" }));
 
     await waitFor(() =>
@@ -885,7 +1356,10 @@ describe("SettingsPage LSP settings", () => {
       }),
     );
     expect(await screen.findByText("远程机器验证失败")).toBeInTheDocument();
-    expect(screen.getByText("目录 · 失败")).toHaveAttribute("title", "No such directory");
+    expect(screen.getByText("目录 · 失败")).toHaveAttribute(
+      "title",
+      "No such directory",
+    );
   });
 
   it("recovers from remote settings load and save errors", async () => {
@@ -898,19 +1372,31 @@ describe("SettingsPage LSP settings", () => {
 
     render(<SettingsPage onBack={vi.fn()} />);
 
-    expect(await screen.findByText("选择本机默认智能体和可用模型来源。")).toBeInTheDocument();
-    expect(screen.queryByText("Error: remote load failed")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("选择本机默认智能体和可用模型来源。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Error: remote load failed"),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: "远程" }));
-    expect(await screen.findByText("Error: remote load failed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Error: remote load failed"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByText("还没有远程机器")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "添加远程机器" })[0]);
-    fireEvent.change(screen.getByLabelText("remote_profile_name"), { target: { value: "Devbox" } });
-    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), { target: { value: "root@devbox" } });
+    fireEvent.change(screen.getByLabelText("remote_profile_name"), {
+      target: { value: "Devbox" },
+    });
+    fireEvent.change(screen.getByLabelText("remote_profile_ssh_target"), {
+      target: { value: "root@devbox" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存远程机器" }));
-    expect(await screen.findByText("Error: remote save failed")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Error: remote save failed"),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "保存远程机器" }));
     expect(await screen.findByText("Devbox")).toBeInTheDocument();
@@ -923,18 +1409,34 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.queryByText("goose")).not.toBeInTheDocument();
     expect(screen.getByLabelText("byok_provider_profile")).toBeInTheDocument();
     expect(screen.getAllByText("未配置").length).toBeGreaterThan(0);
-    expect(screen.queryByText("C:\\Users\\yvonchen\\.kodex\\config.toml")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("C:\\Users\\yvonchen\\.kodex\\config.toml"),
+    ).not.toBeInTheDocument();
 
     await selectByokProvider(/TimiAI/);
     const saveButton = screen.getByRole("button", { name: "保存 TimiAI key" });
     expect(saveButton).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "timiai-secret" } });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "timiai-secret" },
+    });
     expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
-    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "timiai", "timiai-secret", null));
-    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "timiai", "timiai-secret", null);
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "codex",
+        "timiai",
+        "timiai-secret",
+        null,
+      ),
+    );
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+      "claude",
+      "timiai",
+      "timiai-secret",
+      null,
+    );
     await screen.findByText("TimiAI API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("timiai-secret")).not.toBeInTheDocument();
@@ -944,9 +1446,17 @@ describe("SettingsPage LSP settings", () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openAgentSettingsTab("Codex");
-    const codexChannel = screen.getByRole("radiogroup", { name: "Codex channel" });
+    const codexChannel = screen.getByRole("radiogroup", {
+      name: "Codex channel",
+    });
     fireEvent.click(within(codexChannel).getByRole("button", { name: /默认/ }));
-    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "default", null));
+    await waitFor(() =>
+      expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith(
+        "codex",
+        "default",
+        null,
+      ),
+    );
     await screen.findByText("Codex 通道已切换到 默认");
   });
 
@@ -956,17 +1466,33 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Codex");
     await selectByokProvider(/DeepSeek/);
 
-    const saveButton = screen.getByRole("button", { name: "保存 DeepSeek key" });
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "deepseek-secret" } });
+    const saveButton = screen.getByRole("button", {
+      name: "保存 DeepSeek key",
+    });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "deepseek-secret" },
+    });
     fireEvent.click(saveButton);
 
     await waitFor(() =>
-      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "deepseek", "deepseek-secret", null),
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "codex",
+        "deepseek",
+        "deepseek-secret",
+        null,
+      ),
     );
-    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "deepseek", "deepseek-secret", null);
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+      "claude",
+      "deepseek",
+      "deepseek-secret",
+      null,
+    );
     await screen.findByText("DeepSeek API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
-    expect(screen.queryByDisplayValue("deepseek-secret")).not.toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue("deepseek-secret"),
+    ).not.toBeInTheDocument();
   });
 
   it("adds a Kimi Code key to the shared BYOK model pool without echoing it", async () => {
@@ -976,115 +1502,172 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("BYOK 模型池");
     await selectByokProvider(/Kimi Code/);
 
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "kimi-secret" } });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "kimi-secret" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存 Kimi Code key" }));
 
-    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "kimi_code", "kimi-secret", null));
-    await waitFor(() => expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "kimi_code", "kimi-secret", null));
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "codex",
+        "kimi_code",
+        "kimi-secret",
+        null,
+      ),
+    );
+    await waitFor(() =>
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "claude",
+        "kimi_code",
+        "kimi-secret",
+        null,
+      ),
+    );
     await screen.findByText("Kimi Code API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("kimi-secret")).not.toBeInTheDocument();
   });
 
   it("saves Web tools settings and Brave Search key", async () => {
-    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(
+      async (enabled, provider) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          web_tools: {
+            enabled,
+            provider,
+          },
+        },
         web_tools: {
           enabled,
           provider,
+          configured: false,
         },
-      },
-      web_tools: {
-        enabled,
-        provider,
-        configured: false,
-      },
-    }));
-    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
+      }),
+    );
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(
+      async (provider) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          web_tools: {
+            enabled: true,
+            provider,
+          },
+        },
         web_tools: {
           enabled: true,
           provider,
+          configured: true,
         },
-      },
-      web_tools: {
-        enabled: true,
-        provider,
-        configured: true,
-      },
-    }));
+      }),
+    );
     render(<SettingsPage onBack={vi.fn()} />);
     await openSettingsPane("Web 工具");
 
-    const webSection = (await screen.findByRole("heading", { name: "Web 工具", level: 2 })).closest("section");
+    const webSection = (
+      await screen.findByRole("heading", { name: "Web 工具", level: 2 })
+    ).closest("section");
     expect(webSection).not.toBeNull();
     const webControls = within(webSection as HTMLElement);
 
     fireEvent.click(webControls.getByRole("checkbox", { name: "已关闭" }));
 
-    await waitFor(() => expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(true, "brave"));
-    await screen.findByText("需要保存 Brave Search API key 后，新会话才会实际获得 Web 工具。");
+    await waitFor(() =>
+      expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(true, "brave"),
+    );
+    await screen.findByText(
+      "需要保存 Brave Search API key 后，新会话才会实际获得 Web 工具。",
+    );
 
-    fireEvent.change(screen.getByLabelText("web_tools_api_key"), { target: { value: "brave-secret" } });
+    fireEvent.change(screen.getByLabelText("web_tools_api_key"), {
+      target: { value: "brave-secret" },
+    });
     fireEvent.click(webControls.getByRole("button", { name: "保存 key" }));
 
-    await waitFor(() => expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith("brave", "brave-secret"));
-    await screen.findByText("Brave Search API key 已保存，后续新建或重连本机会话生效");
+    await waitFor(() =>
+      expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith(
+        "brave",
+        "brave-secret",
+      ),
+    );
+    await screen.findByText(
+      "Brave Search API key 已保存，后续新建或重连本机会话生效",
+    );
     expect(screen.getByLabelText("web_tools_api_key")).toHaveValue("");
   });
 
   it("switches Web tools provider and saves Tavily key", async () => {
-    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(async (enabled, provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
+    vi.mocked(settingsSaveWebToolsSettings).mockImplementation(
+      async (enabled, provider) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          web_tools: {
+            enabled,
+            provider,
+          },
+        },
         web_tools: {
           enabled,
           provider,
+          configured: false,
         },
-      },
-      web_tools: {
-        enabled,
-        provider,
-        configured: false,
-      },
-    }));
-    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(async (provider) => ({
-      ...agentSnapshot,
-      settings: {
-        ...agentSnapshot.settings,
+      }),
+    );
+    vi.mocked(settingsSaveWebToolsProviderKey).mockImplementation(
+      async (provider) => ({
+        ...agentSnapshot,
+        settings: {
+          ...agentSnapshot.settings,
+          web_tools: {
+            enabled: false,
+            provider,
+          },
+        },
         web_tools: {
           enabled: false,
           provider,
+          configured: true,
         },
-      },
-      web_tools: {
-        enabled: false,
-        provider,
-        configured: true,
-      },
-    }));
+      }),
+    );
     render(<SettingsPage onBack={vi.fn()} />);
     await openSettingsPane("Web 工具");
 
-    const webSection = (await screen.findByRole("heading", { name: "Web 工具", level: 2 })).closest("section");
+    const webSection = (
+      await screen.findByRole("heading", { name: "Web 工具", level: 2 })
+    ).closest("section");
     expect(webSection).not.toBeNull();
     const webControls = within(webSection as HTMLElement);
 
-    fireEvent.change(webControls.getByLabelText("web_tools_provider"), { target: { value: "tavily" } });
+    fireEvent.change(webControls.getByLabelText("web_tools_provider"), {
+      target: { value: "tavily" },
+    });
 
-    await waitFor(() => expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(false, "tavily"));
+    await waitFor(() =>
+      expect(settingsSaveWebToolsSettings).toHaveBeenCalledWith(
+        false,
+        "tavily",
+      ),
+    );
     await screen.findByText("Web 工具搜索来源已切换到 Tavily");
 
-    fireEvent.change(screen.getByLabelText("web_tools_api_key"), { target: { value: "tvly-secret" } });
+    fireEvent.change(screen.getByLabelText("web_tools_api_key"), {
+      target: { value: "tvly-secret" },
+    });
     fireEvent.click(webControls.getByRole("button", { name: "保存 key" }));
 
-    await waitFor(() => expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith("tavily", "tvly-secret"));
-    await screen.findByText("Tavily API key 已保存，后续新建或重连本机会话生效");
+    await waitFor(() =>
+      expect(settingsSaveWebToolsProviderKey).toHaveBeenCalledWith(
+        "tavily",
+        "tvly-secret",
+      ),
+    );
+    await screen.findByText(
+      "Tavily API key 已保存，后续新建或重连本机会话生效",
+    );
     expect(screen.getByLabelText("web_tools_api_key")).toHaveValue("");
   });
 
@@ -1094,31 +1677,56 @@ describe("SettingsPage LSP settings", () => {
       codex_acp: {
         ...agentSnapshot.codex_acp,
         provider: "byok",
-        selected_profile_id: "byok",
-        profiles: codexProfiles("deepseek", { deepseek: true }),
+        selected_profile_id: "deepseek",
+        profiles: codexProfiles("deepseek"),
       },
     });
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openAgentSettingsTab("Codex");
     const sourceSelect = screen.getByLabelText("byok_provider_profile");
-    expect(sourceSelect).toHaveTextContent("DeepSeek · 已配置");
+    expect(sourceSelect).toHaveTextContent("DeepSeek · 未配置");
 
     await selectByokProvider(/Xiaomi Token Plan/);
-    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent("Xiaomi Token Plan · 未配置");
+    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
+      "Xiaomi Token Plan · 未配置",
+    );
     const xiaomiModels = "模型：MiMo-V2.5-Pro、MiMo-V2.5";
-    expect(screen.getByLabelText(xiaomiModels)).toHaveAttribute("title", xiaomiModels);
-    expect(screen.queryByText("https://token-plan-cn.xiaomimimo.com/v1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(xiaomiModels)).toHaveAttribute(
+      "title",
+      xiaomiModels,
+    );
+    expect(
+      screen.queryByText("https://token-plan-cn.xiaomimimo.com/v1"),
+    ).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "mimo-secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存 Xiaomi Token Plan key" }));
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "mimo-secret" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "保存 Xiaomi Token Plan key" }),
+    );
 
     await waitFor(() =>
-      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "xiaomi_mimo", "mimo-secret", null),
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "codex",
+        "xiaomi_mimo",
+        "mimo-secret",
+        null,
+      ),
     );
-    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "xiaomi_mimo", "mimo-secret", null);
-    await screen.findByText("Xiaomi Token Plan API key 已更新，后续新建会话生效");
-    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent("Xiaomi Token Plan");
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+      "claude",
+      "xiaomi_mimo",
+      "mimo-secret",
+      null,
+    );
+    await screen.findByText(
+      "Xiaomi Token Plan API key 已更新，后续新建会话生效",
+    );
+    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
+      "Xiaomi Token Plan",
+    );
   });
 
   it("saves and resets editable BYOK provider models", async () => {
@@ -1142,10 +1750,14 @@ describe("SettingsPage LSP settings", () => {
       ),
     );
     await screen.findByText("TimiAI 模型列表已更新，后续新建会话生效");
-    expect(screen.getByLabelText("byok_provider_models")).toHaveValue("gpt-5.6\nclaude-opus-4.9");
+    expect(screen.getByLabelText("byok_provider_models")).toHaveValue(
+      "gpt-5.6\nclaude-opus-4.9",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
-    await waitFor(() => expect(settingsResetProviderModels).toHaveBeenCalledWith("timiai", null));
+    await waitFor(() =>
+      expect(settingsResetProviderModels).toHaveBeenCalledWith("timiai", null),
+    );
     await screen.findByText("TimiAI 模型列表已恢复默认，后续新建会话生效");
   });
 
@@ -1156,7 +1768,9 @@ describe("SettingsPage LSP settings", () => {
     await selectByokProvider(/CommandCode/);
 
     const urlInput = screen.getByLabelText("byok_provider_model_list_url");
-    expect(urlInput).toHaveValue("https://api.commandcode.ai/provider/v1/models");
+    expect(urlInput).toHaveValue(
+      "https://api.commandcode.ai/provider/v1/models",
+    );
     fireEvent.change(urlInput, {
       target: { value: "https://api.commandcode.ai/provider/v1/models?all=1" },
     });
@@ -1170,7 +1784,9 @@ describe("SettingsPage LSP settings", () => {
       ),
     );
     await screen.findByText("CommandCode 模型列表已同步，后续新建会话生效");
-    expect(screen.getByLabelText("byok_provider_models")).toHaveValue("Qwen/Qwen3.8-Max\nMiniMaxAI/MiniMax-M4");
+    expect(screen.getByLabelText("byok_provider_models")).toHaveValue(
+      "Qwen/Qwen3.8-Max\nMiniMaxAI/MiniMax-M4",
+    );
   });
 
   it("shows configured BYOK providers as a single shared model pool", async () => {
@@ -1189,26 +1805,318 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Codex");
     await screen.findByText("2/5 已配置");
     fireEvent.click(screen.getByLabelText("byok_provider_profile"));
-    expect(screen.getByRole("option", { name: "TimiAI · 已配置" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "CommandCode · 未配置" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "DeepSeek · 已配置" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Kimi Code · 未配置" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "TimiAI · 已配置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "DeepSeek · 已配置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "CommandCode · 未配置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Kimi Code · 未配置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "清除设置 TimiAI" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "清除设置 DeepSeek" }),
+    ).toBeInTheDocument();
     expect(settingsSaveAgentProviderSecret).not.toHaveBeenCalled();
   });
 
+  it("clears a configured builtin BYOK provider without hiding the source entry", async () => {
+    const configuredSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "byok",
+        selected_profile_id: "byok",
+        profiles: codexProfiles("byok", { timiai: true }),
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValueOnce(
+      configuredSnapshot,
+    );
+    vi.mocked(settingsClearProviderConfiguration).mockResolvedValueOnce({
+      ...configuredSnapshot,
+      codex_acp: {
+        ...configuredSnapshot.codex_acp,
+        profiles: codexProfiles("byok"),
+      },
+    });
+    vi.mocked(confirm).mockResolvedValueOnce(true);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    fireEvent.click(screen.getByRole("button", { name: "清除设置 TimiAI" }));
+
+    await waitFor(() =>
+      expect(settingsClearProviderConfiguration).toHaveBeenCalledWith(
+        "timiai",
+        null,
+      ),
+    );
+    await screen.findByText("TimiAI 设置已清除，后续新建会话生效");
+    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
+      "CommandCode · 未配置",
+    );
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    expect(
+      screen.getByRole("option", { name: "TimiAI · 未配置" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "CommandCode · 未配置" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps unnamed custom BYOK provider out of the source list until it is saved", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await screen.findByText("BYOK 模型池");
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    expect(
+      screen.queryByRole("option", { name: /Custom Provider/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加自定义" }));
+    const dialog = screen.getByRole("dialog", { name: "添加自定义 Provider" });
+    expect(
+      within(dialog).getByText(
+        "命名并保存后，才会出现在 BYOK 模型来源下拉框里。",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("custom_provider_label"), {
+      target: { value: "Lab Provider" },
+    });
+    fireEvent.change(
+      within(dialog).getByLabelText("custom_provider_endpoint"),
+      {
+        target: { value: "https://api.lab.test/v1/chat/completions" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByLabelText("custom_provider_protocol"),
+      { target: { value: "responses" } },
+    );
+
+    fireEvent.change(within(dialog).getByLabelText("custom_provider_api_key"), {
+      target: { value: "lab-secret" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "保存自定义 provider" }),
+    );
+
+    await waitFor(() =>
+      expect(settingsSaveCustomProvider).toHaveBeenCalledWith(
+        {
+          label: "Lab Provider",
+          endpoint: "https://api.lab.test/v1/chat/completions",
+          protocol: "responses",
+          apiKey: "lab-secret",
+          modelListUrl: null,
+        },
+        null,
+      ),
+    );
+    await screen.findByText("自定义 provider 已保存，后续新建会话生效");
+    expect(
+      screen.queryByRole("dialog", { name: "添加自定义 Provider" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
+      "Lab Provider · 已配置",
+    );
+
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    expect(
+      screen.getByRole("option", { name: "Lab Provider · 已配置" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the custom provider entry as an add action when one is already configured", async () => {
+    const configuredSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        profiles: codexProfiles("byok", { custom: true }),
+      },
+      claude: {
+        ...agentSnapshot.claude,
+        profiles: claudeProfiles("byok", { custom: true }),
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValueOnce(
+      configuredSnapshot,
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    expect(
+      await screen.findByRole("button", { name: "添加自定义" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "编辑自定义" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加自定义" }));
+    const dialog = screen.getByRole("dialog", { name: "添加自定义 Provider" });
+    expect(within(dialog).getByLabelText("custom_provider_label")).toHaveValue("");
+    expect(within(dialog).getByLabelText("custom_provider_endpoint")).toHaveValue("");
+    expect(within(dialog).getByLabelText("custom_provider_protocol")).toHaveValue("chat_completions");
+    expect(within(dialog).getByLabelText("custom_provider_api_key")).toHaveAttribute(
+      "placeholder",
+      "输入 API key",
+    );
+    expect(within(dialog).queryByRole("button", { name: "移除" })).not.toBeInTheDocument();
+  });
+
+  it("edits a configured custom BYOK provider from the source menu", async () => {
+    const configuredSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "byok",
+        selected_profile_id: "custom",
+        profiles: codexProfiles("custom", { timiai: true, custom: true }),
+      },
+      claude: {
+        ...agentSnapshot.claude,
+        profiles: claudeProfiles("byok", { timiai: true, custom: true }),
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValueOnce(
+      configuredSnapshot,
+    );
+    vi.mocked(settingsSaveCustomProvider).mockResolvedValueOnce({
+      ...configuredSnapshot,
+      codex_acp: {
+        ...configuredSnapshot.codex_acp,
+        profiles: codexProfiles("custom", { timiai: true, custom: true }),
+      },
+    });
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    fireEvent.click(await screen.findByLabelText("byok_provider_profile"));
+    expect(screen.getByRole("button", { name: "编辑 Lab Provider" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 Lab Provider" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 Lab Provider" }));
+    const dialog = screen.getByRole("dialog", { name: "编辑自定义 Provider" });
+    expect(within(dialog).getByLabelText("custom_provider_label")).toHaveValue("Lab Provider");
+    expect(within(dialog).getByLabelText("custom_provider_label")).toBeDisabled();
+    expect(within(dialog).getByLabelText("custom_provider_endpoint")).toHaveValue(
+      "https://api.custom.test/v1/chat/completions",
+    );
+    expect(within(dialog).getByLabelText("custom_provider_protocol")).toHaveValue("chat_completions");
+    expect(within(dialog).getByLabelText("custom_provider_api_key")).toHaveAttribute(
+      "placeholder",
+      "输入新的 API key 以保存配置",
+    );
+
+    fireEvent.change(within(dialog).getByLabelText("custom_provider_endpoint"), {
+      target: { value: "https://api.edited.test/v1/responses" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("custom_provider_protocol"), {
+      target: { value: "responses" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("custom_provider_api_key"), {
+      target: { value: "edited-secret" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() =>
+      expect(settingsSaveCustomProvider).toHaveBeenCalledWith(
+        {
+          label: "Lab Provider",
+          endpoint: "https://api.edited.test/v1/responses",
+          protocol: "responses",
+          apiKey: "edited-secret",
+          modelListUrl: null,
+        },
+        null,
+      ),
+    );
+    await screen.findByText("自定义 provider 已更新，后续新建会话生效");
+  });
+  it("removes a configured custom BYOK provider from the source menu", async () => {
+    const configuredSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        provider: "byok",
+        selected_profile_id: "custom",
+        profiles: codexProfiles("custom", { timiai: true, custom: true }),
+      },
+      claude: {
+        ...agentSnapshot.claude,
+        profiles: claudeProfiles("byok", { timiai: true, custom: true }),
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValueOnce(
+      configuredSnapshot,
+    );
+    vi.mocked(settingsRemoveCustomProvider).mockResolvedValueOnce({
+      ...configuredSnapshot,
+      codex_acp: {
+        ...configuredSnapshot.codex_acp,
+        profiles: codexProfiles("byok", { timiai: true }),
+      },
+      claude: {
+        ...configuredSnapshot.claude,
+        profiles: claudeProfiles("byok", { timiai: true }),
+      },
+    });
+    vi.mocked(confirm).mockResolvedValueOnce(true);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    expect(
+      await screen.findByLabelText("byok_provider_profile"),
+    ).toHaveTextContent("Lab Provider · 已配置");
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    fireEvent.click(screen.getByRole("button", { name: "移除 Lab Provider" }));
+
+    await waitFor(() =>
+      expect(settingsRemoveCustomProvider).toHaveBeenCalledWith(null),
+    );
+    await screen.findByText("自定义 provider 已移除，后续新建会话生效");
+    expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
+      "TimiAI · 已配置",
+    );
+    fireEvent.click(screen.getByLabelText("byok_provider_profile"));
+    expect(
+      screen.queryByRole("option", { name: /Lab Provider/ }),
+    ).not.toBeInTheDocument();
+  });
   it("describes Codex and Claude as channels backed by BYOK models", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openAgentSettingsTab("Codex");
     expect(screen.getByText("Codex 通道")).toBeInTheDocument();
-    const codexChannel = screen.getByRole("radiogroup", { name: "Codex channel" });
-    expect(within(codexChannel).getByRole("button", { name: /默认/ })).toBeInTheDocument();
+    const codexChannel = screen.getByRole("radiogroup", {
+      name: "Codex channel",
+    });
+    expect(
+      within(codexChannel).getByRole("button", { name: /默认/ }),
+    ).toBeInTheDocument();
     await openAgentSettingsTab("Claude");
     expect(screen.getByText("Claude 通道")).toBeInTheDocument();
     expect(screen.queryByText("Venus")).not.toBeInTheDocument();
     expect(screen.getAllByText(/BYOK/).length).toBeGreaterThan(0);
-    expect(screen.queryByLabelText("codex_provider_profile")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("claude_provider_profile")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("codex_provider_profile"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("claude_provider_profile"),
+    ).not.toBeInTheDocument();
   });
 
   it("saves the Claude fast model selection", async () => {
@@ -1217,12 +2125,12 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Claude");
     const fastModel = await screen.findByLabelText("claude_fast_model");
     fireEvent.change(fastModel, {
-      target: { value: "kodex-provider/commandcode/Qwen/Qwen3.7-Max" },
+      target: { value: "kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max" },
     });
 
     await waitFor(() =>
       expect(settingsSelectClaudeFastModel).toHaveBeenCalledWith(
-        "kodex-provider/commandcode/Qwen/Qwen3.7-Max",
+        "kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max",
         null,
       ),
     );
@@ -1235,7 +2143,9 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Claude");
     await screen.findByText("Claude 通道");
     expect(screen.queryByText("Venus")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("claude_venus_api_key")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("claude_venus_api_key"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders usage summaries with token breakdowns and no pricing values", async () => {
@@ -1266,11 +2176,13 @@ describe("SettingsPage LSP settings", () => {
     await openSettingsPane("用量");
     await screen.findByText("gpt-5.1");
 
-    expect(usageGetSummary).toHaveBeenCalledWith(expect.objectContaining({
-      group_by: "model",
-      all_workspaces: false,
-      include_archived: false,
-    }));
+    expect(usageGetSummary).toHaveBeenCalledWith(
+      expect.objectContaining({
+        group_by: "model",
+        all_workspaces: false,
+        include_archived: false,
+      }),
+    );
     expect(screen.getByText("输入 1,000")).toBeInTheDocument();
     expect(screen.getByText("输出 200")).toBeInTheDocument();
     expect(screen.getByText("缓存读 300")).toBeInTheDocument();
@@ -1314,26 +2226,42 @@ describe("SettingsPage LSP settings", () => {
     await waitFor(() => expect(usageGetSummary).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole("button", { name: "按智能体" }));
-    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
-      group_by: "agent",
-    })));
+    await waitFor(() =>
+      expect(usageGetSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          group_by: "agent",
+        }),
+      ),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "7 天" }));
-    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
-      group_by: "agent",
-      from: expect.any(String),
-      to: expect.any(String),
-    })));
+    await waitFor(() =>
+      expect(usageGetSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          group_by: "agent",
+          from: expect.any(String),
+          to: expect.any(String),
+        }),
+      ),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "全部工作区" }));
-    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
-      all_workspaces: true,
-    })));
+    await waitFor(() =>
+      expect(usageGetSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          all_workspaces: true,
+        }),
+      ),
+    );
 
     fireEvent.click(screen.getByLabelText("包含已归档"));
-    await waitFor(() => expect(usageGetSummary).toHaveBeenLastCalledWith(expect.objectContaining({
-      include_archived: true,
-    })));
+    await waitFor(() =>
+      expect(usageGetSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          include_archived: true,
+        }),
+      ),
+    );
   });
   it("saves the shared TimiAI key from the BYOK pool on the Claude tab", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
@@ -1341,21 +2269,147 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Claude");
     await selectByokProvider(/TimiAI/);
     const timiaiModels = "模型：gpt-5.5、gpt-5.4、claude-opus-4.8";
-    expect(screen.queryByText(/llmproxy\/v1\/messages/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText(timiaiModels)).toHaveAttribute("title", timiaiModels);
+    expect(
+      screen.queryByText(/llmproxy\/v1\/messages/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText(timiaiModels)).toHaveAttribute(
+      "title",
+      timiaiModels,
+    );
 
-    fireEvent.change(screen.getByLabelText("byok_api_key"), { target: { value: "timiai-secret" } });
+    fireEvent.change(screen.getByLabelText("byok_api_key"), {
+      target: { value: "timiai-secret" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存 TimiAI key" }));
 
     await waitFor(() =>
-      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("codex", "timiai", "timiai-secret", null),
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "codex",
+        "timiai",
+        "timiai-secret",
+        null,
+      ),
     );
-    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "timiai", "timiai-secret", null);
+    expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+      "claude",
+      "timiai",
+      "timiai-secret",
+      null,
+    );
     await waitFor(() =>
-      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith("claude", "timiai", "timiai-secret", null),
+      expect(settingsSaveAgentProviderSecret).toHaveBeenCalledWith(
+        "claude",
+        "timiai",
+        "timiai-secret",
+        null,
+      ),
     );
     await screen.findByText("TimiAI API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
   });
 
+  it("updates the image view model list when the provider changes before saving", async () => {
+    // Image view reuses a BYOK provider's key, so only providers with a
+    // resolved key are offered. Configure TimiAI and CommandCode so both show
+    // up and the cascade between them can be exercised.
+    const imageSnapshot: AgentSettingsSnapshot = {
+      ...agentSnapshot,
+      codex_acp: {
+        ...agentSnapshot.codex_acp,
+        profiles: codexProfiles("byok", {
+          timiai: true,
+          commandcode: true,
+        }),
+      },
+    };
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(imageSnapshot);
+    vi.mocked(settingsSaveImageViewSettings).mockImplementation(
+      async (enabled, provider, model) => ({
+        ...imageSnapshot,
+        image: {
+          enabled,
+          view_provider: provider,
+          view_model: model,
+          view_configured: true,
+          view_models:
+            imageSnapshot.codex_acp.profiles.find(
+              (profile) => profile.id === provider,
+            )?.models ?? [],
+          generate_protocol: "openai_images",
+          generate_model: "",
+          generate_base_url: "",
+          generate_default_size: "1024x1024",
+          generate_configured: false,
+        },
+      }),
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("图像能力");
+
+    const imageSection = (
+      await screen.findByRole("heading", { name: "图像能力", level: 2 })
+    ).closest("section");
+    expect(imageSection).not.toBeNull();
+    const imageControls = within(imageSection as HTMLElement);
+
+    const providerSelect = imageControls.getByLabelText("image_view_provider");
+    const modelSelect = imageControls.getByLabelText("image_view_model");
+
+    // Save button is disabled when nothing has changed from the saved state.
+    expect(
+      imageControls.getByRole("button", { name: "保存识图配置" }),
+    ).toBeDisabled();
+
+    // Only providers with a resolved key are offered; DeepSeek (no key) is
+    // hidden from the image view source list.
+    const providerOptions = (
+      providerSelect as HTMLSelectElement
+    ).textContent;
+    expect(providerOptions).toContain("TimiAI");
+    expect(providerOptions).toContain("CommandCode");
+    expect(providerOptions).not.toContain("DeepSeek");
+
+    // Initial draft mirrors the saved provider (timiai); its catalog models
+    // populate the model picker before any save.
+    expect(providerSelect).toHaveValue("timiai");
+    expect(
+      (modelSelect as HTMLSelectElement).textContent,
+    ).toContain("gpt-5.5");
+    expect(
+      (modelSelect as HTMLSelectElement).textContent,
+    ).toContain("claude-opus-4.8");
+
+    // Switching the provider dropdown must refresh the model list immediately,
+    // without saving first — this is the cascade the bug broke.
+    fireEvent.change(providerSelect, { target: { value: "commandcode" } });
+    expect(providerSelect).toHaveValue("commandcode");
+    // The draft model resets when the provider changes.
+    expect(modelSelect).toHaveValue("");
+    expect(
+      (modelSelect as HTMLSelectElement).textContent,
+    ).toContain("claude-sonnet-4-6");
+    expect(
+      (modelSelect as HTMLSelectElement).textContent,
+    ).toContain("deepseek/deepseek-v4-pro");
+    // The previous provider's exclusive model must no longer be offered.
+    expect(
+      (modelSelect as HTMLSelectElement).textContent,
+    ).not.toContain("gpt-5.4");
+
+    // Selecting a model and saving persists the draft provider + model.
+    fireEvent.change(modelSelect, { target: { value: "claude-sonnet-4-6" } });
+    fireEvent.click(
+      imageControls.getByRole("button", { name: "保存识图配置" }),
+    );
+
+    await waitFor(() =>
+      expect(settingsSaveImageViewSettings).toHaveBeenCalledWith(
+        false,
+        "commandcode",
+        "claude-sonnet-4-6",
+      ),
+    );
+    await screen.findByText("识图配置已保存。");
+  });
 });

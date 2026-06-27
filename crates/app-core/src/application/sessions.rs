@@ -7,6 +7,8 @@ struct PreparedSessionRuntime {
     remote_ssh: Option<RemoteSshSessionConfig>,
     mcp_servers: Vec<acp_core::McpServer>,
     web_tools_mcp: Option<crate::web_tools_mcp::WebToolsMcpHandle>,
+    image_mcp: Option<crate::image_mcp::ImageMcpHandle>,
+    image_capabilities: workspace_model::ImageCapabilities,
 }
 
 pub(super) fn prepare_web_tools_mcp(
@@ -75,6 +77,95 @@ pub(super) fn prepare_web_tools_mcp(
         ),
     );
     Ok((vec![mcp_server], Some(handle)))
+}
+
+/// Prepare the unified `kodex-image` MCP server for a session.
+///
+/// Mirrors `prepare_web_tools_mcp`: only local codex-acp / kodex-claude
+/// sessions are eligible. When image fallback is active (`enabled` &&
+/// `auto_enable`), resolves native image capabilities for the active
+/// model/provider and starts the image MCP server whose `tools/list` is
+/// trimmed to the missing capabilities. When inactive, returns the safe
+/// "assume native" capabilities so no fallback override fires.
+fn prepare_image_mcp(
+    app_paths: &AppPaths,
+    agent_command: &str,
+    model: &str,
+    workspace_root: &str,
+    remote_session: bool,
+) -> Result<
+    (
+        Vec<acp_core::McpServer>,
+        Option<crate::image_mcp::ImageMcpHandle>,
+        workspace_model::ImageCapabilities,
+    ),
+    String,
+> {
+    let is_codex = crate::settings::is_codex_acp_command(agent_command);
+    let is_claude = crate::settings::is_claude_agent_acp_command(agent_command);
+    // Even when the image MCP fallback is not attached, resolve `native_view`
+    // from the model name so text-only models correctly gate image
+    // attachments instead of being assumed capable (Bug 1).
+    let provider = if is_codex {
+        Some(crate::settings::codex_current_provider(app_paths))
+    } else {
+        None
+    };
+    let mut caps = crate::image_capability::resolve_image_capabilities(
+        model,
+        provider.as_deref(),
+        agent_command,
+    );
+    if remote_session || !(is_codex || is_claude) {
+        return Ok((Vec::new(), None, caps));
+    }
+    let settings = crate::settings::load_app_settings(app_paths);
+    if !settings.image.enabled {
+        crate::startup_perf::mark(
+            "image_mcp/disabled",
+            format!("enabled={}", settings.image.enabled),
+        );
+        return Ok((Vec::new(), None, caps));
+    }
+    crate::settings::validate_image_settings(&settings.image)
+        .map_err(|error| format!("invalid image settings: {error}"))?;
+    let view_api_key =
+        crate::settings::image_view_provider_secret(app_paths, &settings.image.view.provider);
+    let generate_api_key =
+        crate::settings::image_generate_api_key(app_paths, &settings.image.generate);
+    let config = crate::image_mcp::ImageMcpConfig {
+        workspace_root: std::path::PathBuf::from(workspace_root),
+        settings: settings.image.clone(),
+        view_api_key,
+        generate_api_key,
+    };
+    // The MCP server is attached: a `view_image` fallback is now available,
+    // so image attachments are allowed even for text-only models (degraded
+    // through `view_image` before reaching the model).
+    caps.view_fallback = true;
+    let service = crate::image_mcp::ImageMcpService::new(caps, config);
+    let handle = crate::image_mcp::start_image_mcp_server(service)
+        .map_err(|error| format!("failed to start Kodex image MCP server: {error}"))?;
+    let mcp_server = acp_core::http_mcp_server(
+        "kodex-image",
+        handle.url().to_string(),
+        [(
+            "x-kodex-image-token".to_string(),
+            handle.token().to_string(),
+        )],
+    );
+    crate::startup_perf::mark(
+        "image_mcp/ready",
+        format!(
+            "model={} provider={} native_view={} native_generate={} url={}",
+            model,
+            provider.as_deref().unwrap_or(""),
+            caps.native_view,
+            caps.native_generate,
+            handle.url()
+        ),
+    );
+    Ok((vec![mcp_server], Some(handle), caps))
 }
 
 fn remote_machine_profile_from_workspace(
@@ -244,6 +335,7 @@ impl Application {
     fn prepare_session_runtime(
         &self,
         agent_command: &str,
+        model: &str,
     ) -> Result<PreparedSessionRuntime, String> {
         if self.is_remote_workspace() {
             return self.prepare_remote_session_runtime(agent_command);
@@ -251,15 +343,21 @@ impl Application {
 
         crate::settings::ensure_agent_ready_for_command(agent_command, &self.app_paths)
             .map_err(|e| e.to_string())?;
-        let (mcp_servers, web_tools_mcp) =
+        let workspace_root = self.session_config_workspace_root(None);
+        let (mut mcp_servers, web_tools_mcp) =
             prepare_web_tools_mcp(&self.app_paths, agent_command, false)?;
+        let (image_servers, image_mcp, image_capabilities) =
+            prepare_image_mcp(&self.app_paths, agent_command, model, &workspace_root, false)?;
+        mcp_servers.extend(image_servers);
         Ok(PreparedSessionRuntime {
-            workspace_root: self.session_config_workspace_root(None),
+            workspace_root,
             agent_env: crate::settings::agent_env_for_command(agent_command, &self.app_paths),
             acp_port: self.acp_port,
             remote_ssh: None,
             mcp_servers,
             web_tools_mcp,
+            image_mcp,
+            image_capabilities,
         })
     }
 
@@ -296,6 +394,8 @@ impl Application {
             remote_ssh: Some(remote_ssh),
             mcp_servers: Vec::new(),
             web_tools_mcp: None,
+            image_mcp: None,
+            image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
         })
     }
 
@@ -474,7 +574,7 @@ impl Application {
         let resume_id_for_handle = resume_id.clone();
         let has_resume_id = resume_id_for_handle.is_some();
         let agent_command = self.agent_command.clone();
-        let prepared_runtime = self.prepare_session_runtime(&agent_command)?;
+        let prepared_runtime = self.prepare_session_runtime(&agent_command, &self.ui.session.model)?;
         let mut session = SessionHandle::start(SessionConfig {
             workspace_root: prepared_runtime.workspace_root,
             app_data_root: self.app_paths.root().display().to_string(),
@@ -493,7 +593,7 @@ impl Application {
         }
         let current_mode = self.ui.session.mode.as_deref().unwrap_or("Build");
         let _ = session.set_permission_mode(current_mode);
-        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+        let _ = super::config::queue_codex_agent_mode_for_policy_mode(
             &mut session,
             self.is_codex_acp_session(),
             Some(current_mode),
@@ -504,6 +604,8 @@ impl Application {
         self.acp_port = prepared_runtime.acp_port;
         self.remote_ssh = prepared_runtime.remote_ssh;
         self.web_tools_mcp = prepared_runtime.web_tools_mcp;
+        self.image_mcp = prepared_runtime.image_mcp;
+        self.ui.image_capabilities = prepared_runtime.image_capabilities;
         self.ui.session.status = SessionStatus::Idle;
         self.ui.prompt_capabilities = Default::default();
         self.ui.available_commands.clear();
@@ -584,7 +686,7 @@ impl Application {
         } else {
             self.agent_command.clone()
         };
-        let prepared_runtime = self.prepare_session_runtime(&session_agent_command)?;
+        let prepared_runtime = self.prepare_session_runtime(&session_agent_command, &model)?;
 
         let resume_acp_id = self.resume_acp_session_id_for_stored_session(id);
         let has_resume_id = resume_acp_id.is_some();
@@ -604,7 +706,7 @@ impl Application {
         })
         .map_err(|e| e.to_string())?;
         let _ = session.set_permission_mode(mode.as_deref().unwrap_or("Build"));
-        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+        let _ = super::config::queue_codex_agent_mode_for_policy_mode(
             &mut session,
             is_codex_agent_label(&agent_cli_label),
             mode.as_deref(),
@@ -619,6 +721,7 @@ impl Application {
         ui.session.agent_cli = Some(agent_cli_label);
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();
+        ui.image_capabilities = prepared_runtime.image_capabilities;
         ui.available_commands.clear();
         ui.agent_plan.clear();
         ui.messages = messages;
@@ -628,7 +731,10 @@ impl Application {
         ui.session_changes.clear();
         ui.review_changes.clear();
         ui.turn_changes.clear();
-        ui.usage = self.store.load_session_usage_snapshot(id).unwrap_or_default();
+        ui.usage = self
+            .store
+            .load_session_usage_snapshot(id)
+            .unwrap_or_default();
 
         let sessions = self.store.list_sessions().unwrap_or_default();
         if let Some(s) = sessions.iter().find(|s| s.id == id) {
@@ -658,6 +764,7 @@ impl Application {
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh,
             web_tools_mcp: prepared_runtime.web_tools_mcp,
+            image_mcp: prepared_runtime.image_mcp,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -690,7 +797,7 @@ impl Application {
             .map_err(|e| e.to_string())?;
 
         let agent_command = self.prepare_agent_command_for_new_session(agent)?;
-        let prepared_runtime = self.prepare_session_runtime(&agent_command)?;
+        let prepared_runtime = self.prepare_session_runtime(&agent_command, &initial_model)?;
 
         let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
         let mut session = SessionHandle::start(SessionConfig {
@@ -729,6 +836,7 @@ impl Application {
         }
         ui.session_config = Default::default();
         ui.prompt_capabilities = Default::default();
+        ui.image_capabilities = prepared_runtime.image_capabilities;
         ui.session.status = SessionStatus::Idle;
         ui.available_commands.clear();
         ui.agent_plan.clear();
@@ -763,6 +871,7 @@ impl Application {
             acp_port: prepared_runtime.acp_port,
             remote_ssh: prepared_runtime.remote_ssh,
             web_tools_mcp: prepared_runtime.web_tools_mcp,
+            image_mcp: prepared_runtime.image_mcp,
             in_flight_prompt: None,
             seq_counter: 1,
             needs_title: true,

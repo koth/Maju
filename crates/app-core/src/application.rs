@@ -3,6 +3,7 @@ use crate::file_tracker::FileChangeTracker;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
 use crate::web_tools_mcp::WebToolsMcpHandle;
+use crate::image_mcp::ImageMcpHandle;
 use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, SessionConfig, SessionHandle};
 use git_service::GitService;
 use session_store::SessionStore;
@@ -12,7 +13,8 @@ use std::time::{Duration, Instant};
 use workspace_model::{
     AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
-    ToolInvocation, ToolLogEntry, ToolStatus, UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
+    ToolInvocation, ToolLogEntry, ToolStatus, UsageSummaryRequest, UsageSummaryRow,
+    UserPromptContent,
 };
 
 mod bootstrap;
@@ -38,7 +40,10 @@ use diff_utils::{
 };
 use inline_think::InlineThinkFilter;
 pub use path_utils::{normalize_path_for_storage, normalize_tracked_path};
-use prompt_content::{prompt_display_body, prompt_has_file, prompt_has_image, prompt_text};
+use prompt_content::{
+    degrade_prompt_for_image_fallback, prompt_display_body, prompt_has_file, prompt_has_image,
+    prompt_text,
+};
 use titles::{
     extract_title_from_prompt, extract_title_from_response, is_placeholder_session_title,
 };
@@ -94,6 +99,7 @@ struct SessionRuntime {
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
     web_tools_mcp: Option<WebToolsMcpHandle>,
+    image_mcp: Option<ImageMcpHandle>,
     in_flight_prompt: Option<InFlightPrompt>,
     seq_counter: i64,
     needs_title: bool,
@@ -210,6 +216,7 @@ pub struct Application {
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
     web_tools_mcp: Option<WebToolsMcpHandle>,
+    image_mcp: Option<ImageMcpHandle>,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,
@@ -485,6 +492,7 @@ impl Application {
         std::mem::swap(&mut self.acp_port, &mut runtime.acp_port);
         std::mem::swap(&mut self.remote_ssh, &mut runtime.remote_ssh);
         std::mem::swap(&mut self.web_tools_mcp, &mut runtime.web_tools_mcp);
+        std::mem::swap(&mut self.image_mcp, &mut runtime.image_mcp);
         std::mem::swap(&mut self.in_flight_prompt, &mut runtime.in_flight_prompt);
         std::mem::swap(&mut self.seq_counter, &mut runtime.seq_counter);
         std::mem::swap(&mut self.needs_title, &mut runtime.needs_title);

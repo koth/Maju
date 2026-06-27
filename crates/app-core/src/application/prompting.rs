@@ -91,6 +91,14 @@ impl Application {
                 &self.app_paths.attachments_dir(),
             );
         }
+        // Bug 2: when the active model cannot natively view images, degrade
+        // image attachments into text descriptions via the configured view
+        // model (or fall back to a passive `view_image` tool hint). This makes
+        // the `view_image` fallback actually engage on send instead of being
+        // dead code.
+        if prompt_has_image(&prompt) && !self.ui.image_capabilities.native_view {
+            self.degrade_prompt_images(&mut prompt);
+        }
         let display_body = prompt_display_body(&prompt);
         let title_source = prompt_text(&prompt).unwrap_or_else(|| "图片提示".into());
         if display_body.is_empty() {
@@ -189,6 +197,11 @@ impl Application {
                 &self.app_paths.attachments_dir(),
             );
         }
+        // Bug 2: degrade image attachments for text-only models (see
+        // `send_prompt_content_background_inner`).
+        if prompt_has_image(&prompt) && !self.ui.image_capabilities.native_view {
+            self.degrade_prompt_images(&mut prompt);
+        }
         let display_body = prompt_display_body(&prompt);
         if display_body.is_empty() {
             let error = anyhow::anyhow!("提示内容不能为空");
@@ -226,6 +239,22 @@ impl Application {
         let error = anyhow::anyhow!(reason);
         self.push_system_message(format!("会话已断开：{error}"));
         Err(error)
+    }
+
+    /// Degrade image attachments for a text-only model by routing them through
+    /// the `view_image` fallback (Bug 2). When the `kodex-image` MCP server is
+    /// attached, the configured view model describes each image and its text
+    /// description is injected into the prompt in place of the raw image
+    /// blocks; when no view model is configured, a passive `view_image` tool
+    /// hint is appended instead. No-op when the image MCP server is not
+    /// attached (image attachments are gated out before reaching this path).
+    fn degrade_prompt_images(&mut self, prompt: &mut Vec<UserPromptContent>) {
+        let Some(handle) = self.image_mcp.as_ref() else {
+            return;
+        };
+        let config = handle.config();
+        let view_cache = handle.view_cache();
+        degrade_prompt_for_image_fallback(prompt, &config, view_cache);
     }
 
     fn append_user_prompt_message(&mut self, body: String) -> uuid::Uuid {

@@ -1575,6 +1575,28 @@
   padding: 0 12px;
 }
 
+.composer-static-control.is-loading {
+  gap: 7px;
+  color: var(--text-soft);
+  cursor: wait;
+}
+
+.composer-loading-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 24%, transparent);
+  border-top-color: var(--text-muted);
+  border-radius: 999px;
+  animation: composer-loading-spin 0.85s linear infinite;
+}
+
+@keyframes composer-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .composer-control-select {
   position: relative;
   padding: 0;

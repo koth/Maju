@@ -72,6 +72,18 @@ pub fn remote_save_agent_provider_secret(
     )
 }
 
+pub fn remote_clear_provider_configuration(
+    profile: &RemoteMachineProfile,
+    ssh_password: Option<&str>,
+    provider: &str,
+) -> Result<AgentSettingsSnapshot> {
+    remote_update_settings_with_runner(
+        profile,
+        ssh_password,
+        &SystemRemoteSshCommandRunner,
+        |paths| clear_provider_configuration(paths, provider),
+    )
+}
 pub fn remote_save_provider_models(
     profile: &RemoteMachineProfile,
     ssh_password: Option<&str>,

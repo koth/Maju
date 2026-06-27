@@ -323,6 +323,7 @@ impl Application {
         state: &workspace_model::SessionConfigState,
     ) -> workspace_model::SessionConfigState {
         let mut state = state.clone();
+        self.fill_session_config_provider_labels(&mut state);
         if let Some(saved_model) = self.pending_model_restore.as_ref() {
             for control in &mut state.controls {
                 if control.category != workspace_model::SessionConfigCategory::Model {
@@ -356,6 +357,32 @@ impl Application {
         state
     }
 
+    fn fill_session_config_provider_labels(&self, state: &mut workspace_model::SessionConfigState) {
+        for control in &mut state.controls {
+            if control.category != workspace_model::SessionConfigCategory::Model {
+                continue;
+            }
+
+            for choice in &mut control.choices {
+                let Some(provider) = super::config::choice_provider(choice) else {
+                    continue;
+                };
+                let current_label = choice.provider_label.as_deref().map(str::trim);
+                let needs_label = match current_label {
+                    Some(label) if !label.is_empty() && !label.eq_ignore_ascii_case(&provider) => {
+                        false
+                    }
+                    _ => true,
+                };
+                if needs_label {
+                    choice.provider_label = Some(crate::settings::provider_label_for_paths(
+                        &self.app_paths,
+                        &provider,
+                    ));
+                }
+            }
+        }
+    }
     pub(super) fn prepare_session_title_update(&mut self, title: &str) -> Option<ClientEvent> {
         let trimmed = title.trim();
         if trimmed.is_empty() {

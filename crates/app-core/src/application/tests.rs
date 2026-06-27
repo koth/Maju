@@ -29,6 +29,7 @@ use workspace_model::{
 mod change_set_tests;
 mod diff_tests;
 mod prompt_tests;
+mod image_switch_tests;
 
 fn init_test_git_repo(path: &std::path::Path) -> git2::Repository {
     let repo = git2::Repository::init(path).unwrap();
@@ -146,12 +147,18 @@ fn usage_updates_persist_restore_and_delete_with_session() {
     assert_eq!(app.ui.usage.session_total.total_tokens, Some(120));
 
     app.session_delete(&session_id).unwrap();
-    let rows = app.store.query_usage_summary(UsageSummaryRequest {
-        all_workspaces: true,
-        include_archived: true,
-        ..Default::default()
-    }).unwrap();
-    assert!(rows.iter().all(|row| row.session_id.as_deref() != Some(&session_id)));
+    let rows = app
+        .store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            include_archived: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row.session_id.as_deref() != Some(&session_id))
+    );
 }
 
 #[test]
@@ -1112,6 +1119,7 @@ fn model_config_state(
                     label: (*choice).into(),
                     description: None,
                     provider: None,
+                    provider_label: None,
                 })
                 .collect(),
             enabled: true,
@@ -1119,6 +1127,33 @@ fn model_config_state(
     }
 }
 
+#[test]
+fn session_config_update_fills_custom_provider_label_from_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(&dir);
+    crate::settings::save_custom_provider(
+        &app.app_paths,
+        workspace_model::CustomProviderInput {
+            provider_id: Some("custom".to_string()),
+            label: "Lab Provider".into(),
+            endpoint: "https://api.lab.test/v1/chat/completions".into(),
+            protocol: workspace_model::CustomProviderProtocol::ChatCompletions,
+            api_key: "lab-secret".into(),
+            model_list_url: None,
+        },
+    )
+    .unwrap();
+
+    let prepared = app.prepare_session_config_update(&provider_model_config_state(
+        SessionConfigSource::SessionModel,
+        "lab-model",
+        &[("custom", "lab-model")],
+    ));
+
+    let choice = &prepared.controls[0].choices[0];
+    assert_eq!(choice.provider.as_deref(), Some("custom"));
+    assert_eq!(choice.provider_label.as_deref(), Some("Lab Provider"));
+}
 fn provider_model_config_state(
     source: SessionConfigSource,
     current: &str,
@@ -1141,6 +1176,7 @@ fn provider_model_config_state(
                     label: (*choice).into(),
                     description: None,
                     provider: Some((*provider).into()),
+                    provider_label: None,
                 })
                 .collect(),
             enabled: true,

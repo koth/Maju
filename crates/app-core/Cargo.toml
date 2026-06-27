@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 acp-core = { path = "../acp-core" }
 anyhow.workspace = true
+base64 = "0.22"
 bytes.workspace = true
 dirs-next = "2.0"
 git-service = { path = "../git-service" }
@@ -15,6 +16,7 @@ hyper-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+sha2 = "0.10"
 shell-words.workspace = true
 similar.workspace = true
 session-store = { path = "../session-store" }

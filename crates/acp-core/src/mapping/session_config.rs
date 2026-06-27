@@ -133,6 +133,7 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                     "Allow workspace reads and markdown writes; reject shell execution".into(),
                 ),
                 provider: None,
+                provider_label: None,
             },
             SessionConfigChoice {
                 id: BUILD_MODE_ID.into(),
@@ -141,6 +142,7 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                     "Allow read-only work automatically; ask before write operations".into(),
                 ),
                 provider: None,
+                provider_label: None,
             },
             SessionConfigChoice {
                 id: FULL_ACCESS_MODE_ID.into(),
@@ -149,6 +151,7 @@ fn policy_mode_control(current_mode: &str) -> SessionConfigControl {
                     "Ask through the same write gate, then approve automatically".into(),
                 ),
                 provider: None,
+                provider_label: None,
             },
         ],
         enabled: true,
@@ -215,12 +218,8 @@ fn session_config_control_from_models(models: &SessionModelState) -> SessionConf
             id: model.model_id.0.to_string(),
             label: model.name.clone(),
             description: model.description.clone(),
-            provider: model
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("provider"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            provider: model.meta.as_ref().and_then(provider_from_meta),
+            provider_label: model.meta.as_ref().and_then(provider_label_from_meta),
         })
         .collect::<Vec<_>>();
     let current_value_id = models.current_model_id.0.to_string();
@@ -306,12 +305,8 @@ fn flatten_select_options(options: SessionConfigSelectOptions) -> Vec<SessionCon
                 id: option.value.0.to_string(),
                 label: option.name,
                 description: option.description,
-                provider: option
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.get("provider"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                provider: option.meta.as_ref().and_then(provider_from_meta),
+                provider_label: option.meta.as_ref().and_then(provider_label_from_meta),
             })
             .collect(),
         SessionConfigSelectOptions::Grouped(groups) => groups
@@ -321,18 +316,38 @@ fn flatten_select_options(options: SessionConfigSelectOptions) -> Vec<SessionCon
                 id: option.value.0.to_string(),
                 label: option.name,
                 description: option.description,
-                provider: option
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.get("provider"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                provider: option.meta.as_ref().and_then(provider_from_meta),
+                provider_label: option.meta.as_ref().and_then(provider_label_from_meta),
             })
             .collect(),
         _ => Vec::new(),
     }
 }
 
+fn provider_from_meta(meta: &serde_json::Map<String, Value>) -> Option<String> {
+    ["source_provider", "sourceProvider", "provider"]
+        .into_iter()
+        .find_map(|key| meta.get(key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn provider_label_from_meta(meta: &serde_json::Map<String, Value>) -> Option<String> {
+    [
+        "source_provider_label",
+        "sourceProviderLabel",
+        "provider_label",
+        "providerLabel",
+        "provider_name",
+        "providerName",
+    ]
+    .into_iter()
+    .find_map(|key| meta.get(key).and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
+}
 fn normalize_category(category: Option<SessionConfigOptionCategory>) -> SessionConfigCategory {
     match category {
         Some(SessionConfigOptionCategory::Model) => SessionConfigCategory::Model,

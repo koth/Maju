@@ -31,11 +31,11 @@ use sse::{
 };
 
 use provider::{
-    decode_provider_model_id, normalize_proxy_provider, normalized_model_key,
-    proxy_provider_for_model, proxy_provider_from_path, replace_payload_model,
-    should_bridge_anthropic_messages_to_chat_completions, timiai_authorization_log_state,
-    upstream_chat_completion_model, upstream_chat_completions_url, upstream_messages_url,
-    upstream_native_anthropic_model, with_timiai_headers,
+    decode_provider_model_id, mapped_proxy_provider_for_model, normalize_proxy_provider,
+    normalized_model_key, proxy_provider_for_model, proxy_provider_from_path,
+    replace_payload_model, should_bridge_anthropic_messages_to_chat_completions,
+    timiai_authorization_log_state, upstream_chat_completion_model, upstream_chat_completions_url,
+    upstream_messages_url, upstream_native_anthropic_model, with_timiai_headers,
 };
 #[cfg(test)]
 use provider::{is_claude_family_model, timiai_authorization_header_value};
@@ -191,7 +191,8 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
 }
 
 pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
-    let (model_providers, provider_configs, duplicate_count) = match parse_model_provider_map(value) {
+    let (model_providers, provider_configs, duplicate_count) = match parse_model_provider_map(value)
+    {
         Ok(parsed) => parsed,
         Err(error) => {
             append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
@@ -241,6 +242,47 @@ pub fn clear_codex_api_proxy_model_provider_map() {
     append_codex_api_proxy_log("model_provider_map_cleared");
 }
 
+/// Register an API key for an additional provider without changing the active
+/// provider/key.
+///
+/// Unlike `ensure_codex_api_proxy`, this only inserts into the per-provider
+/// `api_keys` (and `session_ids`) map and does **not** mutate
+/// `config.provider` / `config.api_key`. This makes it safe to call from a
+/// secondary caller (e.g. the `kodex-image` `view_image` tool) mid-session
+/// without disrupting the active agent's proxy routing, while still letting a
+/// request that pins this provider via the request path
+/// (`/providers/{provider}/responses`) resolve the key through
+/// `api_key_for_proxy_provider`.
+pub fn register_codex_api_proxy_provider_key(provider: &str, api_key: &str) {
+    if api_key.trim().is_empty() {
+        return;
+    }
+    let provider = normalize_proxy_provider(provider).to_string();
+    let config = CODEX_API_PROXY_CONFIG
+        .get_or_init(|| {
+            Arc::new(RwLock::new(CodexApiProxyConfig {
+                provider: "timiai".to_string(),
+                api_key: String::new(),
+                api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
+            }))
+        })
+        .clone();
+    if let Ok(mut current) = config.write() {
+        current
+            .api_keys
+            .entry(provider.clone())
+            .or_insert_with(|| api_key.to_string());
+        current
+            .session_ids
+            .entry(provider)
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string());
+    }
+    append_codex_api_proxy_log("provider_key_registered (non-active)");
+}
+
 fn parse_model_provider_map(
     value: &str,
 ) -> anyhow::Result<(
@@ -273,10 +315,12 @@ fn parse_model_provider_map(
                 .and_then(Value::as_str)
                 .and_then(parse_proxy_provider_protocol),
         ) {
-            provider_configs.entry(provider.clone()).or_insert_with(|| ProxyProviderConfig {
-                base_url: base_url.to_string(),
-                protocol,
-            });
+            provider_configs
+                .entry(provider.clone())
+                .or_insert_with(|| ProxyProviderConfig {
+                    base_url: base_url.to_string(),
+                    protocol,
+                });
         }
         for field in ["model", "display_name"] {
             if let Some(model) = entry
@@ -461,7 +505,9 @@ async fn proxy_codex_api_request(
         .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
         .map(str::to_string)
+        .or_else(|| mapped_proxy_provider_for_model(&requested_model, &config.model_providers))
         .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
+        .or_else(|| mapped_proxy_provider_for_model(routing_model, &config.model_providers))
         .unwrap_or_else(|| {
             proxy_provider_for_model(routing_model, &config.provider, &config.model_providers)
         });
@@ -546,13 +592,8 @@ async fn proxy_custom_codex_responses_request(
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::Responses => {
-            proxy_native_responses_request(
-                payload,
-                api_key,
-                provider,
-                &custom_config.base_url,
-            )
-            .await
+            proxy_native_responses_request(payload, api_key, provider, &custom_config.base_url)
+                .await
         }
         ProxyProviderProtocol::ChatCompletions => {
             let chat_payload = responses_payload_to_chat_payload(payload, provider)?;
@@ -848,7 +889,9 @@ async fn proxy_anthropic_messages_request(
         .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
         .map(str::to_string)
+        .or_else(|| mapped_proxy_provider_for_model(&requested_model, &config.model_providers))
         .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
+        .or_else(|| mapped_proxy_provider_for_model(routing_model, &config.model_providers))
         .unwrap_or_else(|| {
             proxy_provider_for_model(routing_model, &config.provider, &config.model_providers)
         });

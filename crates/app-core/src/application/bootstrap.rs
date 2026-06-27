@@ -166,7 +166,9 @@ impl Application {
                     ui.session_changes.clear();
                     ui.review_changes.clear();
                     ui.turn_changes.clear();
-                    ui.usage = store.load_session_usage_snapshot(session_id).unwrap_or_default();
+                    ui.usage = store
+                        .load_session_usage_snapshot(session_id)
+                        .unwrap_or_default();
                     let seq =
                         crate::startup_perf::measure("app/bootstrap/next_seq", session_id, || {
                             store.next_seq(session_id).unwrap_or(1)
@@ -236,8 +238,8 @@ impl Application {
         let _ = crate::startup_perf::measure("app/bootstrap/set_permission_mode", "", || {
             session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"))
         });
-        let _ = crate::startup_perf::measure("app/bootstrap/sync_codex_mode", "", || {
-            super::config::sync_codex_agent_mode_for_policy_mode(
+        let _ = crate::startup_perf::measure("app/bootstrap/queue_codex_mode", "", || {
+            super::config::queue_codex_agent_mode_for_policy_mode(
                 &mut session,
                 is_codex_agent_label(&agent_cli_label),
                 ui.session.mode.as_deref(),
@@ -272,6 +274,7 @@ impl Application {
             acp_port,
             remote_ssh: None,
             web_tools_mcp,
+            image_mcp: None,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -423,7 +426,9 @@ impl Application {
                     ui.session_changes.clear();
                     ui.review_changes.clear();
                     ui.turn_changes.clear();
-                    ui.usage = store.load_session_usage_snapshot(session_id).unwrap_or_default();
+                    ui.usage = store
+                        .load_session_usage_snapshot(session_id)
+                        .unwrap_or_default();
                     let seq = store.next_seq(session_id).unwrap_or(1);
                     let needs_title = is_placeholder_session_title(&recent.title);
                     (needs_title, seq, pending_model_restore)
@@ -466,7 +471,7 @@ impl Application {
             }
         }
         let _ = session.set_permission_mode(ui.session.mode.as_deref().unwrap_or("Build"));
-        let _ = super::config::sync_codex_agent_mode_for_policy_mode(
+        let _ = super::config::queue_codex_agent_mode_for_policy_mode(
             &mut session,
             is_codex_agent_label(&agent_cli_label),
             ui.session.mode.as_deref(),
@@ -494,6 +499,7 @@ impl Application {
             acp_port: local_port,
             remote_ssh: Some(remote_ssh),
             web_tools_mcp: None,
+            image_mcp: None,
             in_flight_prompt: None,
             seq_counter,
             needs_title,

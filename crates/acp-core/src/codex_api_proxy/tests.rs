@@ -633,7 +633,8 @@ fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
         }
     ]);
 
-    let (map, provider_configs, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
+    let (map, provider_configs, duplicate_count) =
+        parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(
         map.get("deepseek-v4-pro-r1").map(String::as_str),
@@ -654,23 +655,43 @@ fn model_provider_map_parser_reads_custom_provider_config() {
         }
     ]);
 
-    let (map, provider_configs, duplicate_count) = parse_model_provider_map(&value.to_string()).unwrap();
+    let (map, provider_configs, duplicate_count) =
+        parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(map.get("my-model").map(String::as_str), Some("custom"));
-    let config = provider_configs.get("custom").expect("custom provider config");
-    assert_eq!(config.base_url, "https://api.example.com/v1/chat/completions");
+    let config = provider_configs
+        .get("custom")
+        .expect("custom provider config");
+    assert_eq!(
+        config.base_url,
+        "https://api.example.com/v1/chat/completions"
+    );
     assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
     assert_eq!(duplicate_count, 0);
 }
 
 #[test]
+fn model_provider_map_overrides_safe_byok_encoded_custom_model() {
+    let mut map = BTreeMap::new();
+    map.insert(
+        "kodex-provider/byok/custom/gpt-5.4".to_string(),
+        "custom".to_string(),
+    );
+    map.insert("gpt-5.4".to_string(), "custom".to_string());
+
+    assert_eq!(
+        mapped_proxy_provider_for_model("kodex-provider/byok/custom/gpt-5.4", &map).as_deref(),
+        Some("custom")
+    );
+}
+#[test]
 fn decodes_provider_qualified_model_ids() {
-    let model = decode_provider_model_id("kodex-provider/timiai/gpt-5.5").unwrap();
+    let model = decode_provider_model_id("kodex-provider/byok/timiai/gpt-5.5").unwrap();
 
     assert_eq!(model.provider, "timiai");
     assert_eq!(model.model, "gpt-5.5");
 
-    let model = decode_provider_model_id("kodex-provider/commandcode/Qwen/Qwen3.7-Max").unwrap();
+    let model = decode_provider_model_id("kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max").unwrap();
     assert_eq!(model.provider, "commandcode");
     assert_eq!(model.model, "Qwen/Qwen3.7-Max");
 }

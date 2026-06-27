@@ -829,7 +829,9 @@ fn test_usage_events_round_trip_and_summarize() {
     assert_eq!(snapshot.by_model.len(), 1);
     assert_eq!(snapshot.by_model[0].label, "gpt-5.1");
 
-    let by_model = store.query_usage_summary(UsageSummaryRequest::default()).unwrap();
+    let by_model = store
+        .query_usage_summary(UsageSummaryRequest::default())
+        .unwrap();
     assert_eq!(by_model.len(), 1);
     assert_eq!(by_model[0].tokens.total_tokens, Some(125));
     assert_eq!(by_model[0].session_count, 1);
@@ -857,20 +859,37 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
 
     store_a.create_session("a1", "gpt-5.1").unwrap();
     store_a
-        .append_usage_event("a1", &make_usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"), None, None)
+        .append_usage_event(
+            "a1",
+            &make_usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"),
+            None,
+            None,
+        )
         .unwrap();
     store_a.create_session("a2", "gpt-5.1").unwrap();
     store_a
-        .append_usage_event("a2", &make_usage_event("gpt-5.1", 20, "2026-06-02T00:00:00Z"), None, None)
+        .append_usage_event(
+            "a2",
+            &make_usage_event("gpt-5.1", 20, "2026-06-02T00:00:00Z"),
+            None,
+            None,
+        )
         .unwrap();
     store_a.archive_session("a2").unwrap();
 
     store_b.create_session("b1", "claude-opus-4.7").unwrap();
     store_b
-        .append_usage_event("b1", &make_usage_event("claude-opus-4.7", 30, "2026-06-03T00:00:00Z"), None, None)
+        .append_usage_event(
+            "b1",
+            &make_usage_event("claude-opus-4.7", 30, "2026-06-03T00:00:00Z"),
+            None,
+            None,
+        )
         .unwrap();
 
-    let current_workspace = store_a.query_usage_summary(UsageSummaryRequest::default()).unwrap();
+    let current_workspace = store_a
+        .query_usage_summary(UsageSummaryRequest::default())
+        .unwrap();
     assert_eq!(current_workspace.len(), 1);
     assert_eq!(current_workspace[0].tokens.total_tokens, Some(10));
 
@@ -891,8 +910,22 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
         })
         .unwrap();
     assert_eq!(all_workspaces.len(), 2);
-    assert!(all_workspaces.iter().any(|row| row.workspace_root.as_deref() == Some(store_a.workspace_root()) && row.tokens.total_tokens == Some(10)));
-    assert!(all_workspaces.iter().any(|row| row.workspace_root.as_deref() == Some(store_b.workspace_root()) && row.tokens.total_tokens == Some(30)));
+    assert!(
+        all_workspaces
+            .iter()
+            .any(
+                |row| row.workspace_root.as_deref() == Some(store_a.workspace_root())
+                    && row.tokens.total_tokens == Some(10)
+            )
+    );
+    assert!(
+        all_workspaces
+            .iter()
+            .any(
+                |row| row.workspace_root.as_deref() == Some(store_b.workspace_root())
+                    && row.tokens.total_tokens == Some(30)
+            )
+    );
 
     let date_filtered = store_a
         .query_usage_summary(UsageSummaryRequest {

@@ -22,6 +22,7 @@ pub(super) fn normalize_proxy_provider(provider: &str) -> &'static str {
         "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
         "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
         "custom" | "custom_provider" | "custom-provider" => "custom",
+        "byok" => "byok",
         _ => "timiai",
     }
 }
@@ -35,12 +36,25 @@ pub(super) fn proxy_provider_from_path(path: &str) -> Option<&'static str> {
 pub(super) fn decode_provider_model_id(model: &str) -> Option<ProviderEncodedModel> {
     let rest = model.trim().strip_prefix(PROVIDER_MODEL_ID_PREFIX)?;
     let (provider, upstream_model) = rest.split_once('/')?;
+    let provider = normalize_proxy_provider(provider);
     let upstream_model = upstream_model.trim();
     if upstream_model.is_empty() {
         return None;
     }
+    if provider == "byok" {
+        if let Some((source_provider, source_model)) = upstream_model.split_once('/') {
+            let source_provider = normalize_proxy_provider(source_provider);
+            let source_model = source_model.trim();
+            if source_provider != "byok" && !source_model.is_empty() {
+                return Some(ProviderEncodedModel {
+                    provider: source_provider.to_string(),
+                    model: source_model.to_string(),
+                });
+            }
+        }
+    }
     Some(ProviderEncodedModel {
-        provider: normalize_proxy_provider(provider).to_string(),
+        provider: provider.to_string(),
         model: upstream_model.to_string(),
     })
 }
@@ -52,14 +66,23 @@ pub(super) fn replace_payload_model(mut payload: Value, model: &str) -> Value {
     payload
 }
 
+pub(super) fn mapped_proxy_provider_for_model(
+    model: &str,
+    model_providers: &BTreeMap<String, String>,
+) -> Option<String> {
+    let model_key = normalized_model_key(model);
+    model_providers
+        .get(&model_key)
+        .map(|provider| normalize_proxy_provider(provider).to_string())
+}
+
 pub(super) fn proxy_provider_for_model(
     model: &str,
     fallback_provider: &str,
     model_providers: &BTreeMap<String, String>,
 ) -> String {
-    let model_key = normalized_model_key(model);
-    if let Some(provider) = model_providers.get(&model_key) {
-        return normalize_proxy_provider(provider).to_string();
+    if let Some(provider) = mapped_proxy_provider_for_model(model, model_providers) {
+        return provider;
     }
     proxy_provider_for_model_heuristic(model)
         .unwrap_or_else(|| normalize_proxy_provider(fallback_provider))

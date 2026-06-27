@@ -47,71 +47,75 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         const loadStart = performance.now();
         void startupPerfMark("welcome/load_initial_start", `performance_now=${loadStart.toFixed(1)}`);
         const recentStart = performance.now();
-        const [list, settings] = await Promise.all([
-          workspaceGetRecent(),
-          settingsGetAgentSnapshot().catch(() => null),
-        ]);
+        const recentPromise = workspaceGetRecent();
+        void recentPromise.then((list) => {
+          void startupPerfMark(
+            "welcome/get_recent_end",
+            `count=${list.length} duration_ms=${(performance.now() - recentStart).toFixed(1)}`,
+          );
+          if (!disposed) {
+            setRecents(list);
+          }
+        }).catch(() => undefined);
+
+        if (autoOpened) return;
+        setAutoOpened(true);
+        setLoading(true);
+
+        const restoreStart = performance.now();
+        void startupPerfMark("welcome/restore_open_start", "");
+        const restored = await workspaceRestoreOpen();
         void startupPerfMark(
-          "welcome/get_recent_end",
-          `count=${list.length} duration_ms=${(performance.now() - recentStart).toFixed(1)}`,
+          "welcome/restore_open_end",
+          `restored=${Boolean(restored)} duration_ms=${(performance.now() - restoreStart).toFixed(1)}`,
         );
         if (disposed) return;
-        setRecents(list);
-        setAgentSettings(settings);
-
-        if (!autoOpened) {
-          setAutoOpened(true);
-          const requiredSetup = settings ? setupRecommendationFor(settings) : null;
-          if (settings && requiredSetup) {
-            setLoading(false);
-            setSetupBusy(true);
-            try {
-              await settingsSelectAgent("codex-acp");
-              const nextSnapshot = await settingsSelectAgentProviderProfile("codex", "byok");
-              if (disposed) return;
-              setAgentSettings(nextSnapshot);
-              onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, nextSnapshot));
-            } catch (_error) {
-              if (!disposed) {
-                onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, settings));
-              }
-            } finally {
-              if (!disposed) {
-                setSetupBusy(false);
-              }
-            }
-            return;
-          }
-          setLoading(true);
-          const restoreStart = performance.now();
-          void startupPerfMark("welcome/restore_open_start", "");
-          const restored = await workspaceRestoreOpen();
+        if (restored) {
           void startupPerfMark(
-            "welcome/restore_open_end",
-            `restored=${Boolean(restored)} duration_ms=${(performance.now() - restoreStart).toFixed(1)}`,
+            "welcome/on_workspace_opened_restore",
+            `total_duration_ms=${(performance.now() - loadStart).toFixed(1)}`,
           );
-          if (disposed) return;
-          if (restored) {
-            void startupPerfMark(
-              "welcome/on_workspace_opened_restore",
-              `total_duration_ms=${(performance.now() - loadStart).toFixed(1)}`,
-            );
-            onWorkspaceOpened(restored);
-            return;
-          }
+          onWorkspaceOpened(restored);
+          return;
+        }
 
-          const first = list.find((r) => r.exists && !r.remote);
-          if (first) {
-            const openStart = performance.now();
-            void startupPerfMark("welcome/open_recent_start", first.path);
-            const snapshot = await workspaceOpen(first.path);
-            void startupPerfMark(
-              "welcome/open_recent_end",
-              `duration_ms=${(performance.now() - openStart).toFixed(1)} path=${first.path}`,
-            );
-            if (!disposed) onWorkspaceOpened(snapshot);
-          } else {
-            setLoading(false);
+        const list = await recentPromise;
+        if (disposed) return;
+        setRecents(list);
+        const first = list.find((r) => r.exists && !r.remote);
+        if (first) {
+          const openStart = performance.now();
+          void startupPerfMark("welcome/open_recent_start", first.path);
+          const snapshot = await workspaceOpen(first.path);
+          void startupPerfMark(
+            "welcome/open_recent_end",
+            `duration_ms=${(performance.now() - openStart).toFixed(1)} path=${first.path}`,
+          );
+          if (!disposed) onWorkspaceOpened(snapshot);
+          return;
+        }
+
+        setLoading(false);
+        const settings = await settingsGetAgentSnapshot().catch(() => null);
+        if (disposed) return;
+        setAgentSettings(settings);
+        const requiredSetup = settings ? setupRecommendationFor(settings) : null;
+        if (settings && requiredSetup) {
+          setSetupBusy(true);
+          try {
+            await settingsSelectAgent("codex-acp");
+            const nextSnapshot = await settingsSelectAgentProviderProfile("codex", "byok");
+            if (disposed) return;
+            setAgentSettings(nextSnapshot);
+            onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, nextSnapshot));
+          } catch (_error) {
+            if (!disposed) {
+              onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, settings));
+            }
+          } finally {
+            if (!disposed) {
+              setSetupBusy(false);
+            }
           }
         }
       } catch (e) {

@@ -7,9 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
-    CustomProviderInput, LspProbeResult, LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot,
-    RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
-    RemoteMachineValidationRequest,
+    CustomProviderInput, ImageGenerateProtocol, LspProbeResult, LspServerConfigInput,
+    LspServerSettingsEntry,
+    LspSettingsSnapshot, RemoteMachineProfile, RemoteMachineProfileInput,
+    RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest,
 };
 
 #[cfg(windows)]
@@ -97,6 +98,46 @@ pub fn settings_save_web_tools_provider_key(
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::save_web_tools_provider_key(&paths, &provider, &api_key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_save_image_view_settings(
+    enabled: bool,
+    provider: String,
+    model: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_image_view_settings(&paths, enabled, &provider, &model)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_save_image_generate_settings(
+    protocol: ImageGenerateProtocol,
+    base_url: String,
+    model: String,
+    default_size: String,
+    api_key_env: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_image_generate_settings(
+        &paths,
+        protocol,
+        &base_url,
+        &model,
+        &default_size,
+        &api_key_env,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn settings_save_image_generate_api_key(
+    api_key: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_image_generate_api_key(&paths, &api_key)
         .map_err(|e| e.to_string())
 }
 
@@ -238,6 +279,23 @@ pub fn settings_save_agent_provider_secret(
 }
 
 #[tauri::command]
+pub fn settings_clear_provider_configuration(
+    state: State<'_, AppState>,
+    provider: String,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
+        return app_core::settings::remote_clear_provider_configuration(
+            &scope.profile,
+            scope.ssh_password.as_deref(),
+            &provider,
+        )
+        .map_err(|e| e.to_string());
+    }
+    app_core::settings::clear_provider_configuration(&paths, &provider).map_err(|e| e.to_string())
+}
+#[tauri::command]
 pub fn settings_save_custom_provider(
     state: State<'_, AppState>,
     input: CustomProviderInput,
@@ -248,6 +306,18 @@ pub fn settings_save_custom_provider(
         return Err("远程机器暂不支持保存自定义 BYOK provider".to_string());
     }
     app_core::settings::save_custom_provider(&paths, input).map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn settings_remove_custom_provider(
+    state: State<'_, AppState>,
+    provider: String,
+    remote_profile_id: Option<uuid::Uuid>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    if remote_settings_scope(state.inner(), &paths, remote_profile_id)?.is_some() {
+        return Err("远程机器暂不支持移除自定义 BYOK provider".to_string());
+    }
+    app_core::settings::remove_custom_provider(&paths, &provider).map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub fn settings_save_provider_models(

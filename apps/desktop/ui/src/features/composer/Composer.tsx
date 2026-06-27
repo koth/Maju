@@ -42,6 +42,11 @@ interface ModelProviderGroup {
   choices: SessionConfigControl["choices"];
 }
 
+interface ModelProviderBucket {
+  label: string | null;
+  choices: SessionConfigControl["choices"];
+}
+
 export function Composer({
   snapshot,
   onStateChange,
@@ -99,7 +104,8 @@ export function Composer({
     ),
     [controls],
   );
-  const controlsEnabled = snapshot.session.status === "Idle";
+  const sessionConfigPending = !snapshot.session_config.hydrated && snapshot.session.status === "Idle" && !optimisticTurnActive;
+  const controlsEnabled = snapshot.session.status === "Idle" && !sessionConfigPending;
   const sessionBusy =
     snapshot.session.status === "Streaming" || snapshot.session.status === "WaitingForTool";
   const turnActive = sessionBusy || optimisticTurnActive;
@@ -108,27 +114,32 @@ export function Composer({
   const sessionSteerEnabled = snapshot.prompt_capabilities?.session_steer === true;
   const attachmentInputEnabled = imageInputEnabled || fileInputEnabled;
   const canSteer = turnActive && sessionSteerEnabled;
-  const textInputEnabled = !turnActive || canSteer;
-  const activeAttachmentInputEnabled = !turnActive && attachmentInputEnabled;
-  const attachmentButtonTitle = turnActive
-    ? "当前轮次运行中暂不支持附件"
-    : attachmentInputEnabled
-      ? "附加图片或文件"
-      : "当前智能体不支持附件";
+  const textInputEnabled = (!turnActive || canSteer) && !sessionConfigPending;
+  const activeAttachmentInputEnabled = !turnActive && !sessionConfigPending && attachmentInputEnabled;
+  const attachmentButtonTitle = sessionConfigPending
+    ? "正在加载模型列表"
+    : turnActive
+      ? "当前轮次运行中暂不支持附件"
+      : attachmentInputEnabled
+        ? "附加图片或文件"
+        : "当前智能体不支持附件";
   const trimmedInput = input.trim();
   const canSendIdle =
     (trimmedInput.length > 0 || attachments.length > 0) &&
     snapshot.session.status === "Idle" &&
-    !optimisticTurnActive;
+    !optimisticTurnActive &&
+    !sessionConfigPending;
   const canSendSteer = canSteer && trimmedInput.length > 0;
   const canSend = canSendIdle || canSendSteer;
   const primaryActionIsStop = turnActive && !canSendSteer;
   const primaryActionEnabled = primaryActionIsStop ? !cancelling : canSend;
-  const primaryActionTitle = turnActive
-    ? primaryActionIsStop
-      ? "停止当前轮次"
-      : "追加指令"
-    : "发送提示";
+  const primaryActionTitle = sessionConfigPending
+    ? "正在加载模型列表"
+    : turnActive
+      ? primaryActionIsStop
+        ? "停止当前轮次"
+        : "追加指令"
+      : "发送提示";
   const activeImagePreview = useMemo(
     () => attachments.find((attachment) => attachment.id === activeImagePreviewId && attachment.previewUrl) ?? null,
     [activeImagePreviewId, attachments],
@@ -378,15 +389,20 @@ export function Composer({
 
   const handleControlChange = useCallback(
     async (control: SessionConfigControl, valueId: string) => {
-      if (!controlsEnabled || control.current_value_id === valueId) return;
+      const isModelSelection = control.category === "Model" && control.id === modelControl?.id;
+      if (!controlsEnabled || (!isModelSelection && control.current_value_id === valueId)) return;
       setPendingControlId(control.id);
       setControlError(null);
       try {
         const selectedChoice = control.choices.find((choice) => choice.id === valueId);
+        const requestProvider = isModelSelection
+          ? modelChoiceRequestProvider(selectedChoice, activeModelProviderGroup?.id)
+          : selectedChoice?.provider ?? null;
+        const requestValueId = configControlRequestValue(control, valueId, requestProvider);
         await sessionSetConfigControl(
           control.id,
-          valueId,
-          configControlRequestProvider(control, valueId, selectedChoice?.provider ?? null),
+          requestValueId,
+          configControlRequestProvider(control, requestValueId, requestProvider),
         );
         onStateChange();
       } catch (error) {
@@ -395,7 +411,7 @@ export function Composer({
         setPendingControlId(null);
       }
     },
-    [controlsEnabled, onStateChange],
+    [activeModelProviderGroup?.id, controlsEnabled, modelControl?.id, onStateChange],
   );
 
   const handleModelProviderChange = useCallback(
@@ -412,10 +428,12 @@ export function Composer({
       setPendingControlId(providerControlId);
       setControlError(null);
       try {
+        const requestProvider = modelChoiceRequestProvider(targetChoice, group?.id);
+        const requestValueId = configControlRequestValue(modelControl, targetChoice.id, requestProvider);
         await sessionSetConfigControl(
           modelControl.id,
-          targetChoice.id,
-          configControlRequestProvider(modelControl, targetChoice.id, targetChoice.provider ?? group?.id ?? null),
+          requestValueId,
+          configControlRequestProvider(modelControl, requestValueId, requestProvider),
         );
         onStateChange();
       } catch (error) {
@@ -553,7 +571,7 @@ export function Composer({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             disabled={!textInputEnabled}
-            placeholder={turnActive ? (sessionSteerEnabled ? "补充约束，继续引导当前轮次" : "当前智能体暂不支持追加指令") : "交给 Kodex 一个明确目标"}
+            placeholder={sessionConfigPending ? "正在加载模型列表..." : turnActive ? (sessionSteerEnabled ? "补充约束，继续引导当前轮次" : "当前智能体暂不支持追加指令") : "交给 Kodex 一个明确目标"}
             rows={compact ? 1 : 2}
           />
         </div>
@@ -607,7 +625,12 @@ export function Composer({
               onChange={handleModelProviderChange}
             />
           )}
-          {visibleModelControl ? (
+          {sessionConfigPending ? (
+            <span className="composer-static-control is-loading" data-control-id="model" role="status" aria-live="polite" aria-label="模型加载中">
+              <span className="composer-loading-spinner" aria-hidden="true" />
+              模型加载中
+            </span>
+          ) : visibleModelControl ? (
             <SessionControlSelect
               control={visibleModelControl}
               disabled={!controlsEnabled || pendingControlId !== null}
@@ -680,32 +703,47 @@ const MODEL_PROVIDER_LABELS: Record<string, string> = {
   xiaomi_mimo: "Xiaomi Token Plan",
 };
 
-const MODEL_PROVIDER_ORDER = ["timiai", "commandcode", "deepseek", "kimi_code", "xiaomi_mimo"];
+const MODEL_PROVIDER_ORDER = ["timiai", "commandcode", "deepseek", "kimi_code", "xiaomi_mimo", "custom"];
+const BYOK_SOURCE_MODEL_PROVIDER_IDS = new Set(MODEL_PROVIDER_ORDER);
+function isByokSourceModelProviderId(providerId: string) {
+  return BYOK_SOURCE_MODEL_PROVIDER_IDS.has(providerId) || providerId.startsWith("custom_");
+}
 const GENERIC_MODEL_PROVIDER_IDS = new Set(["byok", "codex", "default", "kodex", "kodex_proxy", "kodex-proxy"]);
 
+function providerDisplayLabel(providerId: string, label?: string | null) {
+  const normalizedLabel = label?.trim();
+  return normalizedLabel || MODEL_PROVIDER_LABELS[providerId] || providerId;
+}
+
 function byokModelProviderGroupsForControl(control: SessionConfigControl): ModelProviderGroup[] {
-  const groups = new Map<string, SessionConfigControl["choices"]>();
+  const groups = new Map<string, ModelProviderBucket>();
   const choices = dedupeControlChoices(control.choices);
   for (const choice of choices) {
     const decoded = decodeProviderModelChoice(choice);
     const providerId = decoded.provider;
     if (!providerId) continue;
-    const current = groups.get(providerId) ?? [];
-    current.push(decoded.choice);
+    const current = groups.get(providerId) ?? { label: null, choices: [] };
+    const providerLabel = decoded.choice.provider_label?.trim();
+    if (providerLabel) {
+      current.label = providerLabel;
+    }
+    current.choices.push(decoded.choice);
     groups.set(providerId, current);
   }
   const currentModel = currentProviderModelForControl(control);
   if (currentModel) {
-    const current = groups.get(currentModel.provider) ?? [];
-    if (!current.some((choice) => modelChoiceMatchesProviderModel(choice, currentModel, currentModel.provider))) {
-      current.push({
+    const current = groups.get(currentModel.provider) ?? { label: null, choices: [] };
+    if (!current.choices.some((choice) => modelChoiceMatchesProviderModel(choice, currentModel, currentModel.provider))) {
+      current.choices.push({
         id: control.current_value_id,
         label: currentModel.model,
         description: null,
         provider: currentModel.provider,
+        provider_label: providerDisplayLabel(currentModel.provider, current.label),
       });
-      groups.set(currentModel.provider, current);
     }
+    current.label = providerDisplayLabel(currentModel.provider, current.label);
+    groups.set(currentModel.provider, current);
   }
   if (groups.size === 0) return [];
   return [...groups.entries()]
@@ -713,13 +751,12 @@ function byokModelProviderGroupsForControl(control: SessionConfigControl): Model
       const byOrder = modelProviderOrderIndex(left) - modelProviderOrderIndex(right);
       return byOrder || left.localeCompare(right);
     })
-    .map(([id, groupChoices]) => ({
+    .map(([id, group]) => ({
       id,
-      label: MODEL_PROVIDER_LABELS[id] ?? id,
-      choices: groupChoices,
+      label: providerDisplayLabel(id, group.label),
+      choices: group.choices,
     }));
 }
-
 function activeModelProviderGroupForControl(
   control: SessionConfigControl | undefined,
   groups: ModelProviderGroup[],
@@ -797,7 +834,9 @@ function decodeProviderModelChoice(
 } {
   const encoded = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
   const modelName = encoded?.model ?? displayModelChoiceLabel(choice);
-  const provider = concreteModelProviderForModel(encoded?.provider ?? choice.provider, modelName);
+  const provider =
+    concreteModelProviderForModel(encoded?.provider, modelName) ??
+    concreteModelProviderForModel(choice.provider, modelName);
   if (!provider) {
     return { provider: null, choice };
   }
@@ -810,6 +849,33 @@ function decodeProviderModelChoice(
       label: displayModelChoiceLabel(choice),
     },
   };
+}
+
+function modelChoiceRequestProvider(
+  choice: SessionConfigControl["choices"][number] | undefined,
+  groupProvider: string | null | undefined,
+) {
+  const normalizedGroupProvider = normalizeModelProviderId(groupProvider);
+  if (normalizedGroupProvider) return normalizedGroupProvider;
+  if (!choice) return null;
+  const encoded = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
+  return encoded?.provider ?? normalizeModelProviderId(choice.provider);
+}
+function configControlRequestValue(
+  control: SessionConfigControl,
+  valueId: string,
+  provider: string | null,
+) {
+  const normalizedProvider = normalizeModelProviderId(provider);
+  if (
+    control.category === "Model" &&
+    normalizedProvider &&
+    isByokSourceModelProviderId(normalizedProvider) &&
+    !decodeProviderModelValue(valueId)
+  ) {
+    return `kodex-provider/byok/${normalizedProvider}/${valueId}`;
+  }
+  return valueId;
 }
 
 function configControlRequestProvider(
@@ -859,7 +925,9 @@ function modelChoiceMatchesProviderModel(
 ) {
   const choiceModel = decodeProviderModelValue(choice.id) ?? decodeProviderModelValue(choice.label);
   if (choiceModel) {
-    const choiceProvider = concreteModelProviderForModel(choiceModel.provider, choiceModel.model);
+    const choiceProvider =
+      concreteModelProviderForModel(choiceModel.provider, choiceModel.model) ??
+      concreteModelProviderForModel(choice.provider, choiceModel.model);
     return choiceProvider === model.provider && choiceModel.model === model.model;
   }
 
@@ -944,7 +1012,16 @@ function normalizeModelProviderId(provider: string | null | undefined) {
 function decodeProviderModelValue(value: string) {
   const slashMatch = value.match(/^kodex-provider\/([^/]+)\/(.+)$/i);
   if (slashMatch) {
-    return { provider: normalizeModelProviderId(slashMatch[1]) ?? slashMatch[1], model: slashMatch[2] };
+    const provider = normalizeModelProviderId(slashMatch[1]) ?? slashMatch[1];
+    const model = slashMatch[2];
+    if (provider === "byok") {
+      const sourceMatch = model.match(/^([^/]+)\/(.+)$/);
+      const sourceProvider = normalizeModelProviderId(sourceMatch?.[1]);
+      if (sourceMatch && sourceProvider && isByokSourceModelProviderId(sourceProvider)) {
+        return { provider: sourceProvider, model: sourceMatch[2] };
+      }
+    }
+    return { provider, model };
   }
 
   const colonMatch = value.match(/^kodex-provider:([^:]+):(.+)$/i);
