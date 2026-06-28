@@ -580,7 +580,7 @@ fn provider_model_config_refresh_preserves_selected_provider_for_duplicate_model
         .expect("model control should exist");
     assert_eq!(
         model_control.current_value_id,
-        "kodex-provider/kimi_code/kimi-for-coding"
+        "kodex-provider/byok/kimi_code/kimi-for-coding"
     );
     assert_eq!(model_control.current_value_label, "kimi-for-coding");
 }
@@ -592,7 +592,7 @@ fn pending_model_restore_keeps_provider_model_visible_before_agent_ack() {
 
     app.ui.session_config = provider_model_config_state(
         SessionConfigSource::ConfigOption,
-        "kodex-provider/timiai/claude-opus-4.8",
+        "kodex-provider/byok/timiai/claude-opus-4.8",
         &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
     );
     app.ui.session.model = "Minimax M3".into();
@@ -600,7 +600,7 @@ fn pending_model_restore_keeps_provider_model_visible_before_agent_ack() {
 
     let prepared = app.prepare_session_config_update(&provider_model_config_state(
         SessionConfigSource::ConfigOption,
-        "kodex-provider/timiai/claude-opus-4.8",
+        "kodex-provider/byok/timiai/claude-opus-4.8",
         &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
     ));
 
@@ -611,7 +611,7 @@ fn pending_model_restore_keeps_provider_model_visible_before_agent_ack() {
         .expect("model control should exist");
     assert_eq!(
         model_control.current_value_id,
-        "kodex-provider/timiai/Minimax M3"
+        "kodex-provider/byok/timiai/Minimax M3"
     );
     assert_eq!(model_control.current_value_label, "Minimax M3");
 }
@@ -623,7 +623,7 @@ fn provider_model_config_refresh_preserves_timiai_minimax_selection() {
 
     app.ui.session_config = provider_model_config_state(
         SessionConfigSource::ConfigOption,
-        "kodex-provider/timiai/Minimax M3",
+        "kodex-provider/byok/timiai/Minimax M3",
         &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
     );
     app.ui.session.model = "Minimax M3".into();
@@ -633,7 +633,7 @@ fn provider_model_config_refresh_preserves_timiai_minimax_selection() {
     app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
         state: provider_model_config_state(
             SessionConfigSource::ConfigOption,
-            "kodex-provider/timiai/claude-opus-4.8",
+            "kodex-provider/byok/timiai/claude-opus-4.8",
             &[("timiai", "claude-opus-4.8"), ("timiai", "Minimax M3")],
         ),
     });
@@ -648,7 +648,7 @@ fn provider_model_config_refresh_preserves_timiai_minimax_selection() {
         .expect("model control should exist");
     assert_eq!(
         model_control.current_value_id,
-        "kodex-provider/timiai/Minimax M3"
+        "kodex-provider/byok/timiai/Minimax M3"
     );
     assert_eq!(model_control.current_value_label, "Minimax M3");
 }
@@ -678,7 +678,7 @@ fn new_session_model_config_hydrate_infers_provider_for_duplicate_kimi_model_id(
         .expect("model control should exist");
     assert_eq!(
         model_control.current_value_id,
-        "kodex-provider/kimi_code/kimi-for-coding"
+        "kodex-provider/byok/kimi_code/kimi-for-coding"
     );
     assert_eq!(
         app.current_model_provider_for_persistence().as_deref(),

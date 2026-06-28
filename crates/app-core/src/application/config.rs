@@ -919,7 +919,7 @@ mod model_config_tests {
         let (value_id, provider) =
             model_request_value_and_provider("lab-model", Some("custom".to_string()));
 
-        assert_eq!(value_id, "kodex-provider/byok/lab-model");
+        assert_eq!(value_id, "kodex-provider/byok/custom/lab-model");
         assert_eq!(provider, None);
     }
 
