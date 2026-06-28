@@ -261,6 +261,39 @@ impl Application {
             workspace_root.display().to_string(),
             || FileChangeTracker::new(workspace_root),
         );
+
+        // Re-resolve image capabilities and attach the `kodex-image` MCP server
+        // for a restored session. The bootstrap path above only prepares
+        // `web_tools_mcp`; without this, a restored text-only-model session
+        // keeps the default `assumed_native()` capabilities (`native_view=true`,
+        // `view_fallback=false`), so image prompts skip degradation and are sent
+        // raw to a text-only model, which then emits "image content omitted".
+        // The session is already started, so the returned MCP server entry is
+        // discarded — the handle is enough for `degrade_prompt_for_image_fallback`
+        // to call `view_image` via the internal codex-api-proxy HTTP path.
+        let (image_mcp, image_capabilities) =
+            match super::sessions::prepare_image_mcp(
+                &app_paths,
+                &agent_command,
+                &startup_model,
+                &ui.workspace.root.display().to_string(),
+                false,
+            ) {
+                Ok((_image_servers, handle, caps)) => (handle, caps),
+                Err(error) => {
+                    crate::startup_perf::mark(
+                        "app/bootstrap/image_mcp_failed",
+                        error,
+                    );
+                    (None, workspace_model::ImageCapabilities::default())
+                }
+            };
+        ui.image_capabilities = image_capabilities;
+        // `prompt_capabilities.image` gates image attachments and mirrors
+        // `image_capabilities.image_capable()` (native_view || view_fallback),
+        // matching `reapply_image_capabilities` / the reducer's
+        // `PromptCapabilitiesUpdated` handler.
+        ui.prompt_capabilities.image = image_capabilities.image_capable();
         crate::startup_perf::mark("app/bootstrap/end", "");
 
         Ok(Self {
@@ -274,7 +307,7 @@ impl Application {
             acp_port,
             remote_ssh: None,
             web_tools_mcp,
-            image_mcp: None,
+            image_mcp,
             in_flight_prompt: None,
             seq_counter,
             needs_title,

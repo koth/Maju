@@ -87,7 +87,7 @@ pub(super) fn prepare_web_tools_mcp(
 /// model/provider and starts the image MCP server whose `tools/list` is
 /// trimmed to the missing capabilities. When inactive, returns the safe
 /// "assume native" capabilities so no fallback override fires.
-fn prepare_image_mcp(
+pub(super) fn prepare_image_mcp(
     app_paths: &AppPaths,
     agent_command: &str,
     model: &str,

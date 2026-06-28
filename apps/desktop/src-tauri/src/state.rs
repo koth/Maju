@@ -426,11 +426,7 @@ impl AppState {
             .iter_mut()
             .map(|(key, entry)| workspace_session_list(key, entry, Some(key) == active.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
-        sort_workspaces(
-            &mut items,
-            |item| item.workspace.name.as_str(),
-            |item| item.is_active,
-        );
+        sort_workspaces(&mut items, |item| item.workspace.name.as_str());
         Ok(items)
     }
 
@@ -1069,11 +1065,7 @@ fn open_workspace_items(guard: &WorkspaceRegistry) -> Vec<OpenWorkspaceItem> {
             },
         })
         .collect::<Vec<_>>();
-    sort_workspaces(
-        &mut items,
-        |item| item.workspace.name.as_str(),
-        |item| item.is_active,
-    );
+    sort_workspaces(&mut items, |item| item.workspace.name.as_str());
     items
 }
 
@@ -1180,13 +1172,14 @@ fn remote_workspace_descriptor(remote: RemoteLinuxWorkspace) -> WorkspaceDescrip
     }
 }
 
-fn sort_workspaces<T, F, G>(items: &mut [T], name: F, is_active: G)
+fn sort_workspaces<T, F>(items: &mut [T], name: F)
 where
     F: Fn(&T) -> &str,
-    G: Fn(&T) -> bool,
 {
+    // Sort by name only and keep the order stable. Previously the active
+    // workspace was forced to the front, which reordered the list every time
+    // the user switched sessions — visually jarring and unpredictable.
     items.sort_by(|a, b| name(a).cmp(name(b)));
-    items.sort_by_key(|item| !is_active(item));
 }
 
 fn workspace_key(path: &PathBuf) -> String {

@@ -188,7 +188,6 @@ impl ImageApi {
                 "path": saved.uri,
                 "saved_path": saved.path,
                 "revised_prompt": image.revised_prompt,
-                "data": BASE64.encode(&image.data),
                 "mime_type": image.mime
             }));
         }
@@ -255,7 +254,6 @@ impl ImageApi {
             "path": saved.uri,
             "saved_path": saved.path,
             "revised_prompt": image.revised_prompt,
-            "data": BASE64.encode(&image.data),
             "mime_type": image.mime,
             "source": image_path
         }))
@@ -453,6 +451,14 @@ async fn edit_chat_completions(
 
 /// Google Gemini `POST /models/{model}:generateContent` with
 /// `responseModalities: ["IMAGE", "TEXT"]`.
+///
+/// The API key is sent both as a `?key=` query parameter (Gemini Developer
+/// API) and as an `x-goog-api-key` header (Vertex AI and third-party Vertex
+/// proxies such as zenmux, which ignore the query param and otherwise return
+/// 403). The `google-genai` SDK sends the same `x-goog-api-key` header when
+/// `vertexai=True`, so this matches the documented wire format. `role: "user"`
+/// is set on `contents` because Vertex proxies reject roleless contents with
+/// `Please use a valid role: user, model.`
 async fn generate_gemini(
     base_url: &str,
     api_key: &str,
@@ -462,6 +468,7 @@ async fn generate_gemini(
 ) -> Result<Vec<DecodedImage>, String> {
     let payload = json!({
         "contents": [{
+            "role": "user",
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
@@ -472,14 +479,16 @@ async fn generate_gemini(
         "{base_url}/models/{model}:generateContent?key={}",
         percent_encode_query(api_key)
     );
-    let response = post_json(&url, "", &payload)
+    let response = post_json_gemini(&url, api_key, &payload)
         .await
         .map_err(|error| format!("generate_image (gemini) request failed: {error}"))?;
     parse_gemini_image_response(&response)
 }
 
 /// Gemini edit: send the original image as an `inline_data` part with the
-/// edit prompt, requesting image output modalities.
+/// edit prompt, requesting image output modalities. See `generate_gemini` for
+/// why the key is sent via the `x-goog-api-key` header and `role: "user"` is
+/// required on `contents`.
 async fn edit_gemini(
     base_url: &str,
     api_key: &str,
@@ -490,6 +499,7 @@ async fn edit_gemini(
 ) -> Result<Vec<DecodedImage>, String> {
     let payload = json!({
         "contents": [{
+            "role": "user",
             "parts": [
                 {"text": prompt},
                 {"inline_data": {"mime_type": image_mime, "data": BASE64.encode(image_bytes)}}
@@ -503,7 +513,7 @@ async fn edit_gemini(
         "{base_url}/models/{model}:generateContent?key={}",
         percent_encode_query(api_key)
     );
-    let response = post_json(&url, "", &payload)
+    let response = post_json_gemini(&url, api_key, &payload)
         .await
         .map_err(|error| format!("edit_image (gemini) request failed: {error}"))?;
     parse_gemini_image_response(&response)
@@ -720,6 +730,29 @@ async fn post_json(url: &str, api_key: &str, payload: &Value) -> Result<Value, S
     let mut request = client.post(url).json(payload);
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("could not parse response ({status}): {error}"))?;
+    if !status.is_success() {
+        let message = error_message(&body);
+        return Err(format!("request to {url} failed ({status}): {message}"));
+    }
+    Ok(body)
+}
+
+/// Like `post_json`, but authenticates with the `x-goog-api-key` header
+/// instead of `Authorization: Bearer`. The Gemini Developer API and Vertex AI
+/// both accept this header; Vertex proxies (e.g. zenmux) require it because
+/// they ignore the `?key=` query parameter.
+async fn post_json_gemini(url: &str, api_key: &str, payload: &Value) -> Result<Value, String> {
+    let client = reqwest::Client::new();
+    let mut request = client.post(url).json(payload);
+    if !api_key.is_empty() {
+        request = request.header("x-goog-api-key", api_key);
     }
     let response = request.send().await.map_err(|error| error.to_string())?;
     let status = response.status();

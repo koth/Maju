@@ -6,6 +6,63 @@ struct MessagePersistenceSnapshot {
     last_message_body: Option<String>,
 }
 
+/// Build a self-contained markdown image string (`![描述](data:...;base64,...)`)
+/// for a `generate_image` / `edit_image` tool result, so the generated image
+/// renders inline in the conversation timeline and survives even if the local
+/// file is deleted. Returns `None` for non-image tool results.
+///
+/// `raw_output` is the MCP tool result, which may be either:
+/// - MCP-wrapped: `{"content":[{"type":"text","text":"<inner-json-string>"}]}` (the
+///   `kodex-image` server wraps its JSON result as a text content item), or
+/// - a bare JSON object/string.
+/// The inner JSON carries `saved_path` (+ `mime_type`) — at top level (edit) or
+/// inside `images[]` (generate). The file is read and base64-encoded here so the
+/// large data never enters the tool `raw_output` (which the agent consumes and
+/// the UI displays verbatim).
+fn extract_generated_image_markdown(raw: &str) -> Option<String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use serde_json::Value;
+    let trimmed = raw.trim();
+    let value: Value = serde_json::from_str(trimmed).ok()?;
+
+    // Unwrap the MCP `{"content":[{"text": "<json>"}]}` envelope, then parse
+    // the inner text as JSON (it is itself a JSON string).
+    let inner: Value = if let Some(text) = value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+    {
+        serde_json::from_str(text).ok().unwrap_or(Value::Null)
+    } else {
+        value
+    };
+
+    // Only image tool results carry `images`/`saved_path`; bail for anything else.
+    let candidates: Vec<(&Value, &str)> = inner
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(|v| (v, "生成的图片")).collect())
+        .unwrap_or_else(|| vec![(&inner, "编辑后的图片")]);
+
+    if candidates.iter().all(|(entry, _)| entry.get("saved_path").is_none()) {
+        return None;
+    }
+
+    for (entry, alt) in candidates {
+        let saved_path = entry.get("saved_path").and_then(Value::as_str)?;
+        let mime = entry
+            .get("mime_type")
+            .and_then(Value::as_str)
+            .unwrap_or("image/png");
+        let bytes = std::fs::read(saved_path).ok()?;
+        let data_url = format!("data:{mime};base64,{}", BASE64.encode(&bytes));
+        return Some(format!("![{alt}]({data_url})"));
+    }
+    None
+}
+
 fn message_role_label(role: &MessageRole) -> &'static str {
     match role {
         MessageRole::User => "User",
@@ -177,10 +234,42 @@ impl Application {
                     let _ = self.store.insert_tool(&session_id, &tool, seq);
                 }
             }
+
             _ => {}
         }
     }
 
+    /// After a `generate_image` / `edit_image` MCP tool completes, inject an
+    /// assistant message that renders the generated image inline via markdown
+    /// so it shows up in the conversation timeline (not only as raw tool
+    /// output). The tool result carries a `markdown` field
+    /// (`![描述](/abs/path.png)`) which MarkdownBody renders directly because
+    /// the saved path is an absolute filesystem path.
+    fn maybe_inject_generated_image(&mut self, event: &ClientEvent) {
+        let ClientEvent::ToolCompleted { raw_output, .. } = event else {
+            return;
+        };
+        let Some(raw) = raw_output.as_deref() else {
+            return;
+        };
+        // MCP tool results for `generate_image`/`edit_image` are detected by
+        // content (the tool name is not always carried through to this event),
+        // so the parser only succeeds when the output is an image result.
+        let Some(markdown) = extract_generated_image_markdown(raw) else {
+            return;
+        };
+
+        let message = ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: MessageRole::Assistant,
+            body: markdown,
+            created_at: current_timestamp(),
+        };
+        self.ui.timeline.push(TimelineItem::Message(message.id));
+        self.ui.messages.push(message.clone());
+        self.persist_message_record(&message);
+        self.bump_revision();
+    }
     pub(super) fn apply_event_with_dirty_tracking(&mut self, event: &ClientEvent) {
         let events = self.filter_inline_think_event(event.clone());
         for event in events {
@@ -204,6 +293,7 @@ impl Application {
             self.persist_changed_message(role, message_before);
         }
         self.persist_event(&event);
+        self.maybe_inject_generated_image(&event);
     }
 
     pub(super) fn mark_tool_call_dirty(&mut self, call_id: &str) {
@@ -452,5 +542,47 @@ impl Application {
             }
             other => vec![other],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    #[test]
+    fn extract_markdown_reads_saved_path_to_data_url() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("kodex-img-test-{}.png", uuid::Uuid::new_v4()));
+        let bytes = b"\x89PNG\r\n\x1a\n fake png";
+        std::fs::write(&path, bytes).unwrap();
+        let saved_path = path.to_string_lossy().to_string();
+
+        // generate_image: MCP-wrapped {"content":[{"text":"<json>"}]}, inner json has images[]
+        let inner = format!(
+            "{{\"images\":[{{\"saved_path\":{saved_path:?},\"mime_type\":\"image/png\"}}],\"saved_dir\":\"x\"}}"
+        );
+        let raw = serde_json::json!({ "content": [{ "type": "text", "text": inner }] }).to_string();
+        let md = extract_generated_image_markdown(&raw).expect("markdown built");
+        assert!(md.starts_with("![生成的图片](data:image/png;base64,"));
+        assert!(md.contains(&BASE64.encode(bytes)));
+
+        // edit_image: MCP-wrapped, inner json has top-level saved_path
+        let inner_edit = format!(
+            "{{\"saved_path\":{saved_path:?},\"mime_type\":\"image/png\",\"source\":\"in\"}}"
+        );
+        let raw_edit = serde_json::json!({ "content": [{ "type": "text", "text": inner_edit }] }).to_string();
+        let md_edit = extract_generated_image_markdown(&raw_edit).expect("markdown built");
+        assert!(md_edit.starts_with("![编辑后的图片](data:image/png;base64,"));
+
+        // non-image tool result -> None
+        let raw_other = serde_json::json!({ "content": [{ "type": "text", "text": "{\"files\":[\"a.rs\"]}" }] }).to_string();
+        assert!(extract_generated_image_markdown(&raw_other).is_none());
+
+        // missing file -> None
+        let raw_bad = serde_json::json!({ "content": [{ "type": "text", "text": "{\"images\":[{\"saved_path\":\"/nope/x.png\"}]}" }] }).to_string();
+        assert!(extract_generated_image_markdown(&raw_bad).is_none());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
