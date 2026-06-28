@@ -1463,7 +1463,14 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     if usage.context.used_tokens.is_some() {
         ui.usage.context.used_tokens = usage.context.used_tokens;
     }
-    if usage.context.window_tokens.is_some() {
+    // The agent's `UsageUpdate.size` reflects the Codex ACP launch config
+    // (default model's window × effective_context_window_percent), not the
+    // session's active model. When the active model has a known context window
+    // in our static tables, prefer it so the UI shows the real window (e.g.
+    // 1M for deepseek-v4-pro / glm-5.2 instead of the 249k kimi default).
+    if let Some(known_window) = current_session_context_window(ui) {
+        ui.usage.context.window_tokens = Some(known_window.max(0) as u64);
+    } else if usage.context.window_tokens.is_some() {
         ui.usage.context.window_tokens = usage.context.window_tokens;
     }
     if usage.context.updated_at.is_some() {
@@ -1538,6 +1545,49 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
     }
 }
 
+/// Resolves the active session model's context window from the static metadata
+/// tables. Returns `None` when the model is not explicitly listed, so callers
+/// can fall back to the agent-reported value instead of a 200k default.
+fn current_session_context_window(ui: &UiSnapshot) -> Option<i64> {
+    let model_control = ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == workspace_model::SessionConfigCategory::Model)?;
+    let current_choice = model_control
+        .choices
+        .iter()
+        .find(|choice| choice.id == model_control.current_value_id)
+        .or_else(|| {
+            model_control
+                .choices
+                .iter()
+                .find(|choice| choice.label == model_control.current_value_label)
+        });
+    let provider = current_choice.and_then(|choice| choice.provider.clone());
+    // Prefer the choice id (request value), fall back to the session model
+    // label; either may carry the `vendor/` prefix that the metadata tables
+    // normalize away.
+    let candidates = [current_choice.map(|choice| choice.id.clone()), Some(ui.session.model.clone())];
+    for model in candidates.into_iter().flatten() {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if let Some(provider) = provider.as_deref().filter(|p| !p.is_empty()) {
+            if crate::settings::known_model_context_window(model).is_some() {
+                return Some(crate::settings::model_context_window_for_provider(
+                    model, provider,
+                ));
+            }
+        }
+        if let Some(window) = crate::settings::known_model_context_window(model) {
+            return Some(window);
+        }
+    }
+    None
+}
+
 fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
     tokens.input_tokens.is_some()
         || tokens.output_tokens.is_some()
@@ -1577,8 +1627,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use workspace_model::{
-        InspectorTab, MessageRole, PermissionOption, RepositorySnapshot, SessionStatus,
-        SessionSummary, WorkspaceDescriptor, WorkspaceLocation,
+        InspectorTab, MessageRole, PermissionOption, RepositorySnapshot, SessionConfigCategory,
+        SessionConfigChoice, SessionConfigControl, SessionConfigSource, SessionConfigState,
+        SessionStatus, SessionSummary, WorkspaceDescriptor, WorkspaceLocation,
     };
 
     fn empty_ui() -> UiSnapshot {
@@ -1622,6 +1673,82 @@ mod tests {
             thinking_status: None,
             usage: Default::default(),
         }
+    }
+
+    fn ui_with_model_choice(model_id: &str, provider: Option<&str>) -> UiSnapshot {
+        let mut ui = empty_ui();
+        ui.session.model = model_id.to_string();
+        ui.session_config = SessionConfigState {
+            hydrated: true,
+            controls: vec![SessionConfigControl {
+                id: "model".into(),
+                label: "Model".into(),
+                description: None,
+                category: SessionConfigCategory::Model,
+                source: SessionConfigSource::SessionModel,
+                current_value_id: model_id.into(),
+                current_value_label: model_id.into(),
+                choices: vec![SessionConfigChoice {
+                    id: model_id.into(),
+                    label: model_id.into(),
+                    description: None,
+                    provider: provider.map(str::to_string),
+                    provider_label: None,
+                }],
+                enabled: true,
+            }],
+        };
+        ui
+    }
+
+    #[test]
+    fn usage_update_overrides_window_with_known_model_context_window() {
+        // The agent reports the Codex ACP launch-config window (kimi 262144 ×
+        // 0.95 ≈ 249036) even after the session switches to a 1M model. The
+        // reducer must surface the active model's real window instead.
+        let mut ui = ui_with_model_choice("deepseek-v4-pro", Some("deepseek"));
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::ContextSnapshot,
+                    context: workspace_model::UsageContextSnapshot {
+                        used_tokens: Some(1200),
+                        window_tokens: Some(249_036),
+                        updated_at: None,
+                    },
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        total_tokens: Some(1200),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.context.used_tokens, Some(1200));
+        assert_eq!(ui.usage.context.window_tokens, Some(1_000_000));
+    }
+
+    #[test]
+    fn usage_update_keeps_agent_window_for_unknown_model() {
+        // When the active model is not in the static tables, keep the agent's
+        // reported window rather than substituting the 200k default.
+        let mut ui = ui_with_model_choice("some-unknown-model", None);
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::ContextSnapshot,
+                    context: workspace_model::UsageContextSnapshot {
+                        used_tokens: Some(50),
+                        window_tokens: Some(80_000),
+                        updated_at: None,
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.context.window_tokens, Some(80_000));
     }
 
     #[test]

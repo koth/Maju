@@ -227,6 +227,17 @@
   box-shadow: none;
 }
 
+/* Hide scrollbars in the sidebar while keeping it scrollable (wheel/trackpad). */
+.thread-sidebar-shell {
+  scrollbar-width: none;
+}
+
+.thread-sidebar-shell ::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
 .workbench-content {
   --left-sidebar-width: var(--shell-sidebar-width);
 

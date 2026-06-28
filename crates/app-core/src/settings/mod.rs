@@ -1960,14 +1960,17 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     doc["model"] = value(active_model_slug.as_str());
     doc["model_provider"] = value(runtime_provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
-    doc["model_context_window"] = value(model_context_window_for_provider(
+    // Omit `model_context_window`: it is a global override in Codex that
+    // clamps every model's window to this value, so writing the launch
+    // model's window would cap a later session-level switch. Letting Codex
+    // read each model's `context_window` from `model_catalog_json` makes the
+    // window follow the active model. Strip any stale value too.
+    let active_max_output_tokens = model_max_output_tokens_for_provider(
         &active_upstream_model,
         &active_model_provider,
-    ));
-    doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
-        &active_upstream_model,
-        &active_model_provider,
-    ));
+    );
+    doc.remove("model_context_window");
+    doc["model_max_output_tokens"] = value(active_max_output_tokens);
     doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
@@ -2048,14 +2051,14 @@ pub fn write_codex_acp_provider_config(
     doc["model"] = value(config_model.as_str());
     doc["model_provider"] = value(active_provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
-    doc["model_context_window"] = value(model_context_window_for_provider(
+    let provider_max_output_tokens = model_max_output_tokens_for_provider(
         &default_model,
         &default_model_provider,
-    ));
-    doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
-        &default_model,
-        &default_model_provider,
-    ));
+    );
+    // Omit `model_context_window` (global override); resolve per-model from
+    // `model_catalog_json`. Strip any stale value too.
+    doc.remove("model_context_window");
+    doc["model_max_output_tokens"] = value(provider_max_output_tokens);
     doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
@@ -2129,10 +2132,8 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
         if doc.get("preferred_auth_method").is_none() {
             doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
         }
-        doc["model_context_window"] = value(model_context_window_for_provider(
-            &active_upstream_model,
-            &active_source_provider,
-        ));
+        // Omit `model_context_window` (global override); let Codex resolve it
+        // per-model from `model_catalog_json`.
         doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
             &active_upstream_model,
             &active_source_provider,
@@ -2473,14 +2474,11 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         }
         let active_upstream_model =
             byok_upstream_model_for_model_with_hint(&active_model_slug, source_provider_hint);
-        let expected_context_window =
-            model_context_window_for_provider(&active_upstream_model, &active_model_provider);
-        if doc
-            .get("model_context_window")
-            .and_then(|item| item.as_integer())
-            != Some(expected_context_window)
-        {
-            doc["model_context_window"] = value(expected_context_window);
+        // Remove any stale `model_context_window` override so Codex resolves the
+        // window per-model from `model_catalog_json` (a global override would
+        // clamp a session-level model switch to the launch model's window).
+        if doc.get("model_context_window").is_some() {
+            doc.remove("model_context_window");
             changed = true;
         }
         let expected_max_output_tokens =
@@ -2566,13 +2564,10 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         doc["model_providers"][provider.as_str()]["base_url"] = value(proxy_base_url);
         changed = true;
     }
-    let expected_context_window = model_context_window_for_provider(&active_model, &provider);
-    if doc
-        .get("model_context_window")
-        .and_then(|item| item.as_integer())
-        != Some(expected_context_window)
-    {
-        doc["model_context_window"] = value(expected_context_window);
+    // Remove any stale `model_context_window` override so Codex resolves the
+    // window per-model from `model_catalog_json`.
+    if doc.get("model_context_window").is_some() {
+        doc.remove("model_context_window");
         changed = true;
     }
     let expected_max_output_tokens = model_max_output_tokens_for_provider(&active_model, &provider);
@@ -2694,10 +2689,10 @@ fn clear_codex_provider_config(paths: &AppPaths, provider: &str) -> Result<()> {
         if doc.get("model").and_then(|item| item.as_str()) != Some(default_model_slug.as_str()) {
             doc["model"] = value(default_model_slug);
         }
-        doc["model_context_window"] = value(model_context_window_for_provider(
-            &default_model,
-            &default_model_provider,
-        ));
+        // Remove stale `model_context_window` override; resolve per-model.
+        if doc.get("model_context_window").is_some() {
+            doc.remove("model_context_window");
+        }
         doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
             &default_model,
             &default_model_provider,
@@ -3227,11 +3222,11 @@ fn legacy_deepseek_external_slug_display_name(model: &str) -> Option<&'static st
     }
 }
 
-fn model_context_window(model: &str) -> i64 {
+pub(crate) fn model_context_window(model: &str) -> i64 {
     model_i64_metadata(model, MODEL_CONTEXT_WINDOWS, DEFAULT_MODEL_CONTEXT_WINDOW)
 }
 
-fn model_context_window_for_provider(model: &str, provider: &str) -> i64 {
+pub(crate) fn model_context_window_for_provider(model: &str, provider: &str) -> i64 {
     if provider == COMMANDCODE_PROVIDER_ID {
         return model_i64_metadata(
             model,
@@ -3240,6 +3235,24 @@ fn model_context_window_for_provider(model: &str, provider: &str) -> i64 {
         );
     }
     model_context_window(model)
+}
+
+/// Returns the model's context window only when it is explicitly listed in a
+/// static metadata table (i.e. not the 200k default fallback). Used to override
+/// the unreliable `UsageUpdate.size` the agent reports, which reflects the
+/// Codex ACP launch config rather than the session's active model.
+pub(crate) fn known_model_context_window(model: &str) -> Option<i64> {
+    let normalized = normalize_model_for_metadata_lookup(model);
+    MODEL_CONTEXT_WINDOWS
+        .iter()
+        .chain(COMMANDCODE_MODEL_CONTEXT_WINDOWS.iter())
+        .find_map(|(candidate, value)| {
+            (*candidate == model
+                || model_slug_for_provider(candidate, TIMIAI_PROVIDER_ID) == model
+                || model_slug_for_provider(candidate, MIMO_PROVIDER_ID) == model
+                || normalize_model_for_metadata_lookup(candidate) == normalized)
+                .then_some(*value)
+        })
 }
 
 fn model_max_output_tokens(model: &str) -> i64 {

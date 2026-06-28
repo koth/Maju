@@ -111,6 +111,32 @@ describe("AgentPlanPanel", () => {
     expect(screen.getByRole("meter", { name: "上下文占用" })).toHaveAttribute("aria-valuenow", "10");
     expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
   });
+  it("hides the occupancy bar when context used_tokens is zero", () => {
+    render(
+      <AgentPlanEnvironment
+        environment={{
+          changeCount: 0,
+          addedLines: 0,
+          removedLines: 0,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "工作区干净",
+          githubLabel: "GitHub CLI 不可用",
+          usage: {
+            context: { used_tokens: 0, window_tokens: 249036, updated_at: "2026-06-28T00:00:00Z" },
+            current_turn: { total_tokens: 0 },
+            session_total: { total_tokens: 0 },
+            by_model: [],
+          },
+        }}
+      />,
+    );
+
+    // No occupancy bar and no "0 / 249k" label while the agent reports zero usage.
+    expect(screen.queryByRole("meter", { name: "上下文占用" })).toBeNull();
+    expect(screen.queryByText(/0 \//)).toBeNull();
+    expect(screen.queryByLabelText("用量")).toBeNull();
+  });
   it("renders an empty progress state when there are no plan entries", () => {
     render(<AgentPlanPanel entries={[]} />);
 

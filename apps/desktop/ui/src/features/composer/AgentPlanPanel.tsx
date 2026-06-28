@@ -175,21 +175,22 @@ export function AgentPlanEnvironment({
   const contextWindow = usage.context.window_tokens ?? null;
   const sessionTotal = totalUsageTokens(usage.session_total);
   const currentTurnTotal = totalUsageTokens(usage.current_turn);
-  const contextOccupancyPercent = contextUsed != null && contextWindow != null && contextWindow > 0
+  const hasContextUsage = contextUsed != null && contextUsed > 0;
+  const contextOccupancyPercent = hasContextUsage && contextWindow != null && contextWindow > 0
     ? Math.max(0, Math.min(100, (contextUsed / contextWindow) * 100))
     : null;
   const usageBreakdown = [
     currentTurnTotal > 0 ? `本轮 ${formatTokenCount(currentTurnTotal)}` : null,
     sessionTotal > 0 ? `会话 ${formatTokenCount(sessionTotal)}` : null,
   ].filter(Boolean) as string[];
-  const usageLabel = contextUsed != null && contextWindow != null && contextWindow > 0
+  const usageLabel = hasContextUsage && contextWindow != null && contextWindow > 0
     ? `${formatTokenCount(contextUsed)} / ${formatTokenCount(contextWindow)}`
     : sessionTotal > 0
       ? formatTokenCount(sessionTotal)
       : currentTurnTotal > 0
         ? formatTokenCount(currentTurnTotal)
         : null;
-  const usageDetail = contextUsed != null && contextWindow != null && contextWindow > 0
+  const usageDetail = hasContextUsage && contextWindow != null && contextWindow > 0
     ? `上下文 ${usageLabel}`
     : sessionTotal > 0
       ? `总计 ${formatTokenCount(sessionTotal)}`

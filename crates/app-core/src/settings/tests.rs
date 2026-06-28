@@ -729,10 +729,10 @@ fn codex_acp_timiai_source_creates_byok_config_file() {
         doc["preferred_auth_method"].as_str(),
         Some(CODEX_AUTH_METHOD_API_KEY)
     );
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(model_context_window(TIMIAI_CODEX_MODEL))
-    );
+    // `model_context_window` is intentionally omitted so Codex resolves the
+    // window per-model from `model_catalog_json` instead of clamping every
+    // model to the launch model's window.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(model_max_output_tokens(TIMIAI_CODEX_MODEL))
@@ -1028,13 +1028,8 @@ fn codex_acp_commandcode_catalog_uses_provider_specific_model_limits() {
         doc["model_provider"].as_str(),
         Some(BYOK_PROVIDER_ID)
     );
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(model_context_window_for_provider(
-            COMMANDCODE_MODEL,
-            COMMANDCODE_PROVIDER_ID
-        ))
-    );
+    // `model_context_window` is intentionally omitted; see byok channel test.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(model_max_output_tokens_for_provider(
@@ -1111,13 +1106,9 @@ api_key = "commandcode-secret"
 
     let content = std::fs::read_to_string(&config_path).unwrap();
     let doc = content.parse::<DocumentMut>().unwrap();
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(model_context_window_for_provider(
-            "Qwen/Qwen3.7-Max",
-            COMMANDCODE_PROVIDER_ID
-        ))
-    );
+    // `model_context_window` override is stripped so Codex resolves the window
+    // per-model from `model_catalog_json`.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(model_max_output_tokens_for_provider(
@@ -1151,13 +1142,8 @@ model_reasoning_effort = "none"
     let content = std::fs::read_to_string(&config_path).unwrap();
     let doc = content.parse::<DocumentMut>().unwrap();
     assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(model_context_window_for_provider(
-            "Qwen/Qwen3.7-Max",
-            COMMANDCODE_PROVIDER_ID
-        ))
-    );
+    // `model_context_window` override is stripped; resolved per-model.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(model_max_output_tokens_for_provider(
@@ -1933,10 +1919,8 @@ api_key = "kimi-secret"
         Some(byok_encoded_model_slug(KIMI_MODEL, KIMI_PROVIDER_ID).as_str())
     );
     assert_eq!(doc["model_provider"].as_str(), Some(BYOK_PROVIDER_ID));
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(KIMI_MODEL_CONTEXT_WINDOW)
-    );
+    // `model_context_window` override is stripped; resolved per-model.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(KIMI_MODEL_MAX_OUTPUT_TOKENS)
@@ -2381,10 +2365,8 @@ api_key = "old-secret"
         doc["preferred_auth_method"].as_str(),
         Some(CODEX_AUTH_METHOD_API_KEY)
     );
-    assert_eq!(
-        doc["model_context_window"].as_integer(),
-        Some(DEFAULT_MODEL_CONTEXT_WINDOW)
-    );
+    // `model_context_window` override is stripped; resolved per-model.
+    assert!(doc.get("model_context_window").is_none());
     assert_eq!(
         doc["model_max_output_tokens"].as_integer(),
         Some(DEFAULT_MODEL_MAX_OUTPUT_TOKENS)

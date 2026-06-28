@@ -38,6 +38,11 @@
   --border-subtle: rgba(215, 225, 223, 0.055);
   --border-focus: var(--agent-primary-hover);
 
+  /* Scrollbars — barely visible on dark surfaces, stronger on hover */
+  --scroll-thumb: rgba(255, 255, 255, 0.06);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.14);
+  --scroll-thumb-active: rgba(255, 255, 255, 0.20);
+
   /* Text */
   --text-strong: var(--agent-cream);
   --text-muted: var(--agent-warm-300);
@@ -257,6 +262,9 @@
   --border-strong: rgba(32, 33, 36, 0.17);
   --border-subtle: rgba(32, 33, 36, 0.07);
   --border-focus: #5e6875;
+  --scroll-thumb: rgba(32, 33, 36, 0.14);
+  --scroll-thumb-hover: rgba(32, 33, 36, 0.26);
+  --scroll-thumb-active: rgba(32, 33, 36, 0.32);
   --text-strong: #202124;
   --text-muted: #3f454d;
   --text-soft: #6f747b;
@@ -318,7 +326,8 @@ textarea:focus-visible {
 }
 
 ::-webkit-scrollbar {
-  width: 7px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -326,12 +335,16 @@ textarea:focus-visible {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: var(--scroll-thumb);
   border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-strong);
+  background: var(--scroll-thumb-hover);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: var(--scroll-thumb-active);
 }
 
 @media (prefers-reduced-motion: reduce) {
