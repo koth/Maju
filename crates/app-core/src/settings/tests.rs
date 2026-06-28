@@ -4,7 +4,9 @@ use serde_json::json;
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use workspace_model::{CustomProviderInput, CustomProviderProtocol, LspServerConfigInput, RemoteMachineProfile};
+use workspace_model::{
+    CustomProviderInput, CustomProviderProtocol, LspServerConfigInput, RemoteMachineProfile,
+};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -343,7 +345,8 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         selected_claude_provider_profile_id: None,
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
-        image: ImageSettings::default(),    };
+        image: ImageSettings::default(),
+    };
 
     save_app_settings(&paths, &settings).unwrap();
     let loaded = load_app_settings(&paths);
@@ -382,7 +385,8 @@ model_provider = "timiai"
         selected_claude_provider_profile_id: Some("legacy-claude".to_string()),
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
-        image: ImageSettings::default(),    };
+        image: ImageSettings::default(),
+    };
 
     save_app_settings(&paths, &settings).unwrap();
     let loaded = load_app_settings(&paths);
@@ -689,7 +693,8 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
 
@@ -800,7 +805,8 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
     write_codex_acp_provider_config(&paths, TIMIAI_PROVIDER_ID, "timiai-secret").unwrap();
@@ -855,7 +861,8 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
     save_agent_provider_secret(
@@ -894,7 +901,8 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
     save_agent_provider_secret(
@@ -1048,7 +1056,10 @@ fn codex_acp_commandcode_catalog_uses_provider_specific_model_limits() {
 
     let glm52 = find_model("zai-org/GLM-5.2");
     assert_eq!(glm52["context_window"].as_i64(), Some(1_000_000));
-    assert_eq!(glm52["max_output_tokens"].as_i64(), Some(DEFAULT_MODEL_MAX_OUTPUT_TOKENS));
+    assert_eq!(
+        glm52["max_output_tokens"].as_i64(),
+        Some(DEFAULT_MODEL_MAX_OUTPUT_TOKENS)
+    );
 
     let qwen37 = find_model("Qwen/Qwen3.7-Max");
     assert_eq!(qwen37["context_window"].as_i64(), Some(1_000_000));
@@ -1423,14 +1434,23 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
     assert!(profile.custom);
     assert!(profile.configured);
     assert_eq!(profile.label, "Lab Provider");
-    assert_eq!(profile.base_url.as_deref(), Some("https://api.lab.test/v1/responses"));
+    assert_eq!(
+        profile.base_url.as_deref(),
+        Some("https://api.lab.test/v1/responses")
+    );
     assert_eq!(profile.protocol, Some(CustomProviderProtocol::Responses));
-    assert_eq!(profile.model_list_url.as_deref(), Some("https://api.lab.test/v1/models"));
+    assert_eq!(
+        profile.model_list_url.as_deref(),
+        Some("https://api.lab.test/v1/models")
+    );
 
     save_provider_models(&paths, CUSTOM_PROVIDER_ID, vec!["lab-model".to_string()]).unwrap();
     let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
     let env = agent_env_for_command(&command, &paths);
-    assert!(env.contains(&(CUSTOM_PROVIDER_API_KEY_ENV.to_string(), "lab-secret".to_string())));
+    assert!(env.contains(&(
+        CUSTOM_PROVIDER_API_KEY_ENV.to_string(),
+        "lab-secret".to_string()
+    )));
     let (_, provider_map) = env
         .iter()
         .find(|(name, _)| name == KODEX_MODEL_PROVIDER_MAP_ENV)
@@ -1443,9 +1463,15 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
         .find(|entry| entry["display_name"].as_str() == Some("lab-model"))
         .unwrap();
     assert_eq!(custom_entry["provider"].as_str(), Some(CUSTOM_PROVIDER_ID));
-    assert_eq!(custom_entry["base_url"].as_str(), Some("https://api.lab.test/v1/responses"));
+    assert_eq!(
+        custom_entry["base_url"].as_str(),
+        Some("https://api.lab.test/v1/responses")
+    );
     assert_eq!(custom_entry["protocol"].as_str(), Some("responses"));
-    assert_eq!(custom_entry["env_key"].as_str(), Some(CUSTOM_PROVIDER_API_KEY_ENV));
+    assert_eq!(
+        custom_entry["env_key"].as_str(),
+        Some(CUSTOM_PROVIDER_API_KEY_ENV)
+    );
 
     let snapshot = reset_provider_models(&paths, CUSTOM_PROVIDER_ID).unwrap();
     let profile = snapshot
@@ -1456,7 +1482,10 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
         .unwrap();
     assert!(profile.custom);
     assert!(profile.configured);
-    assert_eq!(profile.base_url.as_deref(), Some("https://api.lab.test/v1/responses"));
+    assert_eq!(
+        profile.base_url.as_deref(),
+        Some("https://api.lab.test/v1/responses")
+    );
     assert!(profile.models.is_empty());
 }
 #[test]
@@ -1770,7 +1799,8 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
     std::fs::write(
@@ -1864,7 +1894,8 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
     std::fs::create_dir_all(paths.root()).unwrap();
@@ -1959,10 +1990,10 @@ fn codex_acp_model_metadata_tracks_individual_model_limits() {
     assert_eq!(model_max_output_tokens("MiMo-V2.5"), 128_000);
     assert_eq!(model_context_window("mimo-v2.5"), 1_000_000);
     assert_eq!(model_max_output_tokens("mimo-v2.5"), 128_000);
-    assert_eq!(model_context_window_for_provider(
-        "zai-org/GLM-5.2",
-        COMMANDCODE_PROVIDER_ID,
-    ), 1_000_000);
+    assert_eq!(
+        model_context_window_for_provider("zai-org/GLM-5.2", COMMANDCODE_PROVIDER_ID,),
+        1_000_000
+    );
     assert_eq!(model_max_output_tokens("gpt-5.2"), 128_000);
     assert_eq!(model_context_window("gpt-5.3"), 128_000);
     assert_eq!(model_max_output_tokens("gpt-5.3"), 16_384);
@@ -2020,6 +2051,16 @@ fn codex_acp_model_metadata_tracks_individual_model_limits() {
         byok_source_provider_for_model("MiniMaxAI/MiniMax-M3"),
         COMMANDCODE_PROVIDER_ID
     );
+    // Custom providers expose upstream model ids verbatim, with vendor
+    // namespaces and casing that differ from the bare catalog slugs. The
+    // metadata lookup must still resolve the correct window instead of
+    // falling back to the 200k default.
+    assert_eq!(model_context_window("z-ai/glm-5.2"), 1_000_000);
+    assert_eq!(model_context_window("zai-org/glm-5.2"), 1_000_000);
+    assert_eq!(model_context_window("GLM-5.2"), 1_000_000);
+    assert_eq!(model_max_output_tokens("z-ai/glm-5.2"), 128_000);
+    assert_eq!(model_context_window("vendor/gpt-5.4"), 1_050_000);
+    assert_eq!(model_context_window("deepseek/deepseek-v4-pro"), 1_000_000);
 }
 
 #[test]
@@ -2393,7 +2434,8 @@ fn env_override_wins_over_persisted_selection() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
-            image: ImageSettings::default(),        },
+            image: ImageSettings::default(),
+        },
     )
     .unwrap();
 

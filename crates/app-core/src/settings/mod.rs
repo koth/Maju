@@ -686,10 +686,7 @@ fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
     changed
 }
 
-fn infer_legacy_codex_provider_profile_id(
-    paths: &AppPaths,
-    settings: &AppSettings,
-) -> String {
+fn infer_legacy_codex_provider_profile_id(paths: &AppPaths, settings: &AppSettings) -> String {
     if settings.codex_connection_mode == CodexConnectionMode::Default {
         return CODEX_DEFAULT_PROVIDER_ID.to_string();
     }
@@ -875,10 +872,7 @@ fn parse_provider_models_response(body: &str) -> Result<Vec<String>> {
 fn normalize_model_source_provider(provider: &str) -> Result<String> {
     let provider = normalize_codex_provider(provider)?;
     if !codex_is_byok_source(&provider) {
-        anyhow::bail!(
-            "{} does not have an editable model list",
-            provider
-        );
+        anyhow::bail!("{} does not have an editable model list", provider);
     }
     Ok(provider)
 }
@@ -983,7 +977,10 @@ pub fn image_view_provider_secret(paths: &AppPaths, provider: &str) -> Option<St
 ///
 /// Prefers the `api_key_env` environment variable; falls back to the
 /// `image-generate` entry in `provider-secrets.json`.
-pub fn image_generate_api_key(paths: &AppPaths, generate: &ImageGenerateSettings) -> Option<String> {
+pub fn image_generate_api_key(
+    paths: &AppPaths,
+    generate: &ImageGenerateSettings,
+) -> Option<String> {
     if !generate.api_key_env.is_empty() {
         if let Ok(value) = std::env::var(&generate.api_key_env) {
             if !value.trim().is_empty() {
@@ -1035,8 +1032,8 @@ fn web_tools_settings_status(paths: &AppPaths, settings: &AppSettings) -> WebToo
 fn image_settings_status(paths: &AppPaths, settings: &AppSettings) -> ImageSettingsStatus {
     let view = &settings.image.view;
     let generate = &settings.image.generate;
-    let view_configured = !view.provider.is_empty()
-        && image_view_provider_secret(paths, &view.provider).is_some();
+    let view_configured =
+        !view.provider.is_empty() && image_view_provider_secret(paths, &view.provider).is_some();
     let view_models = if view.provider.is_empty() {
         Vec::new()
     } else {
@@ -1626,8 +1623,14 @@ pub fn clear_provider_configuration(
     save_provider_models_catalog(paths, &catalog)?;
 
     let mut secrets = load_provider_secrets(paths);
-    secrets.remove(&provider_secret_storage_key(AgentProviderFamily::Codex, &provider));
-    secrets.remove(&provider_secret_storage_key(AgentProviderFamily::Claude, &provider));
+    secrets.remove(&provider_secret_storage_key(
+        AgentProviderFamily::Codex,
+        &provider,
+    ));
+    secrets.remove(&provider_secret_storage_key(
+        AgentProviderFamily::Claude,
+        &provider,
+    ));
     save_provider_secrets(paths, &secrets)?;
 
     clear_codex_provider_config(paths, &provider)?;
@@ -1667,7 +1670,11 @@ pub fn save_custom_provider(
         anyhow::bail!("provider_id must refer to a custom provider");
     }
     let provider_id = unique_custom_provider_id(&catalog, label, existing_provider_id.as_deref());
-    let existing_entry = catalog.providers.get(&provider_id).cloned().unwrap_or_default();
+    let existing_entry = catalog
+        .providers
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
     let api_key = input.api_key.trim();
     if api_key.is_empty()
         && provider_secret(paths, AgentProviderFamily::Codex, &provider_id)
@@ -1929,7 +1936,12 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
         catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
             .into_iter()
             .next()
-            .unwrap_or_else(|| (TIMIAI_CODEX_MODEL.to_string(), TIMIAI_PROVIDER_ID.to_string()));
+            .unwrap_or_else(|| {
+                (
+                    TIMIAI_CODEX_MODEL.to_string(),
+                    TIMIAI_PROVIDER_ID.to_string(),
+                )
+            });
     let default_model_slug = byok_encoded_model_slug(&default_model, &default_model_provider);
     let raw_active_model = doc
         .get("model")
@@ -2015,7 +2027,12 @@ pub fn write_codex_acp_provider_config(
         catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
             .into_iter()
             .next()
-            .unwrap_or_else(|| (TIMIAI_CODEX_MODEL.to_string(), TIMIAI_PROVIDER_ID.to_string()))
+            .unwrap_or_else(|| {
+                (
+                    TIMIAI_CODEX_MODEL.to_string(),
+                    TIMIAI_PROVIDER_ID.to_string(),
+                )
+            })
     } else {
         (
             default_model_for_provider_with_paths(paths, &provider),
@@ -2091,7 +2108,8 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
     write_codex_byok_provider_table(&mut doc);
 
     if active_provider == BYOK_PROVIDER_ID || codex_is_byok_source(&active_provider) {
-        let source_provider_hint = codex_is_byok_source(&active_provider).then_some(active_provider.as_str());
+        let source_provider_hint =
+            codex_is_byok_source(&active_provider).then_some(active_provider.as_str());
         let runtime_provider = BYOK_PROVIDER_ID;
         doc["model_provider"] = value(runtime_provider);
         let active_model = doc
@@ -2179,7 +2197,11 @@ fn byok_source_provider_ids(paths: &AppPaths) -> Vec<String> {
     // the built-in sources so the latter keep their declared precedence (e.g.
     // timiai wins over commandcode for duplicate models). A global sort would
     // reorder the built-ins alphabetically and break that precedence.
-    providers.extend(custom_provider_entries(paths).into_iter().map(|(provider, _)| provider));
+    providers.extend(
+        custom_provider_entries(paths)
+            .into_iter()
+            .map(|(provider, _)| provider),
+    );
     providers.dedup();
     providers
 }
@@ -2406,7 +2428,9 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
     let normalized_provider = raw_provider
         .as_deref()
         .and_then(|provider| normalize_codex_provider(provider).ok());
-    let provider = normalized_provider.clone().unwrap_or_else(|| BYOK_PROVIDER_ID.to_string());
+    let provider = normalized_provider
+        .clone()
+        .unwrap_or_else(|| BYOK_PROVIDER_ID.to_string());
     let repaired_provider = normalized_provider.is_none();
     if repaired_provider {
         doc["model_provider"] = value(provider.as_str());
@@ -2518,12 +2542,19 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
             doc["model_providers"][provider.as_str()]["base_url"] = value(base_url);
             changed = true;
         }
-        if !provider_field_eq(&doc, &provider, "wire_api", wire_api_for_provider(&provider)) {
-            doc["model_providers"][provider.as_str()]["wire_api"] = value(wire_api_for_provider(&provider));
+        if !provider_field_eq(
+            &doc,
+            &provider,
+            "wire_api",
+            wire_api_for_provider(&provider),
+        ) {
+            doc["model_providers"][provider.as_str()]["wire_api"] =
+                value(wire_api_for_provider(&provider));
             changed = true;
         }
         if !provider_field_eq(&doc, &provider, "env_key", &env_key_for_provider(&provider)) {
-            doc["model_providers"][provider.as_str()]["env_key"] = value(env_key_for_provider(&provider));
+            doc["model_providers"][provider.as_str()]["env_key"] =
+                value(env_key_for_provider(&provider));
             changed = true;
         }
     }
@@ -2653,7 +2684,12 @@ fn clear_codex_provider_config(paths: &AppPaths, provider: &str) -> Result<()> {
             catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| (TIMIAI_CODEX_MODEL.to_string(), TIMIAI_PROVIDER_ID.to_string()));
+                .unwrap_or_else(|| {
+                    (
+                        TIMIAI_CODEX_MODEL.to_string(),
+                        TIMIAI_PROVIDER_ID.to_string(),
+                    )
+                });
         let default_model_slug = byok_encoded_model_slug(&default_model, &default_model_provider);
         if doc.get("model").and_then(|item| item.as_str()) != Some(default_model_slug.as_str()) {
             doc["model"] = value(default_model_slug);
@@ -2694,7 +2730,9 @@ fn normalize_codex_provider(provider: &str) -> Result<String> {
         DEEPSEEK_PROVIDER_ID => Ok(DEEPSEEK_PROVIDER_ID.to_string()),
         KIMI_PROVIDER_ID | "kimi" | "kimi-code" => Ok(KIMI_PROVIDER_ID.to_string()),
         MIMO_PROVIDER_ID | "mimo" | "xiaomi-mimo" => Ok(MIMO_PROVIDER_ID.to_string()),
-        CUSTOM_PROVIDER_ID | "custom-provider" | "custom_provider" => Ok(CUSTOM_PROVIDER_ID.to_string()),
+        CUSTOM_PROVIDER_ID | "custom-provider" | "custom_provider" => {
+            Ok(CUSTOM_PROVIDER_ID.to_string())
+        }
         other if is_custom_provider_id(other) => Ok(other.to_string()),
         other => anyhow::bail!("Unsupported Codex provider: {other}"),
     }
@@ -2862,7 +2900,8 @@ fn catalog_models_for_provider_with_paths(
     paths: &AppPaths,
     provider: &str,
 ) -> Vec<(String, String)> {
-    let provider = normalize_codex_provider(provider).unwrap_or_else(|_| TIMIAI_PROVIDER_ID.to_string());
+    let provider =
+        normalize_codex_provider(provider).unwrap_or_else(|_| TIMIAI_PROVIDER_ID.to_string());
     if provider != BYOK_PROVIDER_ID {
         return effective_catalog_models_for_provider(paths, &provider)
             .into_iter()
@@ -2881,7 +2920,10 @@ fn catalog_models_for_provider_with_paths(
         );
     }
     if models.is_empty() {
-        models.push((TIMIAI_CODEX_MODEL.to_string(), TIMIAI_PROVIDER_ID.to_string()));
+        models.push((
+            TIMIAI_CODEX_MODEL.to_string(),
+            TIMIAI_PROVIDER_ID.to_string(),
+        ));
     }
     models
 }
@@ -3105,13 +3147,12 @@ fn unique_catalog_provider_for_model(paths: &AppPaths, model: &str) -> Option<St
 fn provider_catalog_contains_model(paths: &AppPaths, provider: &str, model: &str) -> bool {
     effective_catalog_models_for_provider(paths, provider)
         .iter()
-        .any(|candidate| candidate == model || model_slug_for_provider(candidate, provider) == model)
+        .any(|candidate| {
+            candidate == model || model_slug_for_provider(candidate, provider) == model
+        })
 }
 
-fn byok_upstream_model_for_model_with_hint(
-    model: &str,
-    provider_hint: Option<&str>,
-) -> String {
+fn byok_upstream_model_for_model_with_hint(model: &str, provider_hint: Option<&str>) -> String {
     if let Some((_, upstream_model)) = decode_provider_model_id(model) {
         return upstream_model.to_string();
     }
@@ -3151,10 +3192,7 @@ fn catalog_provider_for_encoded_model_slug(paths: &AppPaths, model: &str) -> Opt
         })
 }
 
-fn byok_source_provider_for_model_with_hint(
-    model: &str,
-    provider_hint: Option<&str>,
-) -> String {
+fn byok_source_provider_for_model_with_hint(model: &str, provider_hint: Option<&str>) -> String {
     if let Some((provider, _)) = decode_provider_model_id(model) {
         return provider;
     }
@@ -3232,7 +3270,32 @@ fn model_i64_metadata(model: &str, metadata: &[(&str, i64)], fallback: i64) -> i
                 || model_slug_for_provider(candidate, MIMO_PROVIDER_ID) == model)
                 .then_some(*value)
         })
-        .unwrap_or(fallback)
+        .unwrap_or_else(|| {
+            // Custom providers surface upstream model ids verbatim (e.g.
+            // `zai-org/GLM-5.2` or `z-ai/glm-5.2`) which the static tables key
+            // by their bare slug (`glm-5.2`). Fall back to a normalized
+            // comparison that strips the `vendor/` prefix and ignores case so
+            // the correct window is resolved instead of the 200k default.
+            let normalized = normalize_model_for_metadata_lookup(model);
+            metadata
+                .iter()
+                .find_map(|(candidate, value)| {
+                    (normalize_model_for_metadata_lookup(candidate) == normalized).then_some(*value)
+                })
+                .unwrap_or(fallback)
+        })
+}
+
+/// Reduce a model id to a comparable form for metadata-table lookups: drop a
+/// leading `vendor/` namespace and lowercase the remainder. `gpt-5.4` and
+/// `gpt-5.4-mini` stay distinct, so no known catalog entries collide.
+fn normalize_model_for_metadata_lookup(model: &str) -> String {
+    let trimmed = model.trim();
+    let bare = trimmed
+        .rsplit_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    bare.to_ascii_lowercase()
 }
 
 fn codex_provider_key_from_doc(doc: &DocumentMut, provider: &str) -> Option<String> {

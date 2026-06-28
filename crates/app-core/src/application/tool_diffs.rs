@@ -198,6 +198,57 @@ impl Application {
                     );
                 }
                 changed = true;
+            } else if change.change_type != FileChangeType::Deleted {
+                // The tracker could not produce an exact diff (e.g. a
+                // `MissingBaseline` because the ACP diff preview landed after
+                // the write). The tool card still has a diff preview, so try
+                // to reconstruct the old text from the landed hunks and record
+                // the review/session change so the ChangesBar and review panel
+                // appear.
+                if landed_tool_hunks
+                    .as_ref()
+                    .and_then(|hunks| {
+                        self.upsert_review_file_change_from_landed_tool_hunks(
+                            &change.path,
+                            change.change_type.clone(),
+                            change.old_text.as_deref(),
+                            &change.new_text,
+                            hunks,
+                        )
+                    })
+                    .is_none()
+                {
+                    self.upsert_review_file_change_for_tool(
+                        &change.path,
+                        change.change_type.clone(),
+                        exact_edit.as_ref(),
+                        change
+                            .old_text
+                            .clone()
+                            .or(previous_session_new_text.clone())
+                            .or(effective_old_text.clone()),
+                        change.new_text.clone(),
+                    );
+                }
+                if self
+                    .ui
+                    .session_changes
+                    .iter()
+                    .any(|existing| normalize_tracked_path(&existing.path) == normalized)
+                {
+                    changed = true;
+                } else {
+                    self.ui.session_changes.push(SessionFileChange {
+                        path: change.path.clone(),
+                        change_type: change.change_type.clone(),
+                        old_text: change.old_text.clone().or(effective_old_text),
+                        new_text: change.new_text.clone(),
+                        added_lines: 0,
+                        removed_lines: 0,
+                        timestamp: current_timestamp(),
+                    });
+                    changed = true;
+                }
             }
 
             // Attach only this tool's diff preview, not the cumulative session diff.
@@ -1179,7 +1230,16 @@ fn normalized_old_text_matches(
     if let Some(expected_old_text) = expected_old_text {
         return actual_old_text == normalize_diff_text_for_session_change(expected_old_text);
     }
-    allow_empty_old_text && is_effectively_empty_text(actual_old_text)
+    // No baseline is available (e.g. the tracker could not anchor a tool-start
+    // snapshot because the ACP diff preview landed after the write). Accept the
+    // old text reconstructed from the tool's own diff hunks as long as it is
+    // non-empty — this lets the review change set pick up edits that would
+    // otherwise only appear on the tool card. An empty reconstructed baseline
+    // is only trustworthy for created files.
+    if is_effectively_empty_text(actual_old_text) {
+        return allow_empty_old_text;
+    }
+    true
 }
 
 fn is_effectively_empty_text(text: &str) -> bool {

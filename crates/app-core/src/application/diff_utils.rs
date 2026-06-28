@@ -541,7 +541,7 @@ fn looks_like_file_change_entry(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    object
+    if object
         .get("type")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|kind| matches!(kind, "add" | "create" | "update" | "modify" | "delete"))
@@ -550,6 +550,32 @@ fn looks_like_file_change_entry(value: &serde_json::Value) -> bool {
         || object.contains_key("content")
         || object.contains_key("move_path")
         || object.contains_key("movePath")
+    {
+        return true;
+    }
+    // serde serializes the `FileChange` enum as `{"Add": {...}}`,
+    // `{"Update": {"unified_diff": ..., "move_path": ...}}`, or
+    // `{"Delete": {...}}`. codex-acp forwards PatchApplyBeginEvent in this
+    // shape, so recognize the variant key as a file-change entry too.
+    object.keys().any(|variant| {
+        matches!(
+            variant.as_str(),
+            "Add" | "Create" | "Update" | "Modify" | "Delete"
+        )
+    }) && object.len() == 1
+        && object
+            .values()
+            .next()
+            .map(|inner| {
+                inner.as_object().is_some_and(|inner| {
+                    inner.contains_key("unified_diff")
+                        || inner.contains_key("unifiedDiff")
+                        || inner.contains_key("content")
+                        || inner.contains_key("move_path")
+                        || inner.contains_key("movePath")
+                })
+            })
+            .unwrap_or(true)
 }
 
 fn extract_apply_patch_paths(input: &str) -> Vec<String> {

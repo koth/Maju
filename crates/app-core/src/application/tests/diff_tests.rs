@@ -1,6 +1,184 @@
 use super::*;
 
 #[test]
+fn tracker_missing_baseline_uses_tool_diff_preview_hunks_for_review_changes() {
+    // Regression for the Codex (codex-acp) "Edit" tool: ACP streams a
+    // ToolDiffPreview (so the tool card shows a diff), but the file tracker
+    // has no tool-start baseline because the preview landed after the write.
+    // The tracker therefore emits a `MissingBaseline` change. Without the
+    // tool's own preview hunks, review_changes/session_changes stayed empty
+    // and the ChangesBar/review panel never appeared, even though the tool
+    // card showed the edit. The landed hunks must be used to reconstruct the
+    // old text and populate the review change set.
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "crates/app-core/src/settings/mod.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "fn model_i64_metadata() {\n    unwrap_or(fallback)\n}\n";
+    let after = "fn model_i64_metadata() {\n    unwrap_or_else(|| normalized)\n}\n";
+    fs::write(&file_path, after).unwrap();
+
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "edit".into(),
+        created_at: "2026-06-28T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-06-28T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    // Simulate the ACP ToolDiffPreview arriving first: the tool card gets its
+    // diff, and the tracker records the path as a candidate without a baseline.
+    let preview_hunks = diff_to_hunks(Some(before), after);
+    assert!(!preview_hunks.is_empty());
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolDiffPreview {
+        id: "edit-mod".into(),
+        path: relative_path.into(),
+        hunks: preview_hunks.clone(),
+    }]);
+    app.file_tracker.discard_recording("edit-mod");
+
+    // The tracker later verifies the write but cannot anchor a baseline.
+    assert!(app.apply_tracker_changes(
+        "edit-mod",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: relative_path.into(),
+            change_type: FileChangeType::Modified,
+            old_text: None,
+            new_text: after.into(),
+            skipped_diff: true,
+            quality: DiffQuality::MissingBaseline,
+        }],
+    ));
+
+    assert!(
+        !app.ui.review_changes.is_empty(),
+        "review_changes must be reconstructed from the tool diff preview hunks"
+    );
+    assert!(
+        !app.ui.session_changes.is_empty(),
+        "session_changes must capture the write"
+    );
+    assert!(app.review_changes_started);
+    assert_eq!(app.ui.review_changes[0].path, relative_path);
+    assert_eq!(app.ui.review_changes[0].new_text, after);
+
+    let _ = app.persist_current_turn_file_changes();
+    let turn_sets = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    assert!(
+        turn_sets
+            .iter()
+            .any(|summary| summary.status == ChangeSetStatus::Complete && summary.file_count > 0),
+        "turn change set must be persisted as Complete with files"
+    );
+}
+
+#[test]
+fn codex_acp_edit_tool_with_file_path_hint_populates_review_changes() {
+    // Reproduce the Codex (codex-acp) "Edit" tool flow: ToolStarted carries
+    // only `{ "file_path": ... }` (no before/after payload), the file is
+    // modified on disk, then ToolCompleted fires. The file tracker must
+    // detect the change and populate review_changes/session_changes so the
+    // ChangesBar and review panel show it after the turn ends.
+    let dir = tempfile::tempdir().unwrap();
+    let relative_path = "crates/app-core/src/settings/mod.rs";
+    let file_path = dir.path().join(relative_path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    let before = "fn model_i64_metadata() {\n    unwrap_or(fallback)\n}\n";
+    let after =
+        "fn model_i64_metadata() {\n    unwrap_or_else(|| {\n        normalized\n    })\n}\n";
+    fs::write(&file_path, before).unwrap();
+
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "edit".into(),
+        created_at: "2026-06-28T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-06-28T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    let raw_input = serde_json::json!({ "file_path": file_path.display().to_string() }).to_string();
+    app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolStarted {
+        id: "edit-mod".into(),
+        parent_id: None,
+        name: "Edit".into(),
+        kind: "tool".into(),
+        summary: format!("Edit {relative_path}"),
+        is_subagent: false,
+        raw_input: Some(raw_input),
+    }]);
+
+    fs::write(&file_path, after).unwrap();
+
+    let result = app.apply_runtime_events_with_file_tracking(vec![ClientEvent::ToolCompleted {
+        id: "edit-mod".into(),
+        name: Some("Edit".into()),
+        outcome: format!("Edit {relative_path}"),
+        raw_output: None,
+        terminal_output: None,
+    }]);
+
+    // ToolCompleted alone may defer detection; advance the clock and retry.
+    app.advance_runtime_clock(Duration::from_secs(1));
+    let _ = app.retry_pending_tool_write_detections();
+
+    assert!(
+        !app.ui.session_changes.is_empty(),
+        "session_changes must capture the Edit write"
+    );
+    assert!(
+        !app.ui.review_changes.is_empty(),
+        "review_changes must capture the Edit write so the review panel shows it"
+    );
+    assert!(app.review_changes_started);
+    assert!(result.had_file_changes || !app.ui.review_changes.is_empty());
+
+    // Ending the turn must persist a Complete AgentTurn change set.
+    // `persist_current_turn_file_changes` returns the *changed* flag, not
+    // whether it persisted, so verify the persisted change set directly.
+    let _ = app.persist_current_turn_file_changes();
+    let turn_sets = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let completed = turn_sets
+        .iter()
+        .find(|summary| summary.status == ChangeSetStatus::Complete)
+        .expect("turn change set must be persisted as Complete");
+    assert_eq!(completed.file_count, 1);
+}
+
+#[test]
 fn tool_diff_uses_previous_session_new_text_for_repeated_file_edits() {
     let hunks = tool_diff_hunks(Some("one\ntwo\n"), Some("one\n"), "one\nthree\n");
     let added = hunks
@@ -103,6 +281,46 @@ fn tool_event_hint_paths_extracts_apply_patch_change_keys() {
         vec![
             "D:\\work\\ArtAssets\\datas\\scripts\\eagle-export.py".to_string(),
             "packages/backend/src/app/index.ts".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn tool_event_hint_paths_extracts_serde_enum_file_change_keys() {
+    // codex-acp serializes PatchApplyBeginEvent with `changes: HashMap<PathBuf,
+    // FileChange>`. FileChange is a serde enum, so each entry serializes as
+    // `{"Update": {"unified_diff": ..., "move_path": null}}` or
+    // `{"Add": {"content": ...}}` — the discriminator lives in the key, not a
+    // `type` field. The hint-path extractor must still recognize these so the
+    // file tracker can record a baseline before the patch lands.
+    let raw_input = serde_json::json!({
+        "call_id": "call-apply",
+        "turn_id": "turn-1",
+        "auto_approved": false,
+        "changes": {
+            "crates/app-core/src/settings/mod.rs": {
+                "Update": {
+                    "unified_diff": "@@ -1,1 +1,1 @@\n-old\n+new\n",
+                    "move_path": null
+                }
+            },
+            "crates/app-core/src/settings/new_file.rs": {
+                "Add": {
+                    "content": "new\n"
+                }
+            }
+        }
+    })
+    .to_string();
+
+    let mut paths = tool_event_hint_paths(Some(&raw_input));
+    paths.sort();
+
+    assert_eq!(
+        paths,
+        vec![
+            "crates/app-core/src/settings/mod.rs".to_string(),
+            "crates/app-core/src/settings/new_file.rs".to_string(),
         ]
     );
 }

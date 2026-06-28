@@ -1,6 +1,138 @@
 use super::*;
 
 #[test]
+fn multiple_files_with_nonzero_changes_keep_change_set_after_turn() {
+    // Regression: a turn that edits two files must keep its AgentTurn change
+    // set (and thus the ChangesBar / review panel) even though the per-file
+    // added/removed line counts happen to cancel out across files. The
+    // visibility gate is per-file `file_count`, never a net added-minus-removed
+    // sum, so neither file may be dropped.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "edit two files".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-05-13T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    // File A: +3 -1, File B: +1 -3 — net cancels, but each file is non-empty.
+    app.upsert_review_file_change(
+        "src/a.rs",
+        FileChangeType::Modified,
+        Some("x\n".into()),
+        "a\nb\nc\nd\n".into(),
+    );
+    app.upsert_review_file_change(
+        "src/b.rs",
+        FileChangeType::Modified,
+        Some("p\nq\nr\ns\n".into()),
+        "t\n".into(),
+    );
+    assert_eq!(app.ui.review_changes.len(), 2);
+    assert!(app.persist_current_turn_file_changes());
+
+    let turn_sets = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let pending = turn_sets
+        .iter()
+        .find(|summary| summary.status == ChangeSetStatus::Complete)
+        .expect("turn change set must survive with two non-empty files");
+    let files = app.store.list_change_set_files(&pending.id).unwrap();
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn codex_acp_apply_patch_two_files_persist_turn_change_set() {
+    // Reproduce the Codex (codex-acp) apply_patch path: file changes arrive
+    // via the file tracker (no ACP ToolDiff event), one call per file. The
+    // turn's AgentTurn change set must be persisted so the ChangesBar and
+    // review panel show both files after the turn ends.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let assistant_id = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "edit two files".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: assistant_id,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-05-13T00:00:01Z".into(),
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(assistant_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    assert!(app.apply_tracker_changes(
+        "call-apply-patch-a",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: "src/a.rs".into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some("x\n".into()),
+            new_text: "a\nb\nc\nd\n".into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+    assert!(app.apply_tracker_changes(
+        "call-apply-patch-b",
+        vec![crate::file_tracker::VerifiedFileChange {
+            path: "src/b.rs".into(),
+            change_type: FileChangeType::Modified,
+            old_text: Some("p\nq\nr\ns\n".into()),
+            new_text: "t\n".into(),
+            skipped_diff: false,
+            quality: DiffQuality::Exact,
+        }],
+    ));
+    assert_eq!(app.ui.review_changes.len(), 2);
+    assert!(app.review_changes_started);
+    assert!(app.persist_current_turn_file_changes());
+
+    let turn_sets = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let completed = turn_sets
+        .iter()
+        .find(|summary| summary.status == ChangeSetStatus::Complete)
+        .expect("turn change set must be persisted for codex-acp apply_patch edits");
+    assert_eq!(completed.file_count, 2);
+    let files = app.store.list_change_set_files(&completed.id).unwrap();
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
 fn current_turn_without_file_changes_does_not_inherit_recent_review_changes() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
