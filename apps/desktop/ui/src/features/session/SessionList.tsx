@@ -11,7 +11,6 @@ import {
   settingsGetAgentSnapshot,
   workspaceArchive,
   workspaceOpen,
-  workspaceSetActive,
 } from "../../lib/tauri";
 import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -253,19 +252,6 @@ export function SessionList({
     }
   }, []);
 
-  const handleActivateWorkspace = useCallback(
-    async (workspaceRoot: string) => {
-      try {
-        const nextSnapshot = await workspaceSetActive(workspaceRoot);
-        onWorkspaceChanged(nextSnapshot);
-        refresh();
-      } catch {
-        // ignore
-      }
-    },
-    [onWorkspaceChanged, refresh],
-  );
-
   const handleSwitch = useCallback(
     async (id: string, workspaceRoot: string) => {
       if (id === activeSessionId && workspaceRoot === activeWorkspaceRoot) return;
@@ -469,7 +455,6 @@ export function SessionList({
             activeSessionTitle={activeSessionTitle}
             currentSessionStatus={currentSessionStatus}
             activeConversationVisible={activeConversationVisible}
-            onActivateWorkspace={handleActivateWorkspace}
             onReconnectRemoteWorkspace={handleReconnectRemoteWorkspace}
             onCreateSession={handleOpenAgentPicker}
             onSwitch={handleSwitch}
@@ -717,7 +702,6 @@ function WorkspaceSection({
   activeSessionTitle,
   currentSessionStatus,
   activeConversationVisible,
-  onActivateWorkspace,
   onReconnectRemoteWorkspace,
   onCreateSession,
   onSwitch,
@@ -729,7 +713,6 @@ function WorkspaceSection({
   activeSessionTitle: string;
   currentSessionStatus: SessionStatus;
   activeConversationVisible: boolean;
-  onActivateWorkspace: (workspaceRoot: string) => void;
   onReconnectRemoteWorkspace: (remote: RemoteLinuxWorkspace) => void;
   onCreateSession: (workspaceRoot: string, remoteAgent: AgentCliId | null, isRemoteWorkspace: boolean) => void;
   onSwitch: (id: string, workspaceRoot: string) => void;
@@ -737,6 +720,9 @@ function WorkspaceSection({
   onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
+  // Default expanded so background progress indicators stay visible; the user
+  // can click the collapse toggle to fold a workspace's session list.
+  const [collapsed, setCollapsed] = useState(false);
   const workspaceRoot = item.workspace.root;
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
   const isDormantRemoteWorkspace = isRemoteWorkspace && !item.connected;
@@ -748,17 +734,14 @@ function WorkspaceSection({
   const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
 
   return (
-    <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""}`}>
+    <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""}`}>
       <div className="sl-workspace-row">
-        <button
+        <div
           className="sl-workspace-node"
-          type="button"
+          role="button"
+          tabIndex={0}
           aria-current={item.is_active ? "true" : undefined}
-          onClick={() => {
-            if (!isDormantRemoteWorkspace) {
-              onActivateWorkspace(workspaceActionRoot);
-            }
-          }}
+          onClick={() => setCollapsed((value) => !value)}
           onDoubleClick={() => {
             if (isDormantRemoteWorkspace && remoteWorkspace) {
               onReconnectRemoteWorkspace(remoteWorkspace);
@@ -766,12 +749,24 @@ function WorkspaceSection({
           }}
           title={workspaceTooltip}
         >
-          <FolderIcon />
+          <button
+            className="sl-workspace-folder"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setCollapsed((value) => !value);
+            }}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? `展开 ${item.workspace.name} 的会话列表` : `折叠 ${item.workspace.name} 的会话列表`}
+            title={collapsed ? "展开会话列表" : "折叠会话列表"}
+          >
+            <FolderIcon open={!collapsed} />
+          </button>
           <span className="sl-workspace-copy">
             <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
           </span>
           <span className="sl-workspace-state">{workspaceStateLabel}</span>
-        </button>
+        </div>
         <button
           className="sl-workspace-edit"
           type="button"
@@ -793,6 +788,7 @@ function WorkspaceSection({
         </button>
       </div>
 
+      {!collapsed && (
       <div className="sl-thread-branch">
         <div className="sl-items">
           {item.sessions.length === 0 && (
@@ -827,6 +823,7 @@ function WorkspaceSection({
           })}
         </div>
       </div>
+      )}
     </section>
   );
 }
@@ -1017,11 +1014,18 @@ function getTimestamp(value: string) {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function FolderIcon() {
+function FolderIcon({ open }: { open: boolean }) {
+  if (open) {
+    return (
+      <svg className="sl-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+        <path d="M2.5 8.2h15" />
+      </svg>
+    );
+  }
   return (
     <svg className="sl-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
       <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
-      <path d="M2.5 8.2h15" />
     </svg>
   );
 }

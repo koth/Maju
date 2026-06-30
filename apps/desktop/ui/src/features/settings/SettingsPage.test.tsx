@@ -81,7 +81,6 @@ vi.mock("../../lib/tauri", async () => {
     settingsRemoveCustomProvider: vi.fn(),
     settingsSaveCodexAcpProviderKey: vi.fn(),
     settingsSelectCodexAcpProvider: vi.fn(),
-    settingsSelectCodexDefaultMode: vi.fn(),
     settingsSelectAgentProviderProfile: vi.fn(),
     settingsSelectClaudeFastModel: vi.fn(),
     settingsSaveWebToolsProviderKey: vi.fn(),
@@ -900,7 +899,7 @@ describe("SettingsPage LSP settings", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getByText("Codex 通道")).toBeInTheDocument();
+    expect(screen.getByText("Codex 模型来源")).toBeInTheDocument();
   });
 
   it("checks for updates and reports the current version as up to date", async () => {
@@ -1440,24 +1439,6 @@ describe("SettingsPage LSP settings", () => {
     await screen.findByText("TimiAI API key 已更新，后续新建会话生效");
     expect(screen.getByLabelText("byok_api_key")).toHaveValue("");
     expect(screen.queryByDisplayValue("timiai-secret")).not.toBeInTheDocument();
-  });
-
-  it("switches Codex between default and BYOK channels", async () => {
-    render(<SettingsPage onBack={vi.fn()} />);
-
-    await openAgentSettingsTab("Codex");
-    const codexChannel = screen.getByRole("radiogroup", {
-      name: "Codex channel",
-    });
-    fireEvent.click(within(codexChannel).getByRole("button", { name: /默认/ }));
-    await waitFor(() =>
-      expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith(
-        "codex",
-        "default",
-        null,
-      ),
-    );
-    await screen.findByText("Codex 通道已切换到 默认");
   });
 
   it("saves DeepSeek provider key without echoing it", async () => {
@@ -2100,13 +2081,7 @@ describe("SettingsPage LSP settings", () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openAgentSettingsTab("Codex");
-    expect(screen.getByText("Codex 通道")).toBeInTheDocument();
-    const codexChannel = screen.getByRole("radiogroup", {
-      name: "Codex channel",
-    });
-    expect(
-      within(codexChannel).getByRole("button", { name: /默认/ }),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Codex 模型来源")).toBeInTheDocument();
     await openAgentSettingsTab("Claude");
     expect(screen.getByText("Claude 通道")).toBeInTheDocument();
     expect(screen.queryByText("Venus")).not.toBeInTheDocument();

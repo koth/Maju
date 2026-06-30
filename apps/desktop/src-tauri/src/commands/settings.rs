@@ -216,23 +216,6 @@ pub fn settings_select_codex_acp_provider(
     app_core::settings::select_codex_acp_provider(&paths, &provider).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn settings_select_codex_default_mode(
-    state: State<'_, AppState>,
-    remote_profile_id: Option<uuid::Uuid>,
-) -> Result<AgentSettingsSnapshot, String> {
-    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
-        return app_core::settings::remote_select_agent_provider_profile(
-            &scope.profile,
-            scope.ssh_password.as_deref(),
-            AgentProviderFamily::Codex,
-            "default",
-        )
-        .map_err(|e| e.to_string());
-    }
-    app_core::settings::select_codex_default_mode(&paths).map_err(|e| e.to_string())
-}
 
 #[tauri::command]
 pub fn settings_select_agent_provider_profile(

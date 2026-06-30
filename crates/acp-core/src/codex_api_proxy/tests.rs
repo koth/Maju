@@ -537,9 +537,14 @@ fn deepseek_requests_preserve_upstream_streaming() {
 }
 
 #[test]
-fn unsupported_provider_aliases_fall_back_to_timiai() {
-    assert_eq!(normalize_proxy_provider("unsupported"), "timiai");
-    assert_eq!(normalize_proxy_provider("legacy-gateway"), "timiai");
+fn unsupported_provider_aliases_preserve_identity() {
+    // Known aliases still canonicalize.
+    assert_eq!(normalize_proxy_provider("timi-ai"), "timiai");
+    // Unknown / custom_* providers keep their (lowercased) identity instead of
+    // collapsing to timiai, so their base_url/api_key are not overwritten.
+    assert_eq!(normalize_proxy_provider("unsupported"), "unsupported");
+    assert_eq!(normalize_proxy_provider("legacy-gateway"), "legacy-gateway");
+    assert_eq!(normalize_proxy_provider("custom_cline"), "custom_cline");
 }
 
 #[test]
@@ -620,6 +625,8 @@ fn model_provider_map_overrides_byok_provider_heuristics() {
 
 #[test]
 fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
+    // Only the fully-qualified `model` slug is indexed; the bare display_name
+    // is not (so same-named models across providers don't shadow each other).
     let value = json!([
         {
             "model": "deepseek-v4-pro-r1",
@@ -641,7 +648,40 @@ fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
         Some("timiai")
     );
     assert!(provider_configs.is_empty());
-    assert_eq!(duplicate_count, 3);
+    assert_eq!(duplicate_count, 1);
+}
+
+#[test]
+fn model_provider_map_parser_preserves_custom_provider_identity() {
+    // A custom provider with a dynamic id (custom_cline) must keep its own
+    // identity in both the routing map and provider_configs, instead of being
+    // collapsed to "timiai" (which would overwrite the real timiai config and
+    // misroute requests).
+    let value = json!([
+        {
+            "model": "kodex-provider/byok/custom_cline/glm-5.2",
+            "display_name": "glm-5.2",
+            "provider": "custom_cline",
+            "base_url": "https://api.cline.bot/api/v1/chat/completions",
+            "protocol": "chat_completions"
+        }
+    ]);
+
+    let (map, provider_configs, duplicate_count) =
+        parse_model_provider_map(&value.to_string()).unwrap();
+
+    assert_eq!(
+        map.get("kodex-provider/byok/custom_cline/glm-5.2")
+            .map(String::as_str),
+        Some("custom_cline")
+    );
+    let config = provider_configs
+        .get("custom_cline")
+        .expect("custom_cline provider config preserved");
+    assert_eq!(config.base_url, "https://api.cline.bot/api/v1/chat/completions");
+    assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
+    assert!(provider_configs.get("timiai").is_none());
+    assert_eq!(duplicate_count, 0);
 }
 
 #[test]

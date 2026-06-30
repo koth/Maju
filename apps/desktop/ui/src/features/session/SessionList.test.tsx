@@ -993,4 +993,73 @@ describe("SessionList agent picker", () => {
       expect(screen.queryByLabelText("后台会话已完成，尚未查看")).not.toBeInTheDocument();
     });
   });
+
+  it("collapses and expands a workspace session list via the folder toggle", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "session-1", title: "Feature work" }),
+        sessionItem({ id: "session-2", title: "Bugfix" }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="session-1"
+        activeSessionTitle="Feature work"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Feature work")).toBeInTheDocument();
+    expect(screen.getByText("Bugfix")).toBeInTheDocument();
+
+    const collapseBtn = await screen.findByRole("button", { name: /折叠 Kodex 的会话列表/ });
+    fireEvent.click(collapseBtn);
+
+    await waitFor(() => expect(screen.queryByText("Feature work")).not.toBeInTheDocument());
+    expect(screen.queryByText("Bugfix")).not.toBeInTheDocument();
+
+    const expandBtn = await screen.findByRole("button", { name: /展开 Kodex 的会话列表/ });
+    fireEvent.click(expandBtn);
+
+    await waitFor(() => expect(screen.getByText("Feature work")).toBeInTheDocument());
+    expect(screen.getByText("Bugfix")).toBeInTheDocument();
+  });
+
+  it("clicking the project name toggles collapse without activating the workspace", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "session-1", title: "Feature work" }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="session-1"
+        activeSessionTitle="Feature work"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Feature work")).toBeInTheDocument();
+
+    // Clicking the project name (the workspace node) collapses the session list
+    // and must NOT call workspaceSetActive (no auto-activate / first-session open).
+    fireEvent.click(screen.getByText("Kodex"));
+    await waitFor(() => expect(screen.queryByText("Feature work")).not.toBeInTheDocument());
+    expect(workspaceSetActive).not.toHaveBeenCalled();
+
+    // Clicking again expands.
+    fireEvent.click(screen.getByText("Kodex"));
+    await waitFor(() => expect(screen.getByText("Feature work")).toBeInTheDocument());
+    expect(workspaceSetActive).not.toHaveBeenCalled();
+  });
 });

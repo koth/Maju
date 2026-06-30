@@ -1,3 +1,4 @@
+import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WelcomeLauncher } from "./WelcomeLauncher";
@@ -111,9 +112,9 @@ function agentSnapshot(): AgentSettingsSnapshot {
     ],
     env_override: null,
     codex_acp: {
-      provider: "default",
-      selected_profile_id: "default",
-      profiles: [profile("codex", "default", true, true, false)],
+      provider: "byok",
+      selected_profile_id: "byok",
+      profiles: [profile("codex", "byok", true, false, false)],
       connection_mode: "managed",
       deepseek_key_configured: false,
       config_path: "C:\\Users\\yvonchen\\.kodex\\config.toml",
@@ -180,32 +181,62 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     vi.clearAllMocks();
   });
 
-  it("opens Codex BYOK settings when no provider is configured and no workspace can be opened", async () => {
+  it("boots straight into settings when no provider is configured", async () => {
     vi.mocked(workspaceGetRecent).mockResolvedValue([]);
     const onOpenSettings = vi.fn();
     render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
 
-    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
-    await waitFor(() => expect(settingsSelectAgent).toHaveBeenCalledWith("codex-acp"));
-    await waitFor(() => expect(settingsSelectAgentProviderProfile).toHaveBeenCalledWith("codex", "byok"));
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalled());
     await waitFor(() =>
       expect(onOpenSettings).toHaveBeenCalledWith({
         startupNotice: { kind: "codex_byok" },
         initialAgentTab: "codex-acp",
       }),
     );
+    // Must not auto-restore or auto-open before checking the provider.
+    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
+    expect(settingsSelectAgent).not.toHaveBeenCalled();
+    expect(settingsSelectAgentProviderProfile).not.toHaveBeenCalled();
     expect(workspaceOpen).not.toHaveBeenCalled();
   });
 
-  it("opens a recent workspace before loading agent settings", async () => {
+  it("boots into settings under React StrictMode double-invoke", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([]);
+    const onOpenSettings = vi.fn();
+    render(
+      <React.StrictMode>
+        <WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(onOpenSettings).toHaveBeenCalledWith({
+        startupNotice: { kind: "codex_byok" },
+        initialAgentTab: "codex-acp",
+      }),
+    );
+    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
+    expect(workspaceOpen).not.toHaveBeenCalled();
+  });
+
+  it("checks the provider before auto-opening a recent workspace", async () => {
+    const snapshot = agentSnapshot();
+    snapshot.codex_acp.selected_profile_id = "timiai";
+    snapshot.codex_acp.profiles = [
+      profile("codex", "default", false, true, false),
+      profile("codex", "timiai", true, true, true),
+    ];
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
     const onOpenSettings = vi.fn();
     const onWorkspaceOpened = vi.fn();
     render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
 
+    // Provider readiness is checked before auto-restore / auto-open.
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalled());
     await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
     await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
     await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
-    expect(settingsGetAgentSnapshot).not.toHaveBeenCalled();
     expect(settingsSelectAgent).not.toHaveBeenCalled();
     expect(onOpenSettings).not.toHaveBeenCalled();
   });
@@ -231,7 +262,7 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     expect(onOpenSettings).not.toHaveBeenCalled();
   });
 
-  it("auto-opens when CodeBuddy is installed", async () => {
+  it("boots into settings when only CodeBuddy binary is installed but no provider configured", async () => {
     const snapshot = agentSnapshot();
     snapshot.agents.push({
       id: "codebuddy",
@@ -243,14 +274,18 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     });
     vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
     const onOpenSettings = vi.fn();
-    const onWorkspaceOpened = vi.fn();
 
-    render(<WelcomeLauncher onWorkspaceOpened={onWorkspaceOpened} onOpenSettings={onOpenSettings} />);
+    render(<WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={onOpenSettings} />);
 
-    await waitFor(() => expect(workspaceRestoreOpen).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceOpen).toHaveBeenCalledWith("D:\\work\\kodex"));
-    await waitFor(() => expect(onWorkspaceOpened).toHaveBeenCalled());
-    expect(onOpenSettings).not.toHaveBeenCalled();
+    await waitFor(() => expect(settingsGetAgentSnapshot).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(onOpenSettings).toHaveBeenCalledWith({
+        startupNotice: { kind: "codex_byok" },
+        initialAgentTab: "codex-acp",
+      }),
+    );
+    expect(workspaceRestoreOpen).not.toHaveBeenCalled();
+    expect(workspaceOpen).not.toHaveBeenCalled();
   });
 
   it("auto-opens an internal workspace when BYOK is configured", async () => {
@@ -277,6 +312,7 @@ describe("WelcomeLauncher BYOK onboarding", () => {
   it("opens a guided remote Linux workspace flow from a saved machine", async () => {
     vi.mocked(workspaceGetRecent).mockResolvedValue([]);
     const snapshot = agentSnapshot();
+    snapshot.codex_acp.selected_profile_id = "timiai";
     snapshot.codex_acp.profiles = [
       profile("codex", "default", false, true, false),
       profile("codex", "timiai", true, true, true),
@@ -316,6 +352,7 @@ describe("WelcomeLauncher BYOK onboarding", () => {
   it("shows an immediate waiting state while opening a remote workspace", async () => {
     vi.mocked(workspaceGetRecent).mockResolvedValue([]);
     const snapshot = agentSnapshot();
+    snapshot.codex_acp.selected_profile_id = "timiai";
     snapshot.codex_acp.profiles = [
       profile("codex", "default", false, true, false),
       profile("codex", "timiai", true, true, true),
@@ -347,6 +384,13 @@ describe("WelcomeLauncher BYOK onboarding", () => {
   });
 
   it("reopens recent remote workspaces through the password flow", async () => {
+    const snapshot = agentSnapshot();
+    snapshot.codex_acp.selected_profile_id = "timiai";
+    snapshot.codex_acp.profiles = [
+      profile("codex", "default", false, true, false),
+      profile("codex", "timiai", true, true, true),
+    ];
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue(snapshot);
     vi.mocked(workspaceGetRecent).mockResolvedValue([
       {
         path: "ssh://root@devbox:36000/srv/project",

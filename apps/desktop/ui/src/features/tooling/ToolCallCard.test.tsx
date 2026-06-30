@@ -781,6 +781,11 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
       { command: 'grep -n "^## " docs/UNREAL_SETUP.md', title: "docs/UNREAL_SETUP.md" },
       { command: "rg --files apps/desktop/ui", title: "apps/desktop/ui" },
       { command: "sed -n '155,265p' docs/UNREAL_SETUP.md", title: "docs/UNREAL_SETUP.md" },
+      {
+        command:
+          'rg "session_send_prompt|sendPrompt" apps/desktop/ui/src/lib/tauri.ts -n -A 5',
+        title: "apps/desktop/ui/src/lib/tauri.ts",
+      },
     ];
 
     for (const testCase of cases) {

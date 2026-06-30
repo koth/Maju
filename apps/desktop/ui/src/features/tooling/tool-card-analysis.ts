@@ -511,13 +511,14 @@ export function extractExplorationCommandTarget(command: string): string | null 
   for (let i = 1; i < tokens.length - 1; i += 1) {
     const lower = tokens[i].toLowerCase();
     if (lower === "-path" || lower === "-literalpath") {
-      return tokens[i + 1];
+      const value = tokens[i + 1];
+      return value && looksLikePath(value) ? value : null;
     }
   }
 
   if (explorationCommandPrefersLastPositionalTarget(commandName)) {
     const target = lastPositionalCommandToken(tokens);
-    if (target) return target;
+    if (target && looksLikePath(target)) return target;
   }
 
   for (let i = 1; i < tokens.length; i += 1) {
@@ -527,7 +528,7 @@ export function extractExplorationCommandTarget(command: string): string | null 
       i += powershellSwitchLooksValued(token) ? 1 : 0;
       continue;
     }
-    return token;
+    if (looksLikePath(token)) return token;
   }
 
   return null;

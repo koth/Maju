@@ -14,20 +14,25 @@ pub(super) struct ProviderEncodedModel {
     pub(super) model: String,
 }
 
-pub(super) fn normalize_proxy_provider(provider: &str) -> &'static str {
-    match provider.trim().to_ascii_lowercase().as_str() {
-        "timiai" | "timi" | "timi-ai" | "timi_ai" => "timiai",
-        "commandcode" | "command-code" | "command_code" => "commandcode",
-        "deepseek" => "deepseek",
-        "kimi" | "kimi_code" | "kimi-code" => "kimi_code",
-        "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo",
-        "custom" | "custom_provider" | "custom-provider" => "custom",
-        "byok" => "byok",
-        _ => "timiai",
+pub(super) fn normalize_proxy_provider(provider: &str) -> String {
+    let normalized = provider.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "timiai" | "timi" | "timi-ai" | "timi_ai" => "timiai".to_string(),
+        "commandcode" | "command-code" | "command_code" => "commandcode".to_string(),
+        "deepseek" => "deepseek".to_string(),
+        "kimi" | "kimi_code" | "kimi-code" => "kimi_code".to_string(),
+        "mimo" | "xiaomi_mimo" | "xiaomi-mimo" => "xiaomi_mimo".to_string(),
+        "custom" | "custom_provider" | "custom-provider" => "custom".to_string(),
+        "byok" => "byok".to_string(),
+        // Preserve custom_* / unknown provider identity instead of collapsing
+        // to timiai. Custom providers (custom_cline, ...) carry their own
+        // base_url / api_key in provider_configs / api_keys; folding them onto
+        // "timiai" would overwrite the real timiai config and misroute requests.
+        _ => normalized,
     }
 }
 
-pub(super) fn proxy_provider_from_path(path: &str) -> Option<&'static str> {
+pub(super) fn proxy_provider_from_path(path: &str) -> Option<String> {
     let (_, rest) = path.split_once("/providers/")?;
     let provider = rest.split('/').next().unwrap_or_default().trim();
     (!provider.is_empty()).then(|| normalize_proxy_provider(provider))
@@ -84,9 +89,10 @@ pub(super) fn proxy_provider_for_model(
     if let Some(provider) = mapped_proxy_provider_for_model(model, model_providers) {
         return provider;
     }
-    proxy_provider_for_model_heuristic(model)
-        .unwrap_or_else(|| normalize_proxy_provider(fallback_provider))
-        .to_string()
+    if let Some(provider) = proxy_provider_for_model_heuristic(model) {
+        return provider.to_string();
+    }
+    normalize_proxy_provider(fallback_provider)
 }
 
 pub(super) fn proxy_provider_for_model_heuristic(model: &str) -> Option<&'static str> {
@@ -116,7 +122,7 @@ pub(super) fn normalized_model_key(model: &str) -> String {
 }
 
 pub(super) fn upstream_chat_completions_url(provider: &str) -> &'static str {
-    match normalize_proxy_provider(provider) {
+    match normalize_proxy_provider(provider).as_str() {
         "timiai" => TIMIAI_CHAT_COMPLETIONS_URL,
         "commandcode" => COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL,
         "deepseek" => DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL,
@@ -158,7 +164,7 @@ pub(super) fn timiai_authorization_log_state(api_key: &str) -> &'static str {
 }
 
 pub(super) fn upstream_messages_url(provider: &str) -> &'static str {
-    match normalize_proxy_provider(provider) {
+    match normalize_proxy_provider(provider).as_str() {
         "timiai" => TIMIAI_MESSAGES_URL,
         "commandcode" => COMMANDCODE_UPSTREAM_MESSAGES_URL,
         "kimi_code" => KIMI_UPSTREAM_MESSAGES_URL,
@@ -172,7 +178,7 @@ pub(super) fn should_bridge_anthropic_messages_to_chat_completions(
     provider: &str,
     model: &str,
 ) -> bool {
-    match normalize_proxy_provider(provider) {
+    match normalize_proxy_provider(provider).as_str() {
         "kimi_code" => false,
         "commandcode" | "deepseek" | "xiaomi_mimo" => !is_claude_family_model(model),
         "timiai" => !is_claude_family_model(model),
@@ -181,7 +187,7 @@ pub(super) fn should_bridge_anthropic_messages_to_chat_completions(
 }
 
 pub(super) fn upstream_native_anthropic_model<'a>(provider: &str, model: &'a str) -> &'a str {
-    match (normalize_proxy_provider(provider), model) {
+    match (normalize_proxy_provider(provider).as_str(), model) {
         ("xiaomi_mimo", "MiMo-V2.5-Pro") => "mimo-v2.5-pro",
         ("xiaomi_mimo", "MiMo-V2.5") => "mimo-v2.5",
         _ => model,
@@ -196,7 +202,7 @@ pub(super) fn is_claude_family_model(model: &str) -> bool {
 }
 
 pub(super) fn upstream_chat_completion_model<'a>(provider: &str, model: &'a str) -> &'a str {
-    match (normalize_proxy_provider(provider), model) {
+    match (normalize_proxy_provider(provider).as_str(), model) {
         ("xiaomi_mimo", "MiMo-V2.5-Pro") => "mimo-v2.5-pro",
         ("xiaomi_mimo", "MiMo-V2.5") => "mimo-v2.5",
         _ => model,

@@ -48,7 +48,6 @@ import {
   settingsSelectClaudeFastModel,
   settingsSaveLspServer,
   settingsSaveRemoteProfile,
-  settingsSelectAgentProviderProfile,
   settingsSelectAgent,
   settingsSelectTheme,
   settingsSaveWebToolsProviderKey,
@@ -245,7 +244,6 @@ export function SettingsPage({
   const [probeMessages, setProbeMessages] = useState<Record<string, string>>(
     {},
   );
-  const [codexProfileId, setCodexProfileId] = useState("byok");
   const [byokProfileId, setByokProfileId] = useState("deepseek");
   const [byokProviderMenuOpen, setByokProviderMenuOpen] = useState(false);
   const [byokProfileInitialized, setByokProfileInitialized] = useState(false);
@@ -468,11 +466,6 @@ export function SettingsPage({
     }
   }, [initialAgentTab, snapshot?.settings.selected_agent]);
 
-  useEffect(() => {
-    if (snapshot?.codex_acp.selected_profile_id) {
-      setCodexProfileId(snapshot.codex_acp.selected_profile_id);
-    }
-  }, [snapshot?.codex_acp.selected_profile_id]);
 
   useEffect(() => {
     if (!snapshot || byokProfileInitialized) return;
@@ -1255,58 +1248,6 @@ export function SettingsPage({
     imageGenDraftApiKeyEnv,
     snapshot,
   ]);
-
-  const handleSelectCodexChannel = useCallback(
-    async (channel: "default" | "byok") => {
-      const byokProfiles = snapshot
-        ? selectableByokSourceProfiles(
-            snapshot.codex_acp.profiles,
-            byokProfileId,
-          )
-        : [];
-      const selectedByokProfileId =
-        byokProfiles.find((profile) => profile.id === byokProfileId)?.id ??
-        (codexProfileId !== "default" && codexProfileId !== "byok"
-          ? codexProfileId
-          : undefined) ??
-        byokProfiles.find((profile) => profile.configured)?.id ??
-        byokProfiles[0]?.id;
-      const nextProfileId = channel === "default" ? "default" : "byok";
-      if (snapshot?.codex_acp.selected_profile_id === nextProfileId) return;
-      setBusyCodexAcp(true);
-      setError(null);
-      setCodexAcpMessage(null);
-      setCodexAcpMessageTarget("channel");
-      try {
-        const nextSnapshot = await settingsSelectAgentProviderProfile(
-          "codex",
-          nextProfileId,
-          settingsRemoteProfileId,
-        );
-        setSnapshot(nextSnapshot);
-        setCodexProfileId(nextProfileId);
-        if (channel === "byok") {
-          setByokProfileId(selectedByokProfileId ?? byokProfileId);
-        }
-        setCodexAcpApiKey("");
-        setCodexAcpMessageTarget("channel");
-        setCodexAcpMessage(
-          `Codex 通道已切换到 ${channel === "default" ? "默认" : "BYOK"}`,
-        );
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusyCodexAcp(false);
-      }
-    },
-    [
-      byokProfileId,
-      codexProfileId,
-      settingsRemoteProfileId,
-      snapshot?.codex_acp.profiles,
-      snapshot?.codex_acp.selected_profile_id,
-    ],
-  );
 
   const updateLspDraft = useCallback(
     (languageId: string, patch: Partial<LspServerConfigInput>) => {
@@ -3102,7 +3043,7 @@ export function SettingsPage({
   };
 
   const startupNoticeCopy = visibleStartupNotice
-    ? startupNoticeCopyFor(visibleStartupNotice)
+    ? startupNoticeCopyFor(visibleStartupNotice, snapshot?.settings.selected_agent)
     : null;
 
   return (
@@ -3386,63 +3327,15 @@ export function SettingsPage({
 
                     {activeAgentTab === "codex-acp" && (
                       <>
+                                   "default"
                         <div className="settings-provider-config">
                           <div className="settings-provider-config-head">
                             <div>
-                              <span>Codex 通道</span>
-                              <p>选择 Codex 的默认通道。</p>
+                              <span>Codex 模型来源</span>
+                              <p>Codex 使用共享 BYOK 模型池，请在下方保存至少一个 API key。</p>
                             </div>
-                            <span className="settings-provider-active">
-                              当前：
-                              {snapshot.codex_acp.selected_profile_id ===
-                              "default"
-                                ? "默认"
-                                : "BYOK"}
-                            </span>
                           </div>
                           {renderAgentRuntime("codex-acp")}
-                          <div
-                            className="settings-provider-options"
-                            role="radiogroup"
-                            aria-label="Codex channel"
-                          >
-                            {(["default", "byok"] as const).map((channel) => {
-                              const selected =
-                                channel === "default"
-                                  ? snapshot.codex_acp.selected_profile_id ===
-                                    "default"
-                                  : snapshot.codex_acp.selected_profile_id !==
-                                    "default";
-                              return (
-                                <button
-                                  key={channel}
-                                  type="button"
-                                  className={`settings-provider-option ${selected ? "is-selected" : ""}`}
-                                  onClick={() =>
-                                    handleSelectCodexChannel(channel)
-                                  }
-                                  disabled={busyCodexAcp}
-                                  aria-pressed={selected}
-                                >
-                                  <span className="settings-provider-option-main">
-                                    <span>
-                                      {channel === "default" ? "默认" : "BYOK"}
-                                    </span>
-                                    <span>
-                                      {channel === "default"
-                                        ? "本机默认配置"
-                                        : "自带 API key"}
-                                    </span>
-                                  </span>
-                                  <span
-                                    className={`settings-row-badge ${selected ? "is-installed" : "is-missing"}`}
-                                  >
-                                    {selected ? "当前" : "可选"}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
                           {codexAcpMessageTarget === "channel" &&
                             codexAcpMessage && (
                               <div className="settings-provider-config-message">
@@ -3666,13 +3559,42 @@ export function SettingsPage({
   );
 }
 
-function startupNoticeCopyFor(notice: SettingsStartupNotice) {
+function startupNoticeCopyFor(
+  notice: SettingsStartupNotice,
+  selectedAgent?: AgentCliId | null,
+) {
   const detail = notice.message ? ` ${notice.message}` : "";
+  const { title, message } = startupNoticeCopyForAgent(selectedAgent);
   return {
-    title: "模型来源还没设置好",
-    message: `还没有可用于新建会话的 provider。请保存 BYOK API key，或安装并配置 CodeBuddy。${detail}`,
+    title,
+    message: `${message}${detail}`,
     action: "去设置",
   };
+}
+
+function startupNoticeCopyForAgent(
+  selectedAgent?: AgentCliId | null,
+): { title: string; message: string } {
+  switch (selectedAgent) {
+    case "codex-acp":
+      return {
+        title: "Codex 模型来源还没设置好",
+        message:
+          "还没有可用于新建 Codex 会话的模型来源。请在下方 BYOK 模型池里保存至少一个 API key。",
+      };
+    case "claude-agent-acp":
+      return {
+        title: "Claude 模型来源还没设置好",
+        message:
+          "还没有可用于新建 Claude 会话的模型来源。请在下方 BYOK 模型池里保存至少一个 API key。",
+      };
+    default:
+      return {
+        title: "模型来源还没设置好",
+        message:
+          "还没有可用于新建会话的 provider。请保存 BYOK API key，或安装并配置对应的智能体。",
+      };
+  }
 }
 
 function usageGroupLabel(group: UsageSummaryGroupBy): string {

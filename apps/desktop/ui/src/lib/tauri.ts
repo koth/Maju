@@ -557,14 +557,6 @@ export async function settingsSelectCodexAcpProvider(
   });
 }
 
-export async function settingsSelectCodexDefaultMode(
-  remoteProfileId?: string | null,
-): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_select_codex_default_mode", {
-    remoteProfileId: remoteProfileId ?? null,
-  });
-}
-
 export async function settingsSelectAgentProviderProfile(
   family: AgentProviderFamily,
   profileId: string,

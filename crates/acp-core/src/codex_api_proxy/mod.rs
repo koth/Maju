@@ -302,8 +302,7 @@ fn parse_model_provider_map(
             .get("provider")
             .and_then(Value::as_str)
             .map(normalize_proxy_provider)
-            .unwrap_or("timiai")
-            .to_string();
+            .unwrap_or_else(|| "timiai".to_string());
         if let (Some(base_url), Some(protocol)) = (
             entry
                 .get("base_url")
@@ -322,20 +321,23 @@ fn parse_model_provider_map(
                     protocol,
                 });
         }
-        for field in ["model", "display_name"] {
-            if let Some(model) = entry
-                .get(field)
-                .and_then(Value::as_str)
-                .map(normalized_model_key)
-                .filter(|model| !model.is_empty())
-            {
-                match model_providers.entry(model) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(provider.clone());
-                    }
-                    Entry::Occupied(_) => {
-                        duplicate_count += 1;
-                    }
+        // Only the fully-qualified `model` slug (which embeds the source
+        // provider, e.g. kodex-provider/byok/custom_cline/glm-5.2) is used as a
+        // routing key. The bare `display_name` (e.g. "glm-5.2") is intentionally
+        // NOT indexed: two different providers can share the same model name,
+        // and indexing it would let one provider's entry shadow another's.
+        if let Some(model) = entry
+            .get("model")
+            .and_then(Value::as_str)
+            .map(normalized_model_key)
+            .filter(|model| !model.is_empty())
+        {
+            match model_providers.entry(model) {
+                Entry::Vacant(entry) => {
+                    entry.insert(provider.clone());
+                }
+                Entry::Occupied(_) => {
+                    duplicate_count += 1;
                 }
             }
         }
@@ -504,7 +506,7 @@ async fn proxy_codex_api_request(
         .map(|model| model.model.as_str())
         .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
-        .map(str::to_string)
+        .clone()
         .or_else(|| mapped_proxy_provider_for_model(&requested_model, &config.model_providers))
         .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
         .or_else(|| mapped_proxy_provider_for_model(routing_model, &config.model_providers))
@@ -561,7 +563,7 @@ async fn proxy_codex_api_request(
         )
         .await;
     }
-    match normalize_proxy_provider(&provider) {
+    match normalize_proxy_provider(&provider).as_str() {
         "commandcode" => log_chat_payload_summary("commandcode_request", &chat_payload),
         "deepseek" => log_chat_payload_summary("deepseek_request", &chat_payload),
         "xiaomi_mimo" => log_chat_payload_summary("xiaomi_request", &chat_payload),
@@ -798,7 +800,7 @@ async fn proxy_chat_completions_codex_responses_request(
 async fn proxy_native_codex_responses_compact_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
-    explicit_provider: Option<&'static str>,
+    explicit_provider: Option<String>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
@@ -813,8 +815,8 @@ async fn proxy_native_codex_responses_compact_request(
             provider_configs: BTreeMap::new(),
         });
     let provider = explicit_provider
-        .map(str::to_string)
-        .unwrap_or_else(|| normalize_proxy_provider(&config.provider).to_string());
+        .clone()
+        .unwrap_or_else(|| normalize_proxy_provider(&config.provider));
     if provider != "timiai" {
         return Ok(response_with_status(
             StatusCode::NOT_FOUND,
@@ -862,7 +864,7 @@ async fn proxy_native_codex_responses_compact_request(
 async fn proxy_anthropic_messages_request(
     request: Request<Incoming>,
     config: Arc<RwLock<CodexApiProxyConfig>>,
-    explicit_provider: Option<&'static str>,
+    explicit_provider: Option<String>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let body = request.into_body().collect().await?.to_bytes();
     let config = config
@@ -888,7 +890,7 @@ async fn proxy_anthropic_messages_request(
         .map(|model| model.model.as_str())
         .unwrap_or(requested_model.as_str());
     let provider = explicit_provider
-        .map(str::to_string)
+        .clone()
         .or_else(|| mapped_proxy_provider_for_model(&requested_model, &config.model_providers))
         .or_else(|| provider_model.as_ref().map(|model| model.provider.clone()))
         .or_else(|| mapped_proxy_provider_for_model(routing_model, &config.model_providers))
@@ -933,7 +935,7 @@ async fn proxy_anthropic_messages_request(
         )
         .await;
     }
-    match normalize_proxy_provider(&provider) {
+    match normalize_proxy_provider(&provider).as_str() {
         "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
             proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id).await
         }

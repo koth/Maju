@@ -1069,6 +1069,25 @@
   color: var(--text-strong);
 }
 
+.sl-workspace-folder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.sl-workspace-folder:hover {
+  color: var(--text-strong);
+  background: var(--interactive-hover);
+}
+
 .sl-workspace-node:focus-visible,
 .sl-workspace-edit:focus-visible,
 .sl-workspace-archive:focus-visible,

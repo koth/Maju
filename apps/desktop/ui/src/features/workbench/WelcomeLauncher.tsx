@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { AgentSettingsSnapshot, RecentWorkspace, UiSnapshot } from "../../types";
 import {
   settingsGetAgentSnapshot,
@@ -37,12 +37,18 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
   const [remoteExpanded, setRemoteExpanded] = useState(false);
   const [remoteInitial, setRemoteInitial] = useState<RecentWorkspace["remote"] | null>(null);
 
-  const [autoOpened, setAutoOpened] = useState(false);
+  const bootStartedRef = useRef(false);
 
   useEffect(() => {
     let disposed = false;
 
     const loadInitialWorkspaces = async () => {
+      // Guard with a ref so React 18 StrictMode's double-invoke in dev does not
+      // run the boot flow twice (the first run's async work would otherwise be
+      // discarded by `disposed`, silently skipping the settings redirect).
+      if (bootStartedRef.current) return;
+      bootStartedRef.current = true;
+
       try {
         const loadStart = performance.now();
         void startupPerfMark("welcome/load_initial_start", `performance_now=${loadStart.toFixed(1)}`);
@@ -58,9 +64,21 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
           }
         }).catch(() => undefined);
 
-        if (autoOpened) return;
-        setAutoOpened(true);
-        setLoading(true);
+        if (!disposed) setLoading(true);
+
+        // Check provider readiness before any auto-restore / auto-open so that
+        // an unconfigured app boots straight into settings instead of opening a
+        // workspace it cannot run an agent against. Treat a missing snapshot as
+        // "not ready" too, so a failed settings read still boots into settings.
+        const bootSettings = await settingsGetAgentSnapshot().catch(() => null);
+        if (!disposed) setAgentSettings(bootSettings);
+        if (!bootSettings || !selectedAgentReady(bootSettings)) {
+          if (!disposed) setLoading(false);
+          // onOpenSettings is a parent callback; safe to invoke even if this
+          // component is about to unmount (it flips parent settingsOpen state).
+          onOpenSettings(settingsOpenOptionsForCurrentState(bootSettings));
+          return;
+        }
 
         const restoreStart = performance.now();
         void startupPerfMark("welcome/restore_open_start", "");
@@ -95,29 +113,10 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
           return;
         }
 
-        setLoading(false);
-        const settings = await settingsGetAgentSnapshot().catch(() => null);
-        if (disposed) return;
-        setAgentSettings(settings);
-        const requiredSetup = settings ? setupRecommendationFor(settings) : null;
-        if (settings && requiredSetup) {
-          setSetupBusy(true);
-          try {
-            await settingsSelectAgent("codex-acp");
-            const nextSnapshot = await settingsSelectAgentProviderProfile("codex", "byok");
-            if (disposed) return;
-            setAgentSettings(nextSnapshot);
-            onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, nextSnapshot));
-          } catch (_error) {
-            if (!disposed) {
-              onOpenSettings(settingsOpenOptionsForSetup(requiredSetup, settings));
-            }
-          } finally {
-            if (!disposed) {
-              setSetupBusy(false);
-            }
-          }
-        }
+        // Provider readiness was already checked above (bootSettings). Reaching
+        // here means no workspace could be auto-restored/opened, so just stop on
+        // the welcome screen with the open actions guarded by the readiness state.
+        if (!disposed) setLoading(false);
       } catch (e) {
         if (!disposed) {
           const message = String(e);
@@ -152,7 +151,20 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     }
   }, [onOpenSettings]);
 
+  const ensureProviderReady = useCallback(async (): Promise<boolean> => {
+    const snapshot = agentSettings ?? (await settingsGetAgentSnapshot().catch(() => null));
+    if (snapshot && !agentSettings) {
+      setAgentSettings(snapshot);
+    }
+    if (snapshot && selectedAgentReady(snapshot)) {
+      return true;
+    }
+    onOpenSettings(settingsOpenOptionsForCurrentState(snapshot));
+    return false;
+  }, [agentSettings, onOpenSettings]);
+
   const handleOpenFolder = useCallback(async () => {
+    if (!(await ensureProviderReady())) return;
     try {
       const selected = await open({ directory: true, multiple: false });
       if (!selected) return;
@@ -168,10 +180,11 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         onOpenSettings(settingsOpenOptionsForCurrentState(agentSettings));
       }
     }
-  }, [agentSettings, onOpenSettings, onWorkspaceOpened]);
+  }, [agentSettings, ensureProviderReady, onOpenSettings, onWorkspaceOpened]);
 
   const handleOpenRecent = useCallback(
     async (path: string) => {
+      if (!(await ensureProviderReady())) return;
       try {
         setLoading(true);
         setError(null);
@@ -193,7 +206,7 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         }
       }
     },
-    [agentSettings, onOpenSettings, onWorkspaceOpened, recents]
+    [agentSettings, ensureProviderReady, onOpenSettings, onWorkspaceOpened, recents]
   );
 
   const handleRemoteWorkspaceOpened = useCallback((snapshot: UiSnapshot) => {
@@ -202,10 +215,11 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     onWorkspaceOpened(snapshot);
   }, [onWorkspaceOpened]);
 
-  const handleOpenRemotePanel = useCallback(() => {
+  const handleOpenRemotePanel = useCallback(async () => {
+    if (!(await ensureProviderReady())) return;
     setRemoteInitial(null);
     setRemoteExpanded((expanded) => !expanded);
-  }, []);
+  }, [ensureProviderReady]);
 
   const handleCancelRemotePanel = useCallback(() => {
     setRemoteExpanded(false);
@@ -228,6 +242,9 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
   };
   const setupRecommendation = agentSettings ? setupRecommendationFor(agentSettings) : null;
   const showByokOnboarding = setupRecommendation === "codex_byok";
+  const selectedAgent = agentSettings?.settings.selected_agent ?? null;
+  const byokOnboardingLabel =
+    selectedAgent === "claude-agent-acp" ? "Claude" : "Codex";
   const titlebarClassName = `welcome-titlebar ${isMacOS() ? "is-macos" : ""}`;
 
   return (
@@ -249,17 +266,17 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
         </div>
 
         {showByokOnboarding && (
-          <section className="welcome-byok is-required" aria-label="Codex BYOK 引导">
+          <section className="welcome-byok is-required" aria-label={`${byokOnboardingLabel} BYOK 引导`}>
             <div className="welcome-byok-copy">
               <span className="welcome-byok-kicker">开始前需要完成</span>
-              <h1>初始化 Codex BYOK</h1>
+              <h1>初始化 {byokOnboardingLabel} BYOK</h1>
               <p>
-                还没有可用的模型来源。配置 Codex BYOK 后即可打开本地或远程工作区。
+                还没有可用的模型来源。配置 {byokOnboardingLabel} BYOK 后即可打开本地或远程工作区。
               </p>
             </div>
             <div className="welcome-byok-actions">
               <button type="button" className="welcome-open-btn" disabled={setupBusy} onClick={handleUseCodexByok}>
-                {setupBusy ? "处理中..." : "设置 Codex BYOK"}
+                {setupBusy ? "处理中..." : `设置 ${byokOnboardingLabel} BYOK`}
               </button>
               <button type="button" className="welcome-secondary-btn" onClick={() => onOpenSettings(settingsOpenOptionsForSetup("codex_byok", agentSettings ?? undefined))}>
                 打开设置
@@ -277,7 +294,8 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
             <button
               className="welcome-primary-action"
               onClick={handleOpenFolder}
-              disabled={loading}
+              disabled={loading || showByokOnboarding}
+              title={showByokOnboarding ? "请先在设置中配置模型来源" : undefined}
             >
               <span className="welcome-action-icon"><LocalFolderIcon /></span>
               <span>{loading ? "正在打开..." : "打开本地文件夹"}</span>
@@ -287,6 +305,8 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
               className={`welcome-remote-entry ${remoteExpanded ? "is-active" : ""}`}
               onClick={handleOpenRemotePanel}
               aria-expanded={remoteExpanded}
+              disabled={showByokOnboarding}
+              title={showByokOnboarding ? "请先在设置中配置模型来源" : undefined}
             >
               <span className="welcome-action-icon"><RemoteHostIcon /></span>
               <span>打开远程目录</span>
@@ -319,7 +339,8 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
                   <button
                     className="welcome-recent-btn"
                     onClick={() => handleOpenRecent(r.path)}
-                    disabled={!r.exists || loading}
+                    disabled={!r.exists || loading || showByokOnboarding}
+                    title={showByokOnboarding ? "请先在设置中配置模型来源" : undefined}
                   >
                     <span className="recent-name">{folderName(r.path)}</span>
                     <span className="recent-path">{r.remote ? remoteDisplayPath(r.remote) : r.path}</span>
@@ -357,7 +378,7 @@ function isAgentSetupError(message: string) {
 }
 
 function setupRecommendationFor(settings: AgentSettingsSnapshot): InitialSetupKind | null {
-  return hasAnyConfiguredProvider(settings) ? null : "codex_byok";
+  return selectedAgentReady(settings) ? null : "codex_byok";
 }
 
 function settingsOpenOptionsForSetup(
@@ -378,12 +399,29 @@ function settingsOpenOptionsForCurrentState(
   return recommendation ? settingsOpenOptionsForSetup(recommendation, settings) : undefined;
 }
 
-function hasAnyConfiguredProvider(settings: AgentSettingsSnapshot) {
-  const codebuddyInstalled = settings.agents.some((agent) => agent.id === "codebuddy" && agent.installed);
-  if (codebuddyInstalled) return true;
-  return [...settings.codex_acp.profiles, ...settings.claude.profiles].some(
-    (profile) => profile.requires_credential && profile.configured,
-  );
+// Gate on the *currently selected* agent's channel being configured, matching
+// the backend codex_agent_configured_for_settings / claude_agent_configured
+// _for_settings semantics. Default agent is codex-acp, so an unconfigured Codex
+// BYOK pool (no saved key) boots into settings. A globally-installed CodeBuddy
+// binary on PATH does NOT count — it lives outside ~/.kodex, so a clean
+// environment would otherwise still bypass the gate.
+function selectedAgentReady(settings: AgentSettingsSnapshot): boolean {
+  switch (settings.settings.selected_agent) {
+    case "codex-acp": {
+      const profile = settings.codex_acp.profiles.find(
+        (item) => item.id === settings.codex_acp.selected_profile_id,
+      );
+      return !!profile?.configured;
+    }
+    case "claude-agent-acp": {
+      const profile = settings.claude.profiles.find(
+        (item) => item.id === settings.claude.selected_profile_id,
+      );
+      return !!profile?.configured;
+    }
+    default:
+      return false;
+  }
 }
 
 function LocalFolderIcon() {

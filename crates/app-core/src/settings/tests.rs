@@ -622,28 +622,10 @@ fn codex_acp_command_includes_codex_home_env_when_paths_are_known() {
 }
 
 #[test]
-fn codex_default_mode_uses_user_codex_home_and_no_agent_env() {
-    let dir = tempdir().unwrap();
-    let paths = AppPaths::from_root(dir.path().join(".kodex"));
-
-    select_codex_default_mode(&paths).unwrap();
-    let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
-    let env = agent_env_for_command(&command, &paths);
-    let status = codex_acp_settings_status(&paths);
-
-    assert!(!command.starts_with("CODEX_HOME="));
-    assert!(command.contains("codex-acp"));
-    assert!(env.is_empty());
-    assert_eq!(status.provider, "default");
-    assert_eq!(status.connection_mode, CodexConnectionMode::Default);
-}
-
-#[test]
 fn saving_codex_provider_key_switches_back_to_managed_mode() {
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
-    select_codex_default_mode(&paths).unwrap();
     save_codex_acp_provider_key(&paths, DEEPSEEK_PROVIDER_ID, "deepseek-secret").unwrap();
 
     let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
@@ -1158,14 +1140,9 @@ fn codex_provider_profiles_generate_expected_config() {
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
-    select_agent_provider_profile(
-        &paths,
-        AgentProviderFamily::Codex,
-        CODEX_DEFAULT_PROVIDER_ID,
-    )
-    .unwrap();
+    select_agent_provider_profile(&paths, AgentProviderFamily::Codex, BYOK_PROVIDER_ID).unwrap();
     let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
-    assert!(!command.starts_with("CODEX_HOME="));
+    assert!(command.starts_with("CODEX_HOME="));
 
     for (provider, env_key, _model) in [
         (

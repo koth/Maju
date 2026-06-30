@@ -132,7 +132,6 @@ fn main() {
             commands::settings::settings_validate_remote_profile,
             commands::settings::settings_save_codex_acp_provider_key,
             commands::settings::settings_select_codex_acp_provider,
-            commands::settings::settings_select_codex_default_mode,
             commands::settings::settings_select_agent_provider_profile,
             commands::settings::settings_save_agent_provider_secret,
             commands::settings::settings_clear_provider_configuration,

@@ -394,18 +394,6 @@ fn custom_provider_env_key(provider: &str) -> String {
 const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
     ProviderProfileDefinition {
         family: AgentProviderFamily::Codex,
-        id: CODEX_DEFAULT_PROVIDER_ID,
-        label: "默认",
-        proxy_kind: AgentProviderProxyKind::CodexDefault,
-        base_url: None,
-        default_model: None,
-        models: &[],
-        credential_label: None,
-        requires_credential: false,
-        help_text: "不设置 CODEX_HOME，使用用户自己的 Codex 配置。",
-    },
-    ProviderProfileDefinition {
-        family: AgentProviderFamily::Codex,
         id: TIMIAI_PROVIDER_ID,
         label: TIMIAI_PROVIDER_NAME,
         proxy_kind: AgentProviderProxyKind::Responses,
@@ -687,9 +675,9 @@ fn migrate_app_settings(paths: &AppPaths, settings: &mut AppSettings) -> bool {
 }
 
 fn infer_legacy_codex_provider_profile_id(paths: &AppPaths, settings: &AppSettings) -> String {
-    if settings.codex_connection_mode == CodexConnectionMode::Default {
-        return CODEX_DEFAULT_PROVIDER_ID.to_string();
-    }
+    // The "default" channel has been removed; legacy default users fall back to
+    // BYOK so they are gated into settings to pick an explicit provider.
+    let _ = settings;
     normalize_codex_provider(&codex_active_provider(&codex_config_path(paths)))
         .unwrap_or_else(|_| BYOK_PROVIDER_ID.to_string())
 }
@@ -1492,9 +1480,6 @@ fn profile_definition(
         .find(|definition| definition.id == profile_id)
 }
 
-pub fn select_codex_default_mode(paths: &AppPaths) -> Result<AgentSettingsSnapshot> {
-    select_agent_provider_profile(paths, AgentProviderFamily::Codex, CODEX_DEFAULT_PROVIDER_ID)
-}
 
 pub fn select_agent_provider_profile(
     paths: &AppPaths,
@@ -1512,12 +1497,8 @@ pub fn select_agent_provider_profile(
     match family {
         AgentProviderFamily::Codex => {
             settings.selected_codex_provider_profile_id = Some(definition.id.to_string());
-            settings.codex_connection_mode =
-                if definition.proxy_kind == AgentProviderProxyKind::CodexDefault {
-                    CodexConnectionMode::Default
-                } else {
-                    CodexConnectionMode::Managed
-                };
+            // The "default" channel has been removed; always run in managed mode.
+            settings.codex_connection_mode = CodexConnectionMode::Managed;
             if definition.id == BYOK_PROVIDER_ID {
                 write_codex_byok_channel_config(paths)?;
             }
@@ -1900,13 +1881,9 @@ fn save_codex_managed_mode_with_profile(paths: &AppPaths, profile_id: &str) -> R
 
 pub fn refresh_codex_acp_config_for_launch(paths: &AppPaths) -> Result<()> {
     let settings = load_app_settings(paths);
-    if settings.codex_connection_mode == CodexConnectionMode::Default {
-        return Ok(());
-    }
 
     let selected_profile_id = selected_codex_provider_profile_id(paths, &settings);
     match selected_profile_id.as_str() {
-        CODEX_DEFAULT_PROVIDER_ID => Ok(()),
         BYOK_PROVIDER_ID => write_codex_byok_channel_config(paths),
         provider => {
             let Some(api_key) = codex_provider_key(&codex_config_path(paths), provider)
