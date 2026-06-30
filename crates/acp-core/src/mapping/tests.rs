@@ -394,22 +394,31 @@ fn kodex_context_compaction_started_meta_emits_structured_event() {
 }
 
 #[test]
-fn usage_update_maps_context_and_kodex_metadata() {
+fn usage_update_maps_full_breakdown_into_session_total_and_turn_delta() {
     let (tx, rx) = mpsc::channel();
     let notification = SessionNotification::new(
         "session-1",
-        SessionUpdate::UsageUpdate(UsageUpdate::new(1200, 128000).meta(
+        SessionUpdate::UsageUpdate(UsageUpdate::new(1700, 200_000).meta(
             serde_json::Map::from_iter([(
                 "kodex.ai/usage".to_string(),
                 serde_json::json!({
-                    "scope": "turn_delta",
+                    "scope": "session_total",
                     "model": "gpt-5.1",
                     "provider": "openai",
                     "agent_cli": "codex-acp",
                     "input_tokens": 900,
                     "output_tokens": 200,
+                    "cache_read_tokens": 400,
+                    "cache_write_tokens": 50,
                     "reasoning_tokens": 100,
-                    "total_tokens": 1200
+                    "total_tokens": 1650,
+                    "turn_delta": {
+                        "input_tokens": 100,
+                        "output_tokens": 30,
+                        "cache_read_tokens": 40,
+                        "reasoning_tokens": 10,
+                        "total_tokens": 180
+                    }
                 }),
             )]),
         )),
@@ -417,23 +426,171 @@ fn usage_update_maps_context_and_kodex_metadata() {
 
     emit_notification(&tx, "", notification).unwrap();
 
-    match rx.try_recv().unwrap() {
-        ClientEvent::UsageUpdated { usage } => {
-            assert_eq!(usage.scope, UsageEventScope::TurnDelta);
-            assert_eq!(usage.model.as_deref(), Some("gpt-5.1"));
-            assert_eq!(usage.provider.as_deref(), Some("openai"));
-            assert_eq!(usage.agent_cli.as_deref(), Some("codex-acp"));
-            assert_eq!(usage.context.used_tokens, Some(1200));
-            assert_eq!(usage.context.window_tokens, Some(128000));
-            assert_eq!(usage.tokens.input_tokens, Some(900));
-            assert_eq!(usage.tokens.output_tokens, Some(200));
-            assert_eq!(usage.tokens.reasoning_tokens, Some(100));
-            assert_eq!(usage.tokens.total_tokens, Some(1200));
-            assert!(usage.raw_json.as_deref().unwrap().contains("turn_delta"));
-        }
+    // First event: SessionTotal populated from top-level fields.
+    let session_event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
         other => panic!("unexpected event: {other:?}"),
-    }
+    };
+    assert_eq!(session_event.scope, UsageEventScope::SessionTotal);
+    assert_eq!(session_event.model.as_deref(), Some("gpt-5.1"));
+    assert_eq!(session_event.provider.as_deref(), Some("openai"));
+    assert_eq!(session_event.agent_cli.as_deref(), Some("codex-acp"));
+    assert_eq!(session_event.context.used_tokens, Some(1700));
+    assert_eq!(session_event.context.window_tokens, Some(200_000));
+    assert_eq!(session_event.tokens.input_tokens, Some(900));
+    assert_eq!(session_event.tokens.output_tokens, Some(200));
+    assert_eq!(session_event.tokens.cache_read_tokens, Some(400));
+    assert_eq!(session_event.tokens.cache_write_tokens, Some(50));
+    assert_eq!(session_event.tokens.reasoning_tokens, Some(100));
+    assert_eq!(session_event.tokens.total_tokens, Some(1650));
+
+    // Second event: TurnDelta populated from the nested object.
+    let turn_event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(turn_event.scope, UsageEventScope::TurnDelta);
+    assert_eq!(turn_event.context.used_tokens, Some(1700));
+    assert_eq!(turn_event.context.window_tokens, Some(200_000));
+    assert_eq!(turn_event.tokens.input_tokens, Some(100));
+    assert_eq!(turn_event.tokens.output_tokens, Some(30));
+    assert_eq!(turn_event.tokens.cache_read_tokens, Some(40));
+    assert_eq!(turn_event.tokens.reasoning_tokens, Some(10));
+    assert_eq!(turn_event.tokens.total_tokens, Some(180));
+
+    // No further events.
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn usage_update_without_turn_delta_emits_only_session_total() {
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(UsageUpdate::new(500, 100_000).meta(
+            serde_json::Map::from_iter([(
+                "kodex.ai/usage".to_string(),
+                serde_json::json!({
+                    "scope": "session_total",
+                    "input_tokens": 400,
+                    "output_tokens": 100,
+                    "total_tokens": 500
+                }),
+            )]),
+        )),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    let event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(event.scope, UsageEventScope::SessionTotal);
+    assert_eq!(event.tokens.input_tokens, Some(400));
+    assert_eq!(event.tokens.output_tokens, Some(100));
+    assert_eq!(event.tokens.total_tokens, Some(500));
+    assert!(rx.try_recv().is_err(), "no TurnDelta event expected");
+}
+
+#[test]
+fn usage_update_skips_zero_turn_delta() {
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(UsageUpdate::new(100, 10_000).meta(
+            serde_json::Map::from_iter([(
+                "kodex.ai/usage".to_string(),
+                serde_json::json!({
+                    "scope": "session_total",
+                    "input_tokens": 80,
+                    "output_tokens": 20,
+                    "total_tokens": 100,
+                    "turn_delta": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0
+                    }
+                }),
+            )]),
+        )),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    let event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(event.scope, UsageEventScope::SessionTotal);
+    assert!(rx.try_recv().is_err(), "zero turn_delta must be skipped");
+}
+
+#[test]
+fn usage_update_without_metadata_emits_context_only_event() {
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(UsageUpdate::new(64, 8_000)),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    let event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(event.scope, UsageEventScope::ContextSnapshot);
+    assert_eq!(event.context.used_tokens, Some(64));
+    assert_eq!(event.context.window_tokens, Some(8_000));
+    assert!(event.tokens.input_tokens.is_none());
+    assert!(event.tokens.output_tokens.is_none());
+    assert!(event.tokens.total_tokens.is_none());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn usage_update_maps_codex_field_aliases() {
+    // Codex core uses `cached_input_tokens` and `reasoning_output_tokens`; the
+    // mapping layer should resolve them into the Kodex slots.
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::UsageUpdate(UsageUpdate::new(300, 50_000).meta(
+            serde_json::Map::from_iter([(
+                "kodex.ai/usage".to_string(),
+                serde_json::json!({
+                    "scope": "session_total",
+                    "input_tokens": 200,
+                    "cached_input_tokens": 80,
+                    "output_tokens": 100,
+                    "reasoning_output_tokens": 20,
+                    "total_tokens": 300
+                }),
+            )]),
+        )),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    let event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    assert_eq!(event.scope, UsageEventScope::SessionTotal);
+    assert_eq!(event.tokens.input_tokens, Some(200));
+    assert_eq!(
+        event.tokens.cache_read_tokens,
+        Some(80),
+        "cached_input_tokens must resolve to cache_read_tokens"
+    );
+    assert_eq!(event.tokens.output_tokens, Some(100));
+    assert_eq!(
+        event.tokens.reasoning_tokens,
+        Some(20),
+        "reasoning_output_tokens must resolve to reasoning_tokens"
+    );
+    assert_eq!(event.tokens.total_tokens, Some(300));
 }
 #[test]
 fn usage_update_maps_context_with_malformed_metadata_and_ignores_cost() {
@@ -458,21 +615,25 @@ fn usage_update_maps_context_with_malformed_metadata_and_ignores_cost() {
 
     emit_notification(&tx, "", notification).unwrap();
 
-    match rx.try_recv().unwrap() {
-        ClientEvent::UsageUpdated { usage } => {
-            assert_eq!(usage.scope, UsageEventScope::ContextSnapshot);
-            assert_eq!(usage.model, None);
-            assert_eq!(usage.agent_cli, None);
-            assert_eq!(usage.context.used_tokens, Some(33));
-            assert_eq!(usage.context.window_tokens, Some(4096));
-            assert_eq!(usage.tokens.input_tokens, None);
-            assert_eq!(usage.tokens.total_tokens, None);
-            let raw_json = usage.raw_json.as_deref().unwrap();
-            assert!(raw_json.contains("not a number"));
-            assert!(!raw_json.contains("USD"));
-        }
+    // Malformed meta with bad scope value and unparseable token fields:
+    // the mapping layer still emits a SessionTotal event (the meta is
+    // present, so we honor the cumulative-usage intent) but all token
+    // breakdown slots are None. No TurnDelta event is produced because
+    // the meta lacks a `turn_delta` sub-object.
+    let event = match rx.try_recv().unwrap() {
+        ClientEvent::UsageUpdated { usage } => usage,
         other => panic!("unexpected event: {other:?}"),
-    }
+    };
+    assert_eq!(event.scope, UsageEventScope::SessionTotal);
+    assert_eq!(event.model, None);
+    assert_eq!(event.agent_cli, None);
+    assert_eq!(event.context.used_tokens, Some(33));
+    assert_eq!(event.context.window_tokens, Some(4096));
+    assert_eq!(event.tokens.input_tokens, None);
+    assert_eq!(event.tokens.total_tokens, None);
+    let raw_json = event.raw_json.as_deref().unwrap();
+    assert!(raw_json.contains("not a number"));
+    assert!(!raw_json.contains("USD"));
     assert!(rx.try_recv().is_err());
 }
 #[test]

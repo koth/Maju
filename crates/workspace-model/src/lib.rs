@@ -1100,6 +1100,12 @@ pub struct UsageModelSummary {
     pub context_peak_tokens: Option<u64>,
     #[serde(default)]
     pub latest_at: Option<String>,
+    /// True once a `SessionTotal` event has been observed for this group.
+    /// Used by the aggregation layer to avoid double-counting TurnDelta
+    /// events on top of an authoritative SessionTotal.
+    /// Not serialized to the frontend; this is internal aggregation state.
+    #[serde(default, skip)]
+    pub has_session_total: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1112,6 +1118,13 @@ pub struct SessionUsageSnapshot {
     pub session_total: UsageTokenBreakdown,
     #[serde(default)]
     pub by_model: Vec<UsageModelSummary>,
+    /// True once a `SessionTotal` event has been observed for this session.
+    /// When false, `session_total` may be derived from accumulated `TurnDelta`
+    /// events. When true, `SessionTotal` is authoritative and `TurnDelta`
+    /// events must not add to `session_total` (they are already included).
+    /// Not serialized to the frontend; this is internal reducer state.
+    #[serde(default, skip)]
+    pub has_session_total: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

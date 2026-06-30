@@ -247,36 +247,96 @@ fn emit_usage_update(
         .get("_meta")
         .and_then(|meta| meta.get("kodex.ai/usage"));
     let meta = update_meta.or(notification_meta);
-    let tokens = usage_tokens_from_meta(meta);
-    let usage = UsageEvent {
-        scope: meta
-            .and_then(|value| value.get("scope"))
-            .and_then(Value::as_str)
-            .map(usage_scope_from_str)
-            .unwrap_or_default(),
-        model: usage_string_field(meta, "model"),
-        provider: usage_string_field(meta, "provider"),
-        agent_cli: usage_string_field(meta, "agent_cli"),
-        tokens,
-        context: UsageContextSnapshot {
-            used_tokens: Some(update.used),
-            window_tokens: Some(update.size),
-            updated_at: None,
-        },
-        timestamp: None,
-        raw_json: meta.and_then(|value| serde_json::to_string(value).ok()),
+    let context = UsageContextSnapshot {
+        used_tokens: Some(update.used),
+        window_tokens: Some(update.size),
+        updated_at: None,
     };
 
-    tx.send(ClientEvent::UsageUpdated { usage })
-        .map_err(|_| anyhow!("failed to emit usage update"))
+    // When meta is absent we still want to surface context occupancy from the
+    // standard ACP `used`/`size` fields, so emit a single context_snapshot
+    // event with empty token breakdown.
+    let Some(meta) = meta else {
+        let usage = UsageEvent {
+            scope: UsageEventScope::ContextSnapshot,
+            model: None,
+            provider: None,
+            agent_cli: None,
+            tokens: UsageTokenBreakdown::default(),
+            context,
+            timestamp: None,
+            raw_json: None,
+        };
+        return tx
+            .send(ClientEvent::UsageUpdated { usage })
+            .map_err(|_| anyhow!("failed to emit usage update"));
+    };
+
+    let model = usage_string_field(Some(meta), "model");
+    let provider = usage_string_field(Some(meta), "provider");
+    let agent_cli = usage_string_field(Some(meta), "agent_cli");
+    let raw_json = serde_json::to_string(meta).ok();
+
+    // Top-level token fields describe the session cumulative usage
+    // (scope: session_total). codex-acp emits both scopes from a single
+    // token-count event by attaching a nested `turn_delta` object.
+    let total_tokens = usage_tokens_from_meta(Some(meta));
+    let session_event = UsageEvent {
+        scope: UsageEventScope::SessionTotal,
+        model: model.clone(),
+        provider: provider.clone(),
+        agent_cli: agent_cli.clone(),
+        tokens: total_tokens,
+        context: context.clone(),
+        timestamp: None,
+        raw_json: raw_json.clone(),
+    };
+    tx.send(ClientEvent::UsageUpdated {
+        usage: session_event,
+    })
+    .map_err(|_| anyhow!("failed to emit usage update"))?;
+
+    // Nested `turn_delta` object describes the most recent request.
+    // Skip emission when missing or when all token fields are zero/null so we
+    // do not write meaningless rows to the persisted usage stream.
+    if let Some(turn_meta) = meta.get("turn_delta") {
+        let turn_tokens = usage_tokens_from_meta(Some(turn_meta));
+        if has_any_token_value(&turn_tokens) {
+            let turn_event = UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model,
+                provider,
+                agent_cli,
+                tokens: turn_tokens,
+                context,
+                timestamp: None,
+                raw_json,
+            };
+            tx.send(ClientEvent::UsageUpdated {
+                usage: turn_event,
+            })
+            .map_err(|_| anyhow!("failed to emit usage update"))?;
+        }
+    }
+
+    Ok(())
 }
 
-fn usage_scope_from_str(value: &str) -> UsageEventScope {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "turn_delta" => UsageEventScope::TurnDelta,
-        "session_total" => UsageEventScope::SessionTotal,
-        _ => UsageEventScope::ContextSnapshot,
-    }
+/// Returns `true` if any field of the breakdown holds a non-zero numeric value.
+/// Used to skip `turn_delta` events that carry only nulls/zeroes (e.g. the
+/// initial token-count frame for a new turn before any real consumption).
+fn has_any_token_value(tokens: &UsageTokenBreakdown) -> bool {
+    [
+        tokens.input_tokens,
+        tokens.output_tokens,
+        tokens.cache_read_tokens,
+        tokens.cache_write_tokens,
+        tokens.reasoning_tokens,
+        tokens.total_tokens,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value > 0)
 }
 
 fn usage_string_field(meta: Option<&Value>, key: &str) -> Option<String> {
@@ -304,6 +364,10 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
             "cached_read_tokens",
             "cachedReadTokens",
             "cache_read_input_tokens",
+            // Codex core reports cache hits under `cached_input_tokens`; map it
+            // to the Kodex `cache_read_tokens` slot.
+            "cached_input_tokens",
+            "cachedInputTokens",
         ],
     );
     let cache_write_tokens = usage_u64_field(
@@ -316,7 +380,16 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
             "cache_creation_input_tokens",
         ],
     );
-    let reasoning_tokens = usage_u64_field(meta, &["reasoning_tokens", "reasoningTokens"]);
+    let reasoning_tokens = usage_u64_field(
+        meta,
+        &[
+            "reasoning_tokens",
+            "reasoningTokens",
+            // Codex core's per-token-type field is `reasoning_output_tokens`.
+            "reasoning_output_tokens",
+            "reasoningOutputTokens",
+        ],
+    );
     let total_tokens =
         usage_u64_field(meta, &["total_tokens", "totalTokens", "total"]).or_else(|| {
             let parts = [

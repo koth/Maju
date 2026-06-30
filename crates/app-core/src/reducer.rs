@@ -1480,18 +1480,26 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     match usage.scope {
         UsageEventScope::TurnDelta => {
             ui.usage.current_turn = usage.tokens.clone();
-            add_usage_tokens(&mut ui.usage.session_total, &usage.tokens);
+            // Only accumulate into `session_total` if no SessionTotal event
+            // has arrived yet. When SessionTotal is available it is the
+            // authoritative cumulative and is already overwritten by its own
+            // branch; adding the per-turn delta on top would double count.
+            if !ui.usage.has_session_total && has_usage_tokens(&usage.tokens) {
+                add_usage_tokens(&mut ui.usage.session_total, &usage.tokens);
+            }
         }
         UsageEventScope::SessionTotal => {
             if has_usage_tokens(&usage.tokens) {
                 ui.usage.session_total = usage.tokens.clone();
+                ui.usage.has_session_total = true;
             }
         }
-        UsageEventScope::ContextSnapshot => {
-            if has_usage_tokens(&usage.tokens) {
-                ui.usage.current_turn = usage.tokens.clone();
-            }
-        }
+        // `ContextSnapshot` only carries the agent-reported context-window
+        // occupancy (`used`/`size`). The token breakdown on the event is
+        // ignored here so occupancy is never confused with consumption.
+        // `current_turn` and `session_total` are updated exclusively by the
+        // `TurnDelta` and `SessionTotal` scopes.
+        UsageEventScope::ContextSnapshot => {}
     }
 
     update_usage_model_summary(ui, &usage);
@@ -1524,6 +1532,7 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
             latest_at: None,
+            has_session_total: false,
         });
         ui.usage.by_model.last_mut().expect("summary just inserted")
     };
@@ -1537,10 +1546,21 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
         summary.context_peak_tokens = Some(summary.context_peak_tokens.unwrap_or(0).max(used));
     }
     match usage.scope {
-        UsageEventScope::TurnDelta => add_usage_tokens(&mut summary.tokens, &usage.tokens),
+        UsageEventScope::TurnDelta => {
+            // Only accumulate when no SessionTotal has been observed for
+            // this model yet; otherwise the per-turn delta is already
+            // included in the authoritative SessionTotal.
+            if !summary.has_session_total {
+                add_usage_tokens(&mut summary.tokens, &usage.tokens);
+            }
+        }
         UsageEventScope::SessionTotal if has_usage_tokens(&usage.tokens) => {
             summary.tokens = usage.tokens.clone();
+            summary.has_session_total = true;
         }
+        // `ContextSnapshot` does not contribute to per-model token totals;
+        // context peak is already recorded above from `context.used_tokens`.
+        UsageEventScope::ContextSnapshot => {}
         _ => {}
     }
 }
@@ -2227,5 +2247,190 @@ mod tests {
             Some(true)
         );
         assert!(parsed.get("content").is_none());
+    }
+
+    #[test]
+    fn usage_update_session_total_overwrites_session_total_and_per_model() {
+        let mut ui = empty_ui();
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::SessionTotal,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        input_tokens: Some(900),
+                        output_tokens: Some(200),
+                        cache_read_tokens: Some(400),
+                        reasoning_tokens: Some(100),
+                        total_tokens: Some(1_600),
+                        ..Default::default()
+                    },
+                    context: workspace_model::UsageContextSnapshot::default(),
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.session_total.input_tokens, Some(900));
+        assert_eq!(ui.usage.session_total.output_tokens, Some(200));
+        assert_eq!(ui.usage.session_total.cache_read_tokens, Some(400));
+        assert_eq!(ui.usage.session_total.reasoning_tokens, Some(100));
+        assert_eq!(ui.usage.session_total.total_tokens, Some(1_600));
+        assert_eq!(ui.usage.by_model.len(), 1);
+        assert_eq!(ui.usage.by_model[0].tokens.total_tokens, Some(1_600));
+
+        // A later SessionTotal overwrites rather than accumulates.
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::SessionTotal,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        input_tokens: Some(2_000),
+                        output_tokens: Some(500),
+                        total_tokens: Some(2_500),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.session_total.input_tokens, Some(2_000));
+        assert_eq!(ui.usage.session_total.total_tokens, Some(2_500));
+        assert_eq!(ui.usage.by_model[0].tokens.input_tokens, Some(2_000));
+    }
+
+    #[test]
+    fn usage_update_turn_delta_sets_current_and_accumulates_session_total() {
+        let mut ui = empty_ui();
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::TurnDelta,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        input_tokens: Some(100),
+                        output_tokens: Some(30),
+                        cache_read_tokens: Some(40),
+                        reasoning_tokens: Some(10),
+                        total_tokens: Some(180),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.current_turn.total_tokens, Some(180));
+        assert_eq!(ui.usage.session_total.total_tokens, Some(180));
+
+        // A second turn delta accumulates into session_total and replaces
+        // current_turn.
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::TurnDelta,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        input_tokens: Some(50),
+                        output_tokens: Some(20),
+                        total_tokens: Some(70),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.current_turn.total_tokens, Some(70));
+        assert_eq!(ui.usage.session_total.total_tokens, Some(250));
+        assert_eq!(ui.usage.session_total.input_tokens, Some(150));
+    }
+
+    #[test]
+    fn usage_update_context_snapshot_only_updates_context_occupancy() {
+        let mut ui = empty_ui();
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::ContextSnapshot,
+                    context: workspace_model::UsageContextSnapshot {
+                        used_tokens: Some(1_500),
+                        window_tokens: Some(200_000),
+                        updated_at: None,
+                    },
+                    // Even when the agent populates token fields on a context
+                    // snapshot, they must be ignored here.
+                    tokens: workspace_model::UsageTokenBreakdown {
+                        input_tokens: Some(9_999),
+                        output_tokens: Some(9_999),
+                        total_tokens: Some(9_999),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.context.used_tokens, Some(1_500));
+        assert_eq!(ui.usage.context.window_tokens, Some(200_000));
+        assert!(
+            ui.usage.session_total.input_tokens.is_none(),
+            "context_snapshot must not populate session_total"
+        );
+        assert!(
+            ui.usage.session_total.total_tokens.is_none(),
+            "context_snapshot must not populate session_total"
+        );
+        assert!(
+            ui.usage.current_turn.input_tokens.is_none(),
+            "context_snapshot must not populate current_turn"
+        );
+        // The per-model summary is still created (so context_peak is tracked
+        // and event counts increment), but its token breakdown must remain
+        // empty because ContextSnapshot is not a consumption event.
+        assert_eq!(ui.usage.by_model.len(), 1);
+        assert!(ui.usage.by_model[0].tokens.input_tokens.is_none());
+        assert!(ui.usage.by_model[0].tokens.output_tokens.is_none());
+        assert!(ui.usage.by_model[0].tokens.total_tokens.is_none());
+        assert!(ui.usage.by_model[0].event_count > 0);
+        assert_eq!(ui.usage.by_model[0].context_peak_tokens, Some(1_500));
+    }
+
+    #[test]
+    fn usage_update_turn_delta_alone_provides_session_total() {
+        // When only TurnDelta events arrive (no SessionTotal ever), the
+        // session_total should be the sum of those deltas, not context
+        // occupancy.
+        let mut ui = empty_ui();
+        for delta in [120u64, 80, 200] {
+            apply_event(
+                &mut ui,
+                ClientEvent::UsageUpdated {
+                    usage: workspace_model::UsageEvent {
+                        scope: workspace_model::UsageEventScope::TurnDelta,
+                        tokens: workspace_model::UsageTokenBreakdown {
+                            input_tokens: Some(delta),
+                            output_tokens: Some(delta / 2),
+                            total_tokens: Some(delta + delta / 2),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                },
+            );
+        }
+        assert_eq!(ui.usage.session_total.input_tokens, Some(400));
+        assert_eq!(ui.usage.session_total.output_tokens, Some(200));
+        assert_eq!(ui.usage.session_total.total_tokens, Some(600));
     }
 }

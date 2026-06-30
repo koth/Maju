@@ -845,6 +845,162 @@ fn test_usage_events_round_trip_and_summarize() {
     assert_eq!(by_agent.len(), 1);
     assert_eq!(by_agent[0].label, "codex-acp");
 }
+
+#[test]
+fn test_session_usage_snapshot_aggregates_session_total_and_turn_delta() {
+    // codex-acp emits one SessionTotal (cumulative) plus one TurnDelta
+    // (per-request) per token-count event. The aggregated snapshot must
+    // use the SessionTotal for the running total and the latest TurnDelta
+    // for current_turn, ignoring any ContextSnapshot token fields.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+
+    let session_total_1 = UsageEvent {
+        scope: UsageEventScope::SessionTotal,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("10".into()),
+        tokens: UsageTokenBreakdown {
+            input_tokens: Some(900),
+            output_tokens: Some(200),
+            cache_read_tokens: Some(400),
+            reasoning_tokens: Some(100),
+            total_tokens: Some(1_600),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(1_700),
+            window_tokens: Some(200_000),
+            updated_at: Some("10".into()),
+        },
+        raw_json: None,
+    };
+    let turn_delta_1 = UsageEvent {
+        scope: UsageEventScope::TurnDelta,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("11".into()),
+        tokens: UsageTokenBreakdown {
+            input_tokens: Some(100),
+            output_tokens: Some(30),
+            total_tokens: Some(180),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(1_700),
+            window_tokens: Some(200_000),
+            updated_at: Some("11".into()),
+        },
+        raw_json: None,
+    };
+    // A ContextSnapshot carrying token fields must NOT pollute the totals.
+    let context_snapshot = UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("12".into()),
+        tokens: UsageTokenBreakdown {
+            input_tokens: Some(9_999),
+            output_tokens: Some(9_999),
+            total_tokens: Some(9_999),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(1_900),
+            window_tokens: Some(200_000),
+            updated_at: Some("12".into()),
+        },
+        raw_json: None,
+    };
+    store
+        .append_usage_event("s1", &session_total_1, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &turn_delta_1, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &context_snapshot, None, None)
+        .unwrap();
+
+    let snapshot = store.load_session_usage_snapshot("s1").unwrap();
+    assert_eq!(snapshot.session_total.input_tokens, Some(900));
+    assert_eq!(snapshot.session_total.output_tokens, Some(200));
+    assert_eq!(snapshot.session_total.cache_read_tokens, Some(400));
+    assert_eq!(snapshot.session_total.reasoning_tokens, Some(100));
+    assert_eq!(snapshot.session_total.total_tokens, Some(1_600));
+    assert_eq!(snapshot.current_turn.total_tokens, Some(180));
+    assert_eq!(snapshot.context.used_tokens, Some(1_900));
+    assert_eq!(snapshot.context.window_tokens, Some(200_000));
+
+    // The per-model summary must reflect the SessionTotal, not the
+    // ContextSnapshot noise.
+    assert_eq!(snapshot.by_model.len(), 1);
+    assert_eq!(snapshot.by_model[0].tokens.total_tokens, Some(1_600));
+    assert_eq!(snapshot.by_model[0].context_peak_tokens, Some(1_900));
+}
+
+#[test]
+fn test_session_usage_snapshot_compatible_with_legacy_context_snapshot_rows() {
+    // Pre-fix Kodex sessions only have ContextSnapshot rows with a
+    // total_tokens field. When no SessionTotal or TurnDelta events exist,
+    // the snapshot must surface the latest ContextSnapshot total as a
+    // best-effort session total so historical sessions still display
+    // something on reload.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("legacy", "gpt-5.1").unwrap();
+
+    let legacy = UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("1".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(800),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(800),
+            window_tokens: Some(128_000),
+            updated_at: Some("1".into()),
+        },
+        raw_json: None,
+    };
+    let legacy_2 = UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("2".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(1_200),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot {
+            used_tokens: Some(1_200),
+            window_tokens: Some(128_000),
+            updated_at: Some("2".into()),
+        },
+        raw_json: None,
+    };
+    store.append_usage_event("legacy", &legacy, None, None).unwrap();
+    store.append_usage_event("legacy", &legacy_2, None, None).unwrap();
+
+    let snapshot = store.load_session_usage_snapshot("legacy").unwrap();
+    assert_eq!(
+        snapshot.session_total.total_tokens,
+        Some(1_200),
+        "latest legacy context_snapshot total must surface as best-effort session_total"
+    );
+    assert_eq!(snapshot.context.used_tokens, Some(1_200));
+    assert!(snapshot.current_turn.total_tokens.is_none());
+}
+
 #[test]
 fn test_usage_summary_filters_workspace_and_archived_by_default() {
     let dir = tempfile::tempdir().unwrap();

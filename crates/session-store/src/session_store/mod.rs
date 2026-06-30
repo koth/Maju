@@ -2025,6 +2025,8 @@ fn stored_usage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stor
 
 fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsageSnapshot {
     let mut snapshot = SessionUsageSnapshot::default();
+    let mut saw_session_total = false;
+    let mut saw_turn_delta = false;
     for event in events {
         if event.context.used_tokens.is_some() {
             snapshot.context.used_tokens = event.context.used_tokens;
@@ -2039,18 +2041,26 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
         match event.scope {
             UsageEventScope::TurnDelta => {
                 snapshot.current_turn = event.tokens.clone();
-                add_usage_tokens(&mut snapshot.session_total, &event.tokens);
+                // Only accumulate into `session_total` when no SessionTotal
+                // event has been observed for this session. When a
+                // SessionTotal row is present it is authoritative and the
+                // per-turn delta is already folded into it.
+                if !saw_session_total && has_usage_tokens(&event.tokens) {
+                    add_usage_tokens(&mut snapshot.session_total, &event.tokens);
+                }
+                saw_turn_delta = true;
             }
             UsageEventScope::SessionTotal => {
                 if has_usage_tokens(&event.tokens) {
                     snapshot.session_total = event.tokens.clone();
+                    saw_session_total = true;
                 }
             }
-            UsageEventScope::ContextSnapshot => {
-                if has_usage_tokens(&event.tokens) {
-                    snapshot.current_turn = event.tokens.clone();
-                }
-            }
+            // `ContextSnapshot` only carries context-window occupancy; its
+            // token breakdown is ignored so occupancy is never confused with
+            // consumption. Context peak is already updated by
+            // `update_usage_summary_row`.
+            UsageEventScope::ContextSnapshot => {}
         }
         update_usage_summary_row(
             &mut snapshot.by_model,
@@ -2064,6 +2074,28 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
             event,
         );
     }
+
+    // Backward-compat: rows persisted by older Kodex builds (where codex-acp
+    // mislabelled its single-total payload as `context_snapshot`) carry only
+    // `total_tokens`. When no SessionTotal or TurnDelta events were persisted
+    // for this session, surface that total as a best-effort session total so
+    // historical sessions still display a non-zero figure on reload. New
+    // sessions always produce SessionTotal / TurnDelta events and bypass
+    // this path.
+    if !saw_session_total
+        && !saw_turn_delta
+        && let Some(total) = events
+            .iter()
+            .rev()
+            .find_map(|e| matches!(e.scope, UsageEventScope::ContextSnapshot)
+                .then(|| e.tokens.total_tokens)
+                .flatten())
+    {
+        snapshot.session_total.total_tokens = Some(total);
+    }
+
+    snapshot.has_session_total = saw_session_total;
+
     snapshot
 }
 
@@ -2208,6 +2240,7 @@ fn update_usage_summary_row(
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
             latest_at: None,
+            has_session_total: false,
         });
         rows.last_mut().expect("usage row just inserted")
     };
@@ -2223,10 +2256,21 @@ fn update_usage_summary_row(
         row.context_peak_tokens = Some(row.context_peak_tokens.unwrap_or(0).max(used));
     }
     match event.scope {
-        UsageEventScope::TurnDelta => add_usage_tokens(&mut row.tokens, &event.tokens),
+        UsageEventScope::TurnDelta => {
+            // Only accumulate when no SessionTotal has been observed for
+            // this group yet; otherwise the per-turn delta is already
+            // included in the authoritative SessionTotal.
+            if !row.has_session_total {
+                add_usage_tokens(&mut row.tokens, &event.tokens);
+            }
+        }
         UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
             row.tokens = event.tokens.clone();
+            row.has_session_total = true;
         }
+        // `ContextSnapshot` does not contribute to per-model token totals;
+        // context peak is already recorded above from `context.used_tokens`.
+        UsageEventScope::ContextSnapshot => {}
         _ => {}
     }
 }
