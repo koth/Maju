@@ -1017,7 +1017,7 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
     store_a
         .append_usage_event(
             "a1",
-            &make_usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"),
+            &make_usage_event("gpt-5.1", 10, "1751328000"),
             None,
             None,
         )
@@ -1026,7 +1026,7 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
     store_a
         .append_usage_event(
             "a2",
-            &make_usage_event("gpt-5.1", 20, "2026-06-02T00:00:00Z"),
+            &make_usage_event("gpt-5.1", 20, "1751414400"),
             None,
             None,
         )
@@ -1037,7 +1037,7 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
     store_b
         .append_usage_event(
             "b1",
-            &make_usage_event("claude-opus-4.7", 30, "2026-06-03T00:00:00Z"),
+            &make_usage_event("claude-opus-4.7", 30, "1751500800"),
             None,
             None,
         )
@@ -1083,12 +1083,15 @@ fn test_usage_summary_filters_workspace_and_archived_by_default() {
             )
     );
 
+    // Date filter is now a numeric comparison: stored `created_at` is cast to
+    // INTEGER, and the bound is parsed to epoch seconds. Use ISO bounds
+    // (matching what the desktop UI sends) that bracket the middle row.
     let date_filtered = store_a
         .query_usage_summary(UsageSummaryRequest {
             all_workspaces: true,
             include_archived: true,
-            from: Some("2026-06-02T00:00:00Z".into()),
-            to: Some("2026-06-02T23:59:59Z".into()),
+            from: Some("2025-07-02T00:00:00Z".into()),
+            to: Some("2025-07-02T23:59:59Z".into()),
             ..Default::default()
         })
         .unwrap();
@@ -1184,4 +1187,177 @@ fn test_legacy_change_sets_wrap_existing_tables() {
     let recent_id = legacy_agent_recent_id("legacy-session");
     let recent_files = store.list_change_set_files_with_legacy(&recent_id).unwrap();
     assert_eq!(recent_files[0].quality, DiffQuality::LegacyIncomplete);
+}
+
+/// Build a `ContextSnapshot`-only usage event the way `acp-core` emits for
+/// third-party agents that never attach `kodex.ai/usage` meta. The
+/// `agent_cli` field on the event itself stays `None` and is later filled by
+/// `append_usage_event` from the owning session's `agent_cli`, which is what
+/// happens in production for CodeBuddy.
+fn make_codebuddy_context_snapshot(timestamp: &str) -> UsageEvent {
+    UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: None,
+        provider: None,
+        agent_cli: None,
+        timestamp: Some(timestamp.into()),
+        tokens: UsageTokenBreakdown::default(),
+        context: UsageContextSnapshot {
+            used_tokens: Some(640),
+            window_tokens: Some(200_000),
+            updated_at: Some(timestamp.into()),
+        },
+        raw_json: None,
+    }
+}
+
+/// `load_usage_events_for_summary` filters out usage events whose owning
+/// session is a third-party agent that cannot report detailed token usage
+/// (CodeBuddy). Codex/Claude rows in the same workspace and date range must
+/// remain present and unchanged.
+#[test]
+fn query_usage_summary_excludes_codebuddy_sessions_by_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    store.create_session("codex-session", "gpt-5.1").unwrap();
+    store
+        .update_session_agent_cli("codex-session", "codex-acp")
+        .unwrap();
+    store
+        .append_usage_event(
+            "codex-session",
+            &make_usage_event("gpt-5.1", 500, "1751328000"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    store.create_session("codebuddy-session", "codebuddy-model").unwrap();
+    store
+        .update_session_agent_cli("codebuddy-session", "codebuddy")
+        .unwrap();
+    store
+        .append_usage_event(
+            "codebuddy-session",
+            &make_codebuddy_context_snapshot("1751414400"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            include_archived: false,
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "CodeBuddy row must be excluded, got: {rows:?}");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-5.1"));
+    assert_eq!(rows[0].agent_cli.as_deref(), Some("codex-acp"));
+    assert_eq!(rows[0].tokens.total_tokens, Some(500));
+    assert!(
+        rows.iter().all(|row| row.agent_cli.as_deref() != Some("codebuddy")),
+        "no summary row may come from a CodeBuddy session: {rows:?}"
+    );
+
+    // Single-session snapshot must still see the CodeBuddy context usage
+    // because dock occupancy is read from `load_session_usage_snapshot`,
+    // which intentionally does not apply the summary filter.
+    let snapshot = store
+        .load_session_usage_snapshot("codebuddy-session")
+        .unwrap();
+    assert_eq!(snapshot.context.used_tokens, Some(640));
+    assert_eq!(snapshot.context.window_tokens, Some(200_000));
+}
+
+/// `agent_cli` grouping must not produce a `codebuddy` group, even though
+/// CodeBuddy sessions have usage events written to `usage_events`.
+#[test]
+fn query_usage_summary_group_by_agent_omits_codebuddy_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    store.create_session("c1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("c1", "codex-acp").unwrap();
+    store
+        .append_usage_event(
+            "c1",
+            &make_usage_event("gpt-5.1", 100, "1751328000"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    store.create_session("b1", "codebuddy-model").unwrap();
+    store.update_session_agent_cli("b1", "codebuddy").unwrap();
+    store
+        .append_usage_event(
+            "b1",
+            &make_codebuddy_context_snapshot("1751414400"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            include_archived: false,
+            group_by: UsageSummaryGroupBy::Agent,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "rows: {rows:?}");
+    assert_eq!(rows[0].label, "codex-acp");
+    assert_eq!(rows[0].agent_cli.as_deref(), Some("codex-acp"));
+    assert!(
+        !rows.iter().any(|row| row.label == "codebuddy"),
+        "no CodeBuddy group may appear: {rows:?}"
+    );
+}
+
+/// Even if a usage event's `agent_cli` is written directly (e.g. via raw SQL
+/// in a future migration) without going through `update_session_agent_cli`,
+/// the summary filter must still exclude it via the
+/// `COALESCE(s.agent_cli, u.agent_cli, '')` fallback.
+#[test]
+fn query_usage_summary_excludes_codebuddy_via_event_agent_cli_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    // Build an event whose `agent_cli` is explicitly set to "codebuddy"
+    // (bypassing the session-level fallback path) so we exercise the
+    // `u.agent_cli` arm of the COALESCE.
+    let event = UsageEvent {
+        scope: UsageEventScope::SessionTotal,
+        model: Some("codebuddy-model".into()),
+        provider: None,
+        agent_cli: Some("codebuddy".into()),
+        timestamp: Some("1751328000".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(7),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot::default(),
+        raw_json: None,
+    };
+
+    store.create_session("b1", "codebuddy-model").unwrap();
+    // Intentionally do NOT call `update_session_agent_cli("b1", "codebuddy")`
+    // so `s.agent_cli` stays NULL in this row; the filter must still exclude
+    // the event via the `u.agent_cli` fallback.
+    store
+        .append_usage_event("b1", &event, None, None)
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(rows.is_empty(), "CodeBuddy event must be excluded, got: {rows:?}");
 }

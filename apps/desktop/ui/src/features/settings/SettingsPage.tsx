@@ -10,6 +10,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { ModelEntrySelect } from "./ModelEntrySelect";
 import type {
   AgentCliId,
   AgentInstallResult,
@@ -28,6 +29,8 @@ import type {
   UsageSummaryGroupBy,
   UsageSummaryRow,
   ImageGenerateProtocol,
+  ModelAttributesInput,
+  ReasoningEffort,
 } from "../../types";
 import {
   settingsDetectAgents,
@@ -152,14 +155,389 @@ function modelListLabel(models: string[]): string {
   return `模型：${models.join("、")}`;
 }
 
-function parseProviderModelsDraft(value: string): string[] {
-  const models: string[] = [];
-  for (const line of value.split(/\r?\n/)) {
-    const model = line.trim();
-    if (!model || models.includes(model)) continue;
-    models.push(model);
+// Hydrate the editor's working state from a profile. Prefers `model_entries`
+// (rich) and falls back to `models` (slug-only) when the profile does not
+// surface the rich list.
+export function entriesFromProfile(
+  profile: AgentProviderProfile,
+): ModelAttributesInput[] {
+  const rich = profile.model_entries;
+  if (rich && rich.length) {
+    return rich.map((entry) => ({
+      slug: entry.slug,
+      display_name: entry.display_name ?? null,
+      context_window: entry.context_window ?? null,
+      max_output_tokens: entry.max_output_tokens ?? null,
+      supports_image_input: entry.supports_image_input ?? null,
+      reasoning_effort: entry.reasoning_effort ?? null,
+    }));
   }
-  return models;
+  return profile.models.map((slug) => ({ slug }));
+}
+
+// Merge a freshly synced slug list with the existing editor entries. Slugs
+// already present keep their rich attributes (sync only refreshes the slug
+// list); new slugs are appended with empty attributes; stale slugs are dropped.
+function mergeSyncedSlugs(
+  existing: ModelAttributesInput[],
+  syncedSlugs: string[],
+): ModelAttributesInput[] {
+  const bySlug = new Map<string, ModelAttributesInput>();
+  for (const entry of existing) {
+    if (entry.slug) bySlug.set(entry.slug, entry);
+  }
+  const next: ModelAttributesInput[] = [];
+  const seen = new Set<string>();
+  for (const slug of syncedSlugs) {
+    const trimmed = slug.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    const prior = bySlug.get(trimmed);
+    next.push(
+      prior ?? {
+        slug: trimmed,
+        display_name: null,
+        context_window: null,
+        max_output_tokens: null,
+        supports_image_input: null,
+        reasoning_effort: null,
+      },
+    );
+  }
+  return next;
+}
+
+// Validate a single entry. Returns the first error message, or null when
+// valid. Empty fields mean "use default" and are always accepted.
+export function validateModelEntry(
+  entry: ModelAttributesInput,
+): string | null {
+  if (!entry.slug.trim()) {
+    return "模型 slug 不能为空";
+  }
+  if (entry.context_window != null) {
+    if (
+      !Number.isFinite(entry.context_window) ||
+      !Number.isInteger(entry.context_window) ||
+      entry.context_window <= 0
+    ) {
+      return "最大上下文必须是正整数";
+    }
+  }
+  if (entry.max_output_tokens != null) {
+    if (
+      !Number.isFinite(entry.max_output_tokens) ||
+      !Number.isInteger(entry.max_output_tokens) ||
+      entry.max_output_tokens <= 0
+    ) {
+      return "最大输出必须是正整数";
+    }
+  }
+  return null;
+}
+
+const REASONING_EFFORT_OPTIONS: Array<{
+  value: ReasoningEffort;
+  label: string;
+}> = [
+  { value: "none", label: "无 (默认)" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
+
+type ModelEntryListEditorProps = {
+  entries: ModelAttributesInput[];
+  onChange: (next: ModelAttributesInput[]) => void;
+  disabled?: boolean;
+  error?: string | null;
+  expanded: Set<number>;
+  onExpandedChange: (next: Set<number>) => void;
+  onErrorDismiss: () => void;
+};
+
+function hasRichAttributes(entry: ModelAttributesInput): boolean {
+  return (
+    (entry.display_name != null && entry.display_name !== "") ||
+    entry.context_window != null ||
+    entry.max_output_tokens != null ||
+    entry.supports_image_input != null ||
+    entry.reasoning_effort != null
+  );
+}
+
+function emptyEntry(): ModelAttributesInput {
+  return {
+    slug: "",
+    display_name: null,
+    context_window: null,
+    max_output_tokens: null,
+    supports_image_input: null,
+    reasoning_effort: null,
+  };
+}
+
+function ModelEntryListEditor({
+  entries,
+  onChange,
+  disabled,
+  error,
+  expanded,
+  onExpandedChange,
+  onErrorDismiss,
+}: ModelEntryListEditorProps) {
+  const updateAt = (index: number, patch: Partial<ModelAttributesInput>) => {
+    onChange(
+      entries.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)),
+    );
+  };
+
+  const addEntry = () => {
+    onChange([...entries, emptyEntry()]);
+    const next = new Set(expanded);
+    next.add(entries.length);
+    onExpandedChange(next);
+  };
+
+  const removeAt = (index: number) => {
+    onChange(entries.filter((_, i) => i !== index));
+    onExpandedChange(new Set());
+    onErrorDismiss();
+  };
+
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= entries.length) return;
+    const next = entries.slice();
+    const [moved] = next.splice(index, 1);
+    next.splice(target, 0, moved);
+    onChange(next);
+    onExpandedChange(new Set());
+  };
+
+  const toggleExpanded = (index: number) => {
+    const next = new Set(expanded);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    onExpandedChange(next);
+  };
+
+  return (
+    <div className="settings-model-entries" data-testid="byok_provider_models">
+      {error && (
+        <div
+          className="settings-model-entries-error"
+          role="alert"
+          aria-label="byok_provider_models_error"
+        >
+          <span>{error}</span>
+          <button
+            type="button"
+            className="settings-btn settings-btn-icon"
+            aria-label="dismiss byok_provider_models_error"
+            onClick={onErrorDismiss}
+          >
+            <X aria-hidden size={14} />
+          </button>
+        </div>
+      )}
+      {entries.length === 0 ? (
+        <p className="settings-model-entries-empty">尚未添加模型。点击下方按钮新增。</p>
+      ) : (
+        <ul className="settings-model-entries-list">
+          {entries.map((entry, index) => {
+            const isOpen = expanded.has(index);
+            const rich = hasRichAttributes(entry);
+            return (
+              <li
+                key={`model-entry-${index}`}
+                className={`settings-model-entry${isOpen ? " is-open" : ""}`}
+              >
+                <div className="settings-model-entry-row">
+                  <input
+                    type="text"
+                    className="settings-model-entry-slug"
+                    aria-label={`byok_model_slug_${index}`}
+                    value={entry.slug}
+                    disabled={disabled}
+                    placeholder="例如 gpt-5.5"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      updateAt(index, { slug: event.currentTarget.value })
+                    }
+                  />
+                  {rich && (
+                    <span
+                      className="settings-model-entry-chip"
+                      aria-label={`byok_model_chip_${index}`}
+                    >
+                      已配置
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-icon"
+                    aria-label={`byok_model_advanced_toggle_${index}`}
+                    disabled={disabled}
+                    onClick={() => toggleExpanded(index)}
+                  >
+                    {isOpen ? "收起 ▲" : "高级 ▼"}
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-icon"
+                    aria-label={`byok_model_move_up_${index}`}
+                    disabled={disabled || index === 0}
+                    onClick={() => move(index, -1)}
+                    title="上移"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-icon"
+                    aria-label={`byok_model_move_down_${index}`}
+                    disabled={disabled || index === entries.length - 1}
+                    onClick={() => move(index, 1)}
+                    title="下移"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-icon"
+                    aria-label={`byok_model_remove_${index}`}
+                    disabled={disabled}
+                    onClick={() => removeAt(index)}
+                    title="删除"
+                  >
+                    <Trash2 aria-hidden size={14} />
+                  </button>
+                </div>
+                {isOpen && (
+                  <div className="settings-model-entry-advanced">
+                    <label className="settings-model-entry-field">
+                      <span>显示名</span>
+                      <input
+                        type="text"
+                        aria-label={`byok_model_display_name_${index}`}
+                        value={entry.display_name ?? ""}
+                        disabled={disabled}
+                        placeholder="可选：留空使用 slug"
+                        onChange={(event) => {
+                          const value = event.currentTarget.value;
+                          updateAt(index, {
+                            display_name: value === "" ? null : value,
+                          });
+                        }}
+                      />
+                    </label>
+                    <div className="settings-model-entry-field-row">
+                      <label className="settings-model-entry-field-inline">
+                        <span>最大上下文</span>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          step={1}
+                          aria-label={`byok_model_context_window_${index}`}
+                          value={entry.context_window ?? ""}
+                          disabled={disabled}
+                          placeholder="留空使用默认"
+                          onChange={(event) => {
+                            const raw = event.currentTarget.value;
+                            updateAt(index, {
+                              context_window: raw === "" ? null : Number(raw),
+                            });
+                          }}
+                        />
+                      </label>
+                      <label className="settings-model-entry-field-inline">
+                        <span>最大输出</span>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={1}
+                          step={1}
+                          aria-label={`byok_model_max_output_tokens_${index}`}
+                          value={entry.max_output_tokens ?? ""}
+                          disabled={disabled}
+                          placeholder="留空使用默认"
+                          onChange={(event) => {
+                            const raw = event.currentTarget.value;
+                            updateAt(index, {
+                              max_output_tokens:
+                                raw === "" ? null : Number(raw),
+                            });
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div className="settings-model-entry-field-row">
+                      <label className="settings-model-entry-field-inline">
+                        <span>多模态</span>
+                        <ModelEntrySelect<"default" | "yes" | "no">
+                          aria-label={`byok_model_supports_image_input_${index}`}
+                          value={
+                            entry.supports_image_input == null
+                              ? "default"
+                              : entry.supports_image_input
+                                ? "yes"
+                                : "no"
+                          }
+                          disabled={disabled}
+                          onChange={(value) => {
+                            updateAt(index, {
+                              supports_image_input:
+                                value === "default"
+                                  ? null
+                                  : value === "yes",
+                            });
+                          }}
+                          options={[
+                            { value: "default", label: "默认 (未指定)" },
+                            { value: "yes", label: "支持图像" },
+                            { value: "no", label: "不支持图像" },
+                          ]}
+                        />
+                      </label>
+                      <label className="settings-model-entry-field-inline">
+                        <span>Reasoning effort</span>
+                        <ModelEntrySelect<ReasoningEffort>
+                          aria-label={`byok_model_reasoning_effort_${index}`}
+                          value={entry.reasoning_effort ?? "none"}
+                          disabled={disabled}
+                          onChange={(value) => {
+                            updateAt(index, {
+                              reasoning_effort: value === "none" ? null : value,
+                            });
+                          }}
+                          options={REASONING_EFFORT_OPTIONS.map((option) => ({
+                            value: option.value,
+                            label: option.label,
+                          }))}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <button
+        type="button"
+        className="settings-btn"
+        aria-label="byok_model_add"
+        disabled={disabled}
+        onClick={addEntry}
+      >
+        + 添加模型
+      </button>
+    </div>
+  );
 }
 
 function renderModelChip(models?: string[] | null) {
@@ -248,7 +626,15 @@ export function SettingsPage({
   const [byokProviderMenuOpen, setByokProviderMenuOpen] = useState(false);
   const [byokProfileInitialized, setByokProfileInitialized] = useState(false);
   const [codexAcpApiKey, setCodexAcpApiKey] = useState("");
-  const [providerModelsDraft, setProviderModelsDraft] = useState("");
+  const [providerModelsDraft, setProviderModelsDraft] = useState<
+    ModelAttributesInput[]
+  >([]);
+  const [providerModelsError, setProviderModelsError] = useState<
+    string | null
+  >(null);
+  const [providerModelsExpanded, setProviderModelsExpanded] = useState<
+    Set<number>
+  >(() => new Set());
   const [modelListUrlDraft, setModelListUrlDraft] = useState("");
   const [customProviderLabel, setCustomProviderLabel] = useState("");
   const [customProviderEndpoint, setCustomProviderEndpoint] = useState("");
@@ -497,7 +883,9 @@ export function SettingsPage({
       (item) => item.id === byokProfileId,
     );
     if (!profile) return;
-    setProviderModelsDraft(profile.models.join("\n"));
+    setProviderModelsDraft(entriesFromProfile(profile));
+    setProviderModelsError(null);
+    setProviderModelsExpanded(new Set());
     setModelListUrlDraft(profile.model_list_url ?? "");
     if (profile.custom) {
       setCustomProviderLabel(
@@ -718,7 +1106,16 @@ export function SettingsPage({
   }, [byokProfileId, codexAcpApiKey, settingsRemoteProfileId]);
 
   const handleSaveProviderModels = useCallback(async () => {
-    const models = parseProviderModelsDraft(providerModelsDraft);
+    // Normalize first: trim slugs, drop empty/dup rows. Preserve any
+    // user-authored rich attributes for the surviving rows.
+    const cleaned: ModelAttributesInput[] = [];
+    const seen = new Set<string>();
+    for (const entry of providerModelsDraft) {
+      const slug = entry.slug.trim();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      cleaned.push({ ...entry, slug });
+    }
     setError(null);
     setCodexAcpMessage(null);
     setCodexAcpMessageTarget("models");
@@ -726,15 +1123,23 @@ export function SettingsPage({
       setError("请选择 BYOK 模型来源");
       return;
     }
-    if (!models.length) {
+    if (!cleaned.length) {
       setError("模型列表不能为空");
       return;
     }
+    const firstInvalid = cleaned.find((entry) => validateModelEntry(entry));
+    if (firstInvalid) {
+      const idx = cleaned.indexOf(firstInvalid);
+      setProviderModelsError(`第 ${idx + 1} 行：${validateModelEntry(firstInvalid)}`);
+      return;
+    }
+    setProviderModelsError(null);
+    setProviderModelsDraft(cleaned);
     setBusyProviderModels(true);
     try {
       const nextSnapshot = await settingsSaveProviderModels(
         byokProfileId,
-        models,
+        cleaned,
         settingsRemoteProfileId,
       );
       setSnapshot(nextSnapshot);
@@ -797,7 +1202,12 @@ export function SettingsPage({
         (item) => item.id === byokProfileId,
       );
       if (profile) {
-        setProviderModelsDraft(profile.models.join("\n"));
+        // Preserve user-authored rich attributes: merge the freshly synced
+        // slug list with the existing editor entries.
+        setProviderModelsDraft(
+          mergeSyncedSlugs(providerModelsDraft, profile.models),
+        );
+        setProviderModelsError(null);
         setModelListUrlDraft(profile.model_list_url ?? modelListUrl);
       }
       setCodexAcpMessageTarget("models");
@@ -809,7 +1219,12 @@ export function SettingsPage({
     } finally {
       setBusyProviderModels(false);
     }
-  }, [byokProfileId, modelListUrlDraft, settingsRemoteProfileId]);
+  }, [
+    byokProfileId,
+    modelListUrlDraft,
+    providerModelsDraft,
+    settingsRemoteProfileId,
+  ]);
 
   const handleSaveCustomProvider = useCallback(async () => {
     const label = customProviderLabel.trim();
@@ -861,7 +1276,9 @@ export function SettingsPage({
       setCustomProviderApiKey("");
       setCustomProviderEditorId(null);
       if (nextProfile) {
-        setProviderModelsDraft(nextProfile.models.join("\n"));
+        setProviderModelsDraft(entriesFromProfile(nextProfile));
+        setProviderModelsError(null);
+        setProviderModelsExpanded(new Set());
         setModelListUrlDraft(nextProfile.model_list_url ?? "");
       }
       setCustomProviderEditorMode("add");
@@ -905,7 +1322,9 @@ export function SettingsPage({
         nextSnapshot.codex_acp.profiles,
       ).find((item) => item.id !== profile.id);
       setByokProfileId(nextByokSource?.id ?? "timiai");
-      setProviderModelsDraft("");
+      setProviderModelsDraft([]);
+      setProviderModelsError(null);
+      setProviderModelsExpanded(new Set());
       setModelListUrlDraft("");
       setCustomProviderLabel("");
       setCustomProviderEndpoint("");
@@ -944,7 +1363,11 @@ export function SettingsPage({
           nextSnapshot.codex_acp.profiles,
         ).find((item) => item.id !== profile.id);
         setByokProfileId(nextByokSource?.id ?? "timiai");
-        setProviderModelsDraft(nextByokSource?.models.join("\n") ?? "");
+        setProviderModelsDraft(
+          nextByokSource ? entriesFromProfile(nextByokSource) : [],
+        );
+        setProviderModelsError(null);
+        setProviderModelsExpanded(new Set());
         setModelListUrlDraft(nextByokSource?.model_list_url ?? "");
         setCodexAcpMessageTarget("byok");
         setCodexAcpMessage(`${profile.label} 设置已清除，后续新建会话生效`);
@@ -1752,16 +2175,18 @@ export function SettingsPage({
           )}
         <label className="settings-field settings-provider-models-field">
           <span>模型列表</span>
-          <textarea
-            aria-label="byok_provider_models"
-            value={providerModelsDraft}
-            disabled={busyProviderModels}
-            spellCheck={false}
-            onChange={(event) => {
-              setProviderModelsDraft(event.currentTarget.value);
+          <ModelEntryListEditor
+            entries={providerModelsDraft}
+            onChange={(next) => {
+              setProviderModelsDraft(next);
               setCodexAcpMessage(null);
               setCodexAcpMessageTarget("models");
             }}
+            disabled={busyProviderModels}
+            error={providerModelsError}
+            expanded={providerModelsExpanded}
+            onExpandedChange={setProviderModelsExpanded}
+            onErrorDismiss={() => setProviderModelsError(null)}
           />
         </label>
         <label className="settings-field settings-provider-model-url-field">
@@ -1798,7 +2223,7 @@ export function SettingsPage({
           <button
             type="button"
             className="settings-btn"
-            disabled={busyProviderModels || !providerModelsDraft.trim()}
+            disabled={busyProviderModels || providerModelsDraft.length === 0}
             onClick={handleSaveProviderModels}
           >
             {busyProviderModels ? "保存中..." : "保存模型列表"}
@@ -2590,6 +3015,31 @@ export function SettingsPage({
       (sum, row) => sum + row.session_count,
       0,
     );
+    const distinctAgents = new Set(
+      usageRows
+        .map((row) => row.agent_cli?.trim() || "")
+        .filter((value) => value.length > 0),
+    ).size;
+    const totalPrompt = usageRows.reduce(
+      (sum, row) => sum + (row.tokens.input_tokens ?? 0),
+      0,
+    );
+    const totalCompletion = usageRows.reduce(
+      (sum, row) => sum + (row.tokens.output_tokens ?? 0),
+      0,
+    );
+    const avgTokensPerRequest =
+      totalEvents > 0 ? Math.round(totalTokens / totalEvents) : 0;
+    const maxRequestsInRows = usageRows.reduce(
+      (max, row) => Math.max(max, row.event_count),
+      0,
+    );
+    const maxTokensInRows = usageRows.reduce(
+      (max, row) => Math.max(max, usageTokenTotal(row.tokens)),
+      0,
+    );
+    const headlineText = formatUsageTokens(totalTokens);
+    const showChartAndTable = !usageLoading && usageRows.length > 0;
 
     return (
       <section className="settings-section settings-usage-section">
@@ -2597,7 +3047,8 @@ export function SettingsPage({
           <div>
             <h2 className="settings-section-title">用量</h2>
             <p className="settings-section-desc">
-              查看当前工作区记录到的上下文和 token 用量，不包含计价。
+              查看当前工作区可上报智能体（Codex、Claude）汇总的 token 用量，不包含计价。
+              CodeBuddy 等不可上报详细用量的第三方智能体不纳入此面板，但会话中的实时上下文占用仍可在工作区环境信息中查看。
             </p>
           </div>
           <button
@@ -2610,22 +3061,194 @@ export function SettingsPage({
           </button>
         </div>
 
-        <div className="settings-usage-summary-grid" aria-label="用量汇总">
-          <div className="settings-usage-summary-card">
-            <span>总 tokens</span>
-            <strong>{formatUsageTokens(totalTokens)}</strong>
+        <div
+          className="settings-usage-dashboard"
+          aria-label="用量仪表盘"
+        >
+          <header className="settings-usage-dashboard-header">
+            <div className="settings-usage-dashboard-kicker">USAGE controlleris</div>
+            <div className="settings-usage-headline">
+              {totalTokens > 0 ? `${headlineText} tokens` : "— tokens"}
+            </div>
+            <div className="settings-usage-substats">
+              <span>
+                <strong>{totalEvents.toLocaleString("en-US")}</strong> requests
+              </span>
+              <span className="settings-usage-substats-dot" aria-hidden="true">·</span>
+              <span>
+                <strong>{totalSessions.toLocaleString("en-US")}</strong> sessions
+              </span>
+              <span className="settings-usage-substats-dot" aria-hidden="true">·</span>
+              <span>
+                <strong>{distinctAgents.toLocaleString("en-US")}</strong>{" "}
+                {distinctAgents === 1 ? "agent" : "agents"}
+              </span>
+            </div>
+          </header>
+
+          <div
+            className="settings-usage-stat-grid"
+            aria-label="用量统计"
+          >
+            <article className="settings-usage-stat-card">
+              <div className="settings-usage-stat-card-kicker">PROMPT</div>
+              <div className="settings-usage-stat-card-value">
+                {formatUsageTokens(totalPrompt)}
+              </div>
+              <div className="settings-usage-stat-card-sub">input tokens</div>
+            </article>
+            <article className="settings-usage-stat-card">
+              <div className="settings-usage-stat-card-kicker">COMPLETION</div>
+              <div className="settings-usage-stat-card-value">
+                {formatUsageTokens(totalCompletion)}
+              </div>
+              <div className="settings-usage-stat-card-sub">output tokens</div>
+            </article>
+            <article className="settings-usage-stat-card">
+              <div className="settings-usage-stat-card-kicker">24H REQ</div>
+              <div className="settings-usage-stat-card-value is-placeholder">—</div>
+              <div className="settings-usage-stat-card-sub">
+                后端尚未上报 24 小时请求计数
+              </div>
+            </article>
+            <article className="settings-usage-stat-card">
+              <div className="settings-usage-stat-card-kicker">AVG TOKEN</div>
+              <div className="settings-usage-stat-card-value">
+                {formatUsageTokens(avgTokensPerRequest)}
+              </div>
+              <div className="settings-usage-stat-card-sub">
+                {totalEvents > 0
+                  ? `${totalEvents.toLocaleString("en-US")} in · 1 out`
+                  : "尚无请求"}
+              </div>
+            </article>
           </div>
-          <div className="settings-usage-summary-card">
-            <span>事件</span>
-            <strong>{totalEvents.toLocaleString("en-US")}</strong>
+
+          <div
+            className="settings-usage-daily-chart"
+            aria-label="每日用量堆叠图"
+          >
+            <div className="settings-usage-daily-chart-head">
+              <div>
+                <div className="settings-usage-daily-chart-title">DAILY USAGE</div>
+                <div className="settings-usage-daily-chart-hint">
+                  占位：后端尚未返回每日时间序列
+                </div>
+              </div>
+            </div>
+            <UsageDailyChart usageRows={usageRows} />
           </div>
-          <div className="settings-usage-summary-card">
-            <span>会话计数</span>
-            <strong>{totalSessions.toLocaleString("en-US")}</strong>
-          </div>
+
+          {showChartAndTable && (
+            <table className="settings-usage-model-table" aria-label="模型性能">
+              <thead>
+                <tr>
+                  <th scope="col">MODEL</th>
+                  <th scope="col">REQUESTS</th>
+                  <th scope="col">TOKENS</th>
+                  <th scope="col">LATENCY</th>
+                  <th scope="col">TTFT</th>
+                  <th scope="col">SPEED</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usageRows.map((row) => {
+                  const rowKey = `${usageGroupBy}:${row.label}:${row.model ?? ""}:${row.agent_cli ?? ""}:${row.workspace_root ?? ""}:${row.session_id ?? ""}`;
+                  const breakdown = usageBreakdownParts(row.tokens);
+                  const rowTotal = usageTokenTotal(row.tokens);
+                  const requestsFraction =
+                    maxRequestsInRows > 0
+                      ? Math.min(1, row.event_count / maxRequestsInRows)
+                      : 0;
+                  const tokensFraction =
+                    maxTokensInRows > 0
+                      ? Math.min(1, rowTotal / maxTokensInRows)
+                      : 0;
+                  return (
+                    <tr key={rowKey} className="settings-usage-model-row">
+                      <th scope="row" className="settings-usage-model-cell-name">
+                        <div className="settings-usage-model-name">{row.label}</div>
+                        <div className="settings-usage-model-meta">
+                          {usageRowMeta(row)}
+                        </div>
+                        {breakdown.length > 0 && (
+                          <div
+                            className="settings-usage-breakdown"
+                            aria-label="token 分项"
+                          >
+                            {breakdown.map((item) => (
+                              <span key={item.label}>
+                                {item.label} {formatUsageTokens(item.value)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {row.context_peak_tokens != null &&
+                          row.context_peak_tokens > 0 && (
+                            <div className="settings-usage-model-peak">
+                              峰值 {formatUsageTokens(row.context_peak_tokens)}
+                            </div>
+                          )}
+                      </th>
+                      <td className="settings-usage-model-cell">
+                        <div className="settings-usage-model-cell-value">
+                          {formatUsageCount(row.event_count)}
+                        </div>
+                        <div
+                          className="settings-usage-row-bar"
+                          aria-hidden="true"
+                        >
+                          <span
+                            className="settings-usage-row-bar-fill is-accent"
+                            style={{ width: `${requestsFraction * 100}%` }}
+                          />
+                        </div>
+                      </td>
+                      <td className="settings-usage-model-cell">
+                        <div className="settings-usage-model-cell-value">
+                          {formatUsageTokens(rowTotal)}
+                        </div>
+                        <div
+                          className="settings-usage-row-bar"
+                          aria-hidden="true"
+                        >
+                          <span
+                            className="settings-usage-row-bar-fill is-accent"
+                            style={{ width: `${tokensFraction * 100}%` }}
+                          />
+                        </div>
+                      </td>
+                      <td className="settings-usage-model-cell">
+                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-hint">
+                          后端未上报
+                        </div>
+                      </td>
+                      <td className="settings-usage-model-cell">
+                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-hint">
+                          后端未上报
+                        </div>
+                      </td>
+                      <td className="settings-usage-model-cell">
+                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-hint">
+                          后端未上报
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
 
-        <div className="settings-usage-filter-stack">
+        <div
+          className="settings-usage-toolbar-strip"
+          role="toolbar"
+          aria-label="用量筛选"
+        >
           <div
             className="settings-usage-toolbar"
             role="radiogroup"
@@ -2703,49 +3326,8 @@ export function SettingsPage({
         {usageError && <div className="settings-error">{usageError}</div>}
         {usageLoading && <div className="settings-status">正在加载用量...</div>}
         {!usageLoading && usageRows.length === 0 && (
-          <div className="settings-empty-panel">暂无用量记录。</div>
-        )}
-        {!usageLoading && usageRows.length > 0 && (
-          <div className="settings-usage-list">
-            {usageRows.map((row) => {
-              const breakdown = usageBreakdownParts(row.tokens);
-              return (
-                <article
-                  key={`${usageGroupBy}:${row.label}:${row.model ?? ""}:${row.agent_cli ?? ""}:${row.workspace_root ?? ""}:${row.session_id ?? ""}`}
-                  className="settings-usage-row"
-                >
-                  <div className="settings-usage-row-main">
-                    <div className="settings-usage-row-title">{row.label}</div>
-                    <div className="settings-usage-row-meta">
-                      {usageRowMeta(row)}
-                    </div>
-                    {breakdown.length > 0 && (
-                      <div
-                        className="settings-usage-breakdown"
-                        aria-label="token 分项"
-                      >
-                        {breakdown.map((item) => (
-                          <span key={item.label}>
-                            {item.label} {formatUsageTokens(item.value)}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <div className="settings-usage-row-stats">
-                    <strong>
-                      {formatUsageTokens(usageTokenTotal(row.tokens))}
-                    </strong>
-                    {row.context_peak_tokens != null &&
-                      row.context_peak_tokens > 0 && (
-                        <span>
-                          峰值 {formatUsageTokens(row.context_peak_tokens)}
-                        </span>
-                      )}
-                  </div>
-                </article>
-              );
-            })}
+          <div className="settings-empty-panel">
+            暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。
           </div>
         )}
       </section>
@@ -3671,6 +4253,204 @@ function usageRowMeta(row: UsageSummaryRow): string {
   return parts.join(" · ");
 }
 
+function formatUsageCount(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  }
+  if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return value.toLocaleString("en-US");
+}
+
+const USAGE_CHART_PALETTE = [
+  "var(--usage-chart-1)",
+  "var(--usage-chart-2)",
+  "var(--usage-chart-3)",
+  "var(--usage-chart-4)",
+  "var(--usage-chart-5)",
+  "var(--usage-chart-6)",
+  "var(--usage-chart-7)",
+  "var(--usage-chart-8)",
+  "var(--usage-chart-9)",
+];
+
+const USAGE_CHART_PLACEHOLDER_MODELS = [
+  "claude-opus-4-7",
+  "deepseek-v4-flash",
+  "gpt-5.2",
+  "kirodev-v3",
+  "minimax-m3",
+  "mx-x2-pro",
+  "nemotron-3-ultra",
+  "step-3.7-flash",
+  "sonar-5.0-07b",
+];
+
+function usageChartColor(index: number): string {
+  return USAGE_CHART_PALETTE[index % USAGE_CHART_PALETTE.length];
+}
+
+function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
+  const chartWidth = 720;
+  const chartHeight = 220;
+  const paddingX = 28;
+  const paddingTop = 18;
+  const paddingBottom = 36;
+  const dayCount = 30;
+  const innerWidth = chartWidth - paddingX * 2;
+  const innerHeight = chartHeight - paddingTop - paddingBottom;
+  const barWidth = innerWidth / dayCount;
+  const yAxisLabels = ["1M", "800M", "600M", "400M", "200M", "0"];
+  const yAxisFractions = [1, 0.8, 0.6, 0.4, 0.2, 0];
+  const placeholderHeightFraction = 0.12;
+
+  const labels = usageRows.length > 0
+    ? usageRows.map((row) => row.label || row.model || row.agent_cli || "—")
+    : USAGE_CHART_PLACEHOLDER_MODELS;
+  const colorCount = Math.min(labels.length, USAGE_CHART_PALETTE.length);
+
+  const now = new Date();
+  const dayDates: Date[] = [];
+  for (let i = dayCount - 1; i >= 0; i -= 1) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    dayDates.push(d);
+  }
+
+  return (
+    <div className="settings-usage-daily-chart-body">
+      <svg
+        className="settings-usage-daily-chart-svg"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        role="img"
+        aria-label="每日用量堆叠柱状图（占位）"
+        preserveAspectRatio="none"
+      >
+        <title>占位: 后端尚未返回每日时间序列</title>
+        <defs>
+          <pattern
+            id="usage-chart-placeholder-pattern"
+            patternUnits="userSpaceOnUse"
+            width="6"
+            height="6"
+            patternTransform="rotate(45)"
+          >
+            <line
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="6"
+              stroke="var(--usage-chart-placeholder-stripe)"
+              strokeWidth="1.2"
+            />
+          </pattern>
+        </defs>
+
+        {yAxisFractions.map((fraction, index) => {
+          const y = paddingTop + innerHeight * (1 - fraction);
+          return (
+            <g key={`yaxis-${index}`}>
+              <line
+                x1={paddingX}
+                x2={chartWidth - paddingX}
+                y1={y}
+                y2={y}
+                className="settings-usage-daily-chart-grid"
+              />
+              <text
+                x={chartWidth - paddingX + 4}
+                y={y + 3}
+                className="settings-usage-daily-chart-axis"
+              >
+                {yAxisLabels[index]}
+              </text>
+            </g>
+          );
+        })}
+
+        {dayDates.map((date, dayIndex) => {
+          const x = paddingX + barWidth * dayIndex + barWidth * 0.18;
+          const w = barWidth * 0.64;
+          const stackHeight = innerHeight * placeholderHeightFraction * colorCount;
+          const maxStackHeight = innerHeight * 0.6;
+          const finalStackHeight = Math.min(stackHeight, maxStackHeight);
+          let cursorY = paddingTop + innerHeight - finalStackHeight;
+          return (
+            <g key={`day-${dayIndex}`}>
+              {Array.from({ length: colorCount }).map((_, segIndex) => {
+                const segH = finalStackHeight / colorCount;
+                const y = cursorY;
+                cursorY += segH;
+                return (
+                  <rect
+                    key={`seg-${dayIndex}-${segIndex}`}
+                    x={x}
+                    y={y}
+                    width={w}
+                    height={Math.max(1, segH - 1)}
+                    fill={usageChartColor(segIndex)}
+                    opacity={usageRows.length === 0 ? 0.55 : 0.8}
+                    rx={1.5}
+                  />
+                );
+              })}
+              <rect
+                x={x}
+                y={paddingTop + innerHeight - finalStackHeight}
+                width={w}
+                height={finalStackHeight}
+                fill="url(#usage-chart-placeholder-pattern)"
+                pointerEvents="none"
+              />
+              {(dayIndex === 0 ||
+                dayIndex === dayCount - 1 ||
+                dayIndex === Math.floor(dayCount / 2)) && (
+                <text
+                  x={x + w / 2}
+                  y={chartHeight - paddingBottom + 16}
+                  className="settings-usage-daily-chart-axis"
+                  textAnchor="middle"
+                >
+                  {date.toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
+      <div
+        className="settings-usage-chart-legend"
+        role="list"
+        aria-label="模型颜色图例"
+      >
+        {labels.slice(0, colorCount).map((label, index) => (
+          <span
+            key={`legend-${index}-${label}`}
+            className="settings-usage-chart-legend-item"
+            role="listitem"
+          >
+            <span
+              className="settings-usage-chart-legend-swatch"
+              style={{ background: usageChartColor(index) }}
+              aria-hidden="true"
+            />
+            <span
+              className="settings-usage-chart-legend-label"
+              aria-hidden="true"
+            >
+              {label}
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "archive") return "已归档";
   if (pane === "remote") return "远程";
@@ -3690,7 +4470,7 @@ function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "image")
     return "配置识图、生图、改图的降级 MCP 工具：识图复用对话模型，生/改图独立配置协议与模型。";
   if (pane === "usage")
-    return "查看按模型、智能体、工作区或会话汇总的 token 用量。";
+    return "按模型、智能体、工作区或会话汇总可上报智能体（Codex、Claude）的 token 用量；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。";
   if (pane === "lsp")
     return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";

@@ -1382,6 +1382,14 @@ pub struct AgentProviderProfile {
     #[serde(default)]
     pub protocol: Option<CustomProviderProtocol>,
     pub default_model: Option<String>,
+    /// Rich per-model attributes persisted in the provider catalog. Old UI
+    /// surfaces that only need the bare slug list should keep using
+    /// `models`, which is derived from this list.
+    #[serde(default)]
+    pub model_entries: Vec<ModelCatalogEntry>,
+    /// Backward-compatible flat slug list derived from `model_entries`. Kept
+    /// in sync by `recompute_derived_fields` so the existing UI keeps working
+    /// while consumers migrate to `model_entries`.
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default)]
@@ -1390,6 +1398,85 @@ pub struct AgentProviderProfile {
     pub requires_credential: bool,
     pub help_text: String,
 }
+
+impl AgentProviderProfile {
+    /// Recompute derived fields (`models` slug list) from `model_entries`.
+    /// Call after constructing or mutating `model_entries` so older UI
+    /// surfaces see the same data.
+    pub fn recompute_derived_fields(&mut self) {
+        self.models = self
+            .model_entries
+            .iter()
+            .map(|entry| entry.slug.clone())
+            .collect();
+    }
+}
+
+/// Reasoning effort levels surfaced through ACP/Codex config and the model
+/// catalog. `None` is the existing default and disables reasoning summaries
+/// entirely. `Minimal`/`Low`/`Medium`/`High` map to Codex effort values when
+/// the active model/provider supports them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[default]
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn as_codex_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Per-model runtime attributes authored in the provider catalog. Every field
+/// except `slug` is optional; unset fields fall back to the static metadata
+/// tables and the default fallback chain. A slug-only entry is a valid minimal
+/// configuration that just defers everything to the defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCatalogEntry {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl ModelCatalogEntry {
+    /// Build an entry that only carries the model slug. All attributes defer to
+    /// the static tables / defaults.
+    pub fn from_slug(slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            display_name: None,
+            context_window: None,
+            max_output_tokens: None,
+            supports_image_input: None,
+            reasoning_effort: None,
+        }
+    }
+}
+
+/// User-supplied attributes for a model row in the settings editor. Identical
+/// to `ModelCatalogEntry` but kept as a distinct type alias so command inputs
+/// stay semantically separate from catalog storage.
+pub type ModelAttributesInput = ModelCatalogEntry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentModelOption {
@@ -1692,4 +1779,99 @@ pub struct AgentInstallResult {
     pub message: String,
     pub manual_instruction: Option<String>,
     pub snapshot: AgentSettingsSnapshot,
+}
+
+#[cfg(test)]
+mod model_attributes_tests {
+    use super::*;
+
+    #[test]
+    fn slug_only_entry_round_trip() {
+        let entry = ModelCatalogEntry::from_slug("gpt-5.4");
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert_eq!(json, r#"{"slug":"gpt-5.4"}"#);
+        let back: ModelCatalogEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn missing_fields_deserialize_as_none() {
+        let json = r#"{ "slug": "claude-opus-4.8" }"#;
+        let entry: ModelCatalogEntry = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(entry.slug, "claude-opus-4.8");
+        assert!(entry.context_window.is_none());
+        assert!(entry.max_output_tokens.is_none());
+        assert!(entry.supports_image_input.is_none());
+        assert!(entry.reasoning_effort.is_none());
+        assert!(entry.display_name.is_none());
+    }
+
+    #[test]
+    fn rich_entry_preserves_all_fields() {
+        let entry = ModelCatalogEntry {
+            slug: "custom-model".into(),
+            display_name: Some("Custom Model".into()),
+            context_window: Some(400_000),
+            max_output_tokens: Some(64_000),
+            supports_image_input: Some(true),
+            reasoning_effort: Some(ReasoningEffort::Medium),
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(json.contains(r#""display_name":"Custom Model""#));
+        assert!(json.contains(r#""context_window":400000"#));
+        assert!(json.contains(r#""max_output_tokens":64000"#));
+        assert!(json.contains(r#""supports_image_input":true"#));
+        assert!(json.contains(r#""reasoning_effort":"medium""#));
+        let back: ModelCatalogEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn reasoning_effort_serializes_to_snake_case() {
+        for (effort, expected) in [
+            (ReasoningEffort::None, "\"none\""),
+            (ReasoningEffort::Minimal, "\"minimal\""),
+            (ReasoningEffort::Low, "\"low\""),
+            (ReasoningEffort::Medium, "\"medium\""),
+            (ReasoningEffort::High, "\"high\""),
+        ] {
+            let json = serde_json::to_string(&effort).expect("serialize");
+            assert_eq!(json, expected, "mismatch for {effort:?}");
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_default_is_none() {
+        assert_eq!(ReasoningEffort::default(), ReasoningEffort::None);
+        assert_eq!(ReasoningEffort::None.as_codex_str(), "none");
+        assert_eq!(ReasoningEffort::High.as_codex_str(), "high");
+    }
+
+    #[test]
+    fn agent_provider_profile_recompute_derived_fields() {
+        let mut profile = AgentProviderProfile {
+            family: AgentProviderFamily::Codex,
+            id: "test".into(),
+            label: "Test".into(),
+            proxy_kind: AgentProviderProxyKind::Responses,
+            selected: false,
+            configured: true,
+            base_url: None,
+            hidden: false,
+            custom: false,
+            protocol: None,
+            default_model: None,
+            model_entries: vec![
+                ModelCatalogEntry::from_slug("a"),
+                ModelCatalogEntry::from_slug("b"),
+            ],
+            models: Vec::new(),
+            model_list_url: None,
+            credential_label: None,
+            requires_credential: false,
+            help_text: String::new(),
+        };
+        profile.recompute_derived_fields();
+        assert_eq!(profile.models, vec!["a".to_string(), "b".to_string()]);
+    }
 }

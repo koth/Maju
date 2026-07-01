@@ -765,6 +765,26 @@ export interface CustomProviderInput {
   modelListUrl?: string | null;
 }
 
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high";
+
+export interface ModelCatalogEntry {
+  slug: string;
+  display_name?: string | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  supports_image_input?: boolean | null;
+  reasoning_effort?: ReasoningEffort | null;
+}
+
+// Same shape as ModelCatalogEntry; kept as a distinct alias so command inputs
+// and catalog reads remain decoupled at the type level.
+export type ModelAttributesInput = ModelCatalogEntry;
+
 export interface AgentProviderProfile {
   family: AgentProviderFamily;
   id: string;
@@ -778,6 +798,9 @@ export interface AgentProviderProfile {
   protocol: CustomProviderProtocol | null;
   default_model: string | null;
   models: string[];
+  // Rich per-model attributes mirrored from the backend. Old UI surfaces can
+  // keep using `models`; new editor components should read `model_entries`.
+  model_entries?: ModelCatalogEntry[];
   model_list_url: string | null;
   credential_label: string | null;
   requires_credential: boolean;

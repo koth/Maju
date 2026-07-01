@@ -20,7 +20,7 @@ use legacy::{
 };
 use util::{
     cap_string, decode_json_vec, normalize_change_path, normalize_workspace_root, now_iso,
-    upsert_loaded_change,
+    parse_instant_to_epoch_secs, upsert_loaded_change,
 };
 use workspace_model::{
     ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
@@ -32,6 +32,17 @@ use workspace_model::{
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
+
+/// Agent CLI identifiers that cannot report detailed token usage (input/output/
+/// cache/reasoning) because the agent code is third-party and cannot be
+/// modified. Their usage events still carry context occupancy (`used`/`size`)
+/// from the standard ACP `usage_update`, so single-session snapshots and the
+/// live dock continue to work; only the cross-session historical summary
+/// filters them out. Keep the literal in sync with
+/// `app_core::settings::agent_cli::AgentCliId::Codebuddy` and
+/// `update_session_agent_cli` / `append_usage_event`, which write this exact
+/// string to `sessions.agent_cli` and `usage_events.agent_cli`.
+pub(super) const NON_REPORTING_AGENT_CLI: &str = "codebuddy";
 
 #[derive(Debug, Clone)]
 struct StoredUsageEvent {
@@ -989,6 +1000,18 @@ impl SessionStore {
              WHERE 1 = 1",
         );
         let mut params_vec = Vec::<String>::new();
+        // Exclude non-reporting third-party agents (e.g. CodeBuddy) from the
+        // cross-session historical summary. They only ever emit empty
+        // `ContextSnapshot` rows (no token breakdown) and would otherwise
+        // surface as empty groups under "按智能体" or pollute "按模型". The
+        // single-session snapshot path (`load_usage_events_for_session`) is
+        // intentionally untouched, so live context occupancy in the dock
+        // still works for those sessions. We filter on the joined session's
+        // `agent_cli` first, falling back to the `usage_events` row's own
+        // `agent_cli` (which `append_usage_event` populates from the same
+        // source) so a missing session row is still excluded.
+        sql.push_str(" AND COALESCE(s.agent_cli, u.agent_cli, '') != ?");
+        params_vec.push(NON_REPORTING_AGENT_CLI.to_string());
         if !request.all_workspaces {
             let workspace_root = request
                 .workspace_root
@@ -1018,20 +1041,29 @@ impl SessionStore {
             sql.push_str(" AND u.session_id = ?");
             params_vec.push(session_id.to_string());
         }
+        // Date bounds are compared as epoch seconds (numeric) rather than as
+        // raw text. The desktop UI sends ISO-8601 UTC bounds (e.g. "2026-06-30T00:00:00.000Z")
+        // while `usage_events.created_at` is stored as a decimal-seconds string
+        // (e.g. "1780185600"); textual comparison breaks across formats. We
+        // parse the bound with `parse_instant_to_epoch_secs` (which also accepts
+        // raw decimal seconds for backward compatibility) and cast the stored
+        // column to INTEGER so SQLite compares both sides as numbers.
         if let Some(from) = request
             .from
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .and_then(parse_instant_to_epoch_secs)
         {
-            sql.push_str(" AND u.created_at >= ?");
+            sql.push_str(" AND CAST(u.created_at AS INTEGER) >= ?");
             params_vec.push(from.to_string());
         }
         if let Some(to) = request
             .to
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .and_then(parse_instant_to_epoch_secs)
         {
-            sql.push_str(" AND u.created_at <= ?");
+            sql.push_str(" AND CAST(u.created_at AS INTEGER) <= ?");
             params_vec.push(to.to_string());
         }
         sql.push_str(" ORDER BY u.created_at ASC");

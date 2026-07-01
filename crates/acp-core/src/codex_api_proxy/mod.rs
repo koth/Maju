@@ -8,7 +8,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,14 +20,16 @@ mod provider;
 mod sse;
 
 use sse::{
-    streaming_chat_sse_response, streaming_chat_sse_to_anthropic_response,
-    streaming_passthrough_response,
+    streaming_anthropic_sse_to_responses_response, streaming_chat_sse_response,
+    streaming_chat_sse_to_anthropic_response, streaming_passthrough_response,
+    streaming_responses_sse_to_anthropic_response,
 };
 
 #[cfg(test)]
 use sse::{
-    ChatSseStreamConverter, TimiaiResponsesSseSanitizer, chat_sse_to_anthropic_sse,
-    chat_sse_to_responses_sse,
+    AnthropicSseToResponsesConverter, ChatSseStreamConverter, ResponsesSseToAnthropicConverter,
+    TimiaiResponsesSseSanitizer, anthropic_sse_to_responses_sse, chat_sse_to_anthropic_sse,
+    chat_sse_to_responses_sse, responses_sse_to_anthropic_sse,
 };
 
 use provider::{
@@ -676,7 +678,8 @@ async fn proxy_anthropic_messages_codex_responses_request(
     upstream_url: &str,
     requested_stream: bool,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload);
+    let anthropic_payload =
+        chat_payload_to_anthropic_payload(chat_payload, requested_stream);
     log_anthropic_payload_summary(
         &format!("{}_request", normalize_proxy_provider(provider)),
         &anthropic_payload,
@@ -697,6 +700,13 @@ async fn proxy_anthropic_messages_codex_responses_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    if is_event_stream(&content_type) && status.is_success() {
+        append_codex_api_proxy_log(&format!(
+            "codex_stream_convert provider={} upstream=anthropic_messages downstream=responses",
+            normalize_proxy_provider(provider)
+        ));
+        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status));
+    }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
     let body = if status.is_success() {
@@ -1017,6 +1027,13 @@ async fn proxy_responses_to_anthropic_messages_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    if is_event_stream(&content_type) && status.is_success() {
+        append_codex_api_proxy_log(&format!(
+            "anthropic_stream_convert provider={} upstream=responses downstream=anthropic_messages",
+            normalize_proxy_provider(provider)
+        ));
+        return Ok(streaming_responses_sse_to_anthropic_response(upstream, status));
+    }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
     let body = if status.is_success() {
@@ -1423,7 +1440,8 @@ async fn proxy_kimi_codex_api_request(
     api_key: &str,
     requested_stream: bool,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload);
+    let anthropic_payload =
+        chat_payload_to_anthropic_payload(chat_payload, requested_stream);
     log_anthropic_payload_summary("kimi_request", &anthropic_payload);
 
     let client = reqwest::Client::new();
@@ -1440,8 +1458,16 @@ async fn proxy_kimi_codex_api_request(
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
+
+
         .unwrap_or("application/json")
         .to_string();
+    if is_event_stream(&content_type) && status.is_success() {
+        append_codex_api_proxy_log(
+            "codex_stream_convert provider=kimi_code upstream=anthropic_messages downstream=responses",
+        );
+        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status));
+    }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
     let body = if status.is_success() {
@@ -2018,8 +2044,8 @@ fn add_non_gpt_edit_bridge_instructions(chat: Value) -> Value {
     add_system_instruction(chat, NON_GPT_EDIT_BRIDGE_INSTRUCTIONS)
 }
 
-fn chat_payload_to_anthropic_payload(mut chat: Value) -> Value {
-    chat["stream"] = Value::Bool(false);
+fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
+    chat["stream"] = Value::Bool(stream);
     let mut system_parts = Vec::new();
     let mut anthropic_messages = Vec::new();
 

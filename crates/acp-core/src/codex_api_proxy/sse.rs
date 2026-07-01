@@ -999,3 +999,1065 @@ fn next_sse_event(buffer: &str) -> Option<(String, usize)> {
     }
     None
 }
+
+/// Extract the `event:` line value from an SSE event block. Unlike the
+/// chat-completions upstream (which only emits `data:` lines), the Anthropic
+/// and Responses SSE streams carry the event name on a dedicated `event:` line.
+fn sse_event_name_line(event: &str) -> Option<&str> {
+    event
+        .lines()
+        .find_map(|line| line.strip_prefix("event:").map(str::trim))
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic SSE → Responses SSE (streaming)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct AnthropicToResponsesState {
+    response_id: String,
+    model: String,
+    text: String,
+    reasoning_content: String,
+    message_started: bool,
+    text_part_added: bool,
+    /// content_block index → our tool call state. Keyed by the Anthropic
+    /// `content_block_start` index so deltas map back to the right call.
+    tool_calls: BTreeMap<usize, StreamToolCall>,
+    /// Order of tool_call content_block indices, to compute Responses
+    /// `output_index` relative to the message item.
+    tool_call_order: Vec<usize>,
+    stop_reason: Option<String>,
+    usage: Value,
+    /// content_block_index of a finalized tool_use block (after content_block_stop).
+    finalized_tool_blocks: BTreeSet<usize>,
+}
+
+impl AnthropicToResponsesState {
+    fn tool_output_index(&self, block_index: usize) -> usize {
+        // Message item sits at output_index 0; tool calls follow at +1, +2, ...
+        let position = self
+            .tool_call_order
+            .iter()
+            .position(|idx| *idx == block_index)
+            .unwrap_or(0);
+        if self.message_started {
+            position + 1
+        } else {
+            position
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct AnthropicSseToResponsesConverter {
+    buffer: String,
+    state: AnthropicToResponsesState,
+}
+
+impl AnthropicSseToResponsesConverter {
+    pub(super) fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            state: AnthropicToResponsesState {
+                response_id: "resp_proxy".to_string(),
+                model: CHAT_MODEL_FALLBACK.to_string(),
+                usage: normalized_chat_usage(None),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        let mut output = String::new();
+        while let Some((event, consumed)) = next_sse_event(&self.buffer) {
+            self.buffer.drain(..consumed);
+            process_anthropic_to_responses_event(&event, &mut output, &mut self.state);
+        }
+        output.into_bytes()
+    }
+
+    pub(super) fn finish(&mut self) -> Vec<u8> {
+        let trailing = std::mem::take(&mut self.buffer);
+        let mut output = String::new();
+        if !trailing.trim().is_empty() {
+            process_anthropic_to_responses_event(&trailing, &mut output, &mut self.state);
+        }
+        emit_anthropic_to_responses_done(&mut output, &mut self.state);
+        output.into_bytes()
+    }
+}
+
+fn process_anthropic_to_responses_event(
+    event: &str,
+    output: &mut String,
+    state: &mut AnthropicToResponsesState,
+) {
+    let Some(data) = sse_data_line(event) else {
+        return;
+    };
+    if data.trim() == "[DONE]" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+        append_codex_api_proxy_log("failed_to_parse_anthropic_sse_event");
+        return;
+    };
+    let event_name = sse_event_name_line(event).unwrap_or_else(|| {
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    });
+    match event_name {
+        "message_start" => {
+            if let Some(id) = value
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+            {
+                state.response_id = id.to_string();
+            }
+            if let Some(model) = value
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(Value::as_str)
+            {
+                state.model = model.to_string();
+            }
+        }
+        "content_block_start" => {
+            let Some(index) = value.get("index").and_then(Value::as_u64) else {
+                return;
+            };
+            let index = index as usize;
+            let block_type = value
+                .get("content_block")
+                .and_then(|b| b.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match block_type {
+                "text" => {
+                    if !state.message_started {
+                        state.message_started = true;
+                        push_sse(
+                            output,
+                            "response.output_item.added",
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": 0,
+                                "item": {
+                                    "id": "msg_proxy",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "in_progress",
+                                    "content": []
+                                }
+                            }),
+                        );
+                        push_sse(
+                            output,
+                            "response.content_part.added",
+                            json!({
+                                "type": "response.content_part.added",
+                                "output_index": 0,
+                                "content_index": 0,
+                                "item_id": "msg_proxy",
+                                "part": { "type": "output_text", "text": "" }
+                            }),
+                        );
+                        state.text_part_added = true;
+                    } else if !state.text_part_added {
+                        push_sse(
+                            output,
+                            "response.content_part.added",
+                            json!({
+                                "type": "response.content_part.added",
+                                "output_index": 0,
+                                "content_index": 0,
+                                "item_id": "msg_proxy",
+                                "part": { "type": "output_text", "text": "" }
+                            }),
+                        );
+                        state.text_part_added = true;
+                    }
+                }
+                "tool_use" => {
+                    if !state.message_started {
+                        state.message_started = true;
+                        push_sse(
+                            output,
+                            "response.output_item.added",
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": 0,
+                                "item": {
+                                    "id": "msg_proxy",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "in_progress",
+                                    "content": []
+                                }
+                            }),
+                        );
+                    }
+                    let id = value
+                        .get("content_block")
+                        .and_then(|b| b.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_proxy")
+                        .to_string();
+                    let name = value
+                        .get("content_block")
+                        .and_then(|b| b.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let call = StreamToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                        added: true,
+                        content_block_index: Some(index),
+                    };
+                    state.tool_calls.insert(index, call);
+                    state.tool_call_order.push(index);
+                    let output_index = state.tool_output_index(index);
+                    if tool_call_outputs_as_apply_patch(&name) {
+                        push_sse(
+                            output,
+                            "response.output_item.added",
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": output_index,
+                                "item": {
+                                    "id": id,
+                                    "type": "custom_tool_call",
+                                    "call_id": id,
+                                    "name": "apply_patch",
+                                    "input": "",
+                                    "status": "in_progress"
+                                }
+                            }),
+                        );
+                    } else {
+                        let item = namespaced_function_call_item(&id, &name, "", "in_progress");
+                        push_sse(
+                            output,
+                            "response.output_item.added",
+                            json!({
+                                "type": "response.output_item.added",
+                                "output_index": output_index,
+                                "item": item
+                            }),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_delta" => {
+            let Some(index) = value.get("index").and_then(Value::as_u64) else {
+                return;
+            };
+            let index = index as usize;
+            let delta = value.get("delta").unwrap_or(&Value::Null);
+            let delta_type = delta
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match delta_type {
+                "text_delta" => {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            state.text.push_str(text);
+                            push_sse(
+                                output,
+                                "response.output_text.delta",
+                                json!({
+                                    "type": "response.output_text.delta",
+                                    "output_index": 0,
+                                    "content_index": 0,
+                                    "item_id": "msg_proxy",
+                                    "delta": text
+                                }),
+                            );
+                        }
+                    }
+                }
+                "input_json_delta" => {
+                    if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
+                        let output_index = state.tool_output_index(index);
+                        if let Some(call) = state.tool_calls.get_mut(&index) {
+                            call.arguments.push_str(partial);
+                            if !tool_call_outputs_as_apply_patch(&call.name) {
+                                push_sse(
+                                    output,
+                                    "response.function_call_arguments.delta",
+                                    json!({
+                                        "type": "response.function_call_arguments.delta",
+                                        "output_index": output_index,
+                                        "item_id": call.id,
+                                        "delta": partial
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+                "thinking_delta" => {
+                    if let Some(thinking) = delta.get("thinking").and_then(Value::as_str) {
+                        state.reasoning_content.push_str(thinking);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_stop" => {
+            let Some(index) = value.get("index").and_then(Value::as_u64) else {
+                return;
+            };
+            let index = index as usize;
+            // Only finalize tool_use blocks; text block is finalized at stream end.
+            if state.tool_calls.contains_key(&index) {
+                state.finalized_tool_blocks.insert(index);
+                let call = state.tool_calls.get(&index).cloned();
+                if let Some(call) = call {
+                    let output_index = state.tool_output_index(index);
+                    if tool_call_outputs_as_apply_patch(&call.name) {
+                        push_sse(
+                            output,
+                            "response.output_item.done",
+                            json!({
+                                "type": "response.output_item.done",
+                                "output_index": output_index,
+                                "item": {
+                                    "id": call.id,
+                                    "type": "custom_tool_call",
+                                    "call_id": call.id,
+                                    "name": "apply_patch",
+                                    "input": apply_patch_input_for_tool_call(&call.name, &call.arguments),
+                                    "status": "completed"
+                                }
+                            }),
+                        );
+                    } else if !call.arguments.is_empty() {
+                        push_sse(
+                            output,
+                            "response.function_call_arguments.done",
+                            json!({
+                                "type": "response.function_call_arguments.done",
+                                "output_index": output_index,
+                                "item_id": call.id,
+                                "arguments": call.arguments
+                            }),
+                        );
+                        let item = namespaced_function_call_item(
+                            &call.id,
+                            if call.name.is_empty() { "unknown" } else { &call.name },
+                            &call.arguments,
+                            "completed",
+                        );
+                        push_sse(
+                            output,
+                            "response.output_item.done",
+                            json!({
+                                "type": "response.output_item.done",
+                                "output_index": output_index,
+                                "item": item
+                            }),
+                        );
+                    } else {
+                        let item = namespaced_function_call_item(
+                            &call.id,
+                            if call.name.is_empty() { "unknown" } else { &call.name },
+                            "",
+                            "completed",
+                        );
+                        push_sse(
+                            output,
+                            "response.output_item.done",
+                            json!({
+                                "type": "response.output_item.done",
+                                "output_index": output_index,
+                                "item": item
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        "message_delta" => {
+            if let Some(stop_reason) = value
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+            {
+                state.stop_reason = Some(stop_reason.to_string());
+            }
+            if let Some(usage) = value.get("usage") {
+                state.usage = normalized_chat_usage(Some(usage));
+            }
+        }
+        "message_stop" => {
+            // Finalization handled in finish()/emit_anthropic_to_responses_done.
+        }
+        _ => {}
+    }
+}
+
+fn emit_anthropic_to_responses_done(
+    output: &mut String,
+    state: &mut AnthropicToResponsesState,
+) {
+    append_codex_api_proxy_log(&format!(
+        "anthropic_to_responses_stream_done stop_reason={} text_chars={} tool_calls={}",
+        state.stop_reason.as_deref().unwrap_or("<missing>"),
+        state.text.len(),
+        state.tool_calls.len(),
+    ));
+
+    let mut final_output = Vec::new();
+    if state.message_started {
+        push_sse(
+            output,
+            "response.output_text.done",
+            json!({
+                "type": "response.output_text.done",
+                "output_index": 0,
+                "content_index": 0,
+                "item_id": "msg_proxy",
+                "text": state.text
+            }),
+        );
+        push_sse(
+            output,
+            "response.content_part.done",
+            json!({
+                "type": "response.content_part.done",
+                "output_index": 0,
+                "content_index": 0,
+                "item_id": "msg_proxy",
+                "part": { "type": "output_text", "text": state.text }
+            }),
+        );
+        let item =
+            response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
+        remember_reasoning_content(&state.text, &state.reasoning_content);
+        push_sse(
+            output,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": item
+            }),
+        );
+        final_output.push(item);
+    }
+
+    // Tool calls that never received a content_block_stop (defensive).
+    for &block_index in &state.tool_call_order.clone() {
+        if state.finalized_tool_blocks.contains(&block_index) {
+            continue;
+        }
+        let Some(call) = state.tool_calls.get(&block_index).cloned() else {
+            continue;
+        };
+        let output_index = state.tool_output_index(block_index);
+        if tool_call_outputs_as_apply_patch(&call.name) {
+            push_sse(
+                output,
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": {
+                        "id": call.id,
+                        "type": "custom_tool_call",
+                        "call_id": call.id,
+                        "name": "apply_patch",
+                        "input": apply_patch_input_for_tool_call(&call.name, &call.arguments),
+                        "status": "completed"
+                    }
+                }),
+            );
+            final_output.push(json!({
+                "id": call.id,
+                "type": "custom_tool_call",
+                "call_id": call.id,
+                "name": "apply_patch",
+                "input": apply_patch_input_for_tool_call(&call.name, &call.arguments),
+                "status": "completed"
+            }));
+        } else {
+            if !call.arguments.is_empty() {
+                push_sse(
+                    output,
+                    "response.function_call_arguments.done",
+                    json!({
+                        "type": "response.function_call_arguments.done",
+                        "output_index": output_index,
+                        "item_id": call.id,
+                        "arguments": call.arguments
+                    }),
+                );
+            }
+            let item = namespaced_function_call_item(
+                &call.id,
+                if call.name.is_empty() { "unknown" } else { &call.name },
+                &call.arguments,
+                "completed",
+            );
+            push_sse(
+                output,
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item
+                }),
+            );
+            final_output.push(item);
+        }
+    }
+
+    push_sse(
+        output,
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": state.response_id,
+                "object": "response",
+                "created_at": 0,
+                "model": state.model,
+                "status": "completed",
+                "output": final_output,
+                "usage": state.usage
+            }
+        }),
+    );
+    output.push_str("data: [DONE]\n\n");
+}
+
+#[cfg(test)]
+pub(super) fn anthropic_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
+    let mut converter = AnthropicSseToResponsesConverter::new();
+    let mut output = converter.push_chunk(body);
+    output.extend(converter.finish());
+    output
+}
+
+pub(super) fn streaming_anthropic_sse_to_responses_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+) -> Response<ProxyBody> {
+    let upstream_stream = upstream.bytes_stream();
+    let stream = futures::stream::unfold(
+        (
+            upstream_stream,
+            AnthropicSseToResponsesConverter::new(),
+            false,
+        ),
+        |(mut upstream_stream, mut converter, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match upstream_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        let bytes = converter.push_chunk(&chunk);
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, false),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        append_codex_api_proxy_log(&format!(
+                            "upstream_anthropic_to_responses_sse_read_error error={error}"
+                        ));
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                    None => {
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
+    *response.status_mut() = status;
+    if let Ok(value) = "text/event-stream".parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Responses SSE → Anthropic SSE (streaming)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct ResponsesToAnthropicState {
+    message_id: String,
+    model: String,
+    text: String,
+    reasoning_content: String,
+    message_started: bool,
+    text_block_started: bool,
+    text_block_index: Option<usize>,
+    next_content_block_index: usize,
+    /// output_index → tool call state.
+    tool_calls: BTreeMap<usize, StreamToolCall>,
+    stop_reason: Option<String>,
+    usage: Value,
+}
+
+#[derive(Debug)]
+pub(super) struct ResponsesSseToAnthropicConverter {
+    buffer: String,
+    state: ResponsesToAnthropicState,
+}
+
+impl ResponsesSseToAnthropicConverter {
+    pub(super) fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            state: ResponsesToAnthropicState {
+                message_id: "msg_proxy".to_string(),
+                model: CHAT_MODEL_FALLBACK.to_string(),
+                usage: normalized_chat_usage(None),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        let mut output = String::new();
+        while let Some((event, consumed)) = next_sse_event(&self.buffer) {
+            self.buffer.drain(..consumed);
+            process_responses_to_anthropic_event(&event, &mut output, &mut self.state);
+        }
+        output.into_bytes()
+    }
+
+    pub(super) fn finish(&mut self) -> Vec<u8> {
+        let trailing = std::mem::take(&mut self.buffer);
+        let mut output = String::new();
+        if !trailing.trim().is_empty() {
+            process_responses_to_anthropic_event(&trailing, &mut output, &mut self.state);
+        }
+        emit_responses_to_anthropic_done(&mut output, &mut self.state);
+        output.into_bytes()
+    }
+}
+
+fn ensure_responses_to_anthropic_message_started(
+    output: &mut String,
+    state: &mut ResponsesToAnthropicState,
+) {
+    if state.message_started {
+        return;
+    }
+    state.message_started = true;
+    push_sse(
+        output,
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": state.message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": state.model,
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }
+        }),
+    );
+}
+
+fn process_responses_to_anthropic_event(
+    event: &str,
+    output: &mut String,
+    state: &mut ResponsesToAnthropicState,
+) {
+    let Some(data) = sse_data_line(event) else {
+        return;
+    };
+    if data.trim() == "[DONE]" {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+        append_codex_api_proxy_log("failed_to_parse_responses_sse_event");
+        return;
+    };
+    let event_name = sse_event_name_line(event).unwrap_or_else(|| {
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    });
+    match event_name {
+        "response.created" => {
+            if let Some(id) = value
+                .get("response")
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str)
+            {
+                state.message_id = id.to_string();
+            }
+            if let Some(model) = value
+                .get("response")
+                .and_then(|r| r.get("model"))
+                .and_then(Value::as_str)
+            {
+                state.model = model.to_string();
+            }
+        }
+        "response.output_item.added" => {
+            let Some(item) = value.get("item") else {
+                return;
+            };
+            let item_type = item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match item_type {
+                "message" => {
+                    // Text deltas will follow via response.output_text.delta; no
+                    // content_block_start emitted yet (lazy until first delta).
+                }
+                "function_call" | "custom_tool_call" => {
+                    ensure_responses_to_anthropic_message_started(output, state);
+                    let output_index = value
+                        .get("output_index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_proxy")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let call = StreamToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                        added: true,
+                        content_block_index: None,
+                    };
+                    state.tool_calls.insert(output_index, call);
+                    let block_index = state.next_content_block_index;
+                    state.next_content_block_index += 1;
+                    if let Some(call) = state.tool_calls.get_mut(&output_index) {
+                        call.content_block_index = Some(block_index);
+                    }
+                    let display_name = if tool_call_outputs_as_apply_patch(&name) {
+                        "apply_patch"
+                    } else {
+                        name.as_str()
+                    };
+                    push_sse(
+                        output,
+                        "content_block_start",
+                        json!({
+                            "type": "content_block_start",
+                            "index": block_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": id,
+                                "name": display_name,
+                                "input": {}
+                            }
+                        }),
+                    );
+                }
+                _ => {}
+            }
+        }
+        "response.content_part.added" => {
+            // Lazy: message_start is emitted on first text delta.
+        }
+        "response.output_text.delta" => {
+            ensure_responses_to_anthropic_message_started(output, state);
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    let index = if let Some(index) = state.text_block_index {
+                        index
+                    } else {
+                        let index = state.next_content_block_index;
+                        state.next_content_block_index += 1;
+                        state.text_block_index = Some(index);
+                        state.text_block_started = true;
+                        push_sse(
+                            output,
+                            "content_block_start",
+                            json!({
+                                "type": "content_block_start",
+                                "index": index,
+                                "content_block": { "type": "text", "text": "" }
+                            }),
+                        );
+                        index
+                    };
+                    state.text.push_str(delta);
+                    push_sse(
+                        output,
+                        "content_block_delta",
+                        json!({
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": { "type": "text_delta", "text": delta }
+                        }),
+                    );
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let Some(output_index) = value.get("output_index").and_then(Value::as_u64) else {
+                return;
+            };
+            let output_index = output_index as usize;
+            let Some(partial) = value.get("delta").and_then(Value::as_str) else {
+                return;
+            };
+            if let Some(call) = state.tool_calls.get_mut(&output_index) {
+                call.arguments.push_str(partial);
+                if let Some(block_index) = call.content_block_index {
+                    if !tool_call_outputs_as_apply_patch(&call.name) {
+                        push_sse(
+                            output,
+                            "content_block_delta",
+                            json!({
+                                "type": "content_block_delta",
+                                "index": block_index,
+                                "delta": { "type": "input_json_delta", "partial_json": partial }
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        "response.output_item.done" => {
+            let Some(output_index) = value.get("output_index").and_then(Value::as_u64) else {
+                return;
+            };
+            let output_index = output_index as usize;
+            let Some(item) = value.get("item") else {
+                return;
+            };
+            let item_type = item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if item_type == "function_call" || item_type == "custom_tool_call" {
+                if let Some(call) = state.tool_calls.get_mut(&output_index) {
+                    // Capture final arguments if not already accumulated.
+                    if let Some(args) = item
+                        .get("arguments")
+                        .or_else(|| item.get("input"))
+                        .and_then(Value::as_str)
+                    {
+                        if call.arguments.is_empty() {
+                            call.arguments = args.to_string();
+                        }
+                    }
+                }
+                if let Some(block_index) = state
+                    .tool_calls
+                    .get(&output_index)
+                    .and_then(|c| c.content_block_index)
+                {
+                    push_sse(
+                        output,
+                        "content_block_stop",
+                        json!({ "type": "content_block_stop", "index": block_index }),
+                    );
+                }
+            }
+        }
+        "response.output_text.done" => {
+            // Text block finalization handled at stream end.
+            if let Some(text) = value.get("text").and_then(Value::as_str) {
+                if state.text.is_empty() && !text.is_empty() {
+                    state.text = text.to_string();
+                }
+            }
+        }
+        "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                state.reasoning_content.push_str(delta);
+            }
+        }
+        "response.completed" => {
+            if let Some(response) = value.get("response") {
+                if let Some(usage) = response.get("usage") {
+                    state.usage = normalized_chat_usage(Some(usage));
+                }
+                if let Some(model) = response.get("model").and_then(Value::as_str) {
+                    if !model.is_empty() {
+                        state.model = model.to_string();
+                    }
+                }
+                if let Some(id) = response.get("id").and_then(Value::as_str) {
+                    if !id.is_empty() {
+                        state.message_id = id.to_string();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn emit_responses_to_anthropic_done(
+    output: &mut String,
+    state: &mut ResponsesToAnthropicState,
+) {
+    append_codex_api_proxy_log(&format!(
+        "responses_to_anthropic_stream_done stop_reason={} text_chars={} tool_calls={}",
+        state.stop_reason.as_deref().unwrap_or("<missing>"),
+        state.text.len(),
+        state.tool_calls.len(),
+    ));
+
+    ensure_responses_to_anthropic_message_started(output, state);
+    if state.text_block_started {
+        if let Some(index) = state.text_block_index {
+            push_sse(
+                output,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": index }),
+            );
+        }
+    }
+    remember_reasoning_content(&state.text, &state.reasoning_content);
+    // Finalize any tool blocks that did not receive response.output_item.done.
+    for (_, call) in state.tool_calls.iter() {
+        if let Some(block_index) = call.content_block_index {
+            push_sse(
+                output,
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": block_index }),
+            );
+        }
+    }
+    push_sse(
+        output,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": state
+                    .stop_reason
+                    .as_deref()
+                    .unwrap_or(if state.tool_calls.iter().any(|(_, call)| call.added) {
+                        "tool_use"
+                    } else {
+                        "end_turn"
+                    }),
+                "stop_sequence": Value::Null
+            },
+            "usage": state.usage
+        }),
+    );
+    push_sse(output, "message_stop", json!({ "type": "message_stop" }));
+}
+
+#[cfg(test)]
+pub(super) fn responses_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
+    let mut converter = ResponsesSseToAnthropicConverter::new();
+    let mut output = converter.push_chunk(body);
+    output.extend(converter.finish());
+    output
+}
+
+pub(super) fn streaming_responses_sse_to_anthropic_response(
+    upstream: reqwest::Response,
+    status: StatusCode,
+) -> Response<ProxyBody> {
+    let upstream_stream = upstream.bytes_stream();
+    let stream = futures::stream::unfold(
+        (
+            upstream_stream,
+            ResponsesSseToAnthropicConverter::new(),
+            false,
+        ),
+        |(mut upstream_stream, mut converter, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match upstream_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        let bytes = converter.push_chunk(&chunk);
+                        if bytes.is_empty() {
+                            continue;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, false),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        append_codex_api_proxy_log(&format!(
+                            "upstream_responses_to_anthropic_sse_read_error error={error}"
+                        ));
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                    None => {
+                        let bytes = converter.finish();
+                        if bytes.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            Ok(Frame::data(Bytes::from(bytes))),
+                            (upstream_stream, converter, true),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    let mut response = Response::new(BodyExt::boxed(StreamBody::new(stream)));
+    *response.status_mut() = status;
+    if let Ok(value) = "text/event-stream".parse() {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+    response
+}

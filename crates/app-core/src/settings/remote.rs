@@ -88,7 +88,7 @@ pub fn remote_save_provider_models(
     profile: &RemoteMachineProfile,
     ssh_password: Option<&str>,
     provider: &str,
-    models: Vec<String>,
+    models: Vec<workspace_model::ModelAttributesInput>,
 ) -> Result<AgentSettingsSnapshot> {
     remote_update_settings_with_runner(
         profile,
@@ -102,7 +102,7 @@ pub fn remote_save_provider_models_with_model_list_url(
     profile: &RemoteMachineProfile,
     ssh_password: Option<&str>,
     provider: &str,
-    models: Vec<String>,
+    models: Vec<workspace_model::ModelAttributesInput>,
     model_list_url: String,
 ) -> Result<AgentSettingsSnapshot> {
     remote_update_settings_with_runner(

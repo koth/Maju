@@ -123,7 +123,7 @@ fn converts_responses_namespace_tools_to_chat_function_tools() {
     );
     assert_eq!(chat["tool_choice"], "auto");
 
-    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
     assert_eq!(
         anthropic["tools"][0]["name"],
         "mcp__kodex_web_tools__web_search"
@@ -270,7 +270,7 @@ fn kimi_code_expands_apply_patch_tool_to_claude_style_edit_tools() {
         vec!["Edit", "MultiEdit", "Write", "apply_patch"]
     );
 
-    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
     let anthropic_tool_names = anthropic["tools"]
         .as_array()
         .unwrap()
@@ -316,7 +316,7 @@ fn non_gpt_models_expand_apply_patch_tool_and_get_bridge_instructions() {
     );
     assert_eq!(chat["messages"][2]["role"], "user");
 
-    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
     let system = anthropic["system"].as_str().unwrap();
     assert!(system.contains("base instructions"));
     assert!(system.contains(NON_GPT_EDIT_BRIDGE_INSTRUCTIONS));
@@ -1236,7 +1236,7 @@ fn converts_chat_payload_to_kimi_anthropic_messages() {
         }]
     });
 
-    let anthropic = chat_payload_to_anthropic_payload(chat);
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
 
     assert_eq!(anthropic["model"], "kimi-for-coding");
     assert_eq!(anthropic["max_tokens"], 4096);
@@ -1869,4 +1869,279 @@ fn ignores_unsupported_responses_input_item() {
     assert!(chat["messages"][0].get("reasoning_content").is_none());
     assert_eq!(chat["messages"][1]["role"], "user");
     assert_eq!(chat["messages"][1]["content"], "hello");
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic SSE → Responses SSE streaming converter tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn converts_anthropic_stream_text_to_responses_stream() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"content\":[]}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let normalized = anthropic_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: response.output_item.added"));
+    assert!(text.contains("\"type\":\"message\""));
+    assert!(text.contains("event: response.output_text.delta"));
+    assert!(text.contains("\"delta\":\"hello\""));
+    assert!(text.contains("\"delta\":\" world\""));
+    assert!(text.contains("event: response.output_item.done"));
+    assert!(text.contains("event: response.completed"));
+    assert!(text.contains("\"status\":\"completed\""));
+    assert!(text.contains("\"input_tokens\":10"));
+    assert!(text.contains("data: [DONE]"));
+}
+
+#[test]
+fn converts_anthropic_stream_tool_use_to_responses_function_call() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"model\":\"claude-test\",\"content\":[]}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"list_files\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\".\\\"}\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let normalized = anthropic_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: response.output_item.added"));
+    assert!(text.contains("\"type\":\"function_call\""));
+    assert!(text.contains("\"name\":\"list_files\""));
+    assert!(text.contains("event: response.function_call_arguments.delta"));
+    assert!(text.contains("\"delta\":\"{\\\"path\\\":\""));
+    assert!(text.contains("event: response.function_call_arguments.done"));
+    assert!(text.contains("\"arguments\":\"{\\\"path\\\":\\\".\\\"}\""));
+    assert!(text.contains("event: response.output_item.done"));
+    assert!(text.contains("event: response.completed"));
+    assert!(text.contains("data: [DONE]"));
+}
+
+#[test]
+fn converts_anthropic_stream_apply_patch_to_custom_tool_call() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_3\",\"model\":\"claude-test\",\"content\":[]}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_patch\",\"name\":\"apply_patch\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"abc\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let normalized = anthropic_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("\"type\":\"custom_tool_call\""));
+    assert!(text.contains("\"name\":\"apply_patch\""));
+    assert!(text.contains("\"input\":\"abc\""));
+    assert!(!text.contains("response.function_call_arguments.delta"));
+}
+
+#[test]
+fn converts_anthropic_stream_incrementally_across_chunks() {
+    let mut converter = AnthropicSseToResponsesConverter::new();
+
+    let first = converter.push_chunk(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel",
+    );
+    // The partial event at the end should not emit yet.
+    assert!(first.is_empty() || !String::from_utf8(first.clone()).unwrap().contains("\"delta\":\"hel"));
+
+    let second = converter.push_chunk(b"lo\"}}\n\n");
+    let second = String::from_utf8(second).unwrap();
+    assert!(second.contains("event: response.output_text.delta"));
+    assert!(second.contains("\"delta\":\"hello\""));
+
+    let done = String::from_utf8(converter.finish()).unwrap();
+    assert!(done.contains("event: response.completed"));
+    assert!(done.contains("data: [DONE]"));
+}
+
+// ---------------------------------------------------------------------------
+// Responses SSE → Anthropic SSE streaming converter tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn converts_responses_stream_text_to_anthropic_stream() {
+    let body = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\n",
+        "event: response.content_part.added\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"delta\":\"hello\"}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"delta\":\" world\"}\n\n",
+        "event: response.output_text.done\n",
+        "data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"text\":\"hello world\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let normalized = responses_sse_to_anthropic_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: message_start"));
+    assert!(text.contains("\"id\":\"resp_1\""));
+    assert!(text.contains("event: content_block_start"));
+    assert!(text.contains("\"type\":\"text\""));
+    assert!(text.contains("event: content_block_delta"));
+    assert!(text.contains("\"type\":\"text_delta\""));
+    assert!(text.contains("\"text\":\"hello\""));
+    assert!(text.contains("\"text\":\" world\""));
+    assert!(text.contains("event: content_block_stop"));
+    assert!(text.contains("event: message_delta"));
+    assert!(text.contains("\"stop_reason\":\"end_turn\""));
+    assert!(text.contains("\"input_tokens\":10"));
+    assert!(text.contains("event: message_stop"));
+}
+
+#[test]
+fn converts_responses_stream_function_call_to_anthropic_tool_use() {
+    let body = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-test\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"call_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"list_files\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.function_call_arguments.delta\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"call_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+        "event: response.function_call_arguments.delta\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"call_1\",\"delta\":\"\\\".\\\"}\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"call_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\",\"status\":\"completed\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let normalized = responses_sse_to_anthropic_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: message_start"));
+    assert!(text.contains("event: content_block_start"));
+    assert!(text.contains("\"type\":\"tool_use\""));
+    assert!(text.contains("\"id\":\"call_1\""));
+    assert!(text.contains("\"name\":\"list_files\""));
+    assert!(text.contains("event: content_block_delta"));
+    assert!(text.contains("\"type\":\"input_json_delta\""));
+    assert!(text.contains("\"partial_json\":\"{\\\"path\\\":\""));
+    assert!(text.contains("event: content_block_stop"));
+    assert!(text.contains("event: message_delta"));
+    assert!(text.contains("\"stop_reason\":\"tool_use\""));
+    assert!(text.contains("event: message_stop"));
+}
+
+#[test]
+fn converts_responses_stream_apply_patch_to_tool_use() {
+    let body = concat!(
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"cp\",\"type\":\"custom_tool_call\",\"call_id\":\"cp\",\"name\":\"apply_patch\",\"input\":\"abc\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"cp\",\"type\":\"custom_tool_call\",\"call_id\":\"cp\",\"name\":\"apply_patch\",\"input\":\"abc\",\"status\":\"completed\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let normalized = responses_sse_to_anthropic_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("\"type\":\"tool_use\""));
+    assert!(text.contains("\"name\":\"apply_patch\""));
+    assert!(text.contains("event: message_delta"));
+    assert!(text.contains("event: message_stop"));
+}
+
+#[test]
+fn converts_responses_stream_incrementally_across_chunks() {
+    let mut converter = ResponsesSseToAnthropicConverter::new();
+
+    let first = converter.push_chunk(
+        b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"g\"}}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hel",
+    );
+    assert!(first.is_empty() || !String::from_utf8(first.clone()).unwrap().contains("\"text\":\"hel"));
+
+    let second = converter.push_chunk(b"lo\"}\n\n");
+    let second = String::from_utf8(second).unwrap();
+    assert!(second.contains("event: content_block_delta"));
+    assert!(second.contains("\"text\":\"hello\""));
+
+    let done = String::from_utf8(converter.finish()).unwrap();
+    assert!(done.contains("event: message_delta"));
+    assert!(done.contains("event: message_stop"));
+}
+
+#[test]
+fn handles_empty_responses_stream_text_gracefully() {
+    let body = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_empty\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let normalized = responses_sse_to_anthropic_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    assert!(text.contains("event: message_start"));
+    assert!(!text.contains("event: content_block_start"));
+    assert!(!text.contains("event: content_block_delta"));
+    assert!(text.contains("\"stop_reason\":\"end_turn\""));
+    assert!(text.contains("event: message_stop"));
+}
+
+#[test]
+fn handles_empty_anthropic_stream_text_gracefully() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_empty\",\"model\":\"claude-test\",\"content\":[]}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let normalized = anthropic_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    // No content_block_start so no message item text; but response.completed still emitted.
+    assert!(!text.contains("event: response.output_text.delta"));
+    assert!(text.contains("event: response.completed"));
+    assert!(text.contains("data: [DONE]"));
 }

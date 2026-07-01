@@ -172,6 +172,7 @@ function providerProfile(
         : isCommandCode
           ? "https://api.commandcode.ai/provider/v1/models"
           : null,
+    model_entries: [],
     credential_label: requiresCredential ? `${label} API key` : null,
     requires_credential: requiresCredential,
     help_text: `${label} help`,
@@ -634,13 +635,25 @@ describe("SettingsPage LSP settings", () => {
         codex_acp: {
           ...agentSnapshot.codex_acp,
           profiles: codexProfiles("byok").map((profile) =>
-            profile.id === profileId ? { ...profile, models } : profile,
+            profile.id === profileId
+              ? {
+                  ...profile,
+                  models: models.map((entry) => entry.slug),
+                  model_entries: models,
+                }
+              : profile,
           ),
         },
         claude: {
           ...agentSnapshot.claude,
           profiles: claudeProfiles("byok").map((profile) =>
-            profile.id === profileId ? { ...profile, models } : profile,
+            profile.id === profileId
+              ? {
+                  ...profile,
+                  models: models.map((entry) => entry.slug),
+                  model_entries: models,
+                }
+              : profile,
           ),
         },
       }),
@@ -648,13 +661,19 @@ describe("SettingsPage LSP settings", () => {
     vi.mocked(settingsSyncProviderModelsFromUrl).mockImplementation(
       async (profileId, modelListUrl) => {
         const models = ["Qwen/Qwen3.8-Max", "MiniMaxAI/MiniMax-M4"];
+        const entries = models.map((slug) => ({ slug }));
         return {
           ...agentSnapshot,
           codex_acp: {
             ...agentSnapshot.codex_acp,
             profiles: codexProfiles("byok").map((profile) =>
               profile.id === profileId
-                ? { ...profile, models, model_list_url: modelListUrl }
+                ? {
+                    ...profile,
+                    models,
+                    model_entries: entries,
+                    model_list_url: modelListUrl,
+                  }
                 : profile,
             ),
           },
@@ -662,7 +681,12 @@ describe("SettingsPage LSP settings", () => {
             ...agentSnapshot.claude,
             profiles: claudeProfiles("byok").map((profile) =>
               profile.id === profileId
-                ? { ...profile, models, model_list_url: modelListUrl }
+                ? {
+                    ...profile,
+                    models,
+                    model_entries: entries,
+                    model_list_url: modelListUrl,
+                  }
                 : profile,
             ),
           },
@@ -1716,24 +1740,40 @@ describe("SettingsPage LSP settings", () => {
     await openAgentSettingsTab("Codex");
     await selectByokProvider(/TimiAI/);
 
-    const modelsInput = screen.getByLabelText("byok_provider_models");
-    expect(modelsInput).toHaveValue("gpt-5.5\ngpt-5.4\nclaude-opus-4.8");
-    fireEvent.change(modelsInput, {
-      target: { value: "gpt-5.6\n\nclaude-opus-4.9\ngpt-5.6" },
-    });
+    expect(screen.getByTestId("byok_provider_models")).toBeInTheDocument();
+    const slug0 = screen.getByLabelText("byok_model_slug_0") as HTMLInputElement;
+    const slug1 = screen.getByLabelText("byok_model_slug_1") as HTMLInputElement;
+    const slug2 = screen.getByLabelText("byok_model_slug_2") as HTMLInputElement;
+    expect(slug0.value).toBe("gpt-5.5");
+    expect(slug1.value).toBe("gpt-5.4");
+    expect(slug2.value).toBe("claude-opus-4.8");
+
+    fireEvent.change(slug0, { target: { value: "gpt-5.6" } });
+    fireEvent.change(slug1, { target: { value: "" } });
+    fireEvent.change(slug2, { target: { value: "claude-opus-4.9" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: "byok_model_remove_1" }),
+    );
+
     fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
 
     await waitFor(() =>
       expect(settingsSaveProviderModels).toHaveBeenCalledWith(
         "timiai",
-        ["gpt-5.6", "claude-opus-4.9"],
+        [
+          { slug: "gpt-5.6" },
+          { slug: "claude-opus-4.9" },
+        ],
         null,
       ),
     );
     await screen.findByText("TimiAI 模型列表已更新，后续新建会话生效");
-    expect(screen.getByLabelText("byok_provider_models")).toHaveValue(
-      "gpt-5.6\nclaude-opus-4.9",
-    );
+    expect(
+      (screen.getByLabelText("byok_model_slug_0") as HTMLInputElement).value,
+    ).toBe("gpt-5.6");
+    expect(
+      (screen.getByLabelText("byok_model_slug_1") as HTMLInputElement).value,
+    ).toBe("claude-opus-4.9");
 
     fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
     await waitFor(() =>
@@ -1765,8 +1805,222 @@ describe("SettingsPage LSP settings", () => {
       ),
     );
     await screen.findByText("CommandCode 模型列表已同步，后续新建会话生效");
-    expect(screen.getByLabelText("byok_provider_models")).toHaveValue(
-      "Qwen/Qwen3.8-Max\nMiniMaxAI/MiniMax-M4",
+    expect(
+      (screen.getByLabelText("byok_model_slug_0") as HTMLInputElement).value,
+    ).toBe("Qwen/Qwen3.8-Max");
+    expect(
+      (screen.getByLabelText("byok_model_slug_1") as HTMLInputElement).value,
+    ).toBe("MiniMaxAI/MiniMax-M4");
+  });
+
+  it("edits rich model attributes in the BYOK editor and saves them", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/TimiAI/);
+
+    // Expand the first row to access advanced fields.
+    fireEvent.click(
+      screen.getByRole("button", { name: "byok_model_advanced_toggle_0" }),
+    );
+
+    const displayName = screen.getByLabelText(
+      "byok_model_display_name_0",
+    ) as HTMLInputElement;
+    const contextWindow = screen.getByLabelText(
+      "byok_model_context_window_0",
+    ) as HTMLInputElement;
+    const maxOutput = screen.getByLabelText(
+      "byok_model_max_output_tokens_0",
+    ) as HTMLInputElement;
+    const multimodal = screen.getByLabelText(
+      "byok_model_supports_image_input_0",
+    ) as HTMLButtonElement;
+    const reasoning = screen.getByLabelText(
+      "byok_model_reasoning_effort_0",
+    ) as HTMLButtonElement;
+
+    fireEvent.change(displayName, { target: { value: "GPT-5.5 Plus" } });
+    fireEvent.change(contextWindow, { target: { value: "256000" } });
+    fireEvent.change(maxOutput, { target: { value: "16384" } });
+    // ModelEntrySelect is a custom button+listbox; open the trigger and
+    // click the desired option.
+    fireEvent.click(multimodal);
+    fireEvent.click(screen.getByRole("option", { name: "支持图像" }));
+    fireEvent.click(reasoning);
+    fireEvent.click(screen.getByRole("option", { name: "Medium" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
+
+    await waitFor(() =>
+      expect(settingsSaveProviderModels).toHaveBeenCalledWith(
+        "timiai",
+        [
+          {
+            slug: "gpt-5.5",
+            display_name: "GPT-5.5 Plus",
+            context_window: 256000,
+            max_output_tokens: 16384,
+            supports_image_input: true,
+            reasoning_effort: "medium",
+          },
+          { slug: "gpt-5.4" },
+          { slug: "claude-opus-4.8" },
+        ],
+        null,
+      ),
+    );
+  });
+
+  it("rejects non-positive integer context window in the BYOK editor", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/TimiAI/);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "byok_model_advanced_toggle_0" }),
+    );
+
+    const contextWindow = screen.getByLabelText(
+      "byok_model_context_window_0",
+    ) as HTMLInputElement;
+    fireEvent.change(contextWindow, { target: { value: "0" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
+
+    expect(settingsSaveProviderModels).not.toHaveBeenCalled();
+    expect(
+      await screen.findByLabelText("byok_provider_models_error"),
+    ).toHaveTextContent("最大上下文必须是正整数");
+  });
+
+  it("adds and removes rows in the BYOK model editor", async () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/TimiAI/);
+
+    // Start with 3 slugs.
+    expect(screen.getByLabelText("byok_model_slug_2")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("byok_model_slug_3"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "byok_model_add" }));
+    const newSlug = screen.getByLabelText(
+      "byok_model_slug_3",
+    ) as HTMLInputElement;
+    expect(newSlug.value).toBe("");
+
+    fireEvent.change(newSlug, { target: { value: "fresh-model" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
+    await waitFor(() =>
+      expect(settingsSaveProviderModels).toHaveBeenCalledWith(
+        "timiai",
+        [
+          { slug: "gpt-5.5" },
+          { slug: "gpt-5.4" },
+          { slug: "claude-opus-4.8" },
+          {
+            slug: "fresh-model",
+            display_name: null,
+            context_window: null,
+            max_output_tokens: null,
+            supports_image_input: null,
+            reasoning_effort: null,
+          },
+        ],
+        null,
+      ),
+    );
+
+    // Remove the freshly added row and verify it disappears.
+    fireEvent.click(
+      screen.getByRole("button", { name: "byok_model_remove_3" }),
+    );
+    expect(
+      screen.queryByLabelText("byok_model_slug_3"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves rich attributes when syncing model list from URL", async () => {
+    // Override the sync mock to return a profile whose model_entries already
+    // contains rich attributes for the synced slugs.
+    vi.mocked(settingsSyncProviderModelsFromUrl).mockImplementationOnce(
+      async (profileId, modelListUrl) => {
+        const entries: Array<{
+          slug: string;
+          context_window?: number;
+          reasoning_effort?: "high" | "medium" | "low" | "minimal" | "none";
+        }> = [
+          { slug: "Qwen/Qwen3.8-Max", context_window: 128000 },
+          { slug: "MiniMaxAI/MiniMax-M4", reasoning_effort: "high" },
+        ];
+        const models = entries.map((entry) => entry.slug);
+        return {
+          ...agentSnapshot,
+          codex_acp: {
+            ...agentSnapshot.codex_acp,
+            profiles: codexProfiles("byok").map((profile) =>
+              profile.id === profileId
+                ? { ...profile, models, model_entries: entries, model_list_url: modelListUrl }
+                : profile,
+            ),
+          },
+          claude: {
+            ...agentSnapshot.claude,
+            profiles: claudeProfiles("byok").map((profile) =>
+              profile.id === profileId
+                ? { ...profile, models, model_entries: entries, model_list_url: modelListUrl }
+                : profile,
+            ),
+          },
+        };
+      },
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openAgentSettingsTab("Codex");
+    await selectByokProvider(/CommandCode/);
+
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    await screen.findByText("CommandCode 模型列表已同步，后续新建会话生效");
+
+    // Rich entries should hydrate with the 已配置 chip visible.
+    expect(
+      screen.getByLabelText("byok_model_chip_0"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("byok_model_chip_1"),
+    ).toBeInTheDocument();
+
+    // Save should round-trip the rich attributes, not flatten to slug-only.
+    fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
+    await waitFor(() =>
+      expect(settingsSaveProviderModels).toHaveBeenCalledWith(
+        "commandcode",
+        [
+          {
+            slug: "Qwen/Qwen3.8-Max",
+            display_name: null,
+            context_window: 128000,
+            max_output_tokens: null,
+            supports_image_input: null,
+            reasoning_effort: null,
+          },
+          {
+            slug: "MiniMaxAI/MiniMax-M4",
+            display_name: null,
+            context_window: null,
+            max_output_tokens: null,
+            supports_image_input: null,
+            reasoning_effort: "high",
+          },
+        ],
+        null,
+      ),
     );
   });
 
@@ -2149,7 +2403,8 @@ describe("SettingsPage LSP settings", () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openSettingsPane("用量");
-    await screen.findByText("gpt-5.1");
+    const modelTable = await screen.findByRole("table", { name: "模型性能" });
+    await within(modelTable).findByText("gpt-5.1");
 
     expect(usageGetSummary).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2165,6 +2420,19 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.getByText("推理 50")).toBeInTheDocument();
     expect(screen.getByText("峰值 128k")).toBeInTheDocument();
     expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+    const dashboard = screen.getByLabelText("用量仪表盘");
+    expect(dashboard).toBeInTheDocument();
+    expect(within(dashboard).getByText("USAGE controlleris")).toBeInTheDocument();
+    expect(within(dashboard).getByText("PROMPT")).toBeInTheDocument();
+    expect(within(dashboard).getByText("COMPLETION")).toBeInTheDocument();
+    expect(within(dashboard).getByText("AVG TOKEN")).toBeInTheDocument();
+    expect(within(dashboard).getByText("24H REQ")).toBeInTheDocument();
+    expect(within(dashboard).getByText("占位：后端尚未返回每日时间序列")).toBeInTheDocument();
+    expect(within(dashboard).getByText("REQUESTS")).toBeInTheDocument();
+    expect(within(dashboard).getByText("LATENCY")).toBeInTheDocument();
+    expect(within(dashboard).getByText("TTFT")).toBeInTheDocument();
+    expect(within(dashboard).getByText("SPEED")).toBeInTheDocument();
+    expect(within(dashboard).getAllByText("后端未上报").length).toBeGreaterThanOrEqual(3);
   });
 
   it("does not invent token breakdowns when usage rows only have context data", async () => {
@@ -2186,12 +2454,85 @@ describe("SettingsPage LSP settings", () => {
     render(<SettingsPage onBack={vi.fn()} />);
 
     await openSettingsPane("用量");
-    await screen.findByText("context-only");
+    const modelTable = await screen.findByRole("table", { name: "模型性能" });
+    await within(modelTable).findByText("context-only");
 
     expect(screen.queryByLabelText("token 分项")).not.toBeInTheDocument();
     expect(screen.getByText("峰值 64k")).toBeInTheDocument();
     expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+    const breakdownChips = within(modelTable).queryAllByLabelText("token 分项");
+    expect(breakdownChips).toHaveLength(0);
   });
+  it("renders the usage dashboard with placeholder chart and model table", async () => {
+    vi.mocked(usageGetSummary).mockResolvedValue([
+      {
+        label: "gpt-5.1",
+        model: "gpt-5.1",
+        provider: "openai",
+        agent_cli: "codex-acp",
+        workspace_root: "D:\\work\\kodex",
+        session_id: null,
+        tokens: {
+          input_tokens: 1000,
+          output_tokens: 200,
+          cache_read_tokens: 300,
+          cache_write_tokens: 40,
+          reasoning_tokens: 50,
+          total_tokens: 1590,
+        },
+        context_peak_tokens: 128000,
+        event_count: 3,
+        session_count: 2,
+      },
+      {
+        label: "claude-opus-4-7",
+        model: "claude-opus-4-7",
+        provider: "anthropic",
+        agent_cli: "claude-acp",
+        workspace_root: "D:\\work\\kodex",
+        session_id: null,
+        tokens: {
+          input_tokens: 500,
+          output_tokens: 100,
+          total_tokens: 600,
+        },
+        context_peak_tokens: 64000,
+        event_count: 1,
+        session_count: 1,
+      },
+    ]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("用量");
+
+    const dashboard = await screen.findByLabelText("用量仪表盘");
+    expect(within(dashboard).getByText("USAGE controlleris")).toBeInTheDocument();
+    expect(within(dashboard).getByText("REQUESTS")).toBeInTheDocument();
+    expect(within(dashboard).getByText("LATENCY")).toBeInTheDocument();
+
+    const table = within(dashboard).getByRole("table", { name: "模型性能" });
+    const rowCount = within(table)
+      .getAllByRole("row")
+      .filter((row) => row.getAttribute("class")?.includes("settings-usage-model-row"))
+      .length;
+    expect(rowCount).toBe(2);
+  });
+
+  it("shows the empty panel inside the usage dashboard when there are no rows", async () => {
+    vi.mocked(usageGetSummary).mockResolvedValue([]);
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("用量");
+
+    const dashboard = await screen.findByLabelText("用量仪表盘");
+    expect(
+      screen.getByText(
+        "暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。",
+      ),
+    ).toBeInTheDocument();
+    expect(within(dashboard).queryByRole("table")).not.toBeInTheDocument();
+  });
+
   it("requests usage summaries by agent, date range, workspace scope, and archived toggle", async () => {
     vi.mocked(usageGetSummary).mockResolvedValue([]);
 

@@ -54,7 +54,7 @@ use workspace_model::{
 const SETTINGS_FILE: &str = "settings.json";
 const PROVIDER_SECRETS_FILE: &str = "provider-secrets.json";
 const PROVIDER_MODELS_FILE: &str = "provider-models.json";
-const PROVIDER_MODELS_VERSION: u32 = 1;
+const PROVIDER_MODELS_VERSION: u32 = 2;
 const WEB_TOOLS_PROVIDER_BRAVE: &str = "brave";
 const WEB_TOOLS_PROVIDER_TAVILY: &str = "tavily";
 const WEB_TOOLS_BRAVE_SECRET_KEY: &str = "web-tools:brave";
@@ -305,10 +305,46 @@ impl Default for ProviderModelsCatalog {
     }
 }
 
+/// v1 on-disk shape: `models` was a flat `Vec<String>`. The deserializer still
+/// accepts this legacy form for backward compatibility, but the in-memory
+/// representation is always the v2 rich-entry list. Writes always land as v2.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LegacyProviderModelsEntry {
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    model_list_url: Option<String>,
+    #[serde(default)]
+    custom: bool,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    protocol: Option<CustomProviderProtocol>,
+}
+
+impl From<LegacyProviderModelsEntry> for ProviderModelsEntry {
+    fn from(legacy: LegacyProviderModelsEntry) -> Self {
+        ProviderModelsEntry {
+            models: legacy
+                .models
+                .into_iter()
+                .map(workspace_model::ModelCatalogEntry::from_slug)
+                .collect(),
+            model_list_url: legacy.model_list_url,
+            custom: legacy.custom,
+            label: legacy.label,
+            base_url: legacy.base_url,
+            protocol: legacy.protocol,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ProviderModelsEntry {
     #[serde(default)]
-    models: Vec<String>,
+    models: Vec<workspace_model::ModelCatalogEntry>,
     #[serde(default)]
     model_list_url: Option<String>,
     #[serde(default)]
@@ -745,8 +781,49 @@ fn read_provider_models_catalog(paths: &AppPaths) -> Result<ProviderModelsCatalo
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read provider model catalog {}", path.display()))?;
-    serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse provider model catalog {}", path.display()))
+    // Try the current schema first; on shape mismatch (legacy v1 used
+    // `models: Vec<String>`), fall back to the legacy deserializer and
+    // upgrade each entry in place.
+    match serde_json::from_str::<ProviderModelsCatalog>(&content) {
+        Ok(catalog) => Ok(catalog),
+        Err(primary_err) => match serde_json::from_str::<LegacyProviderModelsCatalog>(&content) {
+            Ok(legacy) => Ok(legacy.upgrade()),
+            Err(_) => Err(primary_err).with_context(|| {
+                format!("failed to parse provider model catalog {}", path.display())
+            }),
+        },
+    }
+}
+
+/// v1 on-disk shape (version 1): `ProviderModelsEntry.models` is a flat
+/// `Vec<String>`. Used only for backward-compatible reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyProviderModelsCatalog {
+    #[serde(default = "legacy_provider_models_version")]
+    version: u32,
+    #[serde(default)]
+    providers: BTreeMap<String, LegacyProviderModelsEntry>,
+    #[serde(default)]
+    hidden_providers: BTreeSet<String>,
+}
+
+fn legacy_provider_models_version() -> u32 {
+    1
+}
+
+impl LegacyProviderModelsCatalog {
+    fn upgrade(self) -> ProviderModelsCatalog {
+        let providers = self
+            .providers
+            .into_iter()
+            .map(|(id, entry)| (id, ProviderModelsEntry::from(entry)))
+            .collect();
+        ProviderModelsCatalog {
+            version: PROVIDER_MODELS_VERSION,
+            providers,
+            hidden_providers: self.hidden_providers,
+        }
+    }
 }
 
 fn load_provider_models_catalog(paths: &AppPaths) -> ProviderModelsCatalog {
@@ -776,6 +853,55 @@ fn normalize_model_list(models: Vec<String>) -> Result<Vec<String>> {
         if !normalized.iter().any(|item: &String| item == model) {
             normalized.push(model.to_string());
         }
+    }
+    if normalized.is_empty() {
+        anyhow::bail!("model list cannot be empty");
+    }
+    if normalized.len() > 200 {
+        anyhow::bail!("model list cannot contain more than 200 models");
+    }
+    Ok(normalized)
+}
+
+/// Normalize a list of rich model entries: trim/dedupe slugs, validate
+/// numeric ranges, and preserve the optional attributes the user authored.
+fn normalize_model_entries(
+    models: Vec<workspace_model::ModelAttributesInput>,
+) -> Result<Vec<workspace_model::ModelCatalogEntry>> {
+    let mut normalized: Vec<workspace_model::ModelCatalogEntry> = Vec::new();
+    for entry in models {
+        let slug = entry.slug.trim();
+        if slug.is_empty() {
+            continue;
+        }
+        if slug.len() > 160 {
+            anyhow::bail!("model name is too long: {slug}");
+        }
+        if let Some(window) = entry.context_window {
+            if window <= 0 {
+                anyhow::bail!("context_window must be a positive integer: {window}");
+            }
+        }
+        if let Some(max_output) = entry.max_output_tokens {
+            if max_output <= 0 {
+                anyhow::bail!("max_output_tokens must be a positive integer: {max_output}");
+            }
+        }
+        if normalized.iter().any(|existing| existing.slug == slug) {
+            continue;
+        }
+        let display_name = entry
+            .display_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        normalized.push(workspace_model::ModelCatalogEntry {
+            slug: slug.to_string(),
+            display_name,
+            context_window: entry.context_window,
+            max_output_tokens: entry.max_output_tokens,
+            supports_image_input: entry.supports_image_input,
+            reasoning_effort: entry.reasoning_effort,
+        });
     }
     if normalized.is_empty() {
         anyhow::bail!("model list cannot be empty");
@@ -1025,7 +1151,7 @@ fn image_settings_status(paths: &AppPaths, settings: &AppSettings) -> ImageSetti
     let view_models = if view.provider.is_empty() {
         Vec::new()
     } else {
-        effective_catalog_models_for_provider(paths, &view.provider)
+        effective_catalog_model_slugs_for_provider(paths, &view.provider)
     };
     let generate_configured = image_generate_api_key(paths, generate).is_some()
         && !generate.base_url.trim().is_empty()
@@ -1277,10 +1403,16 @@ fn provider_profile(
         .then(|| custom_provider_entry(paths, definition.id))
         .flatten();
     let custom_protocol = custom_entry.as_ref().and_then(|entry| entry.protocol);
-    let models = if definition.id == BYOK_PROVIDER_ID {
+    let model_entries: Vec<workspace_model::ModelCatalogEntry> = if definition.id == BYOK_PROVIDER_ID {
         match definition.family {
-            AgentProviderFamily::Codex => configured_codex_byok_models(paths),
-            AgentProviderFamily::Claude => configured_claude_byok_models(paths),
+            AgentProviderFamily::Codex => configured_codex_byok_models(paths)
+                .into_iter()
+                .map(workspace_model::ModelCatalogEntry::from_slug)
+                .collect(),
+            AgentProviderFamily::Claude => configured_claude_byok_models(paths)
+                .into_iter()
+                .map(workspace_model::ModelCatalogEntry::from_slug)
+                .collect(),
         }
     } else if definition.id == CUSTOM_PROVIDER_ID {
         // The custom provider has no static catalog; its model list is
@@ -1296,9 +1428,10 @@ fn provider_profile(
         definition
             .models
             .iter()
-            .map(|model| (*model).to_string())
+            .map(|model| workspace_model::ModelCatalogEntry::from_slug(*model))
             .collect()
     };
+    let models: Vec<String> = model_entries.iter().map(|entry| entry.slug.clone()).collect();
     AgentProviderProfile {
         family: definition.family,
         id: definition.id.to_string(),
@@ -1321,6 +1454,7 @@ fn provider_profile(
         custom: definition.id == CUSTOM_PROVIDER_ID,
         protocol: custom_protocol,
         default_model: definition.default_model.map(str::to_string),
+        model_entries: model_entries.clone(),
         models,
         model_list_url: custom_model_list_url_for_provider(paths, definition.id),
         credential_label: definition.credential_label.map(str::to_string),
@@ -1379,7 +1513,8 @@ fn custom_provider_profile(
         custom: true,
         protocol,
         default_model: None,
-        models: effective_catalog_models_for_provider(paths, &provider_id),
+        model_entries: entry.models.clone(),
+        models: entry.models.iter().map(|m| m.slug.clone()).collect(),
         model_list_url: entry.model_list_url.clone(),
         credential_label: Some("API key".to_string()),
         requires_credential: true,
@@ -1699,7 +1834,7 @@ fn normalize_custom_provider_endpoint(endpoint: &str) -> Result<String> {
 pub fn save_provider_models(
     paths: &AppPaths,
     provider: &str,
-    models: Vec<String>,
+    models: Vec<workspace_model::ModelAttributesInput>,
 ) -> Result<AgentSettingsSnapshot> {
     save_provider_models_with_model_list_url(paths, provider, models, None)
 }
@@ -1707,11 +1842,11 @@ pub fn save_provider_models(
 pub fn save_provider_models_with_model_list_url(
     paths: &AppPaths,
     provider: &str,
-    models: Vec<String>,
+    models: Vec<workspace_model::ModelAttributesInput>,
     model_list_url: Option<String>,
 ) -> Result<AgentSettingsSnapshot> {
     let provider = normalize_model_source_provider(provider)?;
-    let models = normalize_model_list(models)?;
+    let models = normalize_model_entries(models)?;
     let mut catalog = read_provider_models_catalog(paths)?;
     let existing_model_list_url = catalog
         .providers
@@ -1769,10 +1904,14 @@ pub async fn sync_provider_models_from_url(
     model_list_url: &str,
 ) -> Result<AgentSettingsSnapshot> {
     let models = fetch_provider_models_from_url(paths, provider, model_list_url).await?;
+    let entries = models
+        .into_iter()
+        .map(workspace_model::ModelAttributesInput::from_slug)
+        .collect();
     save_provider_models_with_model_list_url(
         paths,
         provider,
-        models,
+        entries,
         Some(model_list_url.to_string()),
     )
 }
@@ -1909,16 +2048,17 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
         DocumentMut::new()
     };
 
-    let (default_model, default_model_provider) =
+    let (default_model_entry, default_model_provider) =
         catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
             .into_iter()
             .next()
             .unwrap_or_else(|| {
                 (
-                    TIMIAI_CODEX_MODEL.to_string(),
+                    workspace_model::ModelCatalogEntry::from_slug(TIMIAI_CODEX_MODEL),
                     TIMIAI_PROVIDER_ID.to_string(),
                 )
             });
+    let default_model = default_model_entry.slug.clone();
     let default_model_slug = byok_encoded_model_slug(&default_model, &default_model_provider);
     let raw_active_model = doc
         .get("model")
@@ -1942,13 +2082,19 @@ fn write_codex_byok_channel_config(paths: &AppPaths) -> Result<()> {
     // model's window would cap a later session-level switch. Letting Codex
     // read each model's `context_window` from `model_catalog_json` makes the
     // window follow the active model. Strip any stale value too.
-    let active_max_output_tokens = model_max_output_tokens_for_provider(
+    let active_entry = lookup_model_attributes_for_active(
+        paths,
+        &active_upstream_model,
+        &active_model_provider,
+    );
+    let active_resolved = resolve_model_attributes(
+        active_entry.as_ref(),
         &active_upstream_model,
         &active_model_provider,
     );
     doc.remove("model_context_window");
-    doc["model_max_output_tokens"] = value(active_max_output_tokens);
-    doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+    doc["model_max_output_tokens"] = value(active_resolved.max_output_tokens);
+    doc["model_reasoning_effort"] = value(active_resolved.reasoning_effort.as_codex_str());
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
             .to_string_lossy()
@@ -2003,22 +2149,26 @@ pub fn write_codex_acp_provider_config(
         DocumentMut::new()
     };
 
-    let (default_model, default_model_provider) = if provider == BYOK_PROVIDER_ID {
+    let (default_model_entry, default_model_provider) = if provider == BYOK_PROVIDER_ID {
         catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
             .into_iter()
             .next()
             .unwrap_or_else(|| {
                 (
-                    TIMIAI_CODEX_MODEL.to_string(),
+                    workspace_model::ModelCatalogEntry::from_slug(TIMIAI_CODEX_MODEL),
                     TIMIAI_PROVIDER_ID.to_string(),
                 )
             })
     } else {
         (
-            default_model_for_provider_with_paths(paths, &provider),
+            workspace_model::ModelCatalogEntry::from_slug(default_model_for_provider_with_paths(
+                paths,
+                &provider,
+            )),
             provider.clone(),
         )
     };
+    let default_model = default_model_entry.slug.clone();
     let active_provider = codex_channel_provider_for_source(&provider);
     let config_model = if active_provider == BYOK_PROVIDER_ID {
         byok_encoded_model_slug(&default_model, &default_model_provider)
@@ -2028,15 +2178,21 @@ pub fn write_codex_acp_provider_config(
     doc["model"] = value(config_model.as_str());
     doc["model_provider"] = value(active_provider);
     doc["preferred_auth_method"] = value(CODEX_AUTH_METHOD_API_KEY);
-    let provider_max_output_tokens = model_max_output_tokens_for_provider(
+    let default_entry = lookup_model_attributes_for_active(
+        paths,
+        &default_model,
+        &default_model_provider,
+    );
+    let default_resolved = resolve_model_attributes(
+        default_entry.as_ref(),
         &default_model,
         &default_model_provider,
     );
     // Omit `model_context_window` (global override); resolve per-model from
     // `model_catalog_json`. Strip any stale value too.
     doc.remove("model_context_window");
-    doc["model_max_output_tokens"] = value(provider_max_output_tokens);
-    doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+    doc["model_max_output_tokens"] = value(default_resolved.max_output_tokens);
+    doc["model_reasoning_effort"] = value(default_resolved.reasoning_effort.as_codex_str());
     doc["model_catalog_json"] = value(
         codex_model_catalog_path(paths)
             .to_string_lossy()
@@ -2111,12 +2267,21 @@ fn save_codex_byok_source_secret(paths: &AppPaths, provider: &str, api_key: &str
         }
         // Omit `model_context_window` (global override); let Codex resolve it
         // per-model from `model_catalog_json`.
-        doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
+        let active_entry = lookup_model_attributes_for_active(
+            paths,
             &active_upstream_model,
             &active_source_provider,
-        ));
+        );
+        let active_resolved = resolve_model_attributes(
+            active_entry.as_ref(),
+            &active_upstream_model,
+            &active_source_provider,
+        );
+        doc["model_max_output_tokens"] = value(active_resolved.max_output_tokens);
         if doc.get("model_reasoning_effort").is_none() {
-            doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+            doc["model_reasoning_effort"] = value(
+                active_resolved.reasoning_effort.as_codex_str(),
+            );
         }
         if doc.get("model_catalog_json").is_none() {
             doc["model_catalog_json"] = value(
@@ -2184,7 +2349,7 @@ fn byok_source_provider_ids(paths: &AppPaths) -> Vec<String> {
     providers
 }
 
-fn custom_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Option<Vec<String>> {
+fn custom_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Option<Vec<workspace_model::ModelCatalogEntry>> {
     let provider = normalize_codex_provider(provider).ok()?;
     let catalog = load_provider_models_catalog(paths);
     let models = catalog.providers.get(&provider)?.models.clone();
@@ -2204,13 +2369,25 @@ fn custom_model_list_url_for_provider(paths: &AppPaths, provider: &str) -> Optio
         .map(str::to_string)
 }
 
-fn effective_catalog_models_for_provider(paths: &AppPaths, provider: &str) -> Vec<String> {
+fn effective_catalog_models_for_provider(
+    paths: &AppPaths,
+    provider: &str,
+) -> Vec<workspace_model::ModelCatalogEntry> {
     if let Some(models) = custom_catalog_models_for_provider(paths, provider) {
         return models;
     }
     default_catalog_models_for_provider(provider)
         .iter()
-        .map(|model| (*model).to_string())
+        .map(|model| workspace_model::ModelCatalogEntry::from_slug(*model))
+        .collect()
+}
+
+/// Slug-only projection of `effective_catalog_models_for_provider`. Use when
+/// a caller only needs the bare slug list (most non-launch consumers).
+fn effective_catalog_model_slugs_for_provider(paths: &AppPaths, provider: &str) -> Vec<String> {
+    effective_catalog_models_for_provider(paths, provider)
+        .into_iter()
+        .map(|entry| entry.slug)
         .collect()
 }
 
@@ -2220,7 +2397,7 @@ fn configured_codex_byok_models(paths: &AppPaths) -> Vec<String> {
         if byok_source_secret(paths, AgentProviderFamily::Codex, &provider).is_none() {
             continue;
         }
-        for model in effective_catalog_models_for_provider(paths, &provider) {
+        for model in effective_catalog_model_slugs_for_provider(paths, &provider) {
             let display_name = byok_display_model_name(&model, &provider);
             if !models.contains(&display_name) {
                 models.push(display_name);
@@ -2287,11 +2464,11 @@ fn codex_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
     let entries = catalog_models_for_provider_with_paths(paths, &catalog_provider)
         .into_iter()
         .collect::<Vec<_>>();
-    model_provider_map_env_from_entries(paths, entries, catalog_provider == BYOK_PROVIDER_ID)
+    model_provider_map_env_from_entries(paths, &entries, catalog_provider == BYOK_PROVIDER_ID)
 }
 
 fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<(workspace_model::ModelCatalogEntry, String)> = Vec::new();
     for provider in byok_source_provider_ids(paths) {
         if byok_source_secret(paths, AgentProviderFamily::Claude, &provider).is_none() {
             continue;
@@ -2299,41 +2476,45 @@ fn claude_model_provider_map_env(paths: &AppPaths) -> Option<(String, String)> {
         entries.extend(
             effective_catalog_models_for_provider(paths, &provider)
                 .into_iter()
-                .map(|model| (model, provider.clone())),
+                .map(|entry| (entry, provider.clone())),
         );
     }
-    model_provider_map_env_from_entries(paths, entries, true)
+    model_provider_map_env_from_entries(paths, &entries, true)
 }
 
 fn model_provider_map_env_from_entries(
     paths: &AppPaths,
-    entries: Vec<(String, String)>,
+    entries: &[(workspace_model::ModelCatalogEntry, String)],
     encode_provider_models: bool,
 ) -> Option<(String, String)> {
     if entries.is_empty() {
         return None;
     }
     let entries = entries
-        .into_iter()
-        .map(|(model, provider)| {
+        .iter()
+        .map(|(model_entry, provider)| {
+            let model = model_entry.slug.as_str();
             let model_id = if encode_provider_models {
-                byok_encoded_model_slug(&model, &provider)
+                byok_encoded_model_slug(&model, provider)
             } else {
-                model_slug_for_provider(&model, &provider).to_string()
+                model_slug_for_provider(&model, provider).to_string()
             };
             let display_name = if encode_provider_models {
-                byok_display_model_name(&model, &provider)
+                byok_display_model_name(&model, provider)
             } else {
-                model.clone()
+                model_entry
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| model.to_string())
             };
             let mut entry = json!({
                 "model": model_id,
                 "display_name": display_name,
                 "provider": provider,
-                "provider_label": provider_label_for_paths(paths, &provider),
+                "provider_label": provider_label_for_paths(paths, provider),
             });
-            if is_custom_provider_id(&provider) {
-                if let Some(custom) = custom_provider_entry(paths, &provider) {
+            if is_custom_provider_id(provider) {
+                if let Some(custom) = custom_provider_entry(paths, provider) {
                     if let Some(base_url) = custom
                         .base_url
                         .as_deref()
@@ -2345,7 +2526,7 @@ fn model_provider_map_env_from_entries(
                     if let Some(protocol) = custom.protocol {
                         entry["protocol"] = json!(custom_provider_protocol_id(protocol));
                     }
-                    entry["env_key"] = json!(env_key_for_provider(&provider));
+                    entry["env_key"] = json!(env_key_for_provider(provider));
                 }
             }
             entry
@@ -2458,8 +2639,30 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
             doc.remove("model_context_window");
             changed = true;
         }
-        let expected_max_output_tokens =
-            model_max_output_tokens_for_provider(&active_upstream_model, &active_model_provider);
+        let (expected_max_output_tokens, expected_reasoning_effort) = paths_for_repair
+            .as_ref()
+            .map(|paths| {
+                let entry = lookup_model_attributes_for_active(
+                    paths,
+                    &active_upstream_model,
+                    &active_model_provider,
+                );
+                let resolved = resolve_model_attributes(
+                    entry.as_ref(),
+                    &active_upstream_model,
+                    &active_model_provider,
+                );
+                (resolved.max_output_tokens, resolved.reasoning_effort.as_codex_str().to_string())
+            })
+            .unwrap_or_else(|| {
+                (
+                    model_max_output_tokens_for_provider(
+                        &active_upstream_model,
+                        &active_model_provider,
+                    ),
+                    CODEX_REASONING_EFFORT_NONE.to_string(),
+                )
+            });
         if doc
             .get("model_max_output_tokens")
             .and_then(|item| item.as_integer())
@@ -2469,7 +2672,7 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
             changed = true;
         }
         if doc.get("model_reasoning_effort").is_none() {
-            doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+            doc["model_reasoning_effort"] = value(expected_reasoning_effort);
             changed = true;
         }
         if let Some(parent) = path.parent() {
@@ -2548,6 +2751,20 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         changed = true;
     }
     let expected_max_output_tokens = model_max_output_tokens_for_provider(&active_model, &provider);
+    let (expected_max_output_tokens, expected_reasoning_effort) = path
+        .parent()
+        .map(AppPaths::from_root)
+        .map(|paths| {
+            let entry =
+                lookup_model_attributes_for_active(&paths, &active_model, &provider);
+            let resolved =
+                resolve_model_attributes(entry.as_ref(), &active_model, &provider);
+            (
+                resolved.max_output_tokens,
+                resolved.reasoning_effort.as_codex_str().to_string(),
+            )
+        })
+        .unwrap_or((expected_max_output_tokens, CODEX_REASONING_EFFORT_NONE.to_string()));
     if doc
         .get("model_max_output_tokens")
         .and_then(|item| item.as_integer())
@@ -2557,7 +2774,7 @@ fn ensure_codex_acp_env_key(path: &Path) -> Result<()> {
         changed = true;
     }
     if doc.get("model_reasoning_effort").is_none() {
-        doc["model_reasoning_effort"] = value(CODEX_REASONING_EFFORT_NONE);
+        doc["model_reasoning_effort"] = value(expected_reasoning_effort);
         changed = true;
     }
     if let Some(parent) = path.parent() {
@@ -2652,16 +2869,17 @@ fn clear_codex_provider_config(paths: &AppPaths, provider: &str) -> Result<()> {
         .and_then(|item| item.as_str())
         .and_then(|model| decode_provider_model_id(model).map(|(provider, _)| provider));
     if active_model_provider.as_deref() == Some(provider) {
-        let (default_model, default_model_provider) =
+        let (default_model_entry, default_model_provider) =
             catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| {
                     (
-                        TIMIAI_CODEX_MODEL.to_string(),
+                        workspace_model::ModelCatalogEntry::from_slug(TIMIAI_CODEX_MODEL),
                         TIMIAI_PROVIDER_ID.to_string(),
                     )
                 });
+        let default_model = default_model_entry.slug.clone();
         let default_model_slug = byok_encoded_model_slug(&default_model, &default_model_provider);
         if doc.get("model").and_then(|item| item.as_str()) != Some(default_model_slug.as_str()) {
             doc["model"] = value(default_model_slug);
@@ -2670,10 +2888,14 @@ fn clear_codex_provider_config(paths: &AppPaths, provider: &str) -> Result<()> {
         if doc.get("model_context_window").is_some() {
             doc.remove("model_context_window");
         }
-        doc["model_max_output_tokens"] = value(model_max_output_tokens_for_provider(
+        let default_resolved = resolve_model_attributes(
+            Some(&default_model_entry),
             &default_model,
             &default_model_provider,
-        ));
+        );
+        doc["model_max_output_tokens"] = value(default_resolved.max_output_tokens);
+        doc["model_reasoning_effort"] =
+            value(default_resolved.reasoning_effort.as_codex_str());
         changed = true;
     }
 
@@ -2727,7 +2949,7 @@ fn default_model_for_provider(provider: &str) -> &'static str {
 
 fn default_model_for_provider_with_paths(paths: &AppPaths, provider: &str) -> String {
     let default_model = default_model_for_provider(provider);
-    let models = effective_catalog_models_for_provider(paths, &provider);
+    let models = effective_catalog_model_slugs_for_provider(paths, &provider);
     if !default_model.is_empty()
         && models.iter().any(|model| {
             model == default_model || model_slug_for_provider(model, provider) == default_model
@@ -2851,10 +3073,10 @@ fn codex_acp_model_catalog_content(paths: &AppPaths, provider: &str) -> Result<S
     let models = catalog_models
         .iter()
         .enumerate()
-        .map(|(priority, (model, source_provider))| {
+        .map(|(priority, (entry, source_provider))| {
             let source_provider_label = provider_label_for_paths(paths, source_provider);
             codex_acp_model_catalog_entry(
-                model,
+                entry,
                 source_provider,
                 &source_provider_label,
                 priority,
@@ -2871,13 +3093,13 @@ fn codex_acp_model_catalog_content(paths: &AppPaths, provider: &str) -> Result<S
 fn catalog_models_for_provider_with_paths(
     paths: &AppPaths,
     provider: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(workspace_model::ModelCatalogEntry, String)> {
     let provider =
         normalize_codex_provider(provider).unwrap_or_else(|_| TIMIAI_PROVIDER_ID.to_string());
     if provider != BYOK_PROVIDER_ID {
         return effective_catalog_models_for_provider(paths, &provider)
             .into_iter()
-            .map(|model| (model, provider.clone()))
+            .map(|entry| (entry, provider.clone()))
             .collect();
     }
     let mut models = Vec::new();
@@ -2888,12 +3110,12 @@ fn catalog_models_for_provider_with_paths(
         models.extend(
             effective_catalog_models_for_provider(paths, &provider)
                 .into_iter()
-                .map(|model| (model, provider.clone())),
+                .map(|entry| (entry, provider.clone())),
         );
     }
     if models.is_empty() {
         models.push((
-            TIMIAI_CODEX_MODEL.to_string(),
+            workspace_model::ModelCatalogEntry::from_slug(TIMIAI_CODEX_MODEL),
             TIMIAI_PROVIDER_ID.to_string(),
         ));
     }
@@ -2913,12 +3135,13 @@ fn default_catalog_models_for_provider(provider: &str) -> &'static [&'static str
 }
 
 fn codex_acp_model_catalog_entry(
-    model: &str,
+    entry: &workspace_model::ModelCatalogEntry,
     provider: &str,
     source_provider_label: &str,
     priority: usize,
     encode_provider_models: bool,
 ) -> serde_json::Value {
+    let model = entry.slug.as_str();
     let slug = if encode_provider_models {
         byok_encoded_model_slug(model, provider)
     } else {
@@ -2927,16 +3150,27 @@ fn codex_acp_model_catalog_entry(
     let display_name = if encode_provider_models {
         byok_display_model_name(model, provider)
     } else {
-        model.to_string()
+        entry
+            .display_name
+            .clone()
+            .unwrap_or_else(|| model.to_string())
     };
-    let context_window = model_context_window_for_provider(model, provider);
-    let max_output_tokens = model_max_output_tokens_for_provider(model, provider);
+    let context_window = entry
+        .context_window
+        .unwrap_or_else(|| model_context_window_for_provider(model, provider));
+    let max_output_tokens = entry
+        .max_output_tokens
+        .unwrap_or_else(|| model_max_output_tokens_for_provider(model, provider));
     let is_deepseek = provider == DEEPSEEK_PROVIDER_ID || model.contains("deepseek");
-    // Image input capability mirrors `image_capability::model_supports_image_input`
-    // so the catalog's `input_modalities` stays in sync with the prompt
-    // degradation gate. Plain GLM-5.x text models are text-only; only GLM-*V*
-    // (vision) variants accept images.
-    let supports_image_input = crate::image_capability::model_supports_image_input(model);
+    // Image input capability defaults to the heuristic in
+    // `image_capability::model_supports_image_input`, which the prompt
+    // degradation gate also uses. A user-authored `supports_image_input` on
+    // the entry overrides the heuristic so providers can correct catalog
+    // misclassifications (e.g. plain GLM-5.x text models that share a
+    // family prefix with vision variants).
+    let supports_image_input = entry
+        .supports_image_input
+        .unwrap_or_else(|| crate::image_capability::model_supports_image_input(model));
     let apply_patch_tool_type = apply_patch_tool_type_for_provider(provider);
     let catalog_provider = if encode_provider_models {
         BYOK_PROVIDER_ID
@@ -2944,15 +3178,36 @@ fn codex_acp_model_catalog_entry(
         provider
     };
     let description = format!("Codex {display_name}");
+    // Reasoning effort: a user-authored value on the entry takes precedence;
+    // otherwise we keep the historical single-`none` shape so existing
+    // providers do not regress. Codex only honors a single effort today, so
+    // `supported_reasoning_levels` mirrors the chosen effort rather than
+    // listing every level the static tables know about.
+    let (default_effort, supported_effort) = match entry.reasoning_effort {
+        Some(effort) => {
+            let label = effort.as_codex_str();
+            (
+                label.to_string(),
+                vec![json!({
+                    "effort": label,
+                    "description": reasoning_effort_description(effort)
+                })],
+            )
+        }
+        None => (
+            CODEX_REASONING_EFFORT_NONE.to_string(),
+            vec![json!({
+                "effort": CODEX_REASONING_EFFORT_NONE,
+                "description": "No reasoning effort"
+            })],
+        ),
+    };
     json!({
         "slug": slug,
         "display_name": display_name,
         "description": description,
-        "default_reasoning_level": CODEX_REASONING_EFFORT_NONE,
-        "supported_reasoning_levels": [{
-            "effort": CODEX_REASONING_EFFORT_NONE,
-            "description": "No reasoning effort"
-        }],
+        "default_reasoning_level": default_effort,
+        "supported_reasoning_levels": supported_effort,
         "shell_type": "shell_command",
         "visibility": "list",
         "supported_in_api": true,
@@ -3000,6 +3255,16 @@ fn codex_acp_model_catalog_entry(
 
 fn apply_patch_tool_type_for_provider(_provider: &str) -> &'static str {
     "freeform"
+}
+
+fn reasoning_effort_description(effort: workspace_model::ReasoningEffort) -> &'static str {
+    match effort {
+        workspace_model::ReasoningEffort::None => "No reasoning effort",
+        workspace_model::ReasoningEffort::Minimal => "Minimal reasoning",
+        workspace_model::ReasoningEffort::Low => "Light reasoning",
+        workspace_model::ReasoningEffort::Medium => "Balanced reasoning",
+        workspace_model::ReasoningEffort::High => "Deep reasoning",
+    }
 }
 
 /// Resolve a display model name with the default BYOK slug mapping.
@@ -3117,7 +3382,7 @@ fn unique_catalog_provider_for_model(paths: &AppPaths, model: &str) -> Option<St
 }
 
 fn provider_catalog_contains_model(paths: &AppPaths, provider: &str, model: &str) -> bool {
-    effective_catalog_models_for_provider(paths, provider)
+    effective_catalog_model_slugs_for_provider(paths, provider)
         .iter()
         .any(|candidate| {
             candidate == model || model_slug_for_provider(candidate, provider) == model
@@ -3159,8 +3424,8 @@ fn byok_source_provider_for_model_with_paths(
 fn catalog_provider_for_encoded_model_slug(paths: &AppPaths, model: &str) -> Option<String> {
     catalog_models_for_provider_with_paths(paths, BYOK_PROVIDER_ID)
         .into_iter()
-        .find_map(|(candidate, provider)| {
-            (byok_encoded_model_slug(&candidate, &provider) == model).then_some(provider)
+        .find_map(|(entry, provider)| {
+            (byok_encoded_model_slug(&entry.slug, &provider) == model).then_some(provider)
         })
 }
 
@@ -3251,6 +3516,97 @@ fn model_max_output_tokens_for_provider(model: &str, provider: &str) -> i64 {
     model_max_output_tokens(model)
 }
 
+/// Resolved runtime attributes for a model, after applying the precedence
+/// `custom entry > static table / heuristic > default`. Returned alongside
+/// the reasoning effort label that the Codex config writer should emit
+/// (always defined: falls back to `none` so the config field is never absent).
+pub(crate) struct ResolvedModelAttributes {
+    pub context_window: i64,
+    pub max_output_tokens: i64,
+    pub supports_image_input: bool,
+    pub reasoning_effort: workspace_model::ReasoningEffort,
+}
+
+impl ResolvedModelAttributes {
+    fn fallback() -> Self {
+        Self {
+            context_window: DEFAULT_MODEL_CONTEXT_WINDOW,
+            max_output_tokens: DEFAULT_MODEL_MAX_OUTPUT_TOKENS,
+            supports_image_input: true,
+            reasoning_effort: workspace_model::ReasoningEffort::None,
+        }
+    }
+}
+
+/// Resolve the runtime attributes for a `(model, provider)` pair, applying
+/// user-authored overrides on the rich catalog entry when present. Pass
+/// `entry = None` when the catalog has no custom attributes for the model;
+/// the static tables and `image_capability` heuristic are used instead.
+pub(crate) fn resolve_model_attributes(
+    entry: Option<&workspace_model::ModelCatalogEntry>,
+    upstream_model: &str,
+    provider: &str,
+) -> ResolvedModelAttributes {
+    let mut resolved = ResolvedModelAttributes {
+        context_window: model_context_window_for_provider(upstream_model, provider),
+        max_output_tokens: model_max_output_tokens_for_provider(upstream_model, provider),
+        supports_image_input: crate::image_capability::model_supports_image_input(
+            upstream_model,
+        ),
+        reasoning_effort: workspace_model::ReasoningEffort::None,
+    };
+    if let Some(entry) = entry {
+        if let Some(window) = entry.context_window {
+            resolved.context_window = window;
+        }
+        if let Some(max_output) = entry.max_output_tokens {
+            resolved.max_output_tokens = max_output;
+        }
+        if let Some(supports) = entry.supports_image_input {
+            resolved.supports_image_input = supports;
+        }
+        if let Some(effort) = entry.reasoning_effort {
+            resolved.reasoning_effort = effort;
+        }
+    }
+    if resolved.context_window <= 0 {
+        resolved.context_window = ResolvedModelAttributes::fallback().context_window;
+    }
+    if resolved.max_output_tokens <= 0 {
+        resolved.max_output_tokens = ResolvedModelAttributes::fallback().max_output_tokens;
+    }
+    resolved
+}
+
+/// Locate the rich `ModelCatalogEntry` authored by the user for the given
+/// `(upstream_model, source_provider)` pair, if any. The lookup matches the
+/// upstream model slug against the provider's `effective_catalog_models` and
+/// falls back to scanning every configured BYOK source provider as a last
+/// resort.
+pub(crate) fn lookup_model_attributes_for_active(
+    paths: &AppPaths,
+    upstream_model: &str,
+    source_provider: &str,
+) -> Option<workspace_model::ModelCatalogEntry> {
+    if let Some(found) = effective_catalog_models_for_provider(paths, source_provider)
+        .into_iter()
+        .find(|entry| entry.slug == upstream_model)
+    {
+        return Some(found);
+    }
+    if codex_is_byok_source(source_provider) {
+        for byok_provider in byok_source_provider_ids(paths) {
+            if let Some(found) = effective_catalog_models_for_provider(paths, &byok_provider)
+                .into_iter()
+                .find(|entry| entry.slug == upstream_model)
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn model_i64_metadata(model: &str, metadata: &[(&str, i64)], fallback: i64) -> i64 {
     metadata
         .iter()
@@ -3317,8 +3673,8 @@ fn configured_claude_byok_model_entries(paths: &AppPaths) -> Vec<(String, String
         if byok_source_secret(paths, AgentProviderFamily::Claude, &provider).is_none() {
             continue;
         }
-        for model in effective_catalog_models_for_provider(paths, &provider) {
-            let display_name = byok_display_model_name(&model, &provider);
+        for entry in effective_catalog_models_for_provider(paths, &provider) {
+            let display_name = byok_display_model_name(&entry.slug, &provider);
             if !models.iter().any(|(existing, _)| existing == &display_name) {
                 models.push((display_name, provider.clone()));
             }
@@ -3484,3 +3840,5 @@ fn claude_proxy_kind_env(proxy_kind: AgentProviderProxyKind) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_model_attributes;

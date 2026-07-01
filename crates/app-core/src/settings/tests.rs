@@ -1315,7 +1315,10 @@ fn provider_model_catalog_can_override_and_reset_models() {
             "claude-opus-4.9".to_string(),
             "gpt-5.6".to_string(),
             " ".to_string(),
-        ],
+        ]
+        .into_iter()
+        .map(workspace_model::ModelAttributesInput::from_slug)
+        .collect(),
     )
     .unwrap();
     let profile = snapshot
@@ -1330,7 +1333,10 @@ fn provider_model_catalog_can_override_and_reset_models() {
     let snapshot = save_provider_models_with_model_list_url(
         &paths,
         TIMIAI_PROVIDER_ID,
-        vec!["gpt-5.7".to_string(), "claude-opus-4.10".to_string()],
+        vec!["gpt-5.7".to_string(), "claude-opus-4.10".to_string()]
+            .into_iter()
+            .map(workspace_model::ModelAttributesInput::from_slug)
+            .collect(),
         Some("https://models.example.test/v1/models".to_string()),
     )
     .unwrap();
@@ -1407,7 +1413,12 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
         Some("https://api.lab.test/v1/models")
     );
 
-    save_provider_models(&paths, &custom_id, vec!["lab-model".to_string()]).unwrap();
+    save_provider_models(
+        &paths,
+        &custom_id,
+        vec![workspace_model::ModelAttributesInput::from_slug("lab-model")],
+    )
+    .unwrap();
     let command = command_for_agent_with_paths(AgentCliId::CodexAcp, &paths).unwrap();
     let env = agent_env_for_command(&command, &paths);
     let expected_env_key = format!("CUSTOM_PROVIDER_{}_API_KEY", custom_id.strip_prefix("custom_").unwrap_or(&custom_id).to_ascii_uppercase());
@@ -1654,13 +1665,17 @@ fn claude_byok_model_provider_map_keeps_earlier_provider_for_duplicate_models() 
     save_provider_models(
         &paths,
         TIMIAI_PROVIDER_ID,
-        vec!["deepseek-v4-pro-r1".to_string()],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            "deepseek-v4-pro-r1",
+        )],
     )
     .unwrap();
     save_provider_models(
         &paths,
         COMMANDCODE_PROVIDER_ID,
-        vec!["deepseek-v4-pro-r1".to_string()],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            "deepseek-v4-pro-r1",
+        )],
     )
     .unwrap();
 

@@ -47,6 +47,7 @@ import type {
   UsageSummaryRow,
   CustomProviderInput,
   ImageGenerateProtocol,
+  ModelAttributesInput,
 } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -611,7 +612,7 @@ export async function settingsRemoveCustomProvider(
 }
 export async function settingsSaveProviderModels(
   provider: string,
-  models: string[],
+  models: ModelAttributesInput[],
   remoteProfileId?: string | null,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_provider_models", {

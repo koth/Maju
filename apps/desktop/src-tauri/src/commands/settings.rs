@@ -8,9 +8,9 @@ use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
     CustomProviderInput, ImageGenerateProtocol, LspProbeResult, LspServerConfigInput,
-    LspServerSettingsEntry,
-    LspSettingsSnapshot, RemoteMachineProfile, RemoteMachineProfileInput,
-    RemoteMachineProfilesSnapshot, RemoteMachineValidationRequest,
+    LspServerSettingsEntry, LspSettingsSnapshot, ModelAttributesInput,
+    RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
+    RemoteMachineValidationRequest,
 };
 
 #[cfg(windows)]
@@ -306,7 +306,7 @@ pub fn settings_remove_custom_provider(
 pub fn settings_save_provider_models(
     state: State<'_, AppState>,
     provider: String,
-    models: Vec<String>,
+    models: Vec<ModelAttributesInput>,
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
@@ -334,12 +334,16 @@ pub async fn settings_sync_provider_models_from_url(
         app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
             .await
             .map_err(|e| e.to_string())?;
+    let entries: Vec<ModelAttributesInput> = models
+        .into_iter()
+        .map(ModelAttributesInput::from_slug)
+        .collect();
     if let Some(scope) = remote_settings_scope(state.inner(), &paths, remote_profile_id)? {
         return app_core::settings::remote_save_provider_models_with_model_list_url(
             &scope.profile,
             scope.ssh_password.as_deref(),
             &provider,
-            models,
+            entries,
             model_list_url,
         )
         .map_err(|e| e.to_string());
@@ -347,7 +351,7 @@ pub async fn settings_sync_provider_models_from_url(
     app_core::settings::save_provider_models_with_model_list_url(
         &paths,
         &provider,
-        models,
+        entries,
         Some(model_list_url),
     )
     .map_err(|e| e.to_string())

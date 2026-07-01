@@ -1463,15 +1463,16 @@ fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     if usage.context.used_tokens.is_some() {
         ui.usage.context.used_tokens = usage.context.used_tokens;
     }
-    // The agent's `UsageUpdate.size` reflects the Codex ACP launch config
-    // (default model's window × effective_context_window_percent), not the
-    // session's active model. When the active model has a known context window
-    // in our static tables, prefer it so the UI shows the real window (e.g.
-    // 1M for deepseek-v4-pro / glm-5.2 instead of the 249k kimi default).
-    if let Some(known_window) = current_session_context_window(ui) {
-        ui.usage.context.window_tokens = Some(known_window.max(0) as u64);
-    } else if usage.context.window_tokens.is_some() {
+    // Prefer the agent-reported `window_tokens`: codex-acp >= 0.136 reports
+    // the active model's per-model window from `model_catalog.json` (already
+    // scaled by `effective_context_window_percent`). Fall back to our static
+    // metadata tables only when the agent omits the value, since the static
+    // tables do not cover BYOK/custom-provider slugs and would otherwise
+    // collapse to a 200k default that hides a user-authored entry.
+    if usage.context.window_tokens.is_some() {
         ui.usage.context.window_tokens = usage.context.window_tokens;
+    } else if let Some(known_window) = current_session_context_window(ui) {
+        ui.usage.context.window_tokens = Some(known_window.max(0) as u64);
     }
     if usage.context.updated_at.is_some() {
         ui.usage.context.updated_at = usage.context.updated_at.clone();
@@ -1722,10 +1723,11 @@ mod tests {
     }
 
     #[test]
-    fn usage_update_overrides_window_with_known_model_context_window() {
-        // The agent reports the Codex ACP launch-config window (kimi 262144 ×
-        // 0.95 ≈ 249036) even after the session switches to a 1M model. The
-        // reducer must surface the active model's real window instead.
+    fn usage_update_prefers_agent_window_for_active_model() {
+        // codex-acp >= 0.136 reports the active model's per-model window from
+        // `model_catalog.json` (deepseek-v4-pro = 1M, scaled by the agent's
+        // 0.95 effective_context_window_percent => 950_000). The reducer must
+        // surface that value, not the static-table fallback.
         let mut ui = ui_with_model_choice("deepseek-v4-pro", Some("deepseek"));
         apply_event(
             &mut ui,
@@ -1734,7 +1736,7 @@ mod tests {
                     scope: workspace_model::UsageEventScope::ContextSnapshot,
                     context: workspace_model::UsageContextSnapshot {
                         used_tokens: Some(1200),
-                        window_tokens: Some(249_036),
+                        window_tokens: Some(950_000),
                         updated_at: None,
                     },
                     tokens: workspace_model::UsageTokenBreakdown {
@@ -1746,7 +1748,7 @@ mod tests {
             },
         );
         assert_eq!(ui.usage.context.used_tokens, Some(1200));
-        assert_eq!(ui.usage.context.window_tokens, Some(1_000_000));
+        assert_eq!(ui.usage.context.window_tokens, Some(950_000));
     }
 
     #[test]
@@ -1769,6 +1771,66 @@ mod tests {
             },
         );
         assert_eq!(ui.usage.context.window_tokens, Some(80_000));
+    }
+
+    #[test]
+    fn usage_update_falls_back_to_static_table_when_agent_omits_window() {
+        // When the agent omits `window_tokens` (e.g. older codex-acp before
+        // 0.136 or transient startup gaps) the reducer still surfaces a sane
+        // value from the static metadata tables. The BYOK `qwen/qwen3.7-max`
+        // slug normalizes to `Qwen/Qwen3.7-Max` => 1_000_000.
+        let mut ui = ui_with_model_choice("qwen/qwen3.7-max", Some("custom"));
+        // NOTE: the BYOK `qwen/qwen3.7-max` slug itself is not in the
+        // built-in `MODEL_CONTEXT_WINDOWS` table. Its CommandCode counterpart
+        // `Qwen/Qwen3.7-Max` is in `COMMANDCODE_MODEL_CONTEXT_WINDOWS` and
+        // surfaces via `model_context_window_for_provider` when the
+        // provider is `commandcode`. We exercise that path here so the
+        // fallback does not collapse to 200k.
+        let mut ui = ui_with_model_choice("qwen3.7-max", Some("commandcode"));
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::ContextSnapshot,
+                    context: workspace_model::UsageContextSnapshot {
+                        used_tokens: Some(50),
+                        window_tokens: None,
+                        updated_at: None,
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.context.window_tokens, Some(1_000_000));
+    }
+
+    #[test]
+    fn usage_update_does_not_clamp_byok_rich_window_to_static_table_fallback() {
+        // Regression: BYOK slugs that share a normalized name with a static
+        // table entry (e.g. `cline-pass/minimax-m3` vs CommandCode's
+        // `MiniMaxAI/MiniMax-M3` both normalize to `minimax-m3`) must not
+        // override the agent-reported window, which is the per-model value
+        // from `model_catalog.json` scaled by 0.95. This is the case the
+        // add-model-attributes change unlocks: a user-authored 872k window
+        // on a BYOK model must surface as the agent's 828k value, not the
+        // 200k default the static table fallbacks produce for unknown
+        // providers.
+        let mut ui = ui_with_model_choice("kodex-provider/byok/custom_cline/cline-pass/minimax-m3", Some("custom_cline"));
+        apply_event(
+            &mut ui,
+            ClientEvent::UsageUpdated {
+                usage: workspace_model::UsageEvent {
+                    scope: workspace_model::UsageEventScope::ContextSnapshot,
+                    context: workspace_model::UsageContextSnapshot {
+                        used_tokens: Some(50),
+                        window_tokens: Some(828_400),
+                        updated_at: None,
+                    },
+                    ..Default::default()
+                },
+            },
+        );
+        assert_eq!(ui.usage.context.window_tokens, Some(828_400));
     }
 
     #[test]

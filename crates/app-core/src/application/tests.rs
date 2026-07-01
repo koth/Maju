@@ -107,15 +107,18 @@ fn usage_summary_groups_by_model_and_filters_date_range() {
     let mut app = test_app(&dir);
 
     app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
-        usage: usage_event("gpt-5.1", 10, "2026-06-01T00:00:00Z"),
+        usage: usage_event("gpt-5.1", 10, "1751328000"),
     });
     app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
-        usage: usage_event("claude-opus-4.7", 20, "2026-06-02T00:00:00Z"),
+        usage: usage_event("claude-opus-4.7", 20, "1751414400"),
     });
 
+    // Date filter is a numeric comparison: stored `created_at` is cast to
+    // INTEGER and the bound is parsed to epoch seconds. Use ISO bounds
+    // (matching what the desktop UI sends) that bracket the second row.
     let rows = app.usage_summary(UsageSummaryRequest {
-        from: Some("2026-06-02T00:00:00Z".into()),
-        to: Some("2026-06-02T23:59:59Z".into()),
+        from: Some("2025-07-02T00:00:00Z".into()),
+        to: Some("2025-07-02T23:59:59Z".into()),
         ..Default::default()
     });
 
