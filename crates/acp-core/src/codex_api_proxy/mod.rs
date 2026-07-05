@@ -465,6 +465,16 @@ async fn proxy_codex_api_request(
     }
     let path = request.uri().path().to_string();
     let explicit_provider = proxy_provider_from_path(&path);
+    // Extract the ACP session id from the `session-id` header sent by
+    // codex-acp. This is forwarded to codebuddy proxy as `X-Session-Id`
+    // so it can map ACP sessions to SDK sessions (reuse for multi-turn,
+    // fresh for new conversations).
+    let acp_session_id = request
+        .headers()
+        .get("session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
     if path.ends_with("/messages") {
         return proxy_anthropic_messages_request(request, config, explicit_provider).await;
     }
@@ -481,6 +491,7 @@ async fn proxy_codex_api_request(
     }
 
     let body = request.into_body().collect().await?.to_bytes();
+    let config_arc = config.clone();
     let config = config
         .read()
         .map(|guard| guard.clone())
@@ -531,12 +542,23 @@ async fn proxy_codex_api_request(
         ));
     }
     if let Some(custom_config) = config.provider_configs.get(&provider).cloned() {
+        // Forward the ACP session id so codebuddy proxy can map it to a
+        // persistent SDK session. Fall back to a provider-scoped id when
+        // codex-acp did not send the header.
+        let session_id = acp_session_id
+            .clone()
+            .unwrap_or_else(|| ensure_session_id_for_proxy_provider(&config_arc, &provider));
+        append_codex_api_proxy_log(&format!(
+            "session_id_for_provider provider={} session_id={} acp={}",
+            provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
+        ));
         return proxy_custom_codex_responses_request(
             payload,
             &api_key,
             &provider,
             &custom_config,
             requested_stream,
+            Some(&session_id),
         )
         .await;
     }
@@ -554,7 +576,9 @@ async fn proxy_codex_api_request(
     let chat_payload = normalize_chat_payload_for_provider(chat_payload, &provider);
     if normalize_proxy_provider(&provider) == "timiai" {
         log_chat_payload_summary("timiai_chat_completions_request", &chat_payload);
-        let session_id = session_id_for_proxy_provider(&config, &provider);
+        let session_id = acp_session_id
+            .clone()
+            .unwrap_or_else(|| session_id_for_proxy_provider(&config, &provider));
         return proxy_chat_completions_codex_responses_request(
             chat_payload,
             &api_key,
@@ -576,13 +600,20 @@ async fn proxy_codex_api_request(
     }
     let upstream_url = upstream_chat_completions_url(&provider);
 
+    let session_id = acp_session_id
+        .clone()
+        .unwrap_or_else(|| ensure_session_id_for_proxy_provider(&config_arc, &provider));
+    append_codex_api_proxy_log(&format!(
+        "session_id_for_provider provider={} session_id={} acp={}",
+        provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
+    ));
     proxy_chat_completions_codex_responses_request(
         chat_payload,
         &api_key,
         &provider,
         upstream_url,
         requested_stream,
-        None,
+        Some(&session_id),
     )
     .await
 }
@@ -593,6 +624,7 @@ async fn proxy_custom_codex_responses_request(
     provider: &str,
     custom_config: &ProxyProviderConfig,
     requested_stream: bool,
+    session_id: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::Responses => {
@@ -608,7 +640,7 @@ async fn proxy_custom_codex_responses_request(
                 provider,
                 &custom_config.base_url,
                 requested_stream,
-                None,
+                session_id,
             )
             .await
         }
@@ -744,7 +776,12 @@ async fn proxy_chat_completions_codex_responses_request(
     let request = if normalize_proxy_provider(provider) == "timiai" {
         with_timiai_headers(request, api_key, session_id.unwrap_or_default())
     } else {
-        request.bearer_auth(api_key)
+        let req = request.bearer_auth(api_key);
+        if let Some(sid) = session_id {
+            req.header("X-Session-Id", sid)
+        } else {
+            req
+        }
     };
     let request_body = serde_json::to_vec(&chat_payload)?;
     let upstream = match request.body(request_body).send().await {
@@ -1311,6 +1348,29 @@ fn session_id_for_proxy_provider(config: &CodexApiProxyConfig, provider: &str) -
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
+/// Like `session_id_for_proxy_provider` but also persists the generated
+/// id back into the config so subsequent calls for the same provider
+/// return the same value. `session_id_for_proxy_provider` above is
+/// read-only (returns a fresh UUID when missing); this variant ensures
+/// stability across calls.
+fn ensure_session_id_for_proxy_provider(
+    config: &Arc<RwLock<CodexApiProxyConfig>>,
+    provider: &str,
+) -> String {
+    let config_guard = config.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = config_guard.session_ids.get(provider) {
+        return id.clone();
+    }
+    drop(config_guard);
+    let new_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(mut guard) = config.write() {
+        guard
+            .session_ids
+            .entry(provider.to_string())
+            .or_insert(new_id.clone());
+    }
+    new_id
+}
 fn normalize_native_anthropic_payload(mut payload: Value, provider: &str) -> Value {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return payload;

@@ -756,6 +756,8 @@ export type CustomProviderProtocol =
   | "responses"
   | "anthropic_messages";
 
+export type ManagedProxyKind = "none" | "codebuddy";
+
 export interface CustomProviderInput {
   providerId?: string | null;
   label: string;
@@ -763,6 +765,7 @@ export interface CustomProviderInput {
   protocol: CustomProviderProtocol;
   apiKey: string;
   modelListUrl?: string | null;
+  port?: number | null;
 }
 
 export type ReasoningEffort =
@@ -793,6 +796,8 @@ export interface AgentProviderProfile {
   selected: boolean;
   configured: boolean;
   base_url: string | null;
+  managed_proxy_kind?: ManagedProxyKind;
+  port?: number | null;
   hidden?: boolean;
   custom: boolean;
   protocol: CustomProviderProtocol | null;

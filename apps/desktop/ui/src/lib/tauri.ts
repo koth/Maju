@@ -647,6 +647,40 @@ export async function settingsResetProviderModels(
   });
 }
 
+export interface CodebuddyProxyStatus {
+  running: boolean;
+  port: number | null;
+  debug: boolean;
+}
+
+export async function codebuddyProxyStatus(): Promise<CodebuddyProxyStatus> {
+  return invoke<CodebuddyProxyStatus>("codebuddy_proxy_status");
+}
+
+export async function codebuddyProxyStart(): Promise<void> {
+  return invoke<void>("codebuddy_proxy_start");
+}
+
+export async function codebuddyProxyStop(): Promise<void> {
+  return invoke<void>("codebuddy_proxy_stop");
+}
+
+export async function settingsSaveCodebuddyConfig(
+  port: number | null,
+  apiKey: string,
+  debug: boolean,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_codebuddy_config", {
+    port,
+    apiKey,
+    debug,
+  });
+}
+
+export async function settingsClearCodebuddyConfig(): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_clear_codebuddy_config");
+}
+
 export async function settingsSelectClaudeFastModel(
   modelId: string | null,
   remoteProfileId?: string | null,

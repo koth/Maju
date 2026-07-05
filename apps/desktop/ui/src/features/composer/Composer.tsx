@@ -446,6 +446,9 @@ export function Composer({
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // IME composition in progress (e.g. picking a Chinese candidate): let the
+    // Enter confirm the candidate instead of sending the message.
+    const isComposing = e.nativeEvent.isComposing || e.keyCode === 229;
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -458,7 +461,8 @@ export function Composer({
         return;
       }
     }
-    if (e.key === "Enter" && e.ctrlKey && canSend) {
+    if (e.key === "Enter" && !isComposing && !e.shiftKey && canSend) {
+      // Plain Enter sends; Shift+Enter inserts a newline.
       e.preventDefault();
       handleSend();
     }
@@ -701,9 +705,18 @@ const MODEL_PROVIDER_LABELS: Record<string, string> = {
   deepseek: "DeepSeek",
   kimi_code: "Kimi Code",
   xiaomi_mimo: "Xiaomi Token Plan",
+  codebuddy: "CodeBuddy",
 };
 
-const MODEL_PROVIDER_ORDER = ["timiai", "commandcode", "deepseek", "kimi_code", "xiaomi_mimo", "custom"];
+const MODEL_PROVIDER_ORDER = [
+  "timiai",
+  "commandcode",
+  "deepseek",
+  "kimi_code",
+  "xiaomi_mimo",
+  "codebuddy",
+  "custom",
+];
 const BYOK_SOURCE_MODEL_PROVIDER_IDS = new Set(MODEL_PROVIDER_ORDER);
 function isByokSourceModelProviderId(providerId: string) {
   return BYOK_SOURCE_MODEL_PROVIDER_IDS.has(providerId) || providerId.startsWith("custom_");
@@ -1004,6 +1017,12 @@ function normalizeModelProviderId(provider: string | null | undefined) {
     case "mimo":
     case "xiaomi-mimo":
       return "xiaomi_mimo";
+    case "codebuddy":
+    case "code-buddy":
+    case "code_buddy":
+    case "codebuddy-proxy":
+    case "codebuddy_proxy":
+      return "codebuddy";
     default:
       return normalized;
   }

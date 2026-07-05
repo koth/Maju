@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod codebuddy_proxy;
 mod commands;
 mod events;
 mod lsp;
@@ -8,6 +9,7 @@ mod recent_workspaces;
 mod state;
 
 use app_core::{UiPatchCursor, UiSnapshotUpdate};
+use workspace_model::AgentProviderFamily;
 use state::AppState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,12 +56,23 @@ fn main() {
                 {
                     app_core::startup_perf::mark("desktop/claude_agent_acp_install_failed", &error);
                 }
+                if let Err(error) =
+                    commands::settings::install_bundled_codebuddy_proxy_if_missing(app.handle())
+                {
+                    app_core::startup_perf::mark("desktop/codebuddy_proxy_install_failed", &error);
+                }
                 let terminal_app = app.handle().clone();
                 app.state::<AppState>()
                     .set_terminal_event_sink(Arc::new(move |event| {
                         events::emit_terminal_event(&terminal_app, event);
                     }));
                 start_snapshot_bridge(app.handle().clone(), snapshot_bridge_running);
+                // If the CodeBuddy provider is configured and selected, eagerly
+                // start the managed proxy at app launch.
+                // Spawn the codebuddy proxy boot in the background so the
+                // Tauri setup closure (and the UI) is not blocked on the
+                // child process + TCP probe.
+                try_start_codebuddy_proxy_at_launch(app.handle().clone());
                 app_core::startup_perf::mark("desktop/setup_end", "");
                 Ok(())
             }
@@ -141,6 +154,11 @@ fn main() {
             commands::settings::settings_sync_provider_models_from_url,
             commands::settings::settings_reset_provider_models,
             commands::settings::settings_select_claude_fast_model,
+            commands::settings::codebuddy_proxy_status,
+            commands::settings::codebuddy_proxy_start,
+            commands::settings::codebuddy_proxy_stop,
+            commands::settings::settings_save_codebuddy_config,
+            commands::settings::settings_clear_codebuddy_config,
             commands::settings::settings_install_agent,
             commands::settings::settings_get_lsp_snapshot,
             commands::settings::settings_save_lsp_server,
@@ -184,6 +202,50 @@ fn main() {
                 }
             }
         });
+}
+
+/// If the CodeBuddy provider is configured and selected (for Codex or Claude),
+/// eagerly start the managed proxy at app launch.
+fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let paths = match app_core::AppPaths::resolve() {
+            Ok(p) => p,
+            Err(e) => {
+                app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &e.to_string());
+                return;
+            }
+        };
+        let snapshot = app_core::settings::settings_snapshot(&paths);
+        // Start the proxy if the codebuddy profile is configured in
+        // either family — regardless of whether it is currently
+        // selected. The user may have BYOK selected (which maps to
+        // "byok" id) while codebuddy is the underlying provider.
+        let check = |family: AgentProviderFamily| {
+            let list = match family {
+                AgentProviderFamily::Codex => &snapshot.codex_acp.profiles,
+                AgentProviderFamily::Claude => &snapshot.claude.profiles,
+            };
+            list.iter().any(|p| p.id == "codebuddy" && p.configured)
+        };
+        if !check(AgentProviderFamily::Codex) && !check(AgentProviderFamily::Claude) {
+            return;
+        }
+        let state = app.state::<AppState>();
+        let manager = state.codebuddy_proxy().clone();
+        let port = app_core::settings::codebuddy_port(&paths);
+        let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
+        let default_model = app_core::settings::codebuddy_default_model(&paths);
+        let debug = app_core::settings::codebuddy_debug(&paths);
+        let result = tokio::task::spawn_blocking(move || {
+            manager.ensure_running(&paths, port, &api_key, &default_model, debug)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &e),
+            Err(e) => app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &format!("join: {e}")),
+        }
+    });
 }
 
 fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {

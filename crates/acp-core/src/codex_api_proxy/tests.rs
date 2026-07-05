@@ -52,15 +52,17 @@ fn converts_responses_request_to_chat_payload() {
     assert_eq!(chat["messages"][1]["content"], "dev instructions");
     assert_eq!(chat["messages"][2]["role"], "user");
     assert_eq!(chat["messages"][2]["content"], "hello");
+    // The assistant text/reasoning and its function_call are one merged
+    // assistant message (Anthropic-friendly: no adjacent assistant pair).
     assert_eq!(chat["messages"][3]["role"], "assistant");
     assert_eq!(chat["messages"][3]["content"], "hi");
     assert_eq!(
         chat["messages"][3]["reasoning_content"],
         "previous thinking"
     );
-    assert_eq!(chat["messages"][4]["tool_calls"][0]["id"], "call_1");
-    assert_eq!(chat["messages"][5]["role"], "tool");
-    assert_eq!(chat["messages"][5]["tool_call_id"], "call_1");
+    assert_eq!(chat["messages"][3]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(chat["messages"][4]["role"], "tool");
+    assert_eq!(chat["messages"][4]["tool_call_id"], "call_1");
     assert_eq!(chat["tools"][0]["function"]["name"], "list_files");
     assert_eq!(chat["tool_choice"], "auto");
 }
@@ -170,6 +172,230 @@ fn converts_namespaced_responses_tool_call_history_to_flat_chat_tool_call() {
         "mcp__kodex_web_tools__web_search"
     );
     assert_eq!(chat["messages"][1]["tool_call_id"], "call_web");
+}
+
+#[test]
+fn parallel_tool_outputs_collapse_into_single_anthropic_user_message() {
+    // When an assistant turn emits several function_call items followed by
+    // their function_call_output items, the chat layer merges the calls into a
+    // single assistant message but keeps each output as a separate `tool`
+    // message. The Anthropic Messages API requires strict user/assistant
+    // alternation and forbids two consecutive `user` messages. Naively mapping
+    // each `tool` message to its own `user`/tool_result message produced
+    // user->user sequences that violate the spec and confuse long-context
+    // models into ending the turn early. The converter must coalesce adjacent
+    // tool_result blocks into one `user` message.
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "go" }] },
+            {
+                "type": "function_call",
+                "call_id": "call_a",
+                "name": "read_file",
+                "arguments": "{\"path\":\"a\"}"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_b",
+                "name": "read_file",
+                "arguments": "{\"path\":\"b\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_a",
+                "output": "body-a"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_b",
+                "output": "body-b"
+            },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "done both" }]
+            }
+        ],
+        "tools": [{
+            "type": "function",
+            "name": "read_file",
+            "parameters": { "type": "object", "properties": { "path": { "type": "string" } } }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
+
+    let roles: Vec<&str> = anthropic["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+
+    // Expected: user, assistant(tool_use x2), user(tool_result x2), assistant
+    assert_eq!(roles, vec!["user", "assistant", "user", "assistant"]);
+
+    // Both tool_results land in the single coalesced user message.
+    let tool_results = &anthropic["messages"][2]["content"];
+    assert_eq!(tool_results.as_array().unwrap().len(), 2);
+    assert_eq!(tool_results[0]["type"], "tool_result");
+    assert_eq!(tool_results[0]["tool_use_id"], "call_a");
+    assert_eq!(tool_results[1]["tool_use_id"], "call_b");
+}
+
+#[test]
+fn consecutive_assistant_text_messages_are_not_dropped() {
+    // Two adjacent assistant text turns in the Responses history (no tool
+    // call between them) must not lose the second message's text; they
+    // belong to the same coalesced assistant message.
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "q" }] },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "first" }]
+            },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "second" }]
+            }
+        ]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+
+    let roles: Vec<&str> = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["user", "assistant"]);
+
+    // Both texts survive in the single assistant message.
+    let content = chat["messages"][1]["content"].as_str().unwrap();
+    assert!(content.contains("first"));
+    assert!(content.contains("second"));
+}
+
+#[test]
+fn full_responses_to_anthropic_chain_enforces_strict_alternation() {
+    // End-to-end: a realistic agentic tail (two assistant turns each with
+    // text + a tool call and its output) must reach the Anthropic Messages
+    // layer as a strictly alternating user/assistant sequence. Before the
+    // fixes this produced adjacent assistant pairs (text vs tool_calls) and
+    // adjacent user pairs (parallel tool outputs) that made long-context
+    // models end the turn early.
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "go" }] },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "turn1 text" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "read_file",
+                "arguments": "{\"path\":\"a\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "a-body"
+            },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "turn2 text" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "c2",
+                "name": "read_file",
+                "arguments": "{\"path\":\"b\"}"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "c2",
+                "output": "b-body"
+            }
+        ],
+        "tools": [{
+            "type": "function",
+            "name": "read_file",
+            "parameters": { "type": "object", "properties": { "path": { "type": "string" } } }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
+
+    let roles: Vec<&str> = anthropic["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+
+    // user, assistant(text+tool_use), user(tool_result), assistant(text+tool_use), user(tool_result)
+    assert_eq!(
+        roles,
+        vec!["user", "assistant", "user", "assistant", "user"]
+    );
+}
+
+#[test]
+fn assistant_text_then_tool_call_stays_one_chat_assistant_message() {
+    // In the Responses format an assistant turn is represented as a `message`
+    // item (its text/reasoning) followed by one or more `function_call` items.
+    // Mapping each to a separate Chat Completions assistant message produced
+    // assistant->assistant sequences; they must be merged into a single
+    // assistant message carrying both the text content and the tool_calls.
+    let payload = json!({
+        "model": "minimax-m3",
+        "input": [
+            { "role": "user", "content": [{ "type": "input_text", "text": "go" }] },
+            {
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "I'll read it" }]
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": "{\"path\":\"a\"}"
+            }
+        ],
+        "tools": [{
+            "type": "function",
+            "name": "read_file",
+            "parameters": { "type": "object", "properties": { "path": { "type": "string" } } }
+        }]
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+
+    // user, assistant(text+tool_calls) — exactly two messages, no
+    // adjacent assistant pair.
+    let roles: Vec<&str> = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, vec!["user", "assistant"]);
+
+    // The single assistant message carries both the text and the tool_call.
+    let assistant = &chat["messages"][1];
+    assert_eq!(assistant["content"], "I'll read it");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["name"],
+        "read_file"
+    );
 }
 
 #[test]
@@ -1282,6 +1508,57 @@ fn converts_chat_payload_to_kimi_anthropic_messages() {
 }
 
 #[test]
+fn chat_to_anthropic_preserves_tool_choice_strings() {
+    // Regression: chat_payload_to_anthropic_payload used to drop `tool_choice`
+    // entirely, so providers that rely on it (e.g. forcing tool use in long
+    // agentic turns) lost the hint and could prematurely end_turn.
+    let chat = json!({
+        "model": "minimax-m3",
+        "messages": [{ "role": "user", "content": "go" }],
+        "tools": [{
+            "type": "function",
+            "function": { "name": "read_file", "parameters": { "type": "object" } }
+        }],
+        "tool_choice": "required"
+    });
+
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
+
+    assert_eq!(anthropic["tool_choice"]["type"], "any");
+}
+
+#[test]
+fn chat_to_anthropic_preserves_tool_choice_function_object() {
+    let chat = json!({
+        "model": "minimax-m3",
+        "messages": [{ "role": "user", "content": "go" }],
+        "tools": [{
+            "type": "function",
+            "function": { "name": "read_file", "parameters": { "type": "object" } }
+        }],
+        "tool_choice": { "type": "function", "function": { "name": "read_file" } }
+    });
+
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
+
+    assert_eq!(anthropic["tool_choice"]["type"], "tool");
+    assert_eq!(anthropic["tool_choice"]["name"], "read_file");
+}
+
+#[test]
+fn chat_to_anthropic_auto_tool_choice_maps_to_auto() {
+    let chat = json!({
+        "model": "minimax-m3",
+        "messages": [{ "role": "user", "content": "go" }],
+        "tool_choice": "auto"
+    });
+
+    let anthropic = chat_payload_to_anthropic_payload(chat, false);
+
+    assert_eq!(anthropic["tool_choice"]["type"], "auto");
+}
+
+#[test]
 fn converts_anthropic_tools_to_chat_completion_tools() {
     let anthropic = json!({
         "model": "deepseek-v4-pro",
@@ -1427,6 +1704,98 @@ fn converts_kimi_anthropic_response_to_responses_response() {
     assert_eq!(response["usage"]["input_tokens"], 12);
     assert_eq!(response["usage"]["output_tokens"], 5);
     assert_eq!(response["usage"]["total_tokens"], 17);
+}
+
+#[test]
+fn anthropic_non_stream_max_tokens_maps_to_responses_incomplete() {
+    // Regression: a non-stream Anthropic Messages response whose top-level
+    // `stop_reason` is `max_tokens` (i.e. the model was truncated and never
+    // got to emit its tool_use block) used to be converted to a Responses
+    // object with `status: "completed"` and no `stop_reason`/`incomplete_details`,
+    // which made the downstream client believe the turn ended normally.
+    let anthropic = json!({
+        "id": "msg_trunc",
+        "model": "minimax-m3",
+        "stop_reason": "max_tokens",
+        "content": [
+            { "type": "text", "text": "I will now call a tool but the output was cut" }
+        ],
+        "usage": { "input_tokens": 10, "output_tokens": 4096 }
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], "max_output_tokens");
+    // The text block is still preserved so nothing is lost.
+    assert_eq!(response["output"][0]["type"], "message");
+}
+
+#[test]
+fn anthropic_non_stream_end_turn_maps_to_responses_completed() {
+    let anthropic = json!({
+        "id": "msg_ok",
+        "model": "minimax-m3",
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "done" }],
+        "usage": { "input_tokens": 1, "output_tokens": 1 }
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["status"], "completed");
+    assert!(response.get("incomplete_details").is_none() || response["incomplete_details"].is_null());
+}
+
+#[test]
+fn anthropic_non_stream_tool_use_maps_to_responses_completed() {
+    let anthropic = json!({
+        "id": "msg_tool",
+        "model": "minimax-m3",
+        "stop_reason": "tool_use",
+        "content": [
+            { "type": "text", "text": "reading" },
+            { "type": "tool_use", "id": "call_1", "name": "read_file", "input": { "path": "a.rs" } }
+        ],
+        "usage": { "input_tokens": 1, "output_tokens": 1 }
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["status"], "completed");
+    assert_eq!(response["output"][1]["type"], "function_call");
+}
+
+#[test]
+fn anthropic_non_stream_refusal_maps_to_responses_incomplete_content_filter() {
+    let anthropic = json!({
+        "id": "msg_refusal",
+        "model": "minimax-m3",
+        "stop_reason": "refusal",
+        "content": [{ "type": "text", "text": "" }],
+        "usage": { "input_tokens": 1, "output_tokens": 1 }
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["status"], "incomplete");
+    assert_eq!(response["incomplete_details"]["reason"], "content_filter");
+}
+
+#[test]
+fn anthropic_non_stream_missing_stop_reason_stays_completed() {
+    // Parity with previous behavior: an upstream that omits `stop_reason`
+    // entirely is treated as a normal end_turn (completed), never incomplete.
+    let anthropic = json!({
+        "id": "msg_nostop",
+        "model": "minimax-m3",
+        "content": [{ "type": "text", "text": "hi" }],
+        "usage": { "input_tokens": 1, "output_tokens": 1 }
+    });
+
+    let response = anthropic_response_to_responses_response(anthropic);
+
+    assert_eq!(response["status"], "completed");
 }
 
 #[test]

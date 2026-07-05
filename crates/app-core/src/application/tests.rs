@@ -1143,6 +1143,7 @@ fn session_config_update_fills_custom_provider_label_from_settings() {
             protocol: workspace_model::CustomProviderProtocol::ChatCompletions,
             api_key: "lab-secret".into(),
             model_list_url: None,
+            port: None,
         },
     )
     .unwrap();

@@ -5,7 +5,8 @@ use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use workspace_model::{
-    CustomProviderInput, CustomProviderProtocol, LspServerConfigInput, RemoteMachineProfile,
+    CustomProviderInput, CustomProviderProtocol, LspServerConfigInput, ManagedProxyKind,
+    RemoteMachineProfile,
 };
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -480,6 +481,261 @@ fn settings_snapshot_omits_goose_and_lists_provider_profiles() {
             && profile.proxy_kind == AgentProviderProxyKind::ClaudeNative
             && profile.base_url.as_deref() == Some(MIMO_ANTHROPIC_BASE_URL)
     }));
+}
+
+#[test]
+fn codebuddy_provider_in_catalog_for_both_families() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    let snapshot = settings_snapshot(&paths);
+
+    // Codex family
+    let codex = snapshot
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
+        .unwrap_or_else(|| panic!("codebuddy profile missing from codex"));
+    assert_eq!(codex.label, CODEBUDDY_PROVIDER_NAME);
+    assert_eq!(codex.proxy_kind, AgentProviderProxyKind::CompletionToResponses);
+    assert_eq!(codex.managed_proxy_kind, ManagedProxyKind::Codebuddy);
+    assert!(!codex.configured, "codebuddy unconfigured by default");
+    assert!(codex.requires_credential);
+    assert_eq!(codex.port, Some(CODEBUDDY_DEFAULT_PORT));
+    assert_eq!(
+        codex.model_list_url.as_deref(),
+        Some(codebuddy_model_list_url(CODEBUDDY_DEFAULT_PORT).as_str())
+    );
+
+    // Claude family
+    let claude = snapshot
+        .claude
+        .profiles
+        .iter()
+        .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
+        .unwrap_or_else(|| panic!("codebuddy profile missing from claude"));
+    assert_eq!(claude.proxy_kind, AgentProviderProxyKind::CompletionToClaude);
+    assert_eq!(claude.managed_proxy_kind, ManagedProxyKind::Codebuddy);
+    assert!(!claude.configured);
+    assert_eq!(claude.port, Some(CODEBUDDY_DEFAULT_PORT));
+    assert_eq!(
+        claude.model_list_url.as_deref(),
+        Some(codebuddy_model_list_url(CODEBUDDY_DEFAULT_PORT).as_str())
+    );
+}
+
+#[test]
+fn codebuddy_configured_after_saving_key_and_port() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    // Unconfigured initially
+    let snap = settings_snapshot(&paths);
+    let profile = snap
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
+        .unwrap();
+    assert!(!profile.configured);
+
+    // Save config with a custom port + key
+    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string()).unwrap();
+    let profile = snap
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
+        .unwrap();
+    assert!(profile.configured);
+    assert_eq!(profile.port, Some(17870));
+    assert_eq!(
+        profile.model_list_url.as_deref(),
+        Some("http://127.0.0.1:17870/v1/models")
+    );
+
+    // Clearing config reverts to unconfigured
+    let snap = clear_codebuddy_config(&paths).unwrap();
+    let profile = snap
+        .codex_acp
+        .profiles
+        .iter()
+        .find(|p| p.id == CODEBUDDY_PROVIDER_ID)
+        .unwrap();
+    assert!(!profile.configured);
+}
+
+#[test]
+fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
+    // Regression: `byok_source_secret` historically only consulted
+    // `provider_secret` (which writes under `codex:codebuddy` /
+    // `claude:codebuddy`) and `codex_config.toml` — neither of which the
+    // settings page's "保存" button populates. The CodeBuddy API key lives
+    // under the dedicated `codebuddy:proxy-api-key` storage slot, so the
+    // BYOK iteration that feeds `model_catalog.json` /
+    // `KODEX_MODEL_PROVIDER_MAP` / `ensure_codex_api_proxy` silently skipped
+    // it. That dropped CodeBuddy from the Composer's BYOK provider dropdown
+    // (only the configured Codex/Claude/Custom sources appeared). The fix
+    // adds a codebuddy-only fallback to `byok_source_secret` and teaches
+    // `provider_label` about the `codebuddy` id, so the dropdown and the
+    // catalog source-provider label both surface "CodeBuddy" instead of
+    // being mis-routed to TimiAI.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_app_settings(
+        &paths,
+        &AppSettings {
+            selected_agent: AgentCliId::CodexAcp,
+            acp_port: 0,
+            theme: AppTheme::KodexDark,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
+            image: ImageSettings::default(),
+        },
+    )
+    .unwrap();
+
+    // User authored a custom model list for codebuddy in
+    // provider-models.json (the same path the settings UI uses for "手动添加
+    // model").
+    let entries = vec![
+        workspace_model::ModelAttributesInput {
+            slug: "glm-5.2-ioa".to_string(),
+            display_name: None,
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(128_000),
+            supports_image_input: Some(false),
+            reasoning_effort: None,
+        },
+        workspace_model::ModelAttributesInput {
+            slug: "claude-sonnet-5-lm".to_string(),
+            display_name: None,
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(128_000),
+            supports_image_input: Some(true),
+            reasoning_effort: None,
+        },
+    ];
+    save_provider_models_with_model_list_url(
+        &paths,
+        CODEBUDDY_PROVIDER_ID,
+        entries,
+        Some(codebuddy_model_list_url(CODEBUDDY_DEFAULT_PORT)),
+    )
+    .unwrap();
+    // Save the proxy key through the same entry point the settings UI uses.
+    save_codebuddy_config(&paths, None, "ck-secret".to_string()).unwrap();
+
+    // byok_source_secret must now resolve the dedicated codebuddy slot.
+    let resolved = byok_source_secret(&paths, AgentProviderFamily::Codex, CODEBUDDY_PROVIDER_ID);
+    assert_eq!(resolved.as_deref(), Some("ck-secret"));
+
+    // provider_label must surface "CodeBuddy" rather than silently falling
+    // back to TimiAI (which is what used to happen because the match lacked
+    // the codebuddy arm).
+    assert_eq!(provider_label(CODEBUDDY_PROVIDER_ID), CODEBUDDY_PROVIDER_NAME);
+    assert_eq!(
+        provider_label_for_paths(&paths, CODEBUDDY_PROVIDER_ID),
+        CODEBUDDY_PROVIDER_NAME
+    );
+
+    // The BYOK model catalog written for Codex/Claude must include the
+    // codebuddy sources with `source_provider = "codebuddy"` and the
+    // `source_provider_label = "CodeBuddy"`. Without the fix this array
+    // would only contain timiai/deepseek/.../custom entries.
+    let catalog = remote_codex_model_catalog_content(&paths).unwrap().unwrap();
+    let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+    let codebuddy_entries: Vec<&serde_json::Value> = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| {
+            entry["_meta"]["source_provider"].as_str() == Some(CODEBUDDY_PROVIDER_ID)
+        })
+        .collect();
+    assert_eq!(
+        codebuddy_entries.len(),
+        2,
+        "expected both codebuddy models in catalog; got {codebuddy_entries:?}"
+    );
+    assert!(codebuddy_entries.iter().all(|entry| {
+        entry["_meta"]["source_provider_label"].as_str() == Some(CODEBUDDY_PROVIDER_NAME)
+    }));
+}
+
+#[test]
+fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions() {
+    // Regression: the in-process Codex API proxy (127.0.0.1:17851) routes a
+    // request tagged `provider=codebuddy` to `upstream_chat_completions_url`,
+    // whose match has no `codebuddy` arm — it falls to the default and returns
+    // `https://api.deepseek.com/v1/chat/completions`. So the proxy ends up
+    // hitting DeepSeek with a CodeBuddy key, returning 401. The fix is to emit
+    // a `base_url = http://127.0.0.1:<port>/v1/chat/completions` +
+    // `protocol = "chat_completions"` pair for every codebuddy model entry in
+    // `KODEX_MODEL_PROVIDER_MAP`. The proxy then lands the request in
+    // `proxy_custom_codex_responses_request` (via `provider_configs`), which
+    // honors the explicit `base_url` and forwards to the local CodeBuddy proxy.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    save_app_settings(
+        &paths,
+        &AppSettings {
+            selected_agent: AgentCliId::CodexAcp,
+            acp_port: 0,
+            theme: AppTheme::KodexDark,
+            lsp_servers: BTreeMap::new(),
+            codex_connection_mode: CodexConnectionMode::Managed,
+            selected_codex_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
+            claude: ClaudeProviderSettings::default(),
+            web_tools: WebToolsSettings::default(),
+            image: ImageSettings::default(),
+        },
+    )
+    .unwrap();
+    // Buying a port + key registers the codebuddy BYOK source.
+    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string()).unwrap();
+    save_provider_models_with_model_list_url(
+        &paths,
+        CODEBUDDY_PROVIDER_ID,
+        vec![workspace_model::ModelAttributesInput {
+            slug: "glm-5.2-ioa".to_string(),
+            display_name: None,
+            context_window: Some(1_000_000),
+            max_output_tokens: Some(128_000),
+            supports_image_input: Some(false),
+            reasoning_effort: None,
+        }],
+        Some(codebuddy_model_list_url(17870)),
+    )
+    .unwrap();
+
+    let (_, map_json) = codex_model_provider_map_env(&paths).expect("provider map");
+    let entries: serde_json::Value = serde_json::from_str(&map_json).unwrap();
+    let codebuddy_entry = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["provider"].as_str() == Some(CODEBUDDY_PROVIDER_ID))
+        .unwrap_or_else(|| panic!("no codebuddy entry in map: {entries:?}"));
+    assert_eq!(
+        codebuddy_entry["base_url"].as_str(),
+        Some("http://127.0.0.1:17870/v1/chat/completions"),
+        "base_url must point at the local codebuddy proxy (port 17870), not deepseek"
+    );
+    assert_eq!(
+        codebuddy_entry["protocol"].as_str(),
+        Some("chat_completions"),
+        "protocol must be chat_completions so the proxy uses the custom routing path"
+    );
 }
 
 #[test]
@@ -1390,6 +1646,7 @@ fn custom_provider_saves_config_and_exports_model_provider_map() {
             protocol: CustomProviderProtocol::Responses,
             api_key: "lab-secret".to_string(),
             model_list_url: Some("https://api.lab.test/v1/models".to_string()),
+            port: None,
         },
     )
     .unwrap();

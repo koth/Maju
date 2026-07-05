@@ -577,6 +577,32 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
         }
     }
 
+    // Windows: `npm install -g <pkg>` puts the binary under
+    // `%LOCALAPPDATA%\<pkg>\bin\` and adds that directory to the user's
+    // interactive shell PATH, but Tauri-spawned children do not always
+    // inherit the modified PATH. Look up the npm-global roots explicitly
+    // so `find_binary("codebuddy")` still resolves when launching the
+    // bundled proxy as a child process.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            for suffix in ["codebuddy/bin", "Programs/codebuddy/bin"] {
+                let p = PathBuf::from(&local_app_data).join(suffix);
+                if !search_paths.contains(&p) {
+                    search_paths.push(p);
+                }
+            }
+        }
+        if let Some(app_data) = std::env::var_os("APPDATA") {
+            for suffix in ["npm"] {
+                let p = PathBuf::from(&app_data).join(suffix);
+                if !search_paths.contains(&p) {
+                    search_paths.push(p);
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         for extra in [

@@ -49,6 +49,12 @@ import {
   settingsSaveProviderModels,
   settingsSyncProviderModelsFromUrl,
   settingsSelectClaudeFastModel,
+  settingsSaveCodebuddyConfig,
+  settingsClearCodebuddyConfig,
+  codebuddyProxyStatus,
+  codebuddyProxyStart,
+  codebuddyProxyStop,
+  type CodebuddyProxyStatus,
   settingsSaveLspServer,
   settingsSaveRemoteProfile,
   settingsSelectAgent,
@@ -86,7 +92,8 @@ export type SettingsPane =
   | "archive"
   | "remote"
   | "usage"
-  | "lsp";
+  | "lsp"
+  | "codebuddy";
 type SettingsScope = "local" | "remote";
 type UsageDateRange = "today" | "7d" | "30d" | "all";
 type UsageWorkspaceScope = "current" | "all";
@@ -650,6 +657,16 @@ export function SettingsPage({
   const [busyProviderModels, setBusyProviderModels] = useState(false);
   const [busyCustomProvider, setBusyCustomProvider] = useState(false);
   const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
+  const [codebuddyPortDraft, setCodebuddyPortDraft] = useState("17856");
+  const [codebuddyApiKeyDraft, setCodebuddyApiKeyDraft] = useState("");
+  const [codebuddyDebug, setCodebuddyDebug] = useState(false);
+  const [codebuddyStatus, setCodebuddyStatus] =
+    useState<CodebuddyProxyStatus | null>(null);
+  const [codebuddyMessage, setCodebuddyMessage] = useState<
+    { text: string; kind: "success" | "error" } | null
+  >(null);
+  const [codebuddyCopied, setCodebuddyCopied] = useState(false);
+  const [busyCodebuddy, setBusyCodebuddy] = useState(false);
   const [busyWebTools, setBusyWebTools] = useState(false);
   const [busyImage, setBusyImage] = useState(false);
   const [imageMessage, setImageMessage] = useState<string | null>(null);
@@ -793,6 +810,29 @@ export function SettingsPage({
     if (activePane !== "usage") return;
     loadUsageSummary();
   }, [activePane, loadUsageSummary]);
+
+  const loadCodebuddyStatus = useCallback(async () => {
+    try {
+      const status = await codebuddyProxyStatus();
+      setCodebuddyStatus(status);
+      if (status) setCodebuddyDebug(status.debug);
+    } catch {
+      setCodebuddyStatus(null);
+    }
+  }, []);
+  useEffect(() => {
+    if (activePane !== "codebuddy") return;
+    loadCodebuddyStatus();
+  }, [activePane, loadCodebuddyStatus]);
+  useEffect(() => {
+    if (activePane !== "codebuddy") return;
+    const codebuddyProfile =
+      snapshot?.codex_acp?.profiles.find((p) => p.id === "codebuddy") ??
+      snapshot?.claude?.profiles.find((p) => p.id === "codebuddy");
+    if (codebuddyProfile?.port != null) {
+      setCodebuddyPortDraft(String(codebuddyProfile.port));
+    }
+  }, [activePane, snapshot]);
 
   useEffect(() => {
     if (archivedWorkspaceFilter === "all") return;
@@ -2113,6 +2153,21 @@ export function SettingsPage({
                               }}
                             >
                               编辑
+                            </button>
+                          )}
+                          {item.id === "codebuddy" && (
+                            <button
+                              type="button"
+                              className="settings-provider-select-option-action"
+                              aria-label={`配置 ${item.label}`}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setByokProviderMenuOpen(false);
+                                setActivePane("codebuddy");
+                              }}
+                            >
+                              {item.configured ? "✓ 配置" : "配置"}
                             </button>
                           )}
                           {item.configured && (
@@ -3624,6 +3679,247 @@ export function SettingsPage({
     );
   };
 
+  const renderCodebuddyPane = () => {
+    const port = parseInt(codebuddyPortDraft, 10) || 17856;
+    const modelListUrl = `http://127.0.0.1:${port}/v1/models`;
+    const isRunning = codebuddyStatus?.running ?? false;
+    const codebuddyProfile =
+      snapshot?.codex_acp?.profiles.find((p) => p.id === "codebuddy") ??
+      snapshot?.claude?.profiles.find((p) => p.id === "codebuddy");
+    const configured = codebuddyProfile?.configured ?? false;
+
+    const handleSave = async () => {
+      setBusyCodebuddy(true);
+      setCodebuddyMessage(null);
+      try {
+        const nextSnapshot = await settingsSaveCodebuddyConfig(
+          port,
+          codebuddyApiKeyDraft,
+          codebuddyDebug,
+        );
+          setSnapshot(nextSnapshot);
+          setCodebuddyApiKeyDraft("");
+          setCodebuddyMessage({ text: "已保存配置", kind: "success" });
+        } catch (err) {
+          setCodebuddyMessage({
+            text: `保存失败：${err instanceof Error ? err.message : String(err)}`,
+            kind: "error",
+          });
+        } finally {
+          setBusyCodebuddy(false);
+        }
+      };
+
+      const handleStart = async () => {
+        setBusyCodebuddy(true);
+        setCodebuddyMessage(null);
+        try {
+          await codebuddyProxyStart();
+          await loadCodebuddyStatus();
+          setCodebuddyMessage({ text: "代理已启动", kind: "success" });
+        } catch (err) {
+          setCodebuddyMessage({
+            text: `启动失败：${err instanceof Error ? err.message : String(err)}`,
+            kind: "error",
+          });
+        } finally {
+          setBusyCodebuddy(false);
+        }
+      };
+
+      const handleStop = async () => {
+        setBusyCodebuddy(true);
+        setCodebuddyMessage(null);
+        try {
+          await codebuddyProxyStop();
+          await loadCodebuddyStatus();
+          setCodebuddyMessage({ text: "代理已停止", kind: "success" });
+        } catch (err) {
+          setCodebuddyMessage({
+            text: `停止失败：${err instanceof Error ? err.message : String(err)}`,
+            kind: "error",
+          });
+        } finally {
+          setBusyCodebuddy(false);
+        }
+      };
+
+      const handleClear = async () => {
+        setBusyCodebuddy(true);
+        setCodebuddyMessage(null);
+        try {
+          const nextSnapshot = await settingsClearCodebuddyConfig();
+          setSnapshot(nextSnapshot);
+          await loadCodebuddyStatus();
+          setCodebuddyMessage({ text: "已清除配置", kind: "success" });
+        } catch (err) {
+          setCodebuddyMessage({
+            text: `清除失败：${err instanceof Error ? err.message : String(err)}`,
+            kind: "error",
+          });
+        } finally {
+          setBusyCodebuddy(false);
+        }
+      };
+
+      const handleCopyModelUrl = async () => {
+        try {
+          await navigator.clipboard?.writeText(modelListUrl);
+          setCodebuddyCopied(true);
+          window.setTimeout(() => setCodebuddyCopied(false), 1500);
+        } catch {
+          // Clipboard unavailable in this webview; ignore silently.
+        }
+      };
+
+      return (
+        <section className="settings-section" data-testid="codebuddy_pane">
+          <div className="settings-codebuddy-card">
+            <header className="settings-codebuddy-head">
+              <div className="settings-codebuddy-head-copy">
+                <h2 className="settings-section-title">CodeBuddy 反向代理</h2>
+                <p className="settings-section-desc">
+                  本地托管的 CodeBuddy OpenAI 兼容代理。配置端口与密钥后，在
+                  BYOK 下拉选择 codebuddy 即可使用 CodeBuddy 的模型池。
+                </p>
+              </div>
+              <span
+                className={`settings-row-badge ${isRunning ? "is-installed" : "is-missing"}`}
+                aria-label="codebuddy_status"
+              >
+                {isRunning
+                  ? `运行中 · ${codebuddyStatus?.port ?? port}`
+                  : "未运行"}
+              </span>
+            </header>
+
+            <div className="settings-codebuddy-group">
+              <h3 className="settings-codebuddy-group-title">基本配置</h3>
+              <div className="settings-codebuddy-fields">
+                <label className="settings-codebuddy-field">
+                  <span>端口</span>
+                  <input
+                    className="settings-field-input"
+                    type="number"
+                    min={1024}
+                    max={65535}
+                    value={codebuddyPortDraft}
+                    onChange={(e) => setCodebuddyPortDraft(e.target.value)}
+                    aria-label="codebuddy_port"
+                    disabled={busyCodebuddy}
+                  />
+                </label>
+                <label className="settings-codebuddy-field">
+                  <span>API 密钥</span>
+                  <input
+                    className="settings-field-input"
+                    type="password"
+                    placeholder={
+                      configured ? "已配置（输入可替换）" : "输入代理 API 密钥"
+                    }
+                    value={codebuddyApiKeyDraft}
+                    onChange={(e) => setCodebuddyApiKeyDraft(e.target.value)}
+                    aria-label="codebuddy_api_key"
+                    disabled={busyCodebuddy}
+                  />
+                </label>
+                <label className="settings-switch settings-codebuddy-switch">
+                  <input
+                    type="checkbox"
+                    checked={codebuddyDebug}
+                    onChange={(e) => setCodebuddyDebug(e.target.checked)}
+                    disabled={busyCodebuddy}
+                    aria-label="codebuddy_debug"
+                  />
+                  <span>调试模式（显示控制台窗口 + 详细日志）</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="settings-codebuddy-group">
+              <h3 className="settings-codebuddy-group-title">连接信息</h3>
+              <div className="settings-codebuddy-model-url">
+                <input
+                  className="settings-field-input"
+                  type="text"
+                  value={modelListUrl}
+                  readOnly
+                  aria-label="codebuddy_model_list_url"
+                />
+                <button
+                  type="button"
+                  className="settings-btn settings-codebuddy-copy-btn"
+                  onClick={handleCopyModelUrl}
+                  disabled={busyCodebuddy}
+                  aria-label="codebuddy_copy_model_url"
+                >
+                  {codebuddyCopied ? "已复制" : "复制"}
+                </button>
+              </div>
+              <p className="settings-codebuddy-hint">
+                在 BYOK provider 下拉中选择 codebuddy，即可使用此模型池。
+              </p>
+            </div>
+
+            {codebuddyMessage && (
+              <div
+                className={
+                  codebuddyMessage.kind === "success"
+                    ? "settings-success"
+                    : "settings-error"
+                }
+                role={codebuddyMessage.kind === "error" ? "alert" : "status"}
+              >
+                {codebuddyMessage.text}
+              </div>
+            )}
+
+            <footer className="settings-codebuddy-foot">
+              <div className="settings-row-actions settings-codebuddy-primary-actions">
+                {isRunning ? (
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-danger"
+                    onClick={handleStop}
+                    disabled={busyCodebuddy}
+                  >
+                    停止
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="settings-btn is-install"
+                    onClick={handleStart}
+                    disabled={busyCodebuddy}
+                  >
+                    启动
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={handleSave}
+                  disabled={busyCodebuddy}
+                >
+                  保存配置
+                </button>
+              </div>
+              {configured && (
+                <button
+                  type="button"
+                  className="settings-btn settings-btn-danger settings-codebuddy-clear"
+                  onClick={handleClear}
+                  disabled={busyCodebuddy}
+                >
+                  清除配置
+                </button>
+              )}
+            </footer>
+          </div>
+        </section>
+      );
+    };
+
   const startupNoticeCopy = visibleStartupNotice
     ? startupNoticeCopyFor(visibleStartupNotice, snapshot?.settings.selected_agent)
     : null;
@@ -3686,6 +3982,13 @@ export function SettingsPage({
             onClick={() => setActivePane("lsp")}
           >
             LSP
+          </button>
+          <button
+            type="button"
+            className={`settings-nav-item ${activePane === "codebuddy" ? "is-active" : ""}`}
+            onClick={() => setActivePane("codebuddy")}
+          >
+            CodeBuddy
           </button>
         </div>
       </aside>
@@ -4108,6 +4411,7 @@ export function SettingsPage({
             </div>
           </section>
         )}
+        {activePane === "codebuddy" && renderCodebuddyPane()}
       </main>
 
       {renderCustomProviderModal()}
@@ -4458,6 +4762,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "image") return "图像能力";
   if (pane === "usage") return "用量";
   if (pane === "lsp") return "LSP";
+  if (pane === "codebuddy") return "CodeBuddy";
   return "通用";
 }
 
@@ -4473,6 +4778,8 @@ function settingsPaneDescription(pane: SettingsPane): string {
     return "按模型、智能体、工作区或会话汇总可上报智能体（Codex、Claude）的 token 用量；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。";
   if (pane === "lsp")
     return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
+  if (pane === "codebuddy")
+    return "配置本地托管的 CodeBuddy 反向代理：端口、密钥、启停与模型同步。";
   return "外观、默认提供者和智能体配置。";
 }
 

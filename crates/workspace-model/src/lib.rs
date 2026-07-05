@@ -1350,6 +1350,19 @@ pub enum CustomProviderProtocol {
     AnthropicMessages,
 }
 
+/// Discriminator for providers that own a managed local proxy process (spawned
+/// and torn down by the Tauri shell). Currently only the CodeBuddy reverse
+/// proxy; extend with new variants as more managed proxies appear.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedProxyKind {
+    /// No managed proxy; the provider is a plain remote HTTP upstream.
+    #[default]
+    None,
+    /// The self-hosted CodeBuddy OpenAI-compatible proxy (`kodex-codebuddy/`).
+    Codebuddy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomProviderInput {
@@ -1364,6 +1377,10 @@ pub struct CustomProviderInput {
     pub api_key: String,
     #[serde(default)]
     pub model_list_url: Option<String>,
+    /// Optional explicit port for managed-proxy providers (e.g. codebuddy).
+    /// Ignored for plain remote HTTP providers.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1375,6 +1392,15 @@ pub struct AgentProviderProfile {
     pub selected: bool,
     pub configured: bool,
     pub base_url: Option<String>,
+    /// Managed local proxy discriminator. `None` for plain remote HTTP
+    /// providers; `Codebuddy` marks the self-hosted CodeBuddy proxy whose
+    /// process lifecycle the Tauri shell owns.
+    #[serde(default)]
+    pub managed_proxy_kind: ManagedProxyKind,
+    /// Explicit listen port for managed-proxy providers (e.g. codebuddy).
+    /// `None` for plain remote HTTP providers.
+    #[serde(default)]
+    pub port: Option<u16>,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -1857,6 +1883,8 @@ mod model_attributes_tests {
             selected: false,
             configured: true,
             base_url: None,
+            managed_proxy_kind: ManagedProxyKind::None,
+            port: None,
             hidden: false,
             custom: false,
             protocol: None,
@@ -1873,5 +1901,57 @@ mod model_attributes_tests {
         };
         profile.recompute_derived_fields();
         assert_eq!(profile.models, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn agent_provider_profile_managed_proxy_and_port_round_trip() {
+        let profile = AgentProviderProfile {
+            family: AgentProviderFamily::Codex,
+            id: "codebuddy".into(),
+            label: "CodeBuddy".into(),
+            proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+            selected: true,
+            configured: true,
+            base_url: None,
+            managed_proxy_kind: ManagedProxyKind::Codebuddy,
+            port: Some(17856),
+            hidden: false,
+            custom: false,
+            protocol: None,
+            default_model: Some("claude-sonnet-5".into()),
+            model_entries: Vec::new(),
+            models: Vec::new(),
+            model_list_url: Some("http://127.0.0.1:17856/v1/models".into()),
+            credential_label: Some("API key".into()),
+            requires_credential: true,
+            help_text: String::new(),
+        };
+        let json = serde_json::to_string(&profile).expect("serialize");
+        assert!(json.contains("\"managed_proxy_kind\":\"codebuddy\""), "managed_proxy_kind serialized: {json}");
+        assert!(json.contains("\"port\":17856"), "port serialized: {json}");
+        let back: AgentProviderProfile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.managed_proxy_kind, ManagedProxyKind::Codebuddy);
+        assert_eq!(back.port, Some(17856));
+    }
+
+    #[test]
+    fn managed_proxy_kind_default_is_none() {
+        assert_eq!(ManagedProxyKind::default(), ManagedProxyKind::None);
+    }
+
+    #[test]
+    fn agent_provider_profile_defaults_when_omitted() {
+        // A profile serialized without managed_proxy_kind/port must deserialize
+        // to the defaults (backward compatibility for old persisted settings).
+        let json = r#"{
+            "family":"codex","id":"x","label":"X","proxy_kind":"responses",
+            "selected":false,"configured":false,"base_url":null,
+            "hidden":false,"custom":false,"protocol":null,"default_model":null,
+            "model_entries":[],"models":[],"model_list_url":null,
+            "credential_label":null,"requires_credential":false,"help_text":""
+        }"#;
+        let back: AgentProviderProfile = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(back.managed_proxy_kind, ManagedProxyKind::None);
+        assert_eq!(back.port, None);
     }
 }

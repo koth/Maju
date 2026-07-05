@@ -694,3 +694,81 @@ fn plan_update_emits_normalized_plan_event() {
     );
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn codebuddy_tool_call_survives_session_notification_round_trip() {
+    let (tx, rx) = mpsc::channel();
+    let raw_payload = serde_json::json!({
+        "sessionId": "019f2c43-96c4-7512-9f88-891765cc9045",
+        "update": {
+            "_meta": {
+                "kodex.ai/toolStop": {
+                    "stopKind": "agent_owned",
+                    "toolCallId": "call_83adddaecdcc4253a2237350"
+                }
+            },
+            "kind": "execute",
+            "rawInput": {
+                "call_id": "call_83adddaecdcc4253a2237350",
+                "command": ["pwsh.exe", "-Command", "Get-ChildItem"],
+                "cwd": "D:\\work\\kodex",
+                "source": "agent",
+                "started_at_ms": 1783154209982_i64,
+                "turn_id": "019f2c45-ceb3-7a52-8d92-81fcdcdb15c6"
+            },
+            "sessionUpdate": "tool_call",
+            "status": "in_progress",
+            "title": "Get-ChildItem",
+            "toolCallId": "call_83adddaecdcc4253a2237350"
+        }
+    });
+
+    // Simulate the real code path: raw JSON → SessionNotification → re-serialized Value
+    let notification: SessionNotification =
+        serde_json::from_value(raw_payload).expect("CodeBuddy tool_call should deserialize");
+    let round_tripped = serde_json::to_value(&notification).expect("should re-serialize");
+
+    // Verify the CodeBuddy extension fields survived the round-trip
+    let update = round_tripped
+        .get("update")
+        .expect("update should exist after round-trip");
+    assert_eq!(
+        update.get("sessionUpdate").and_then(Value::as_str),
+        Some("tool_call"),
+        "sessionUpdate tag should survive round-trip"
+    );
+    assert_eq!(
+        update.get("toolCallId").and_then(Value::as_str),
+        Some("call_83adddaecdcc4253a2237350"),
+        "toolCallId should survive round-trip"
+    );
+    assert_eq!(
+        update.get("status").and_then(Value::as_str),
+        Some("in_progress"),
+        "status should survive round-trip"
+    );
+    assert!(
+        update.get("rawInput").is_some(),
+        "rawInput should survive round-trip"
+    );
+    assert!(
+        update.get("_meta").is_some(),
+        "_meta should survive round-trip"
+    );
+
+    // Verify emit_codebuddy_notification can process the round-tripped value
+    emit_notification(&tx, "", notification)
+        .expect("emit_notification should not error on CodeBuddy tool_call");
+
+    // Should emit at least a ToolStarted event
+    let event = rx
+        .try_recv()
+        .expect("should emit a tool event after round-trip");
+    match &event {
+        ClientEvent::ToolStarted { id, name, .. } => {
+            assert_eq!(id, "call_83adddaecdcc4253a2237350");
+            assert!(!name.is_empty());
+        }
+        _ => panic!("expected ToolStarted, got {event:?}"),
+    }
+}

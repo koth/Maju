@@ -20,6 +20,7 @@ const CODEX_ACP_NPM_PACKAGE: &str = "@zed-industries/codex-acp@latest";
 const CLAUDE_AGENT_ACP_NPM_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@latest";
 const BUNDLED_CODEX_ACP_RESOURCE_DIR: &str = "bundled-codex-acp";
 const BUNDLED_CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "bundled-claude-agent-acp";
+const BUNDLED_CODEBUDDY_PROXY_RESOURCE_DIR: &str = "bundled-codebuddy-proxy";
 
 #[tauri::command]
 pub fn settings_get_agent_snapshot(
@@ -330,6 +331,17 @@ pub async fn settings_sync_provider_models_from_url(
     remote_profile_id: Option<uuid::Uuid>,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    // For the codebuddy managed proxy, ensure the proxy is running before
+    // fetching the model list from its /v1/models endpoint.
+    if provider.trim().eq_ignore_ascii_case("codebuddy") {
+        let port = app_core::settings::codebuddy_port(&paths);
+        let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
+        let default_model = app_core::settings::codebuddy_default_model(&paths);
+        let debug = app_core::settings::codebuddy_debug(&paths);
+        state
+            .codebuddy_proxy()
+            .ensure_running(&paths, port, &api_key, &default_model, debug)?;
+    }
     let models =
         app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
             .await
@@ -674,6 +686,81 @@ fn install_command(agent: AgentCliId) -> (&'static str, Vec<&'static str>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CodeBuddy proxy lifecycle commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn codebuddy_proxy_status(
+    state: State<'_, AppState>,
+) -> Result<crate::codebuddy_proxy::CodebuddyProxyStatus, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let debug = app_core::settings::codebuddy_debug(&paths);
+    Ok(state.codebuddy_proxy().status(debug))
+}
+
+#[tauri::command]
+pub async fn codebuddy_proxy_start(state: State<'_, AppState>) -> Result<(), String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let port = app_core::settings::codebuddy_port(&paths);
+    let api_key = app_core::settings::codebuddy_secret(&paths)
+        .unwrap_or_default();
+    let default_model = app_core::settings::codebuddy_default_model(&paths);
+    let debug = app_core::settings::codebuddy_debug(&paths);
+    let manager = state.inner().codebuddy_proxy().clone();
+    // ensure_running spawns a child process and TCP-probes the port. Run
+    // it on the blocking pool so the Tauri IPC worker (and the UI) stay
+    // responsive while the proxy boots.
+    tokio::task::spawn_blocking(move || {
+        manager.ensure_running(&paths, port, &api_key, &default_model, debug)
+    })
+    .await
+    .map_err(|e| format!("proxy start task panicked: {e}"))?
+}
+
+#[tauri::command]
+pub async fn codebuddy_proxy_stop(state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.inner().codebuddy_proxy().clone();
+    tokio::task::spawn_blocking(move || manager.stop())
+        .await
+        .map_err(|e| format!("proxy stop task panicked: {e}"))?;
+    Ok(())
+}
+
+/// Save CodeBuddy proxy config (port + key) and restart the proxy if running.
+#[tauri::command]
+pub fn settings_save_codebuddy_config(
+    state: State<'_, AppState>,
+    port: Option<u16>,
+    api_key: String,
+    debug: bool,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let snapshot = app_core::settings::save_codebuddy_config(&paths, port, api_key, debug)
+        .map_err(|e| e.to_string())?;
+    // Restart if already running so it picks up the new port/key.
+    let _ = state
+        .codebuddy_proxy()
+        .restart_if_changed(
+            &paths,
+            app_core::settings::codebuddy_port(&paths),
+            &app_core::settings::codebuddy_secret(&paths).unwrap_or_default(),
+            &app_core::settings::codebuddy_default_model(&paths),
+            app_core::settings::codebuddy_debug(&paths),
+        );
+    Ok(snapshot)
+}
+
+/// Clear CodeBuddy proxy config and stop the proxy.
+#[tauri::command]
+pub fn settings_clear_codebuddy_config(
+    state: State<'_, AppState>,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    state.codebuddy_proxy().stop();
+    app_core::settings::clear_codebuddy_config(&paths).map_err(|e| e.to_string())
+}
+
 fn install_codex_acp(
     paths: &app_core::AppPaths,
     bundled_binary: Option<&Path>,
@@ -726,6 +813,18 @@ pub(crate) fn install_bundled_codex_acp_if_missing(app: &AppHandle) -> Result<()
     };
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     install_bundled_codex_acp_if_missing_with_paths(&paths, &resource)
+}
+
+pub(crate) fn install_bundled_codebuddy_proxy_if_missing(app: &AppHandle) -> Result<(), String> {
+    let Some(resource) = bundled_codebuddy_proxy_binary(app) else {
+        return Ok(());
+    };
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    let target = app_core::settings::codex_acp_binary_path(&paths).with_file_name(codebuddy_proxy_binary_name());
+    if managed_binary_matches_resource(&target, &resource) {
+        return Ok(());
+    }
+    install_managed_binary(&paths, &resource, &target).map(|_| ())
 }
 
 fn install_bundled_codex_acp_if_missing_with_paths(
@@ -1163,6 +1262,16 @@ fn bundled_codex_acp_binary(app: &AppHandle) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+fn bundled_codebuddy_proxy_binary(app: &AppHandle) -> Option<PathBuf> {
+    let candidate = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join(BUNDLED_CODEBUDDY_PROXY_RESOURCE_DIR)
+        .join(codebuddy_proxy_binary_name());
+    candidate.is_file().then_some(candidate)
+}
+
 fn bundled_claude_agent_acp_resource(app: &AppHandle) -> Option<PathBuf> {
     let root = app
         .path()
@@ -1181,6 +1290,14 @@ fn codex_acp_binary_name() -> &'static str {
         "codex-acp.exe"
     } else {
         "codex-acp"
+    }
+}
+
+fn codebuddy_proxy_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "codebuddy-proxy.exe"
+    } else {
+        "codebuddy-proxy"
     }
 }
 

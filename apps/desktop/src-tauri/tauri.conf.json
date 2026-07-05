@@ -47,10 +47,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "resources/codex-acp/*": "bundled-codex-acp/",
-      "resources/claude-agent-acp": "bundled-claude-agent-acp"
-    },
+      "resources": {
+        "resources/codex-acp/*": "bundled-codex-acp/",
+        "resources/claude-agent-acp": "bundled-claude-agent-acp",
+        "resources/codebuddy-proxy/*": "bundled-codebuddy-proxy/"
+      },
     "windows": {
       "nsis": {
         "installerHooks": "nsis/kodex-hooks.nsh"

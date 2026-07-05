@@ -66,15 +66,62 @@ const CODEX_DEFAULT_PROVIDER_ID: &str = "default";
 const BYOK_PROVIDER_ID: &str = "byok";
 const BYOK_PROVIDER_NAME: &str = "BYOK";
 const BYOK_API_KEY_ENV: &str = "BYOK_API_KEY";
+const CODEBUDDY_PROVIDER_ID: &str = "codebuddy";
+const CODEBUDDY_PROVIDER_NAME: &str = "CodeBuddy";
+const CODEBUDDY_DEFAULT_PORT: u16 = 17856;
+const CODEBUDDY_SECRET_KEY: &str = "codebuddy:proxy-api-key";
+const CODEBUDDY_DEBUG_KEY: &str = "codebuddy:proxy-debug";
+const CODEBUDDY_CATALOG_MODELS: &[&str] = &[];
+
+/// Derive the codebuddy proxy model-list URL from a port.
+fn codebuddy_model_list_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/v1/models")
+}
+
+/// Read the persisted codebuddy proxy port (defaults to `CODEBUDDY_DEFAULT_PORT`).
+pub fn codebuddy_port(paths: &AppPaths) -> u16 {
+    provider_catalog_entry(paths, CODEBUDDY_PROVIDER_ID)
+        .and_then(|entry| entry.port)
+        .unwrap_or(CODEBUDDY_DEFAULT_PORT)
+}
+
+/// Read the persisted codebuddy proxy API key.
+pub fn codebuddy_secret(paths: &AppPaths) -> Option<String> {
+    let mut secrets = load_provider_secrets(paths);
+    secrets.remove(CODEBUDDY_SECRET_KEY).filter(|s| !s.trim().is_empty())
+}
+
+/// True when the codebuddy proxy has both a port and an API key configured.
+fn codebuddy_configured(paths: &AppPaths) -> bool {
+    codebuddy_secret(paths).is_some()
+}
+
+/// Default model for the codebuddy provider (from the catalog definition).
+pub fn codebuddy_default_model(_paths: &AppPaths) -> String {
+    "claude-sonnet-5".to_string()
+}
+
+/// Look up a raw catalog entry by provider id (no normalization side effects).
+fn provider_catalog_entry(paths: &AppPaths, provider: &str) -> Option<ProviderModelsEntry> {
+    let provider = normalize_codex_provider(provider).ok()?;
+    load_provider_models_catalog(paths).providers.get(&provider).cloned()
+}
 const CUSTOM_PROVIDER_ID: &str = "custom";
 const CUSTOM_PROVIDER_NAME: &str = "Custom Provider";
 const CUSTOM_PROVIDER_API_KEY_ENV: &str = "CUSTOM_PROVIDER_API_KEY";
+// Providers that expose a user-editable model list (BYOK "source" providers).
+// CodeBuddy is included so the user's hand-entered model list in
+// `provider-models.json` flows through `effective_catalog_models_for_provider`
+// and surfaces in the model config control. The CodeBuddy proxy itself can
+// still sync the catalog at session-init time; until that lands, the manual
+// list is the source of truth (the catalog starts empty).
 const BYOK_SOURCE_PROVIDER_IDS: &[&str] = &[
     TIMIAI_PROVIDER_ID,
     COMMANDCODE_PROVIDER_ID,
     DEEPSEEK_PROVIDER_ID,
     KIMI_PROVIDER_ID,
     MIMO_PROVIDER_ID,
+    CODEBUDDY_PROVIDER_ID,
 ];
 const CODEX_PROXY_WIRE_API: &str = "responses";
 const COMMANDCODE_PROVIDER_ID: &str = "commandcode";
@@ -322,6 +369,8 @@ struct LegacyProviderModelsEntry {
     base_url: Option<String>,
     #[serde(default)]
     protocol: Option<CustomProviderProtocol>,
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 impl From<LegacyProviderModelsEntry> for ProviderModelsEntry {
@@ -337,6 +386,7 @@ impl From<LegacyProviderModelsEntry> for ProviderModelsEntry {
             label: legacy.label,
             base_url: legacy.base_url,
             protocol: legacy.protocol,
+            port: legacy.port,
         }
     }
 }
@@ -355,6 +405,8 @@ struct ProviderModelsEntry {
     base_url: Option<String>,
     #[serde(default)]
     protocol: Option<CustomProviderProtocol>,
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 fn is_custom_provider_id(provider: &str) -> bool {
@@ -512,6 +564,18 @@ const CODEX_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
         requires_credential: true,
         help_text: "通过本机 Codex API Proxy 将 Responses 请求转为 Xiaomi Token Plan chat completions。",
     },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Codex,
+        id: CODEBUDDY_PROVIDER_ID,
+        label: CODEBUDDY_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::CompletionToResponses,
+        base_url: None,
+        default_model: Some("claude-sonnet-5"),
+        models: CODEBUDDY_CATALOG_MODELS,
+        credential_label: Some("CodeBuddy proxy API key"),
+        requires_credential: true,
+        help_text: "本地托管的 CodeBuddy 反向代理（OpenAI Chat Completions），由 Kodex 管理进程生命周期。配置端口与 key 后同步模型列表。",
+    },
 ];
 
 const CLAUDE_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
@@ -598,6 +662,18 @@ const CLAUDE_PROVIDER_PROFILES: &[ProviderProfileDefinition] = &[
         credential_label: Some("Xiaomi Token Plan API key"),
         requires_credential: true,
         help_text: "通过 Xiaomi Token Plan Anthropic-compatible Messages API 对接 Claude Agent ACP。",
+    },
+    ProviderProfileDefinition {
+        family: AgentProviderFamily::Claude,
+        id: CODEBUDDY_PROVIDER_ID,
+        label: CODEBUDDY_PROVIDER_NAME,
+        proxy_kind: AgentProviderProxyKind::CompletionToClaude,
+        base_url: None,
+        default_model: Some("claude-sonnet-5"),
+        models: CODEBUDDY_CATALOG_MODELS,
+        credential_label: Some("CodeBuddy proxy API key"),
+        requires_credential: true,
+        help_text: "本地托管的 CodeBuddy 反向代理（OpenAI Chat Completions），由 Kodex 管理进程生命周期。配置端口与 key 后同步模型列表。",
     },
 ];
 
@@ -985,6 +1061,9 @@ fn parse_provider_models_response(body: &str) -> Result<Vec<String>> {
 
 fn normalize_model_source_provider(provider: &str) -> Result<String> {
     let provider = normalize_codex_provider(provider)?;
+    if provider == CODEBUDDY_PROVIDER_ID {
+        return Ok(provider);
+    }
     if !codex_is_byok_source(&provider) {
         anyhow::bail!("{} does not have an editable model list", provider);
     }
@@ -1432,6 +1511,22 @@ fn provider_profile(
             .collect()
     };
     let models: Vec<String> = model_entries.iter().map(|entry| entry.slug.clone()).collect();
+    let is_codebuddy = definition.id == CODEBUDDY_PROVIDER_ID;
+    let managed_proxy_kind = if is_codebuddy {
+        workspace_model::ManagedProxyKind::Codebuddy
+    } else {
+        workspace_model::ManagedProxyKind::None
+    };
+    let port = if is_codebuddy {
+        Some(codebuddy_port(paths))
+    } else {
+        None
+    };
+    let model_list_url = if is_codebuddy {
+        Some(codebuddy_model_list_url(codebuddy_port(paths)))
+    } else {
+        custom_model_list_url_for_provider(paths, definition.id)
+    };
     AgentProviderProfile {
         family: definition.family,
         id: definition.id.to_string(),
@@ -1450,13 +1545,15 @@ fn provider_profile(
             .as_ref()
             .and_then(|entry| entry.base_url.clone())
             .or_else(|| definition.base_url.map(str::to_string)),
+        managed_proxy_kind,
+        port,
         hidden: provider_profile_hidden(paths, definition.id),
         custom: definition.id == CUSTOM_PROVIDER_ID,
         protocol: custom_protocol,
         default_model: definition.default_model.map(str::to_string),
         model_entries: model_entries.clone(),
         models,
-        model_list_url: custom_model_list_url_for_provider(paths, definition.id),
+        model_list_url,
         credential_label: definition.credential_label.map(str::to_string),
         requires_credential: definition.requires_credential,
         help_text: definition.help_text.to_string(),
@@ -1509,6 +1606,8 @@ fn custom_provider_profile(
         selected: provider_id == selected_profile_id,
         configured: custom_provider_configured(paths, family, &provider_id, &entry),
         base_url: entry.base_url.clone(),
+        managed_proxy_kind: workspace_model::ManagedProxyKind::None,
+        port: None,
         hidden: provider_profile_hidden(paths, &provider_id),
         custom: true,
         protocol,
@@ -1580,6 +1679,9 @@ fn provider_profile_configured(paths: &AppPaths, definition: &ProviderProfileDef
         return BYOK_SOURCE_PROVIDER_IDS
             .iter()
             .any(|provider| byok_source_secret(paths, definition.family, provider).is_some());
+    }
+    if definition.id == CODEBUDDY_PROVIDER_ID {
+        return codebuddy_configured(paths);
     }
     if !definition.requires_credential {
         return true;
@@ -1810,6 +1912,7 @@ pub fn save_custom_provider(
             label: Some(label.to_string()),
             base_url: Some(endpoint),
             protocol: Some(input.protocol),
+            port: None,
         },
     );
     save_provider_models_catalog(paths, &catalog)?;
@@ -1874,8 +1977,12 @@ pub async fn fetch_provider_models_from_url(
 ) -> Result<Vec<String>> {
     let provider = normalize_model_source_provider(provider)?;
     let model_list_url = normalize_model_list_url(model_list_url)?;
-    let api_key = byok_source_secret(paths, AgentProviderFamily::Codex, &provider)
-        .or_else(|| byok_source_secret(paths, AgentProviderFamily::Claude, &provider));
+    let api_key = if provider == CODEBUDDY_PROVIDER_ID {
+        codebuddy_secret(paths)
+    } else {
+        byok_source_secret(paths, AgentProviderFamily::Codex, &provider)
+            .or_else(|| byok_source_secret(paths, AgentProviderFamily::Claude, &provider))
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(25))
         .build()?;
@@ -1930,6 +2037,61 @@ pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSe
     catalog.version = PROVIDER_MODELS_VERSION;
     save_provider_models_catalog(paths, &catalog)?;
     refresh_codex_model_catalog_after_provider_models_change(paths)?;
+    Ok(settings_snapshot(paths))
+}
+
+/// Save the CodeBuddy proxy configuration: port goes into the provider-models
+/// catalog, API key into the secrets store. The proxy URL is derived from the
+/// port at read time, never persisted directly.
+pub fn save_codebuddy_config(
+    paths: &AppPaths,
+    port: Option<u16>,
+    api_key: String,
+    debug: bool,
+) -> Result<AgentSettingsSnapshot> {
+    let port = port.unwrap_or(CODEBUDDY_DEFAULT_PORT);
+    let mut catalog = read_provider_models_catalog(paths)?;
+    let entry = catalog
+        .providers
+        .entry(CODEBUDDY_PROVIDER_ID.to_string())
+        .or_default();
+    entry.port = Some(port);
+    entry.model_list_url = Some(codebuddy_model_list_url(port));
+    catalog.version = PROVIDER_MODELS_VERSION;
+    save_provider_models_catalog(paths, &catalog)?;
+
+    let trimmed = api_key.trim();
+    let mut secrets = load_provider_secrets(paths);
+    if trimmed.is_empty() {
+        secrets.remove(CODEBUDDY_SECRET_KEY);
+    } else {
+        secrets.insert(CODEBUDDY_SECRET_KEY.to_string(), trimmed.to_string());
+    }
+    if debug {
+        secrets.insert(CODEBUDDY_DEBUG_KEY.to_string(), "1".to_string());
+    } else {
+        secrets.remove(CODEBUDDY_DEBUG_KEY);
+    }
+    save_provider_secrets(paths, &secrets)?;
+
+    Ok(settings_snapshot(paths))
+}
+
+/// Clear the CodeBuddy proxy configuration (port + API key).
+pub fn clear_codebuddy_config(paths: &AppPaths) -> Result<AgentSettingsSnapshot> {
+    let mut catalog = read_provider_models_catalog(paths)?;
+    if let Some(entry) = catalog.providers.get_mut(CODEBUDDY_PROVIDER_ID) {
+        entry.port = None;
+        entry.model_list_url = None;
+    }
+    catalog.version = PROVIDER_MODELS_VERSION;
+    save_provider_models_catalog(paths, &catalog)?;
+
+    let mut secrets = load_provider_secrets(paths);
+    secrets.remove(CODEBUDDY_SECRET_KEY);
+    secrets.remove(CODEBUDDY_DEBUG_KEY);
+    save_provider_secrets(paths, &secrets)?;
+
     Ok(settings_snapshot(paths))
 }
 
@@ -2418,6 +2580,21 @@ fn byok_source_secret(
             codex_provider_key(&codex_config_path(paths), provider)
                 .filter(|secret| !secret.trim().is_empty())
         })
+        // CodeBuddy stores its API key under a dedicated storage key
+        // (`codebuddy:proxy-api-key`) rather than the family-prefixed
+        // `codex:codebuddy` / `claude:codebuddy` slots that
+        // `provider_secret_storage_key` produces. Without this fallback the
+        // BYOK iteration in `catalog_models_for_provider_with_paths`,
+        // `ensure_codex_api_proxy`, and `claude_model_provider_map_env`
+        // would skip CodeBuddy entirely, hiding its models from
+        // `model_catalog.json`, the KODEX_MODEL_PROVIDER_MAP, and the
+        // Composer's BYOK provider dropdown.
+        .or_else(|| {
+            (provider == CODEBUDDY_PROVIDER_ID)
+                .then(|| codebuddy_secret(paths))
+                .flatten()
+                .filter(|secret| !secret.trim().is_empty())
+        })
 }
 
 fn codex_deepseek_key_configured(path: &Path) -> bool {
@@ -2513,6 +2690,24 @@ fn model_provider_map_env_from_entries(
                 "provider": provider,
                 "provider_label": provider_label_for_paths(paths, provider),
             });
+            // CodeBuddy routes through a self-hosted proxy
+            // (`http://127.0.0.1:{port}/v1/chat/completions`) whose port+api_key
+            // live in the dedicated `provider-models.json["codebuddy"]` catalog
+            // entry + `provider-secrets.json["codebuddy:proxy-api-key"]`. Without
+            // `base_url`/`protocol` here, the local Codex API proxy (port 17851)
+            // falls back to `upstream_chat_completions_url("codebuddy")`, whose
+            // default arm points at `https://api.deepseek.com/...` — so any
+            // codebuddy request would leak to DeepSeek with a codebuddy key and
+            // 401. Pinning `base_url` + `protocol = "chat_completions"` lands it
+            // in `proxy_custom_codex_responses_request` instead, which honors the
+            // explicit `base_url`.
+            if provider == CODEBUDDY_PROVIDER_ID {
+                entry["base_url"] = json!(format!(
+                    "http://127.0.0.1:{}/v1/chat/completions",
+                    codebuddy_port(paths)
+                ));
+                entry["protocol"] = json!("chat_completions");
+            }
             if is_custom_provider_id(provider) {
                 if let Some(custom) = custom_provider_entry(paths, provider) {
                     if let Some(base_url) = custom
@@ -2927,6 +3122,7 @@ fn normalize_codex_provider(provider: &str) -> Result<String> {
         CUSTOM_PROVIDER_ID | "custom-provider" | "custom_provider" => {
             Ok(CUSTOM_PROVIDER_ID.to_string())
         }
+        CODEBUDDY_PROVIDER_ID => Ok(CODEBUDDY_PROVIDER_ID.to_string()),
         other if is_custom_provider_id(other) => Ok(other.to_string()),
         other => anyhow::bail!("Unsupported Codex provider: {other}"),
     }
@@ -2943,6 +3139,11 @@ fn default_model_for_provider(provider: &str) -> &'static str {
         KIMI_PROVIDER_ID => model_slug_for_provider(KIMI_MODEL, KIMI_PROVIDER_ID),
         MIMO_PROVIDER_ID => model_slug_for_provider(MIMO_MODEL, MIMO_PROVIDER_ID),
         CUSTOM_PROVIDER_ID => "",
+        // CodeBuddy has no static catalog; the default model is whichever
+        // entry the user listed first in `provider-models.json`. Returning an
+        // empty string lets the caller pick from the configured list instead
+        // of silently defaulting to a TimiAI model.
+        CODEBUDDY_PROVIDER_ID => "",
         _ => model_slug_for_provider(TIMIAI_CODEX_MODEL, TIMIAI_PROVIDER_ID),
     }
 }
@@ -2984,6 +3185,7 @@ fn provider_label(provider: &str) -> &'static str {
         DEEPSEEK_PROVIDER_ID => "DeepSeek",
         KIMI_PROVIDER_ID => "Kimi Code",
         MIMO_PROVIDER_ID => MIMO_PROVIDER_NAME,
+        CODEBUDDY_PROVIDER_ID => CODEBUDDY_PROVIDER_NAME,
         CUSTOM_PROVIDER_ID => CUSTOM_PROVIDER_NAME,
         _ => TIMIAI_PROVIDER_NAME,
     }
@@ -3842,3 +4044,11 @@ fn claude_proxy_kind_env(proxy_kind: AgentProviderProxyKind) -> &'static str {
 mod tests;
 #[cfg(test)]
 mod tests_model_attributes;
+/// Read the persisted codebuddy proxy debug flag (default false).
+pub fn codebuddy_debug(paths: &AppPaths) -> bool {
+    let secrets = load_provider_secrets(paths);
+    secrets
+        .get(CODEBUDDY_DEBUG_KEY)
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}

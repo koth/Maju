@@ -159,6 +159,37 @@ fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str
 }
 
 fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_call: &Value) {
+    // When the model emits a tool_use without any preceding text (common for
+    // agentic-first models like glm-5.2-ioa), `emit_text_delta` was never
+    // called, so `message_started` is still false. Without a `message` item
+    // wrapping the subsequent `function_call` items, the Responses stream is
+    // malformed — the consumer (codex-acp) sees function_calls with no
+    // assistant message container, resulting in `message_started=false` and
+    // no `agent_message_chunk` being emitted to the UI.
+    //
+    // Fix: ensure the assistant message item exists before emitting any
+    // function_call output_item. We emit an empty message item (no content
+    // part) because the model produced no text — the tool card alone will be
+    // shown in the UI.
+    if !state.message_started {
+        state.message_started = true;
+        push_sse(
+            output,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "msg_proxy",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": []
+                }
+            }),
+        );
+    }
+
     let index = tool_call
         .get("index")
         .and_then(Value::as_u64)
@@ -279,6 +310,13 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
         } else {
             index
         };
+        append_codex_api_proxy_log(&format!(
+            "emit_stream_done_tool_call index={index} id={} name={} args_len={} added={}",
+            call.id,
+            if call.name.is_empty() { "<empty>" } else { &call.name },
+            call.arguments.len(),
+            call.added,
+        ));
         if !call.arguments.is_empty() && !tool_call_outputs_as_apply_patch(&call.name) {
             push_sse(
                 output,

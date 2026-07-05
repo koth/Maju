@@ -1,3 +1,4 @@
+use crate::codebuddy_proxy::CodebuddyProxyManager;
 use crate::lsp::LspService;
 use crate::open_workspaces::{OpenWorkspaceRecord, OpenWorkspaceState};
 use app_core::{Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path};
@@ -13,10 +14,13 @@ use workspace_model::{
     WorkspaceSessionList,
 };
 
+use std::sync::Arc;
+
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
     lsp_service: LspService,
     terminal_service: TerminalService,
+    codebuddy_proxy: Arc<CodebuddyProxyManager>,
 }
 
 #[derive(Default)]
@@ -50,7 +54,12 @@ impl AppState {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
             lsp_service,
             terminal_service,
+            codebuddy_proxy: Arc::new(CodebuddyProxyManager::new()),
         }
+    }
+
+    pub fn codebuddy_proxy(&self) -> Arc<CodebuddyProxyManager> {
+        self.codebuddy_proxy.clone()
     }
 
     pub fn set_terminal_event_sink(&self, sink: TerminalEventSink) {
@@ -281,6 +290,7 @@ impl AppState {
         drop(workspaces);
         self.lsp_service.shutdown_all();
         self.terminal_service.shutdown_all();
+        self.codebuddy_proxy.stop();
     }
 
     pub fn lsp_service(&self) -> LspService {
