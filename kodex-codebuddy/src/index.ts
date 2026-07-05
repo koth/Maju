@@ -18,6 +18,19 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+  // Orphan watchdog: if Kodex (our parent) is killed — including SIGKILL,
+  // which bypasses Rust's Drop/shutdown — the proxy would otherwise keep
+  // running as a reparented orphan. Poll the parent pid; once it changes
+  // (reparented to init/launchd), drain and exit.
+  const parentPid = process.ppid;
+  const watchdog = setInterval(() => {
+    if (process.ppid !== parentPid) {
+      logger.info('parent process gone (ppid %d -> %d), shutting down', parentPid, process.ppid);
+      void shutdown('orphan');
+    }
+  }, 2000);
+  watchdog.unref();
 }
 
 // Swallow the transport-teardown race that the SDK throws when a query is

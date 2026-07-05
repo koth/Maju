@@ -13,6 +13,7 @@ serde_json.workspace = true
 session-store = { path = "../../../crates/session-store" }
 tauri = { version = "2", features = ["protocol-asset"] }
 git2.workspace = true
+libc.workspace = true
 terminal-service = { path = "../../../crates/terminal-service" }
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"

@@ -2132,6 +2132,7 @@ dependencies = [
  "app-core",
  "git-service",
  "git2",
+ "libc",
  "serde",
  "serde_json",
  "session-store",

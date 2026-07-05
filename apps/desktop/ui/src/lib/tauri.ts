@@ -651,6 +651,7 @@ export interface CodebuddyProxyStatus {
   running: boolean;
   port: number | null;
   debug: boolean;
+  internet_environment: string;
 }
 
 export async function codebuddyProxyStatus(): Promise<CodebuddyProxyStatus> {
@@ -669,11 +670,13 @@ export async function settingsSaveCodebuddyConfig(
   port: number | null,
   apiKey: string,
   debug: boolean,
+  internetEnvironment: string,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_codebuddy_config", {
     port,
     apiKey,
     debug,
+    internetEnvironment,
   });
 }
 

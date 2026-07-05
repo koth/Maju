@@ -28,7 +28,7 @@ function ModelEntrySelectInner<T extends string>(
   const ariaLabel = rest["aria-label"];
   const listboxId = useId();
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const listboxRef = useRef<HTMLUListElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
 
   const setRefs = useCallback(
@@ -54,15 +54,17 @@ function ModelEntrySelectInner<T extends string>(
     [onChange],
   );
 
+  // Close on outside pointer-down. Listen on `pointerdown` (fires before
+  // focus/selection side-effects) and check the shared container so both the
+  // trigger and the floating listbox count as "inside". Using the container
+  // ref (instead of separate trigger/listbox refs) avoids races where the
+  // listbox ref is still null on the first interaction, which previously left
+  // the dropdown stuck open after selecting an option or clicking away.
   useEffect(() => {
     if (!open) return;
-    const onDocPointer = (event: MouseEvent) => {
-      if (
-        triggerRef.current?.contains(event.target as Node) ||
-        listboxRef.current?.contains(event.target as Node)
-      ) {
-        return;
-      }
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && containerRef.current?.contains(target)) return;
       setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
@@ -71,10 +73,10 @@ function ModelEntrySelectInner<T extends string>(
         triggerRef.current?.focus();
       }
     };
-    document.addEventListener("mousedown", onDocPointer);
+    document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onDocPointer);
+      document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
@@ -112,7 +114,7 @@ function ModelEntrySelectInner<T extends string>(
   };
 
   return (
-    <>
+    <div ref={containerRef} className="settings-model-entry-select-wrapper">
       <button
         ref={setRefs}
         type="button"
@@ -134,7 +136,6 @@ function ModelEntrySelectInner<T extends string>(
       </button>
       {open && (
         <ul
-          ref={listboxRef}
           id={listboxId}
           role="listbox"
           tabIndex={-1}
@@ -152,8 +153,10 @@ function ModelEntrySelectInner<T extends string>(
                 data-option-value={option.value}
                 tabIndex={-1}
                 className="settings-model-entry-select-item"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => pick(option.value)}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  pick(option.value);
+                }}
               >
                 <span>{option.label}</span>
                 {isSelected && (
@@ -166,7 +169,7 @@ function ModelEntrySelectInner<T extends string>(
           })}
         </ul>
       )}
-    </>
+    </div>
   );
 }
 

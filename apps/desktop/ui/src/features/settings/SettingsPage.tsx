@@ -11,6 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { ModelEntrySelect } from "./ModelEntrySelect";
+import { isMacOS } from "../../lib/platform";
 import type {
   AgentCliId,
   AgentInstallResult,
@@ -660,6 +661,7 @@ export function SettingsPage({
   const [codebuddyPortDraft, setCodebuddyPortDraft] = useState("17856");
   const [codebuddyApiKeyDraft, setCodebuddyApiKeyDraft] = useState("");
   const [codebuddyDebug, setCodebuddyDebug] = useState(false);
+  const [codebuddyInternetEnv, setCodebuddyInternetEnv] = useState("internal");
   const [codebuddyStatus, setCodebuddyStatus] =
     useState<CodebuddyProxyStatus | null>(null);
   const [codebuddyMessage, setCodebuddyMessage] = useState<
@@ -815,7 +817,10 @@ export function SettingsPage({
     try {
       const status = await codebuddyProxyStatus();
       setCodebuddyStatus(status);
-      if (status) setCodebuddyDebug(status.debug);
+      if (status) {
+        setCodebuddyDebug(status.debug);
+        setCodebuddyInternetEnv(status.internet_environment ?? "internal");
+      }
     } catch {
       setCodebuddyStatus(null);
     }
@@ -3696,6 +3701,7 @@ export function SettingsPage({
           port,
           codebuddyApiKeyDraft,
           codebuddyDebug,
+          codebuddyInternetEnv,
         );
           setSnapshot(nextSnapshot);
           setCodebuddyApiKeyDraft("");
@@ -3714,9 +3720,34 @@ export function SettingsPage({
         setBusyCodebuddy(true);
         setCodebuddyMessage(null);
         try {
+          // Persist the on-screen draft (port + key + debug) first so the
+          // proxy boots with the toggled debug flag. Otherwise the start
+          // command reads the stale on-disk debug value and never opens the
+          // console window (and if the proxy is already running with that
+          // stale config, ensure_running no-ops).
+          const startPort = parseInt(codebuddyPortDraft, 10) || 17856;
+          const savedSnapshot = await settingsSaveCodebuddyConfig(
+            startPort,
+            codebuddyApiKeyDraft,
+            codebuddyDebug,
+            codebuddyInternetEnv,
+          );
+          setSnapshot(savedSnapshot);
+          setCodebuddyApiKeyDraft("");
           await codebuddyProxyStart();
-          await loadCodebuddyStatus();
-          setCodebuddyMessage({ text: "代理已启动", kind: "success" });
+          // Don't trust the start command's Ok alone — the proxy may spawn
+          // then exit, or no-op because it was already running with a stale
+          // config. Re-fetch status and report the actual running state.
+          const status = await codebuddyProxyStatus();
+          setCodebuddyStatus(status);
+          if (status.running) {
+            setCodebuddyMessage({ text: "代理已启动", kind: "success" });
+          } else {
+            setCodebuddyMessage({
+              text: "代理未能保持运行，请检查日志目录或端口是否被占用",
+              kind: "error",
+            });
+          }
         } catch (err) {
           setCodebuddyMessage({
             text: `启动失败：${err instanceof Error ? err.message : String(err)}`,
@@ -3823,13 +3854,36 @@ export function SettingsPage({
                     disabled={busyCodebuddy}
                   />
                 </label>
-                <label className="settings-switch settings-codebuddy-switch">
+                <label className="settings-codebuddy-field">
+                  <span>网络环境</span>
+                  <ModelEntrySelect<"internal" | "ioa">
+                    aria-label="codebuddy_internet_environment"
+                    value={
+                      codebuddyInternetEnv === "ioa" ? "ioa" : "internal"
+                    }
+                    disabled={busyCodebuddy}
+                    onChange={(value) => setCodebuddyInternetEnv(value)}
+                    options={[
+                      { value: "internal", label: "国内 (internal)" },
+                      { value: "ioa", label: "内网 (ioa)" },
+                    ]}
+                  />
+                </label>
+                <label
+                  className="settings-switch settings-codebuddy-switch"
+                  title={
+                    isMacOS()
+                      ? "macOS 暂不支持调试模式（无控制台窗口），请在 Windows 上使用"
+                      : undefined
+                  }
+                >
                   <input
                     type="checkbox"
                     checked={codebuddyDebug}
                     onChange={(e) => setCodebuddyDebug(e.target.checked)}
-                    disabled={busyCodebuddy}
+                    disabled={busyCodebuddy || isMacOS()}
                     aria-label="codebuddy_debug"
+                    aria-disabled={busyCodebuddy || isMacOS()}
                   />
                   <span>调试模式（显示控制台窗口 + 详细日志）</span>
                 </label>

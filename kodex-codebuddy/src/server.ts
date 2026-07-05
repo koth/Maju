@@ -92,6 +92,10 @@ export function createApp(cfg: ProxyConfig): { app: express.Express; pool: Sessi
         mcpServers: mcp ? { [PROXY_TOOL_SERVER_NAME_KEY]: mcp } : undefined,
         buildMcp: (p) => buildMcpServer(body, p),
         systemPrompt,
+        env: {
+          CODEBUDDY_API_KEY: process.env.CODEBUDDY_API_KEY,
+          CODEBUDDY_INTERNET_ENVIRONMENT: process.env.CODEBUDDY_INTERNET_ENVIRONMENT,
+        },
       }, toolSig);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

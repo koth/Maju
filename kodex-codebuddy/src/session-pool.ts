@@ -32,6 +32,9 @@ export interface PoolSessionOptions {
   /** System prompt passed via SDK `SessionOptions.systemPrompt` — the proper
    *  system-prompt channel instead of mixing system text into the user message. */
   systemPrompt?: string;
+  /** Environment variables forwarded to the CodeBuddy CLI session
+   *  (`CODEBUDDY_API_KEY`, `CODEBUDDY_INTERNET_ENVIRONMENT`, …). */
+  env?: Record<string, string | undefined>;
   /** Callback to build the SDK MCP server using the entry's persistent
    *  pending object. Called only at session creation time. */
   buildMcp?: BuildMcpCallback;
@@ -162,6 +165,7 @@ export class SessionPool {
       sessionId,
       systemPrompt: opts.systemPrompt,
       maxTurns: opts.maxTurns,
+      env: opts.env,
     });
     const entry: Entry = {
       session,

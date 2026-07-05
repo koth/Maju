@@ -338,9 +338,10 @@ pub async fn settings_sync_provider_models_from_url(
         let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
         let default_model = app_core::settings::codebuddy_default_model(&paths);
         let debug = app_core::settings::codebuddy_debug(&paths);
+        let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
         state
             .codebuddy_proxy()
-            .ensure_running(&paths, port, &api_key, &default_model, debug)?;
+            .ensure_running(&paths, port, &api_key, &default_model, debug, &internet_env)?;
     }
     let models =
         app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
@@ -696,7 +697,8 @@ pub async fn codebuddy_proxy_status(
 ) -> Result<crate::codebuddy_proxy::CodebuddyProxyStatus, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     let debug = app_core::settings::codebuddy_debug(&paths);
-    Ok(state.codebuddy_proxy().status(debug))
+    let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
+    Ok(state.codebuddy_proxy().status(debug, &internet_env))
 }
 
 #[tauri::command]
@@ -707,12 +709,13 @@ pub async fn codebuddy_proxy_start(state: State<'_, AppState>) -> Result<(), Str
         .unwrap_or_default();
     let default_model = app_core::settings::codebuddy_default_model(&paths);
     let debug = app_core::settings::codebuddy_debug(&paths);
+    let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
     let manager = state.inner().codebuddy_proxy().clone();
     // ensure_running spawns a child process and TCP-probes the port. Run
     // it on the blocking pool so the Tauri IPC worker (and the UI) stay
     // responsive while the proxy boots.
     tokio::task::spawn_blocking(move || {
-        manager.ensure_running(&paths, port, &api_key, &default_model, debug)
+        manager.ensure_running(&paths, port, &api_key, &default_model, debug, &internet_env)
     })
     .await
     .map_err(|e| format!("proxy start task panicked: {e}"))?
@@ -734,10 +737,17 @@ pub fn settings_save_codebuddy_config(
     port: Option<u16>,
     api_key: String,
     debug: bool,
+    internet_environment: String,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    let snapshot = app_core::settings::save_codebuddy_config(&paths, port, api_key, debug)
-        .map_err(|e| e.to_string())?;
+    let snapshot = app_core::settings::save_codebuddy_config(
+        &paths,
+        port,
+        api_key,
+        debug,
+        internet_environment,
+    )
+    .map_err(|e| e.to_string())?;
     // Restart if already running so it picks up the new port/key.
     let _ = state
         .codebuddy_proxy()
@@ -747,6 +757,7 @@ pub fn settings_save_codebuddy_config(
             &app_core::settings::codebuddy_secret(&paths).unwrap_or_default(),
             &app_core::settings::codebuddy_default_model(&paths),
             app_core::settings::codebuddy_debug(&paths),
+            &app_core::settings::codebuddy_internet_environment(&paths),
         );
     Ok(snapshot)
 }

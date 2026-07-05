@@ -4,14 +4,13 @@
 //! spawns the bundled single-file proxy binary on the configured loopback
 //! port and keeps it alive for the app's lifetime. The proxy is torn down on
 //! app exit, on config change (restart), or when the provider is removed.
-use app_core::settings::codex_acp_bin_dir;
-use app_core::settings::detect_agent_with_paths;
+use app_core::settings::{codex_acp_bin_dir, detect_agent_with_paths, search_paths};
 use workspace_model::AgentCliId;
 use app_core::AppPaths;
 use serde::Serialize;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Windows: do not flash a console window for the spawned child. We use
@@ -30,11 +29,18 @@ struct RunningConfig {
     /// stdio so the operator can read its `INFO`/`DEBUG` logs directly. Also
     /// forwards `CODEBUDDY_PROXY_LOG_LEVEL=debug` to the child.
     debug: bool,
+    /// CodeBuddy internet environment (`internal` | `ioa`), forwarded to the
+    /// child as `CODEBUDDY_INTERNET_ENVIRONMENT`.
+    internet_environment: String,
 }
 
 pub struct CodebuddyProxyManager {
     child: Mutex<Option<Child>>,
     running: Mutex<Option<RunningConfig>>,
+    /// Tail of the child's stderr, captured so launch failures (e.g.
+    /// `EADDRINUSE`) surface in the error returned to the UI instead of
+    /// being swallowed by an unread pipe.
+    stderr_tail: Arc<Mutex<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,6 +51,9 @@ pub struct CodebuddyProxyStatus {
     /// window / verbose logging for the next launch. Reflects the on-disk
     /// value, not whether the running child was started with `debug=true`.
     pub debug: bool,
+    /// Persisted internet environment (`internal` | `ioa`) forwarded to the
+    /// proxy as `CODEBUDDY_INTERNET_ENVIRONMENT`.
+    pub internet_environment: String,
 }
 
 impl CodebuddyProxyManager {
@@ -52,16 +61,22 @@ impl CodebuddyProxyManager {
         Self {
             child: Mutex::new(None),
             running: Mutex::new(None),
+            stderr_tail: Arc::new(Mutex::new(String::new())),
         }
     }
 
     /// Current status (running + port).
-    pub fn status(&self, debug: bool) -> CodebuddyProxyStatus {
+    pub fn status(
+        &self,
+        debug: bool,
+        internet_environment: &str,
+    ) -> CodebuddyProxyStatus {
         let running = self.running.lock().map(|r| r.clone()).ok().flatten();
         CodebuddyProxyStatus {
             running: self.is_alive(),
             port: running.map(|c| c.port),
             debug,
+            internet_environment: internet_environment.to_string(),
         }
     }
 
@@ -93,12 +108,14 @@ impl CodebuddyProxyManager {
         api_key: &str,
         default_model: &str,
         debug: bool,
+        internet_environment: &str,
     ) -> Result<(), String> {
         let desired = RunningConfig {
             port,
             api_key: api_key.to_string(),
             default_model: default_model.to_string(),
             debug,
+            internet_environment: internet_environment.to_string(),
         };
         if self.is_alive() {
             let current = self.running.lock().map(|r| r.clone()).ok().flatten();
@@ -124,12 +141,14 @@ impl CodebuddyProxyManager {
         api_key: &str,
         default_model: &str,
         debug: bool,
+        internet_environment: &str,
     ) -> Result<(), String> {
         let desired = RunningConfig {
             port,
             api_key: api_key.to_string(),
             default_model: default_model.to_string(),
             debug,
+            internet_environment: internet_environment.to_string(),
         };
         // Only restart if already running; never start from stopped.
         if !self.is_alive() {
@@ -153,9 +172,23 @@ impl CodebuddyProxyManager {
             Err(_) => return,
         };
         if let Some(mut child) = guard.take() {
+            // Kill the whole process group first so grandchildren (the
+            // `node` CodeBuddy CLI processes the proxy spawns) are torn down
+            // too. `child.kill()` only signals the direct child.
+            #[cfg(unix)]
+            {
+                let pid = child.id() as i32;
+                // `process_group(0)` made the child a group leader; a
+                // negative pid targets the whole group. SIGTERM lets the
+                // proxy drain its session pool and flush logs.
+                unsafe {
+                    libc::kill(-pid, libc::SIGTERM);
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
+        drop(guard);
         if let Ok(mut r) = self.running.lock() {
             *r = None;
         }
@@ -173,6 +206,14 @@ impl CodebuddyProxyManager {
         cmd.env("CODEBUDDY_PROXY_HOST", "127.0.0.1");
         cmd.env("CODEBUDDY_PROXY_PORT", config.port.to_string());
         cmd.env("CODEBUDDY_PROXY_API_KEY", &config.api_key);
+        // The proxy also reads the upstream CodeBuddy API key from
+        // `CODEBUDDY_API_KEY`; mirror the configured key there so the
+        // bundled CodeBuddy CLI authenticates against Tencent's backend.
+        cmd.env("CODEBUDDY_API_KEY", &config.api_key);
+        cmd.env(
+            "CODEBUDDY_INTERNET_ENVIRONMENT",
+            &config.internet_environment,
+        );
         cmd.env("CODEBUDDY_PROXY_DEFAULT_MODEL", &config.default_model);
         // Pass the Kodex codex-api-proxy base URL so the 17856 proxy can
         // `fetch` /v1/tools/execute back to the right Kodex instance.
@@ -203,12 +244,32 @@ impl CodebuddyProxyManager {
             .detected_path
             .filter(|p| p.is_file())
         {
-            cmd.env("CODEBUDDY_CODE_PATH", &cli_path);
+            // Resolve symlinks (e.g. `/opt/homebrew/bin/codebuddy` → the
+            // npm-global `.../@tencent-ai/codebuddy-code/bin/codebuddy`).
+            // The SDK does a naive string replace of `bin/codebuddy` →
+            // `dist/codebuddy-headless.js` on this path to pick the headless
+            // entry; a symlink path would yield a non-existent target, so
+            // `node` runs nothing and stdout closes immediately.
+            let resolved = std::fs::canonicalize(&cli_path).unwrap_or(cli_path);
+            cmd.env("CODEBUDDY_CODE_PATH", &resolved);
+        }
+        // The proxy is a Node SEA that spawns `node <cli-path>` to run the
+        // codebuddy CLI (a `#!/usr/bin/env node` script). When Tauri is
+        // launched from Finder/Dock the child inherits a minimal PATH
+        // (`/usr/bin:/bin:...`) that omits where `node` lives (e.g.
+        // `/opt/homebrew/bin` on macOS), so that inner `spawn('node', ...)`
+        // fails with `ENOENT`. Replace the child PATH with the same superset
+        // `find_binary` searches so the Node runtime is resolvable.
+        if let Ok(joined) = std::env::join_paths(search_paths()) {
+            cmd.env("PATH", &joined);
         }
         if config.debug {
-            // Attach a console window and forward the child's stdout/stderr
-            // straight to the parent's terminal so the operator can watch
-            // tool-use logging in real time.
+            // Forward the child's stdout/stderr to the parent's terminal so
+            // the operator can watch tool-use logging in real time. On Windows
+            // a GUI app has no console, so the console-subsystem child
+            // allocates a fresh console window — the desired behavior. macOS
+            // has no controlling terminal under a GUI app, so debug mode is
+            // disabled in the UI on macOS.
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::inherit());
@@ -218,13 +279,61 @@ impl CodebuddyProxyManager {
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            // Start the proxy in its own process group so that on shutdown
+            // we can kill the whole tree (the proxy spawns `node` children
+            // for the CodeBuddy CLI; `child.kill()` only targets the proxy
+            // itself and would orphan those grandchildren).
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::null());
+            // Capture stderr so launch failures (EADDRINUSE, missing CLI,
+            // ...) are not lost. A background thread drains the pipe into
+            // `stderr_tail` (surfaced via the health-check error) and
+            // appends to the proxy log file.
             cmd.stderr(Stdio::piped());
         }
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn codebuddy proxy: {e}"))?;
+        // Drain stderr (only piped in non-debug mode) so an unread pipe
+        // doesn't block the child and so we can surface the real reason if
+        // it exits early (e.g. EADDRINUSE).
+        if let Some(stderr) = child.stderr.take() {
+            let tail = self.stderr_tail.clone();
+            let log_path = paths.logs_dir().join("codebuddy-proxy-stderr.log");
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .ok();
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if let Some(f) = file.as_mut() {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{line}");
+                    }
+                    if let Ok(mut buf) = tail.lock() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                        // Keep the last ~8KB so the error message stays bounded.
+                        if buf.len() > 8192 {
+                            let cut = buf.len() - 8192;
+                            buf.drain(..cut);
+                        }
+                    }
+                }
+            });
+        }
         if let Ok(mut g) = self.child.lock() {
             *g = Some(child);
         }
@@ -245,10 +354,7 @@ impl CodebuddyProxyManager {
         let tcp_deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < tcp_deadline {
             if !self.is_alive() {
-                return Err(
-                    "proxy process exited before becoming healthy (port may be in use)"
-                        .to_string(),
-                );
+                return Err(self.exited_error());
             }
             if TcpStream::connect_timeout(
                 &format!("127.0.0.1:{port}").parse().unwrap(),
@@ -256,11 +362,43 @@ impl CodebuddyProxyManager {
             )
             .is_ok()
             {
+                // The port is listening, but it might be a stale process
+                // from a previous run that our child failed to bind against
+                // (EADDRINUSE). Wait briefly and re-check liveness so a
+                // child that exits right after a successful TCP probe (port
+                // conflict) is still caught.
+                std::thread::sleep(Duration::from_millis(150));
+                if !self.is_alive() {
+                    return Err(self.exited_error());
+                }
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
         }
         Err(format!("timeout waiting for proxy to listen on 127.0.0.1:{port}"))
+    }
+
+    /// Build an error message when the proxy child exited before becoming
+    /// healthy, including the captured stderr tail so the operator sees the
+    /// real cause (e.g. `EADDRINUSE`, missing CLI binary).
+    fn exited_error(&self) -> String {
+        let stderr = self
+            .stderr_tail
+            .lock()
+            .map(|buf| buf.trim().to_string())
+            .unwrap_or_default();
+        if stderr.is_empty() {
+            "proxy process exited before becoming healthy (port may be in use)"
+                .to_string()
+        } else {
+            // Show the last ~1KB of stderr — enough to see the root cause.
+            let tail = if stderr.len() > 1024 {
+                &stderr[stderr.len() - 1024..]
+            } else {
+                &stderr
+            };
+            format!("proxy process exited before becoming healthy: {tail}")
+        }
     }
 }
 

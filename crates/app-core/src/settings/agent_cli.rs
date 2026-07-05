@@ -557,7 +557,14 @@ pub(super) fn binary_name(binary: &str) -> String {
     }
 }
 
-fn find_binary(binary: &str) -> Option<PathBuf> {
+/// Directories searched to locate bundled CLIs (and their runtimes).
+///
+/// Starts with the current process `PATH`, then adds common user-local and
+/// platform locations that GUI-launched apps (Finder/Dock on macOS, or a
+/// Tauri child process) do not inherit. Exposed so callers that spawn child
+/// processes (e.g. the codebuddy proxy) can build a `PATH` that lets the
+/// child resolve `node` / the CLI the same way [`find_binary`] does.
+pub fn search_paths() -> Vec<PathBuf> {
     let mut search_paths: Vec<PathBuf> = Vec::new();
 
     // Start with the current process PATH
@@ -622,6 +629,10 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
         }
     }
 
+    search_paths
+}
+
+fn find_binary(binary: &str) -> Option<PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
         vec![
             format!("{binary}.exe"),
@@ -632,7 +643,7 @@ fn find_binary(binary: &str) -> Option<PathBuf> {
         vec![binary.to_string()]
     };
 
-    search_paths
+    search_paths()
         .into_iter()
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|path| path.is_file())

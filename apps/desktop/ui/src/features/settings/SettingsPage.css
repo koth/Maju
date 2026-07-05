@@ -1887,6 +1887,11 @@
   position: relative;
 }
 
+/* The wrapper around trigger + floating listbox is the positioning context. */
+.settings-model-entry-select-wrapper {
+  position: relative;
+}
+
 .settings-model-entry-select {
   display: inline-flex;
   align-items: center;
@@ -1932,7 +1937,7 @@
   margin: 0;
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: #1f2127;
+  background: var(--panel-bg);
   color: var(--text-strong);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   font-size: 12px;

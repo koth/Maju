@@ -11,6 +11,7 @@ pub use agent_cli::{
     is_codex_acp_command, remote_agent_env_for_command, remote_codex_home,
     remote_codex_proxy_config, remote_linux_command_for_agent,
     remote_linux_command_for_agent_label, resolve_agent_command_with_settings,
+    search_paths,
 };
 
 use agent_cli::{agent_statuses, binary_name};
@@ -71,6 +72,7 @@ const CODEBUDDY_PROVIDER_NAME: &str = "CodeBuddy";
 const CODEBUDDY_DEFAULT_PORT: u16 = 17856;
 const CODEBUDDY_SECRET_KEY: &str = "codebuddy:proxy-api-key";
 const CODEBUDDY_DEBUG_KEY: &str = "codebuddy:proxy-debug";
+const CODEBUDDY_INTERNET_ENV_KEY: &str = "codebuddy:internet-env";
 const CODEBUDDY_CATALOG_MODELS: &[&str] = &[];
 
 /// Derive the codebuddy proxy model-list URL from a port.
@@ -99,6 +101,16 @@ fn codebuddy_configured(paths: &AppPaths) -> bool {
 /// Default model for the codebuddy provider (from the catalog definition).
 pub fn codebuddy_default_model(_paths: &AppPaths) -> String {
     "claude-sonnet-5".to_string()
+}
+
+/// Read the persisted codebuddy internet environment (`internal` | `ioa`).
+/// Defaults to `internal` when unset.
+pub fn codebuddy_internet_environment(paths: &AppPaths) -> String {
+    let secrets = load_provider_secrets(paths);
+    match secrets.get(CODEBUDDY_INTERNET_ENV_KEY).map(|v| v.trim().to_string()) {
+        Some(v) if v == "ioa" => "ioa".to_string(),
+        _ => "internal".to_string(),
+    }
 }
 
 /// Look up a raw catalog entry by provider id (no normalization side effects).
@@ -311,7 +323,7 @@ const MODEL_MAX_OUTPUT_TOKENS: &[(&str, i64)] = &[
     ("MiMo-V2.5-Pro", MIMO_MODEL_MAX_OUTPUT_TOKENS),
     ("MiMo-V2.5", MIMO_MODEL_MAX_OUTPUT_TOKENS),
 ];
-const CODEX_ACP_BASE_INSTRUCTIONS: &str = r#"You are Codex, a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
+const CODEX_ACP_BASE_INSTRUCTIONS: &str = r#"You are a coding agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.
 
 Use the available tools to inspect files, run commands, and edit the workspace when the request calls for action. Do not merely say that you will inspect or change something; perform the needed tool calls and then report the result.
 
@@ -2043,11 +2055,18 @@ pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSe
 /// Save the CodeBuddy proxy configuration: port goes into the provider-models
 /// catalog, API key into the secrets store. The proxy URL is derived from the
 /// port at read time, never persisted directly.
+/// Save CodeBuddy proxy config (port + debug) and the API key.
+///
+/// An empty `api_key` is treated as "leave the stored key unchanged" so that
+/// re-saving after toggling only `debug` (the frontend clears the key draft
+/// after each save for security) does not wipe a previously configured key.
+/// To remove the key, use [`clear_codebuddy_config`].
 pub fn save_codebuddy_config(
     paths: &AppPaths,
     port: Option<u16>,
     api_key: String,
     debug: bool,
+    internet_environment: String,
 ) -> Result<AgentSettingsSnapshot> {
     let port = port.unwrap_or(CODEBUDDY_DEFAULT_PORT);
     let mut catalog = read_provider_models_catalog(paths)?;
@@ -2063,7 +2082,7 @@ pub fn save_codebuddy_config(
     let trimmed = api_key.trim();
     let mut secrets = load_provider_secrets(paths);
     if trimmed.is_empty() {
-        secrets.remove(CODEBUDDY_SECRET_KEY);
+        // Empty key means "unchanged"; keep any previously stored key.
     } else {
         secrets.insert(CODEBUDDY_SECRET_KEY.to_string(), trimmed.to_string());
     }
@@ -2072,6 +2091,14 @@ pub fn save_codebuddy_config(
     } else {
         secrets.remove(CODEBUDDY_DEBUG_KEY);
     }
+    let env = match internet_environment.trim() {
+        "ioa" => "ioa",
+        _ => "internal",
+    };
+    secrets.insert(
+        CODEBUDDY_INTERNET_ENV_KEY.to_string(),
+        env.to_string(),
+    );
     save_provider_secrets(paths, &secrets)?;
 
     Ok(settings_snapshot(paths))
@@ -2090,6 +2117,7 @@ pub fn clear_codebuddy_config(paths: &AppPaths) -> Result<AgentSettingsSnapshot>
     let mut secrets = load_provider_secrets(paths);
     secrets.remove(CODEBUDDY_SECRET_KEY);
     secrets.remove(CODEBUDDY_DEBUG_KEY);
+    secrets.remove(CODEBUDDY_INTERNET_ENV_KEY);
     save_provider_secrets(paths, &secrets)?;
 
     Ok(settings_snapshot(paths))

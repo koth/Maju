@@ -236,8 +236,9 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
         let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
         let default_model = app_core::settings::codebuddy_default_model(&paths);
         let debug = app_core::settings::codebuddy_debug(&paths);
+        let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
         let result = tokio::task::spawn_blocking(move || {
-            manager.ensure_running(&paths, port, &api_key, &default_model, debug)
+            manager.ensure_running(&paths, port, &api_key, &default_model, debug, &internet_env)
         })
         .await;
         match result {
