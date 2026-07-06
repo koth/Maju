@@ -1,31 +1,48 @@
 /**
  * Converts an OpenAI Chat Completions request into inputs for the
- * CodeBuddy SDK: a single prompt string + a list of SDK MCP tool
- * definitions to register via `createSdkMcpServer`.
+ * CodeBuddy SDK: message content (plain text or structured content blocks)
+ * + a list of SDK MCP tool definitions to register via `createSdkMcpServer`.
  *
  * Tool-calling strategy (passthrough):
  *   - Client-declared `tools` are registered as an in-process SDK MCP server.
  *     The CodeBuddy model therefore sees real tool schemas and emits native
  *     `tool_use` content blocks (Anthropic shape) in the stream.
- *   - The tool handlers NEVER resolve; instead, the adapter aborts the query
- *     the instant the first `assistant` message containing a `tool_use`
- *     block is observed. This stops CodeBuddy's agentic loop at the tool
- *     boundary so the proxy can hand the `tool_use` back to the HTTP client,
- *     which is responsible for executing the tool and sending `role: 'tool'`
+ *   - The tool handlers NEVER resolve; instead, the adapter interrupts the
+ *     session once the consolidated `AssistantMessage` (carrying the real
+ *     tool_use ids and complete inputs) arrives, handing the `tool_use` back
+ *     to the HTTP client which executes the tool and sends `role: 'tool'`
  *     results in a subsequent request.
  *   - Tool names returned by the model are namespaced as
  *     `mcp__<serverName>__<toolName>`; we strip that prefix before returning.
+ *
+ * Message-format alignment with the Python sibling (`prompt_builder.py`):
+ *   - **New session**: the CLI's stream-json input only accepts `type:"user"`
+ *     lines, so assistant history cannot be replayed structurally. We send
+ *     only the **last user message** as plain text — a clean single-turn
+ *     prompt rather than a role-tagged dump of prior history (which would
+ *     leak synthetic `<user>`/`<assistant>` noise). Earlier turns are
+ *     effectively dropped on a cold session; clients that need continuity
+ *     should pin the session via `X-Session-Id`.
+ *   - **Existing session**: only the incremental tail after the last
+ *     assistant message is sent. Tool results are rendered as **plain text**
+ *     that embeds the real result content (not structured `tool_result`
+ *     content blocks). The bundled CodeBuddy CLI's stream-json input handler
+ *     (`StreamJsonUtils.convertContentBlock`) downgrades any `tool_result`
+ *     content block to the placeholder text `[Tool result: <id>]` and
+ *     **discards the actual result content**, so the model would not see the
+ *     tool output and would re-explore endlessly. Sending the result as a
+ *     text string makes the CLI pass it through verbatim, preserving the
+ *     content the model needs.
  */
 import { z } from 'zod';
 import type { ZodTypeAny } from 'zod';
 import type { OAIChatRequest, OAIMessage, OAITool, OAIContentPart } from './openai-types.js';
 import type { ContentBlock } from '@tencent-ai/agent-sdk';
 
-/** A SDK-compatible user message — either a plain string or a
- *  structured `UserMessage` with `ContentBlock[]`. Tool results are now
- *  rendered as plain text strings to avoid duplicate tool_use_id in the
- *  CLI's internal history (the MCP handler already recorded a placeholder
- *  tool_result). */
+/** A SDK-compatible user message — either a plain string or a structured
+ *  `UserMessage`. Tool results are currently rendered as plain text (see
+ *  module docstring), so the structured `UserMessage` branch is retained for
+ *  forward compatibility but not exercised by the current tool-result path. */
 export type IncrementalMessage =
   | string
   | {
@@ -37,21 +54,14 @@ export type IncrementalMessage =
 
 /** Extract the message to send to the CLI session.
  *
- *  - **New session** (`isNew = true`): send the **full** conversation
- *    as a single text message. The CLI has no prior history, so we must
- *    include everything (tool_use blocks, tool_results, etc.) rendered
- *    as text so the model sees the complete context.
- *
- *  - **Existing session** (`isNew = false`): send only the **incremental**
- *    tail after the last assistant message. The CLI session maintains its
- *    own history internally, so each `session.send()` delivers only the
- *    new turn's content. Tool results are rendered as text (not structured
- *    tool_result blocks) to avoid duplicate tool_use_id in the CLI's
- *    internal history — the interrupt happened before the handler resolved,
- *    so the CLI has no tool_result for the previous tool_use. */
+ *  - **New session** (`isNew = true`): send only the **last user message** as
+ *    plain text (see module docstring).
+ *  - **Existing session** (`isNew = false`): send only the incremental tail
+ *    after the last assistant message; tool results are rendered as plain
+ *    text that embeds the real result content (see module docstring). */
 export function extractIncrementalMessage(
   messages: OAIMessage[],
-  _sessionId: string,
+  sessionId: string,
   isNew = true,
 ): IncrementalMessage {
   if (isNew) {
@@ -60,21 +70,34 @@ export function extractIncrementalMessage(
   return buildIncrementalTail(messages);
 }
 
-/** Render the full conversation (minus system) as a single text block. */
-function buildFullPrompt(messages: OAIMessage[]): IncrementalMessage {
+/** Build the user message for a turn on a fresh session: the **last user
+ *  message** as plain text. The CLI stream-json input only accepts
+ *  `type:"user"` lines, so assistant history cannot be replayed as structured
+ *  messages; sending a role-tagged dump of the whole conversation would leak
+ *  synthetic `<user>`/`<assistant>` noise into the model context. Earlier
+ *  turns are effectively dropped on a cold session; clients that need
+ *  continuity should pin the session via `X-Session-Id`. */
+function buildFullPrompt(messages: OAIMessage[]): string {
   const convo = messages.filter((m) => m.role !== 'system');
-  const blocks: string[] = [];
-  for (const m of convo) {
-    blocks.push(renderMessage(m));
+  for (let i = convo.length - 1; i >= 0; i--) {
+    const m = convo[i];
+    if (m.role === 'user') {
+      const text = contentToText(m.content);
+      if (text.length > 0) return text;
+    }
   }
-  const last = convo[convo.length - 1];
-  if (!last || last.role === 'assistant') {
-    blocks.push('<user>\n(continue)');
-  }
-  return blocks.join('\n\n') || '(continue)';
+  return '(continue)';
 }
 
-/** Extract only the incremental tail after the last assistant message. */
+/** Build the user message for a turn on a warm session. The CLI keeps its own
+ *  history, so only the incremental tail after the last assistant message is
+ *  sent. Tool results are rendered as **plain text** embedding the real
+ *  result content (e.g. `[tool_result call_id="..."]\n<result>`). We do NOT
+ *  use structured `tool_result` content blocks here: the bundled CLI's
+ *  stream-json input handler downgrades a `tool_result` block to the
+ *  placeholder `[Tool result: <id>]` and discards the content, so the model
+ *  would never see the actual tool output and would loop. A text string is
+ *  passed through verbatim by the CLI, preserving the content. */
 function buildIncrementalTail(messages: OAIMessage[]): IncrementalMessage {
   const convo = messages.filter((m) => m.role !== 'system');
 
@@ -105,19 +128,24 @@ function buildIncrementalTail(messages: OAIMessage[]): IncrementalMessage {
     .map((m) => contentToText(m.content))
     .filter((t) => t.length > 0);
 
-  if (toolResults.length > 0) {
-    const parts = toolResults.map((m) => {
-      const id = m.tool_call_id ?? '';
-      const text = contentToText(m.content);
-      return `[tool_result call_id="${id}"]\n${text}`;
-    });
-    if (userTexts.length > 0) {
-      parts.push(userTexts.join('\n\n'));
-    }
-    return parts.join('\n\n') || '(continue)';
+  // No tool results → plain-text user turn.
+  if (toolResults.length === 0) {
+    return userTexts.join('\n\n') || '(continue)';
   }
 
-  return userTexts.join('\n\n') || '(continue)';
+  // Tool results as text: embed the real result content so the CLI passes it
+  // through verbatim (structured `tool_result` blocks would be downgraded to a
+  // contentless placeholder — see module docstring). tool_result(s) first,
+  // then any trailing user text.
+  const parts: string[] = toolResults.map((m) => {
+    const id = m.tool_call_id ?? '';
+    const text = contentToText(m.content);
+    return `[tool_result call_id="${id}"]\n${text}`;
+  });
+  if (userTexts.length > 0) {
+    parts.push(userTexts.join('\n\n'));
+  }
+  return parts.join('\n\n') || '(continue)';
 }
 
 /** Flatten an OpenAI content array into plain text (ignores images). */
@@ -133,37 +161,11 @@ function contentToText(content: OAIMessage['content']): string {
     .join('');
 }
 
-function renderMessage(msg: OAIMessage): string {
-  const text = contentToText(msg.content);
-  switch (msg.role) {
-    case 'system':
-      return `<system>\n${text}`;
-    case 'user':
-      return `<user>\n${text}`;
-    case 'assistant': {
-      let body = text;
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const calls = msg.tool_calls
-          .map(
-            (tc) =>
-              '```tool_use\n' +
-              JSON.stringify({ name: tc.function.name, arguments: tc.function.arguments }) +
-              '\n```',
-          )
-          .join('\n');
-        body = (body ? body + '\n' : '') + calls;
-      }
-      return `<assistant>\n${body}`;
-    }
-    case 'tool': {
-      return `<tool_result call_id="${msg.tool_call_id ?? ''}">\n${text}`;
-    }
-    default:
-      return `<${msg.role}>\n${text}`;
-  }
-}
-
 export interface BuiltPrompt {
+  /** Reserved; no longer populated with message text. The adapter sends
+   *  message content via `extractIncrementalMessage` and passes the model
+   *  name/system prompt from the fields below. Kept for API-shape parity
+   *  with the Python sibling (`BuiltPrompt.prompt == ""`). */
   prompt: string;
   /** System prompt extracted from `role: system` messages, passed via
    *  SDK `SessionOptions.systemPrompt` instead of being mixed into the
@@ -220,38 +222,25 @@ function jsonSchemaPropToZod(def: Record<string, unknown>, required: boolean): Z
   return base;
 }
 
+/** Split an OpenAI request into (model, systemPrompt).
+ *
+ *  `role: system` messages are extracted into `systemPrompt` so they can be
+ *  passed via SDK `SessionOptions.systemPrompt` — the proper system-prompt
+ *  channel — instead of being mixed into the user text. `prompt` is not used
+ *  to send content (the adapter calls `extractIncrementalMessage` for that);
+ *  it is returned as an empty string only to keep the `BuiltPrompt` shape
+ *  aligned with the Python sibling. */
 export function buildPrompt(
   req: OAIChatRequest,
   defaults: { defaultModel: string; maxTurns: number },
 ): BuiltPrompt {
-  const blocks: string[] = [];
-
-  // Extract system messages into a separate field so they can be passed
-  // via SDK `SessionOptions.systemPrompt` — the proper system-prompt channel
-  // that carries higher weight than user-role text and avoids conflicting
-  // with CodeBuddy CLI's own default system prompt.
   const systemParts: string[] = [];
-  const convo: OAIMessage[] = [];
   for (const m of req.messages) {
     if (m.role === 'system') systemParts.push(contentToText(m.content));
-    else convo.push(m);
   }
   const systemPrompt = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
-
-  for (const m of convo) {
-    blocks.push(renderMessage(m));
-  }
-
-  // If the last message is an assistant message (e.g. asking to continue),
-  // nudge the model to respond.
-  const last = convo[convo.length - 1];
-  if (!last || last.role === 'assistant') {
-    blocks.push('<user>\n(continue)');
-  }
-
-  const prompt = blocks.join('\n\n');
   const model = (req.model && req.model.trim()) || defaults.defaultModel;
-  return { prompt, systemPrompt, model, maxTurns: defaults.maxTurns };
+  return { prompt: '', systemPrompt, model, maxTurns: defaults.maxTurns };
 }
 
 /** Name of the SDK MCP server we register for client tools. */

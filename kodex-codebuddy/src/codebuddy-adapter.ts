@@ -14,11 +14,15 @@
  *   of the stream.
  *
  *   Only the **last** tool_use is surfaced to the HTTP client (codex-acp)
- *   for execution. The real result is sent in the next request as a
- *   **user text message** (not a structured tool_result) — the CLI's
- *   internal history has no tool_result for this tool_use (interrupt
- *   happened before the handler resolved), so there is no duplicate
- *   tool_use_id. See `extractIncrementalMessage` in prompt-builder.ts.
+ *   for execution. The real result is sent in the next request as **plain
+ *   text** embedding the result content (e.g. `[tool_result call_id="..."]`),
+ *   not a structured `tool_result` content block: the bundled CLI's
+ *   stream-json input handler downgrades a `tool_result` block to a
+ *   contentless placeholder `[Tool result: <id>]`, so the model would never
+ *   see the actual output and would loop. The CLI's internal history has no
+ *   tool_result for this tool_use (interrupt happened before the handler
+ *   resolved), so there is no duplicate `tool_use_id`. See
+ *   `extractIncrementalMessage` in prompt-builder.ts.
  */
 import { createSdkMcpServer, tool as sdkTool } from '@tencent-ai/agent-sdk';
 import type { Session, Message, ContentBlock, RawMessageStreamEvent } from '@tencent-ai/agent-sdk';
