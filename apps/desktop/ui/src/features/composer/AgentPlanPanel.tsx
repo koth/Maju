@@ -46,6 +46,10 @@ export interface AgentPlanEnvironmentInfo {
   actionLabel: string;
   githubLabel: string;
   usage?: SessionUsageSnapshot;
+  /** True while a turn is active (Streaming / WaitingForTool). Used to mark
+   *  the "已用上下文" figure as pending-refresh, since codex-core only emits
+   *  a context-occupancy update at the next model response. */
+  streaming?: boolean;
 }
 
 export interface PlanApprovalRequest {
@@ -197,6 +201,17 @@ export function AgentPlanEnvironment({
       : currentTurnTotal > 0
         ? `本轮 ${formatTokenCount(currentTurnTotal)}`
         : "等待用量";
+  // Staleness cue: codex-core only emits a context-occupancy update at the
+  // next model response, so while a turn is active the "已用上下文" figure
+  // is pending refresh. Mark it "更新中" then, otherwise show when it last
+  // refreshed so the dock never looks frozen.
+  const contextUpdatedAt = usage.context.updated_at ?? null;
+  const usagePendingRefresh = environment.streaming === true && hasContextUsage;
+  const stalenessLabel = usagePendingRefresh
+    ? "更新中"
+    : contextUpdatedAt != null
+      ? `上次更新 ${formatRelativeTime(contextUpdatedAt)}`
+      : null;
 
   return (
     <div className="agent-plan-environment" aria-label="环境信息">
@@ -255,6 +270,18 @@ export function AgentPlanEnvironment({
             </span>
             <span className="agent-plan-env-usage-metrics" title={usageDetail}>
               <span>{usageLabel}</span>
+              {stalenessLabel && (
+                <span
+                  className={
+                    usagePendingRefresh
+                      ? "agent-plan-env-usage-staleness is-pending"
+                      : "agent-plan-env-usage-staleness"
+                  }
+                  aria-hidden="true"
+                >
+                  {stalenessLabel}
+                </span>
+              )}
             </span>
           </div>
           {contextOccupancyPercent != null && (
@@ -289,13 +316,29 @@ export function AgentPlanEnvironment({
 }
 
 function totalUsageTokens(tokens: SessionUsageSnapshot["session_total"]) {
+  // cache_read is a subset of input; adding it would double-count. Keep
+  // cache_read/cache_write as display-only breakdown, not in the total.
   return tokens.total_tokens ?? (
     (tokens.input_tokens ?? 0) +
     (tokens.output_tokens ?? 0) +
-    (tokens.cache_read_tokens ?? 0) +
-    (tokens.cache_write_tokens ?? 0) +
     (tokens.reasoning_tokens ?? 0)
   );
+}
+
+/// Format an ISO-8601 instant as a coarse relative label for the context-
+/// occupancy staleness cue. Returns "" for unparseable input.
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const diffMs = Date.now() - then;
+  if (diffMs < 5000) return "刚刚";
+  const secs = Math.floor(diffMs / 1000);
+  if (secs < 60) return `${secs} 秒前`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins} 分前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
 }
 
 function formatTokenCount(value: number) {

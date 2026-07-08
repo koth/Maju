@@ -22,6 +22,10 @@ impl Application {
     pub fn send_prompt(&mut self, prompt: impl Into<String>) -> anyhow::Result<()> {
         self.inline_think_filter.reset();
         self.ui.agent_plan.clear();
+        // P3: clear the previous turn's token breakdown so the "本轮" dock
+        // figure does not show stale usage before the first TokenCount of the
+        // new turn arrives.
+        self.ui.usage.current_turn = Default::default();
         self.ui.session.status = SessionStatus::Streaming;
         let events = self.session.send_prompt(prompt)?;
         let turn_stop_reason = events.iter().rev().find_map(|event| match event {
@@ -136,6 +140,8 @@ impl Application {
             self.append_user_prompt_message(display_body)
         };
         self.ui.agent_plan.clear();
+        // P3: clear the previous turn's token breakdown (see send_prompt).
+        self.ui.usage.current_turn = Default::default();
         self.ui.session.status = SessionStatus::Streaming;
         self.review_changes_started = false;
         self.current_turn_user_message_id = Some(message_id);

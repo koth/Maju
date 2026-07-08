@@ -542,7 +542,7 @@ fn codebuddy_configured_after_saving_key_and_port() {
     assert!(!profile.configured);
 
     // Save config with a custom port + key
-    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), false, "internal".to_string()).unwrap();
+    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string()).unwrap();
     let profile = snap
         .codex_acp
         .profiles
@@ -571,31 +571,26 @@ fn codebuddy_configured_after_saving_key_and_port() {
 fn codebuddy_save_with_empty_key_keeps_existing_key() {
     // Regression: the settings frontend clears the API key draft after each
     // successful save (to avoid keeping the plaintext key in the input), so a
-    // later save that only toggles `debug` sends an empty key. An empty key
-    // must not wipe a previously stored key — clearing is the job of
-    // `clear_codebuddy_config`.
+    // later re-save sends an empty key. An empty key must not wipe a
+    // previously stored key — clearing is the job of `clear_codebuddy_config`.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir().unwrap();
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
     // Seed a configured key + port.
-    save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), false, "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string()).unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
         "key should be stored after initial save"
     );
 
-    // Re-save with an empty key while flipping debug on.
-    save_codebuddy_config(&paths, Some(17870), String::new(), true, "internal".to_string()).unwrap();
+    // Re-save with an empty key — the stored key must survive.
+    save_codebuddy_config(&paths, Some(17870), String::new(), "internal".to_string()).unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
         "empty key on re-save must not clear the stored key"
-    );
-    assert!(
-        codebuddy_debug(&paths),
-        "debug flag should be persisted on re-save"
     );
 
     // Clearing config still removes the key.
@@ -667,7 +662,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
     )
     .unwrap();
     // Save the proxy key through the same entry point the settings UI uses.
-    save_codebuddy_config(&paths, None, "ck-secret".to_string(), false, "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, None, "ck-secret".to_string(), "internal".to_string()).unwrap();
 
     // byok_source_secret must now resolve the dedicated codebuddy slot.
     let resolved = byok_source_secret(&paths, AgentProviderFamily::Codex, CODEBUDDY_PROVIDER_ID);
@@ -738,7 +733,7 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
     )
     .unwrap();
     // Buying a port + key registers the codebuddy BYOK source.
-    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string(), false, "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string(), "internal".to_string()).unwrap();
     save_provider_models_with_model_list_url(
         &paths,
         CODEBUDDY_PROVIDER_ID,

@@ -42,7 +42,7 @@ fn converts_responses_request_to_chat_payload() {
         "stream": true
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "timiai", "test-session").unwrap();
 
     assert_eq!(chat["model"], "glm-5.1");
     assert_eq!(chat["stream"], true);
@@ -105,7 +105,7 @@ fn converts_responses_namespace_tools_to_chat_function_tools() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
     let tools = chat["tools"].as_array().unwrap();
 
     assert_eq!(
@@ -164,7 +164,7 @@ fn converts_namespaced_responses_tool_call_history_to_flat_chat_tool_call() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["tool_calls"][0]["id"], "call_web");
     assert_eq!(
@@ -223,7 +223,7 @@ fn parallel_tool_outputs_collapse_into_single_anthropic_user_message() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     let anthropic = chat_payload_to_anthropic_payload(chat, false);
 
     let roles: Vec<&str> = anthropic["messages"]
@@ -264,7 +264,7 @@ fn consecutive_assistant_text_messages_are_not_dropped() {
         ]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
 
     let roles: Vec<&str> = chat["messages"]
         .as_array()
@@ -330,7 +330,7 @@ fn full_responses_to_anthropic_chain_enforces_strict_alternation() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     let anthropic = chat_payload_to_anthropic_payload(chat, false);
 
     let roles: Vec<&str> = anthropic["messages"]
@@ -376,7 +376,7 @@ fn assistant_text_then_tool_call_stays_one_chat_assistant_message() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
 
     // user, assistant(text+tool_calls) — exactly two messages, no
     // adjacent assistant pair.
@@ -412,7 +412,7 @@ fn converts_responses_image_input_to_chat_image_content() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "kimi_code").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "kimi_code", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "user");
     assert_eq!(chat["messages"][0]["content"][0]["type"], "text");
@@ -451,7 +451,7 @@ fn converts_apply_patch_custom_tool_to_chat_function_tool() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "timiai", "test-session").unwrap();
 
     assert_eq!(
         chat["tools"][0]["function"]["parameters"]["properties"]["patch"]["type"],
@@ -483,7 +483,7 @@ fn kimi_code_expands_apply_patch_tool_to_claude_style_edit_tools() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "kimi_code").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "kimi_code", "test-session").unwrap();
     let tool_names = chat["tools"]
         .as_array()
         .unwrap()
@@ -523,7 +523,7 @@ fn non_gpt_models_expand_apply_patch_tool_and_get_bridge_instructions() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
     let tool_names = chat["tools"]
         .as_array()
         .unwrap()
@@ -561,7 +561,7 @@ fn gpt_models_keep_apply_patch_as_the_only_edit_tool() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "timiai", "test-session").unwrap();
     let tool_names = chat["tools"]
         .as_array()
         .unwrap()
@@ -593,7 +593,7 @@ fn gpt_models_get_shell_tool_instructions() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "timiai").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "timiai", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["content"], "base instructions");
     assert_eq!(chat["messages"][1]["role"], "user");
@@ -631,7 +631,7 @@ fn converts_claude_style_edit_tool_call_to_apply_patch_custom_call() {
         }]
     });
 
-    let response = chat_response_to_responses_response(chat).unwrap();
+    let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
     assert_eq!(response["output"][0]["type"], "custom_tool_call");
     assert_eq!(response["output"][0]["name"], "apply_patch");
@@ -757,7 +757,7 @@ fn deepseek_requests_preserve_upstream_streaming() {
         "stream": true
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["stream"], true);
 }
@@ -1198,7 +1198,7 @@ fn converts_chat_usage_prompt_cache_hit_tokens_to_cached_input_tokens() {
         }
     });
 
-    let response = chat_response_to_responses_response(chat).unwrap();
+    let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
     assert_eq!(response["usage"]["input_tokens"], 120);
     assert_eq!(
@@ -1334,7 +1334,7 @@ fn converts_chat_response_to_responses_response() {
         }
     });
 
-    let response = chat_response_to_responses_response(chat).unwrap();
+    let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
     assert_eq!(response["id"], "chatcmpl_1");
     assert_eq!(response["output"][0]["type"], "message");
@@ -1384,7 +1384,7 @@ fn converts_apply_patch_chat_function_call_to_custom_tool_call() {
         }]
     });
 
-    let response = chat_response_to_responses_response(chat).unwrap();
+    let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
     assert_eq!(response["output"][0]["type"], "custom_tool_call");
     assert_eq!(response["output"][0]["call_id"], "call_patch");
@@ -1413,7 +1413,7 @@ fn converts_flat_chat_mcp_tool_call_to_namespaced_responses_item() {
         }]
     });
 
-    let response = chat_response_to_responses_response(chat).unwrap();
+    let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
     assert_eq!(response["output"][0]["type"], "function_call");
     assert_eq!(response["output"][0]["call_id"], "call_web");
@@ -1581,7 +1581,7 @@ fn converts_anthropic_tools_to_chat_completion_tools() {
         "tool_choice": { "type": "auto" }
     });
 
-    let chat = anthropic_payload_to_chat_payload(anthropic);
+    let chat = anthropic_payload_to_chat_payload(anthropic, "test-session");
 
     assert_eq!(chat["model"], "deepseek-v4-pro");
     assert_eq!(chat["stream"], true);
@@ -1616,7 +1616,7 @@ fn converts_anthropic_image_blocks_to_chat_image_content() {
         }]
     });
 
-    let chat = anthropic_payload_to_chat_payload(anthropic);
+    let chat = anthropic_payload_to_chat_payload(anthropic, "test-session");
 
     assert_eq!(chat["messages"][0]["role"], "user");
     assert_eq!(chat["messages"][0]["content"][0]["type"], "text");
@@ -1653,7 +1653,7 @@ fn converts_anthropic_tool_history_to_chat_completion_messages() {
         ]
     });
 
-    let chat = anthropic_payload_to_chat_payload(anthropic);
+    let chat = anthropic_payload_to_chat_payload(anthropic, "test-session");
 
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert!(chat["messages"][0]["content"].is_null());
@@ -1965,14 +1965,14 @@ fn restores_deepseek_reasoning_for_anthropic_tool_history() {
         }]
     });
 
-    let chat = anthropic_payload_to_chat_payload(anthropic);
+    let chat = anthropic_payload_to_chat_payload(anthropic, "test-session");
 
     assert_eq!(chat["messages"][0]["reasoning_content"], "tool thinking");
 }
 
 #[test]
 fn converts_chat_stream_incrementally() {
-    let mut converter = ChatSseStreamConverter::new();
+    let mut converter = ChatSseStreamConverter::new("test-session");
 
     let first = converter.push_chunk(
             b"data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"content\":\"hel",
@@ -2022,11 +2022,43 @@ fn injects_remembered_reasoning_content_into_next_chat_request() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert_eq!(chat["messages"][0]["content"], "unique cached answer");
     assert_eq!(chat["messages"][0]["reasoning_content"], "cached thinking");
+}
+
+#[test]
+fn reasoning_history_isolated_per_session() {
+    // Session A streams a reasoning-content + content pair. The test SSE
+    // helper writes into the shared "test-session" bucket.
+    let body = concat!(
+        "data:{\"id\":\"chatcmpl_1\",\"model\":\"deepseek-v4-pro\",\"choices\":[{\"delta\":{\"reasoning_content\":\"session a thinking\"}}]}\n\n",
+        "data:{\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"shared answer text\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let _ = chat_sse_to_responses_sse(body.as_bytes());
+
+    // Session B sends the *same* assistant text under a different session
+    // id. It must NOT inherit session A's reasoning_content.
+    let payload = json!({
+        "input": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "shared answer text" }]
+        }]
+    });
+
+    let chat =
+        responses_payload_to_chat_payload(payload, "deepseek", "session-b").unwrap();
+
+    assert_eq!(chat["messages"][0]["role"], "assistant");
+    assert_eq!(chat["messages"][0]["content"], "shared answer text");
+    assert!(
+        chat["messages"][0].get("reasoning_content").is_none(),
+        "session B must not see reasoning_content remembered for session A"
+    );
 }
 
 #[test]
@@ -2039,7 +2071,7 @@ fn leaves_uncached_deepseek_text_history_without_fake_reasoning() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert_eq!(chat["messages"][0]["content"], "uncached assistant answer");
@@ -2062,7 +2094,7 @@ fn normalizes_deepseek_assistant_messages_before_upstream_request() {
         "stream": true
     });
 
-    let normalized = normalize_chat_payload_for_provider(payload, "deepseek");
+    let normalized = normalize_chat_payload_for_provider(payload, "deepseek", "test-session");
 
     assert!(normalized["messages"][1].get("reasoning_content").is_none());
     assert_eq!(
@@ -2082,7 +2114,7 @@ fn normalizes_timiai_deepseek_assistant_messages_before_chat_upstream_request() 
         "stream": true
     });
 
-    let normalized = normalize_chat_payload_for_provider(payload, "timiai");
+    let normalized = normalize_chat_payload_for_provider(payload, "timiai", "test-session");
 
     assert!(normalized["messages"][1].get("reasoning_content").is_none());
 }
@@ -2108,7 +2140,7 @@ fn disables_deepseek_thinking_when_tool_reasoning_history_is_missing() {
         "stream": true
     });
 
-    let normalized = normalize_chat_payload_for_provider(payload, "deepseek");
+    let normalized = normalize_chat_payload_for_provider(payload, "deepseek", "test-session");
 
     assert_eq!(normalized["thinking"]["type"], "disabled");
     assert!(normalized.get("reasoning_effort").is_none());
@@ -2136,7 +2168,7 @@ fn rewrites_xiaomi_chat_completion_display_model_to_upstream_slug() {
         "stream": true
     });
 
-    let normalized = normalize_chat_payload_for_provider(payload, "xiaomi_mimo");
+    let normalized = normalize_chat_payload_for_provider(payload, "xiaomi_mimo", "test-session");
 
     assert_eq!(normalized["model"], "mimo-v2.5-pro");
 }
@@ -2198,7 +2230,7 @@ fn groups_consecutive_responses_function_calls_before_outputs() {
         ]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "user");
     assert_eq!(chat["messages"][1]["role"], "assistant");
@@ -2230,7 +2262,7 @@ fn ignores_unsupported_responses_input_item() {
         ]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "deepseek").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "test-session").unwrap();
 
     assert_eq!(chat["messages"].as_array().unwrap().len(), 2);
     assert_eq!(chat["messages"][0]["role"], "assistant");
@@ -2340,7 +2372,7 @@ fn converts_anthropic_stream_apply_patch_to_custom_tool_call() {
 
 #[test]
 fn converts_anthropic_stream_incrementally_across_chunks() {
-    let mut converter = AnthropicSseToResponsesConverter::new();
+    let mut converter = AnthropicSseToResponsesConverter::new("test-session");
 
     let first = converter.push_chunk(
         b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel",
@@ -2460,7 +2492,7 @@ fn converts_responses_stream_apply_patch_to_tool_use() {
 
 #[test]
 fn converts_responses_stream_incrementally_across_chunks() {
-    let mut converter = ResponsesSseToAnthropicConverter::new();
+    let mut converter = ResponsesSseToAnthropicConverter::new("test-session");
 
     let first = converter.push_chunk(
         b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"g\"}}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hel",

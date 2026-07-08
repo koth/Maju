@@ -11,7 +11,6 @@ import {
   X,
 } from "lucide-react";
 import { ModelEntrySelect } from "./ModelEntrySelect";
-import { isMacOS } from "../../lib/platform";
 import type {
   AgentCliId,
   AgentInstallResult,
@@ -27,6 +26,7 @@ import type {
   RemoteMachineProfilesSnapshot,
   RemoteValidationPhaseKind,
   RemoteValidationPhaseStatus,
+  UsageDailyBucket,
   UsageSummaryGroupBy,
   UsageSummaryRow,
   ImageGenerateProtocol,
@@ -70,6 +70,7 @@ import {
   sessionDeleteArchived,
   sessionListArchived,
   sessionUnarchive,
+  usageGetDailySeries,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -660,7 +661,6 @@ export function SettingsPage({
   const [busyClaudeFastModel, setBusyClaudeFastModel] = useState(false);
   const [codebuddyPortDraft, setCodebuddyPortDraft] = useState("17856");
   const [codebuddyApiKeyDraft, setCodebuddyApiKeyDraft] = useState("");
-  const [codebuddyDebug, setCodebuddyDebug] = useState(false);
   const [codebuddyInternetEnv, setCodebuddyInternetEnv] = useState("internal");
   const [codebuddyStatus, setCodebuddyStatus] =
     useState<CodebuddyProxyStatus | null>(null);
@@ -700,6 +700,9 @@ export function SettingsPage({
     useState<UsageWorkspaceScope>("current");
   const [usageIncludeArchived, setUsageIncludeArchived] = useState(false);
   const [usageRows, setUsageRows] = useState<UsageSummaryRow[]>([]);
+  const [usageDailyBuckets, setUsageDailyBuckets] = useState<
+    UsageDailyBucket[]
+  >([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
   const byokProviderMenuRef = useRef<HTMLDivElement>(null);
@@ -783,15 +786,21 @@ export function SettingsPage({
     setUsageError(null);
     try {
       const range = usageDateRangeBounds(usageDateRange);
-      setUsageRows(
-        await usageGetSummary({
-          group_by: usageGroupBy,
-          all_workspaces: usageWorkspaceScope === "all",
-          include_archived: usageIncludeArchived,
-          from: range.from,
-          to: range.to,
-        }),
-      );
+      const summaryRequest = {
+        group_by: usageGroupBy,
+        all_workspaces: usageWorkspaceScope === "all",
+        include_archived: usageIncludeArchived,
+        from: range.from,
+        to: range.to,
+      };
+      // P2: fetch the model summary and the daily series in parallel so the
+      // "每日用量" chart renders real per-day buckets instead of placeholders.
+      const [rows, dailyBuckets] = await Promise.all([
+        usageGetSummary(summaryRequest),
+        usageGetDailySeries(summaryRequest),
+      ]);
+      setUsageRows(rows);
+      setUsageDailyBuckets(dailyBuckets);
     } catch (e) {
       setUsageError(String(e));
     } finally {
@@ -818,7 +827,6 @@ export function SettingsPage({
       const status = await codebuddyProxyStatus();
       setCodebuddyStatus(status);
       if (status) {
-        setCodebuddyDebug(status.debug);
         setCodebuddyInternetEnv(status.internet_environment ?? "internal");
       }
     } catch {
@@ -3067,8 +3075,12 @@ export function SettingsPage({
       (sum, row) => sum + usageTokenTotal(row.tokens),
       0,
     );
-    const totalEvents = usageRows.reduce(
-      (sum, row) => sum + row.event_count,
+    // P5: request_count counts only token-reporting events (TurnDelta +
+    // SessionTotal), excluding ContextSnapshot occupancy-only reports, so the
+    // per-request average and "requests" figures are not diluted by context
+    // telemetry.
+    const totalRequests = usageRows.reduce(
+      (sum, row) => sum + row.request_count,
       0,
     );
     const totalSessions = usageRows.reduce(
@@ -3089,9 +3101,9 @@ export function SettingsPage({
       0,
     );
     const avgTokensPerRequest =
-      totalEvents > 0 ? Math.round(totalTokens / totalEvents) : 0;
+      totalRequests > 0 ? Math.round(totalTokens / totalRequests) : 0;
     const maxRequestsInRows = usageRows.reduce(
-      (max, row) => Math.max(max, row.event_count),
+      (max, row) => Math.max(max, row.request_count),
       0,
     );
     const maxTokensInRows = usageRows.reduce(
@@ -3132,7 +3144,7 @@ export function SettingsPage({
             </div>
             <div className="settings-usage-substats">
               <span>
-                <strong>{totalEvents.toLocaleString("en-US")}</strong> requests
+                <strong>{totalRequests.toLocaleString("en-US")}</strong> requests
               </span>
               <span className="settings-usage-substats-dot" aria-hidden="true">·</span>
               <span>
@@ -3177,8 +3189,8 @@ export function SettingsPage({
                 {formatUsageTokens(avgTokensPerRequest)}
               </div>
               <div className="settings-usage-stat-card-sub">
-                {totalEvents > 0
-                  ? `${totalEvents.toLocaleString("en-US")} in · 1 out`
+                {totalRequests > 0
+                  ? `${totalRequests.toLocaleString("en-US")} in · 1 out`
                   : "尚无请求"}
               </div>
             </article>
@@ -3192,11 +3204,13 @@ export function SettingsPage({
               <div>
                 <div className="settings-usage-daily-chart-title">DAILY USAGE</div>
                 <div className="settings-usage-daily-chart-hint">
-                  占位：后端尚未返回每日时间序列
+                  {usageDailyBuckets.length > 0
+                    ? "近 30 天每日 token 用量（UTC）"
+                    : "暂无每日用量数据"}
                 </div>
               </div>
             </div>
-            <UsageDailyChart usageRows={usageRows} />
+            <UsageDailyChart buckets={usageDailyBuckets} />
           </div>
 
           {showChartAndTable && (
@@ -3218,7 +3232,7 @@ export function SettingsPage({
                   const rowTotal = usageTokenTotal(row.tokens);
                   const requestsFraction =
                     maxRequestsInRows > 0
-                      ? Math.min(1, row.event_count / maxRequestsInRows)
+                      ? Math.min(1, row.request_count / maxRequestsInRows)
                       : 0;
                   const tokensFraction =
                     maxTokensInRows > 0
@@ -3252,7 +3266,7 @@ export function SettingsPage({
                       </th>
                       <td className="settings-usage-model-cell">
                         <div className="settings-usage-model-cell-value">
-                          {formatUsageCount(row.event_count)}
+                          {formatUsageCount(row.request_count)}
                         </div>
                         <div
                           className="settings-usage-row-bar"
@@ -3700,7 +3714,6 @@ export function SettingsPage({
         const nextSnapshot = await settingsSaveCodebuddyConfig(
           port,
           codebuddyApiKeyDraft,
-          codebuddyDebug,
           codebuddyInternetEnv,
         );
           setSnapshot(nextSnapshot);
@@ -3720,16 +3733,13 @@ export function SettingsPage({
         setBusyCodebuddy(true);
         setCodebuddyMessage(null);
         try {
-          // Persist the on-screen draft (port + key + debug) first so the
-          // proxy boots with the toggled debug flag. Otherwise the start
-          // command reads the stale on-disk debug value and never opens the
-          // console window (and if the proxy is already running with that
-          // stale config, ensure_running no-ops).
+          // Persist the on-screen draft (port + key) first so the proxy
+          // boots with the current config. Otherwise, if the proxy is already
+          // running with a stale config, ensure_running no-ops.
           const startPort = parseInt(codebuddyPortDraft, 10) || 17856;
           const savedSnapshot = await settingsSaveCodebuddyConfig(
             startPort,
             codebuddyApiKeyDraft,
-            codebuddyDebug,
             codebuddyInternetEnv,
           );
           setSnapshot(savedSnapshot);
@@ -3868,24 +3878,6 @@ export function SettingsPage({
                       { value: "ioa", label: "内网 (ioa)" },
                     ]}
                   />
-                </label>
-                <label
-                  className="settings-switch settings-codebuddy-switch"
-                  title={
-                    isMacOS()
-                      ? "macOS 暂不支持调试模式（无控制台窗口），请在 Windows 上使用"
-                      : undefined
-                  }
-                >
-                  <input
-                    type="checkbox"
-                    checked={codebuddyDebug}
-                    onChange={(e) => setCodebuddyDebug(e.target.checked)}
-                    disabled={busyCodebuddy || isMacOS()}
-                    aria-label="codebuddy_debug"
-                    aria-disabled={busyCodebuddy || isMacOS()}
-                  />
-                  <span>调试模式（显示控制台窗口 + 详细日志）</span>
                 </label>
               </div>
             </div>
@@ -4569,12 +4561,13 @@ function usageDateRangeBounds(range: UsageDateRange): {
 }
 
 function usageTokenTotal(tokens: UsageSummaryRow["tokens"]): number {
+  // cache_read is a subset of input (cache hits are billed as discounted
+  // input); adding it would double-count. cache_write is null for codex-acp.
+  // Keep cache_read/cache_write as display-only breakdown, not in the total.
   return (
     tokens.total_tokens ??
     (tokens.input_tokens ?? 0) +
       (tokens.output_tokens ?? 0) +
-      (tokens.cache_read_tokens ?? 0) +
-      (tokens.cache_write_tokens ?? 0) +
       (tokens.reasoning_tokens ?? 0)
   );
 }
@@ -4606,7 +4599,7 @@ function usageRowMeta(row: UsageSummaryRow): string {
     row.provider,
     row.workspace_root ? workspaceNameFromRoot(row.workspace_root) : null,
     row.session_count > 0 ? `${row.session_count} 会话` : null,
-    `${row.event_count} 事件`,
+    `${row.request_count} 请求`,
   ].filter(Boolean);
   return parts.join(" · ");
 }
@@ -4648,7 +4641,7 @@ function usageChartColor(index: number): string {
   return USAGE_CHART_PALETTE[index % USAGE_CHART_PALETTE.length];
 }
 
-function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
+function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
   const chartWidth = 720;
   const chartHeight = 220;
   const paddingX = 28;
@@ -4658,22 +4651,63 @@ function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
   const innerWidth = chartWidth - paddingX * 2;
   const innerHeight = chartHeight - paddingTop - paddingBottom;
   const barWidth = innerWidth / dayCount;
-  const yAxisLabels = ["1M", "800M", "600M", "400M", "200M", "0"];
+
+  // P2: index real daily buckets by UTC date for O(1) lookup and derive a
+  // dynamic Y axis from the peak day total instead of hardcoded ticks.
+  const bucketsByDate = new Map<string, UsageDailyBucket>();
+  for (const bucket of buckets) {
+    bucketsByDate.set(bucket.date, bucket);
+  }
   const yAxisFractions = [1, 0.8, 0.6, 0.4, 0.2, 0];
+  const hasData = buckets.length > 0;
   const placeholderHeightFraction = 0.12;
 
-  const labels = usageRows.length > 0
-    ? usageRows.map((row) => row.label || row.model || row.agent_cli || "—")
-    : USAGE_CHART_PLACEHOLDER_MODELS;
-  const colorCount = Math.min(labels.length, USAGE_CHART_PALETTE.length);
-
-  const now = new Date();
-  const dayDates: Date[] = [];
-  for (let i = dayCount - 1; i >= 0; i -= 1) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    dayDates.push(d);
+  // Legend labels: union of per-model labels across all days, sorted by total
+  // desc so the largest model gets the first palette color; fall back to
+  // placeholder models when there is no data.
+  const legendTotals = new Map<string, number>();
+  for (const bucket of buckets) {
+    for (const row of bucket.by_model) {
+      const label = row.label || row.model || row.agent_cli || "—";
+      legendTotals.set(
+        label,
+        (legendTotals.get(label) ?? 0) + usageTokenTotal(row.tokens),
+      );
+    }
   }
+  const labels =
+    legendTotals.size > 0
+      ? [...legendTotals.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([label]) => label)
+      : USAGE_CHART_PLACEHOLDER_MODELS;
+  const colorCount = Math.min(labels.length, USAGE_CHART_PALETTE.length);
+  const colorIndexByLabel = new Map<string, number>();
+  labels.slice(0, colorCount).forEach((label, index) => {
+    colorIndexByLabel.set(label, index);
+  });
+
+  // Build the last `dayCount` UTC days ending today.
+  const now = new Date();
+  const dayDates: { key: string; date: Date }[] = [];
+  for (let i = dayCount - 1; i >= 0; i -= 1) {
+    const d = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i),
+    );
+    const key = `${d.getUTCFullYear()}-${String(
+      d.getUTCMonth() + 1,
+    ).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+    dayDates.push({ key, date: d });
+  }
+
+  const dayTotals = dayDates.map(({ key }) => {
+    const bucket = bucketsByDate.get(key);
+    return bucket ? usageTokenTotal(bucket.tokens) : 0;
+  });
+  const maxTotal = Math.max(1, ...dayTotals);
+  const yAxisLabels = yAxisFractions.map((fraction) =>
+    formatUsageTokens(Math.round(maxTotal * fraction)),
+  );
 
   return (
     <div className="settings-usage-daily-chart-body">
@@ -4681,10 +4715,14 @@ function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
         className="settings-usage-daily-chart-svg"
         viewBox={`0 0 ${chartWidth} ${chartHeight}`}
         role="img"
-        aria-label="每日用量堆叠柱状图（占位）"
+        aria-label={
+          hasData ? "每日用量堆叠柱状图" : "每日用量堆叠柱状图（占位）"
+        }
         preserveAspectRatio="none"
       >
-        <title>占位: 后端尚未返回每日时间序列</title>
+        <title>
+          {hasData ? "近 30 天每日 token 用量" : "占位: 暂无每日用量数据"}
+        </title>
         <defs>
           <pattern
             id="usage-chart-placeholder-pattern"
@@ -4726,17 +4764,61 @@ function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
           );
         })}
 
-        {dayDates.map((date, dayIndex) => {
+        {dayDates.map(({ key, date }, dayIndex) => {
           const x = paddingX + barWidth * dayIndex + barWidth * 0.18;
           const w = barWidth * 0.64;
-          const stackHeight = innerHeight * placeholderHeightFraction * colorCount;
-          const maxStackHeight = innerHeight * 0.6;
-          const finalStackHeight = Math.min(stackHeight, maxStackHeight);
-          let cursorY = paddingTop + innerHeight - finalStackHeight;
+          const bucket = bucketsByDate.get(key);
+          const dayTotal = bucket ? usageTokenTotal(bucket.tokens) : 0;
+          const showDateLabel =
+            dayIndex === 0 ||
+            dayIndex === dayCount - 1 ||
+            dayIndex === Math.floor(dayCount / 2);
+          if (!hasData) {
+            // Empty state: keep the original placeholder stripe visual.
+            const stackHeight =
+              innerHeight * placeholderHeightFraction * colorCount;
+            const maxStackHeight = innerHeight * 0.6;
+            const finalStackHeight = Math.min(stackHeight, maxStackHeight);
+            return (
+              <g key={`day-${dayIndex}`}>
+                <rect
+                  x={x}
+                  y={paddingTop + innerHeight - finalStackHeight}
+                  width={w}
+                  height={finalStackHeight}
+                  fill="url(#usage-chart-placeholder-pattern)"
+                  opacity={0.55}
+                  rx={1.5}
+                />
+                {showDateLabel && (
+                  <text
+                    x={x + w / 2}
+                    y={chartHeight - paddingBottom + 16}
+                    className="settings-usage-daily-chart-axis"
+                    textAnchor="middle"
+                  >
+                    {date.toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                      timeZone: "UTC",
+                    })}
+                  </text>
+                )}
+              </g>
+            );
+          }
+          // Real stacked bar: segments are bottom-up, largest first
+          // (`by_model` is already sorted desc by the backend).
+          const stackHeight = (dayTotal / maxTotal) * innerHeight;
+          let cursorY = paddingTop + innerHeight - stackHeight;
+          const segments = bucket ? bucket.by_model : [];
           return (
             <g key={`day-${dayIndex}`}>
-              {Array.from({ length: colorCount }).map((_, segIndex) => {
-                const segH = finalStackHeight / colorCount;
+              {segments.map((row, segIndex) => {
+                const label =
+                  row.label || row.model || row.agent_cli || "—";
+                const segH =
+                  (usageTokenTotal(row.tokens) / maxTotal) * innerHeight;
                 const y = cursorY;
                 cursorY += segH;
                 return (
@@ -4745,24 +4827,16 @@ function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
                     x={x}
                     y={y}
                     width={w}
-                    height={Math.max(1, segH - 1)}
-                    fill={usageChartColor(segIndex)}
-                    opacity={usageRows.length === 0 ? 0.55 : 0.8}
-                    rx={1.5}
+                    height={Math.max(0, segH - 0.5)}
+                    fill={usageChartColor(
+                      colorIndexByLabel.get(label) ?? 0,
+                    )}
+                    opacity={0.9}
+                    rx={1}
                   />
                 );
               })}
-              <rect
-                x={x}
-                y={paddingTop + innerHeight - finalStackHeight}
-                width={w}
-                height={finalStackHeight}
-                fill="url(#usage-chart-placeholder-pattern)"
-                pointerEvents="none"
-              />
-              {(dayIndex === 0 ||
-                dayIndex === dayCount - 1 ||
-                dayIndex === Math.floor(dayCount / 2)) && (
+              {showDateLabel && (
                 <text
                   x={x + w / 2}
                   y={chartHeight - paddingBottom + 16}
@@ -4772,6 +4846,7 @@ function UsageDailyChart({ usageRows }: { usageRows: UsageSummaryRow[] }) {
                   {date.toLocaleDateString("en-US", {
                     month: "short",
                     day: "numeric",
+                    timeZone: "UTC",
                   })}
                 </text>
               )}

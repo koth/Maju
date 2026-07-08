@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use workspace_model::{
     AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
     SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
-    ToolInvocation, ToolLogEntry, ToolStatus, UsageSummaryRequest, UsageSummaryRow,
-    UserPromptContent,
+    ToolInvocation, ToolLogEntry, ToolStatus, UsageDailyBucket, UsageSummaryRequest,
+    UsageSummaryRow, UserPromptContent,
 };
 
 mod bootstrap;
@@ -492,6 +492,13 @@ impl Application {
 
     pub fn usage_summary(&self, request: UsageSummaryRequest) -> Vec<UsageSummaryRow> {
         self.store.query_usage_summary(request).unwrap_or_default()
+    }
+
+    /// P2: daily usage series for the settings "每日用量" chart.
+    pub fn usage_daily_series(&self, request: UsageSummaryRequest) -> Vec<UsageDailyBucket> {
+        self.store
+            .query_usage_daily_series(request)
+            .unwrap_or_default()
     }
 
     #[cfg(test)]

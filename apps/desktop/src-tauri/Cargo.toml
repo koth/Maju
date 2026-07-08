@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 acp-core = { path = "../../../crates/acp-core" }
+codebuddy-proxy = { path = "../../../crates/codebuddy-proxy" }
 anyhow.workspace = true
 app-core = { path = "../../../crates/app-core" }
 git-service = { path = "../../../crates/git-service" }

@@ -91,6 +91,9 @@ vi.mock("../../lib/tauri", async () => {
     settingsSaveLspServer: vi.fn(),
     settingsResetLspServer: vi.fn(),
     usageGetSummary: vi.fn(),
+    // P2: default to an empty daily series so the usage dashboard renders
+    // without real Tauri `invoke` calls in tests.
+    usageGetDailySeries: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -2396,6 +2399,7 @@ describe("SettingsPage LSP settings", () => {
         },
         context_peak_tokens: 128000,
         event_count: 3,
+        request_count: 3,
         session_count: 2,
       },
     ]);
@@ -2427,7 +2431,7 @@ describe("SettingsPage LSP settings", () => {
     expect(within(dashboard).getByText("COMPLETION")).toBeInTheDocument();
     expect(within(dashboard).getByText("AVG TOKEN")).toBeInTheDocument();
     expect(within(dashboard).getByText("24H REQ")).toBeInTheDocument();
-    expect(within(dashboard).getByText("占位：后端尚未返回每日时间序列")).toBeInTheDocument();
+    expect(within(dashboard).getByText("暂无每日用量数据")).toBeInTheDocument();
     expect(within(dashboard).getByText("REQUESTS")).toBeInTheDocument();
     expect(within(dashboard).getByText("LATENCY")).toBeInTheDocument();
     expect(within(dashboard).getByText("TTFT")).toBeInTheDocument();
@@ -2447,6 +2451,7 @@ describe("SettingsPage LSP settings", () => {
         tokens: {},
         context_peak_tokens: 64000,
         event_count: 1,
+        request_count: 0,
         session_count: 1,
       },
     ]);
@@ -2482,6 +2487,7 @@ describe("SettingsPage LSP settings", () => {
         },
         context_peak_tokens: 128000,
         event_count: 3,
+        request_count: 3,
         session_count: 2,
       },
       {
@@ -2498,6 +2504,7 @@ describe("SettingsPage LSP settings", () => {
         },
         context_peak_tokens: 64000,
         event_count: 1,
+        request_count: 1,
         session_count: 1,
       },
     ]);

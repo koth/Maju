@@ -130,6 +130,36 @@ mod tests {
     }
 
     #[test]
+    fn send_prompt_background_clears_current_turn_usage_before_first_token_count() {
+        // P3: a new turn must reset the "本轮" dock figure so stale usage from
+        // the previous turn does not leak into the dock before the first
+        // TokenCount of the new turn arrives.
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+
+        // Seed a previous turn's token breakdown.
+        app.ui.usage.current_turn = workspace_model::UsageTokenBreakdown {
+            input_tokens: Some(100),
+            output_tokens: Some(30),
+            total_tokens: Some(180),
+            ..Default::default()
+        };
+        assert_eq!(app.ui.usage.current_turn.total_tokens, Some(180));
+
+        // Starting a new background prompt must clear current_turn synchronously,
+        // before any TokenCount from the agent arrives.
+        app.send_prompt_background("next turn").unwrap();
+        assert!(app.ui.usage.current_turn.total_tokens.is_none());
+        assert!(app.ui.usage.current_turn.input_tokens.is_none());
+        assert!(app.ui.usage.current_turn.output_tokens.is_none());
+
+        // Drain the in-flight prompt so the test does not leave a dangling task.
+        while app.has_in_flight_prompt() {
+            app.poll_prompt_progress();
+        }
+    }
+
+    #[test]
     fn lightweight_ui_update_emits_full_then_incremental_patches() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);

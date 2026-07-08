@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
@@ -19,16 +19,19 @@ use legacy::{
     legacy_agent_turn_id, legacy_records_from_session_changes, summarize_change_records,
 };
 use util::{
-    cap_string, decode_json_vec, normalize_change_path, normalize_workspace_root, now_iso,
-    parse_instant_to_epoch_secs, upsert_loaded_change,
+    cap_string, decode_json_vec, instant_to_date_utc, normalize_change_path,
+    normalize_workspace_root, now_iso, parse_instant_to_epoch_secs, upsert_loaded_change,
 };
+// Re-export the display timestamp helpers so app-core can produce ISO-8601
+// without duplicating the calendar algorithm; storage stays epoch-seconds.
+pub use util::{epoch_secs_to_iso_utc, instant_to_iso_utc};
 use workspace_model::{
     ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
     FileChangeRecord, FileChangeSummary, FileChangeType, MessageRole, SessionFileChange,
     SessionListItem, SessionUsageSnapshot, TimelineItem, ToolDiffPreview, ToolInvocation,
-    ToolStatus, TurnFileChanges, UsageContextSnapshot, UsageEvent, UsageEventScope,
-    UsageModelSummary, UsageSummaryGroupBy, UsageSummaryRequest, UsageSummaryRow,
-    UsageTokenBreakdown,
+    ToolStatus, TurnFileChanges, UsageContextSnapshot, UsageDailyBucket, UsageEvent,
+    UsageEventScope, UsageModelSummary, UsageSummaryGroupBy, UsageSummaryRequest,
+    UsageSummaryRow, UsageTokenBreakdown,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
@@ -901,7 +904,17 @@ impl SessionStore {
         } else {
             self.workspace_root.clone()
         };
-        let created_at = event.timestamp.clone().unwrap_or_else(now_iso);
+        // Store `created_at` as epoch-seconds (the storage format) even when
+        // `event.timestamp` is ISO-8601 (as the reducer now produces for
+        // display). Parsing to epoch seconds keeps `CAST(created_at AS INTEGER)`
+        // date filters and `ORDER BY created_at` working without a data
+        // migration; epoch-seconds timestamps pass through unchanged.
+        let created_at = event
+            .timestamp
+            .as_deref()
+            .and_then(parse_instant_to_epoch_secs)
+            .map(|secs| secs.to_string())
+            .unwrap_or_else(now_iso);
         let model = event
             .model
             .as_deref()
@@ -965,6 +978,21 @@ impl SessionStore {
     ) -> Result<Vec<UsageSummaryRow>> {
         let events = self.load_usage_events_for_summary(&request)?;
         Ok(usage_summary_from_events(&events, request.group_by))
+    }
+
+    /// P2: real daily usage series for the settings "每日用量" chart. Loads the
+    /// same filtered event set as [`query_usage_summary`] (so workspace,
+    /// archived, date-range and non-reporting-agent filters all apply), then
+    /// buckets events by UTC calendar day. Within each day, per-model rows are
+    /// aggregated with the same `SessionTotal`-overwrites /
+    /// `TurnDelta`-accumulates rules as the cross-session summary, producing
+    /// stackable `by_model` segments plus a day-total breakdown.
+    pub fn query_usage_daily_series(
+        &self,
+        request: UsageSummaryRequest,
+    ) -> Result<Vec<UsageDailyBucket>> {
+        let events = self.load_usage_events_for_summary(&request)?;
+        Ok(usage_daily_series_from_events(&events))
     }
 
     fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
@@ -2049,7 +2077,10 @@ fn stored_usage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stor
         context: UsageContextSnapshot {
             used_tokens: opt_u64(row.get::<_, Option<i64>>(13)?),
             window_tokens: opt_u64(row.get::<_, Option<i64>>(14)?),
-            updated_at: Some(created_at.clone()),
+            // Display boundary: normalize the epoch-seconds storage value to
+            // ISO-8601 UTC so the dock shows a readable time. Live events
+            // already carry ISO via the reducer's `now_iso_utc`.
+            updated_at: Some(instant_to_iso_utc(&created_at)),
         },
         created_at,
     })
@@ -2094,9 +2125,17 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
             // `update_usage_summary_row`.
             UsageEventScope::ContextSnapshot => {}
         }
+        // P7: pass an explicit model key instead of relying on the
+        // `explicit_key = None` fallback, so the single-session snapshot and
+        // the cross-session summary build the key through the same helper.
+        let model_key = usage_model_key_from_fields(
+            event.model.as_deref(),
+            event.provider.as_deref(),
+            event.agent_cli.as_deref(),
+        );
         update_usage_summary_row(
             &mut snapshot.by_model,
-            None,
+            Some(&model_key),
             event.model.clone().or_else(|| Some("Unknown model".into())),
             event.model.clone(),
             event.provider.clone(),
@@ -2123,6 +2162,20 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
                 .then(|| e.tokens.total_tokens)
                 .flatten())
     {
+        // P6: this branch only fires for sessions persisted by older Kodex
+        // builds that mislabelled a single-total payload as
+        // `context_snapshot`. The surfaced total may be stale; emit a debug
+        // line so the fallback is observable while those legacy rows still
+        // exist (a one-time migration to relabel them would let us drop this
+        // branch entirely).
+        let sid = events
+            .first()
+            .map(|event| event.session_id.as_str())
+            .unwrap_or("?");
+        eprintln!(
+            "[kodex/usage] session {sid} has only a legacy context_snapshot total ({total}); \
+             no SessionTotal/TurnDelta events were persisted — figure may be stale"
+        );
         snapshot.session_total.total_tokens = Some(total);
     }
 
@@ -2237,6 +2290,68 @@ fn usage_summary_from_events(
     rows
 }
 
+/// P2: bucket usage events into UTC calendar days. Each bucket carries a
+/// per-model breakdown (reusing [`update_usage_summary_row`] so the
+/// `SessionTotal`-overwrites / `TurnDelta`-accumulates rules apply per day)
+/// and a day-total breakdown whose `total_tokens` is the sum of each
+/// per-model row's effective total. Days with no parseable timestamp are
+/// skipped. `BTreeMap` keeps buckets sorted by date ascending.
+fn usage_daily_series_from_events(events: &[StoredUsageEvent]) -> Vec<UsageDailyBucket> {
+    let mut events_by_date: BTreeMap<String, Vec<&StoredUsageEvent>> = BTreeMap::new();
+    for event in events {
+        let Some(date) = instant_to_date_utc(&event.created_at) else {
+            continue;
+        };
+        events_by_date.entry(date).or_default().push(event);
+    }
+    let mut buckets = Vec::with_capacity(events_by_date.len());
+    for (date, day_events) in events_by_date {
+        let mut by_model = Vec::<UsageModelSummary>::new();
+        for event in &day_events {
+            let label = event
+                .model
+                .clone()
+                .or_else(|| event.agent_cli.clone())
+                .unwrap_or_else(|| "Unknown model".into());
+            // `explicit_key = None` + `session_id = None` keys rows by
+            // `model:provider:agent_cli` (see `usage_summary_key_by_values`),
+            // collapsing same-model events within the day.
+            update_usage_summary_row(
+                &mut by_model,
+                None,
+                Some(label),
+                event.model.clone(),
+                event.provider.clone(),
+                event.agent_cli.clone(),
+                None,
+                None,
+                event,
+            );
+        }
+        let mut tokens = UsageTokenBreakdown::default();
+        let mut day_total: u64 = 0;
+        for row in &by_model {
+            add_usage_tokens(&mut tokens, &row.tokens);
+            day_total = day_total.saturating_add(usage_total_tokens(&row.tokens));
+        }
+        // Override the summed `total_tokens` with the sum of each row's
+        // *effective* total so rows that only carried component tokens (no
+        // authoritative `total_tokens`) still count toward the day total.
+        tokens.total_tokens = Some(day_total);
+        by_model.sort_by(|a, b| {
+            usage_total_tokens(&b.tokens)
+                .cmp(&usage_total_tokens(&a.tokens))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+        buckets.push(UsageDailyBucket {
+            date,
+            tokens,
+            by_model,
+        });
+    }
+    buckets
+}
+
 fn update_usage_summary_row(
     rows: &mut Vec<UsageModelSummary>,
     explicit_key: Option<&str>,
@@ -2249,12 +2364,7 @@ fn update_usage_summary_row(
     event: &StoredUsageEvent,
 ) {
     let key = explicit_key.map(str::to_string).unwrap_or_else(|| {
-        format!(
-            "model:{}:{}:{}",
-            model.as_deref().unwrap_or(""),
-            provider.as_deref().unwrap_or(""),
-            agent_cli.as_deref().unwrap_or("")
-        )
+        usage_model_key_from_fields(model.as_deref(), provider.as_deref(), agent_cli.as_deref())
     });
     let index = rows.iter().position(|row| usage_row_matches_key(row, &key));
     let row = if let Some(index) = index {
@@ -2268,6 +2378,7 @@ fn update_usage_summary_row(
             session_id,
             workspace_root,
             event_count: 0,
+            request_count: 0,
             session_count: 1,
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
@@ -2278,12 +2389,32 @@ fn update_usage_summary_row(
     };
 
     row.event_count += 1;
-    row.latest_at = Some(
-        row.latest_at
-            .as_ref()
-            .map(|latest| latest.max(&event.created_at).clone())
-            .unwrap_or_else(|| event.created_at.clone()),
-    );
+    // P5: only TurnDelta / SessionTotal represent an actual token-reporting
+    // request; ContextSnapshot is occupancy-only telemetry.
+    if matches!(
+        event.scope,
+        UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
+    ) {
+        row.request_count += 1;
+    }
+    // `latest_at` is stored as canonical ISO-8601 UTC (via `instant_to_iso_utc`)
+    // so the cross-session sort in `usage_summary_from_events` can compare
+    // strings safely. The "latest" pick itself compares numeric epoch seconds
+    // so it stays correct even while a session's rows transition from legacy
+    // epoch-seconds storage to ISO.
+    let event_at = instant_to_iso_utc(&event.created_at);
+    row.latest_at = Some(match row.latest_at.as_ref() {
+        Some(latest) => {
+            let latest_secs = parse_instant_to_epoch_secs(latest).unwrap_or(i64::MIN);
+            let event_secs = parse_instant_to_epoch_secs(&event.created_at).unwrap_or(i64::MIN);
+            if event_secs >= latest_secs {
+                event_at
+            } else {
+                latest.clone()
+            }
+        }
+        None => event_at,
+    });
     if let Some(used) = event.context.used_tokens {
         row.context_peak_tokens = Some(row.context_peak_tokens.unwrap_or(0).max(used));
     }
@@ -2333,15 +2464,38 @@ fn usage_summary_key(row: &UsageSummaryRow, group_by: &UsageSummaryGroupBy) -> S
     }
 }
 
+/// Build the model-keyed aggregation key (`model:provider:agent_cli`) from
+/// individual fields. This is the single source of truth for that key shape:
+/// [`update_usage_summary_row`]'s `explicit_key = None` fallback and the
+/// single-session snapshot path both route through here so the two paths
+/// cannot drift.
+fn usage_model_key_from_fields(
+    model: Option<&str>,
+    provider: Option<&str>,
+    agent_cli: Option<&str>,
+) -> String {
+    format!(
+        "model:{}:{}:{}",
+        model.unwrap_or(""),
+        provider.unwrap_or(""),
+        agent_cli.unwrap_or("")
+    )
+}
+
 fn usage_summary_key_by_values(row: &UsageSummaryRow) -> String {
+    // Defensive fallback: if a row already carries a session id, key it by
+    // session so it is never silently merged into a model group. In practice
+    // every call site that matches via a `model:` key creates rows with
+    // `session_id = None`, so this branch is only hit by legacy/defensive
+    // paths; the authoritative per-session key is built explicitly in
+    // `usage_summary_from_events` (`session:{id}`).
     if row.session_id.is_some() {
         return format!("session:{}", row.session_id.as_deref().unwrap_or(""));
     }
-    format!(
-        "model:{}:{}:{}",
-        row.model.as_deref().unwrap_or(""),
-        row.provider.as_deref().unwrap_or(""),
-        row.agent_cli.as_deref().unwrap_or("")
+    usage_model_key_from_fields(
+        row.model.as_deref(),
+        row.provider.as_deref(),
+        row.agent_cli.as_deref(),
     )
 }
 
@@ -2386,11 +2540,15 @@ fn add_optional_u64(target: &mut Option<u64>, delta: Option<u64>) {
 }
 
 fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {
+    // `cache_read_tokens` is a subset of `input_tokens` (cache hits are billed
+    // as discounted input), and `cache_write_tokens` is null for codex-acp.
+    // Adding either to the fallback would double-count the same input tokens.
+    // `cache_read_tokens` / `cache_write_tokens` remain as display-only
+    // breakdown fields; the authoritative `total_tokens` is preferred when
+    // present, otherwise fall back to input + output + reasoning.
     tokens.total_tokens.unwrap_or_else(|| {
         tokens.input_tokens.unwrap_or(0)
             + tokens.output_tokens.unwrap_or(0)
-            + tokens.cache_read_tokens.unwrap_or(0)
-            + tokens.cache_write_tokens.unwrap_or(0)
             + tokens.reasoning_tokens.unwrap_or(0)
     })
 }

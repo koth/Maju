@@ -49,8 +49,7 @@
     ],
       "resources": {
         "resources/codex-acp/*": "bundled-codex-acp/",
-        "resources/claude-agent-acp": "bundled-claude-agent-acp",
-        "resources/codebuddy-proxy/*": "bundled-codebuddy-proxy/"
+        "resources/claude-agent-acp": "bundled-claude-agent-acp"
       },
     "windows": {
       "nsis": {

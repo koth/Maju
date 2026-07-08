@@ -124,8 +124,22 @@ struct ProxyProviderConfig {
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
 static CODEX_API_PROXY_RUNNING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static CODEX_API_PROXY_PORT: OnceLock<Arc<RwLock<u16>>> = OnceLock::new();
-static DEEPSEEK_REASONING_HISTORY: OnceLock<Arc<RwLock<Vec<ReasoningHistoryEntry>>>> =
+/// DeepSeek reasoning history, **partitioned by session id** so concurrent
+/// requests for different sessions cannot cross-contaminate each other's
+/// `reasoning_content`. The previous design used a single shared `Vec` keyed
+/// only by assistant text/tool-call signature; two concurrent sessions with
+/// similar agent phrasing would match each other's entries and inject the
+/// wrong reasoning into the next turn. Each session now owns an isolated
+/// bucket.
+static DEEPSEEK_REASONING_HISTORY: OnceLock<Arc<RwLock<BTreeMap<String, Vec<ReasoningHistoryEntry>>>>> =
     OnceLock::new();
+
+/// Sentinel session id used when no session id is available (e.g. legacy
+/// callers that never sent the `session-id` header). Requests that fall back
+/// to a provider-scoped id already carry a stable value; this constant is only
+/// for paths where we truly cannot determine a session, so they are isolated
+/// under a single bucket rather than the global one.
+const REASONING_HISTORY_ANONYMOUS_SESSION: &str = "__anonymous__";
 
 #[derive(Debug, Clone)]
 struct ReasoningHistoryEntry {
@@ -545,9 +559,7 @@ async fn proxy_codex_api_request(
         // Forward the ACP session id so codebuddy proxy can map it to a
         // persistent SDK session. Fall back to a provider-scoped id when
         // codex-acp did not send the header.
-        let session_id = acp_session_id
-            .clone()
-            .unwrap_or_else(|| ensure_session_id_for_proxy_provider(&config_arc, &provider));
+        let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id);
         append_codex_api_proxy_log(&format!(
             "session_id_for_provider provider={} session_id={} acp={}",
             provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
@@ -562,7 +574,10 @@ async fn proxy_codex_api_request(
         )
         .await;
     }
-    let chat_payload = match responses_payload_to_chat_payload(payload, &provider) {
+    // Resolve the session id once for the whole request so reasoning-history
+    // lookups stay scoped to this session (deepseek/timiai-deepseek compat).
+    let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id);
+    let chat_payload = match responses_payload_to_chat_payload(payload, &provider, &session_id) {
         Ok(payload) => payload,
         Err(error) => {
             append_codex_api_proxy_log(&format!("responses_to_chat_error error={error}"));
@@ -573,12 +588,11 @@ async fn proxy_codex_api_request(
             ));
         }
     };
-    let chat_payload = normalize_chat_payload_for_provider(chat_payload, &provider);
+    let chat_payload =
+        normalize_chat_payload_for_provider(chat_payload, &provider, &session_id);
     if normalize_proxy_provider(&provider) == "timiai" {
         log_chat_payload_summary("timiai_chat_completions_request", &chat_payload);
-        let session_id = acp_session_id
-            .clone()
-            .unwrap_or_else(|| session_id_for_proxy_provider(&config, &provider));
+        // session_id already resolved above; reuse it.
         return proxy_chat_completions_codex_responses_request(
             chat_payload,
             &api_key,
@@ -596,13 +610,12 @@ async fn proxy_codex_api_request(
         _ => {}
     }
     if provider == "kimi_code" {
-        return proxy_kimi_codex_api_request(chat_payload, &api_key, requested_stream).await;
+        return proxy_kimi_codex_api_request(chat_payload, &api_key, requested_stream, &session_id)
+            .await;
     }
     let upstream_url = upstream_chat_completions_url(&provider);
 
-    let session_id = acp_session_id
-        .clone()
-        .unwrap_or_else(|| ensure_session_id_for_proxy_provider(&config_arc, &provider));
+    // session_id already resolved above; reuse it.
     append_codex_api_proxy_log(&format!(
         "session_id_for_provider provider={} session_id={} acp={}",
         provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
@@ -632,26 +645,32 @@ async fn proxy_custom_codex_responses_request(
                 .await
         }
         ProxyProviderProtocol::ChatCompletions => {
-            let chat_payload = responses_payload_to_chat_payload(payload, provider)?;
-            let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
+            let session_id = session_id.unwrap_or_default();
+            let chat_payload =
+                responses_payload_to_chat_payload(payload, provider, &session_id)?;
+            let chat_payload =
+                normalize_chat_payload_for_provider(chat_payload, provider, &session_id);
             proxy_chat_completions_codex_responses_request(
                 chat_payload,
                 api_key,
                 provider,
                 &custom_config.base_url,
                 requested_stream,
-                session_id,
+                Some(&session_id),
             )
             .await
         }
         ProxyProviderProtocol::AnthropicMessages => {
-            let chat_payload = responses_payload_to_chat_payload(payload, provider)?;
+            let session_id = session_id.unwrap_or_default();
+            let chat_payload =
+                responses_payload_to_chat_payload(payload, provider, &session_id)?;
             proxy_anthropic_messages_codex_responses_request(
                 chat_payload,
                 api_key,
                 provider,
                 &custom_config.base_url,
                 requested_stream,
+                &session_id,
             )
             .await
         }
@@ -709,6 +728,7 @@ async fn proxy_anthropic_messages_codex_responses_request(
     provider: &str,
     upstream_url: &str,
     requested_stream: bool,
+    session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let anthropic_payload =
         chat_payload_to_anthropic_payload(chat_payload, requested_stream);
@@ -737,7 +757,7 @@ async fn proxy_anthropic_messages_codex_responses_request(
             "codex_stream_convert provider={} upstream=anthropic_messages downstream=responses",
             normalize_proxy_provider(provider)
         ));
-        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status));
+        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status, session_id));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -810,7 +830,7 @@ async fn proxy_chat_completions_codex_responses_request(
             append_codex_api_proxy_log(&format!(
                 "codex_stream_convert provider={provider} upstream=chat_completions downstream=responses"
             ));
-            return Ok(streaming_chat_sse_response(upstream, status));
+            return Ok(streaming_chat_sse_response(upstream, status, session_id.unwrap_or_default()));
         }
         return Ok(streaming_passthrough_response(
             upstream,
@@ -823,7 +843,8 @@ async fn proxy_chat_completions_codex_responses_request(
     let mut response_content_type = content_type.clone();
     let body = if status.is_success() {
         let chat_response: Value = serde_json::from_slice(body.as_ref())?;
-        let response = chat_response_to_responses_response(chat_response)?;
+        let response =
+            chat_response_to_responses_response(chat_response, session_id.unwrap_or_default())?;
         if requested_stream {
             response_content_type = "text/event-stream".to_string();
             responses_response_to_sse(&response)
@@ -1032,6 +1053,7 @@ async fn proxy_custom_anthropic_messages_request(
                 api_key,
                 provider,
                 &custom_config.base_url,
+                session_id,
             )
             .await
         }
@@ -1043,6 +1065,7 @@ async fn proxy_responses_to_anthropic_messages_request(
     api_key: &str,
     provider: &str,
     upstream_url: &str,
+    session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let requested_stream = payload
         .get("stream")
@@ -1069,7 +1092,7 @@ async fn proxy_responses_to_anthropic_messages_request(
             "anthropic_stream_convert provider={} upstream=responses downstream=anthropic_messages",
             normalize_proxy_provider(provider)
         ));
-        return Ok(streaming_responses_sse_to_anthropic_response(upstream, status));
+        return Ok(streaming_responses_sse_to_anthropic_response(upstream, status, session_id));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -1263,8 +1286,8 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
         .get("stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let chat_payload = anthropic_payload_to_chat_payload(payload);
-    let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider);
+    let chat_payload = anthropic_payload_to_chat_payload(payload, session_id);
+    let chat_payload = normalize_chat_payload_for_provider(chat_payload, provider, session_id);
     log_chat_payload_summary(
         &format!(
             "{}_anthropic_chat_bridge_request",
@@ -1300,7 +1323,7 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
         .unwrap_or("application/json")
         .to_string();
     if is_event_stream(&content_type) {
-        return Ok(streaming_chat_sse_to_anthropic_response(upstream, status));
+        return Ok(streaming_chat_sse_to_anthropic_response(upstream, status, session_id));
     }
 
     let body = upstream.bytes().await?;
@@ -1357,19 +1380,41 @@ fn ensure_session_id_for_proxy_provider(
     config: &Arc<RwLock<CodexApiProxyConfig>>,
     provider: &str,
 ) -> String {
-    let config_guard = config.read().unwrap_or_else(|e| e.into_inner());
-    if let Some(id) = config_guard.session_ids.get(provider) {
+    // Single write-locked critical section. The previous implementation did
+    // read → drop → write, which left a window where two concurrent requests
+    // for the same provider could both observe "no session id", each
+    // generate a fresh UUID, and only one would survive the `or_insert`.
+    // The losing caller would then send a *different* session id upstream
+    // than the one that actually got persisted, splitting a multi-turn
+    // conversation into two upstream sessions. `entry().or_insert_with`
+    // makes the check-and-set atomic under one lock, so every caller that
+    // enters this function returns the value that ends up persisted.
+    let Ok(mut guard) = config.write() else {
+        // If the lock is poisoned we still want a deterministic id rather
+        // than a panic that would 500 the request.
+        return uuid::Uuid::new_v4().to_string();
+    };
+    guard
+        .session_ids
+        .entry(provider.to_string())
+        .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+        .clone()
+}
+
+/// Resolve the session id to use for a proxy request, preferring the ACP
+/// session id forwarded by codex-acp (which is per-conversation) and falling
+/// back to a provider-scoped persistent id. Centralizing this keeps the
+/// reasoning-history bucket keyed consistently across a request's remember
+/// and lookup phases.
+fn resolved_proxy_session_id(
+    config: &Arc<RwLock<CodexApiProxyConfig>>,
+    provider: &str,
+    acp_session_id: &Option<String>,
+) -> String {
+    if let Some(id) = acp_session_id.as_ref().filter(|s| !s.trim().is_empty()) {
         return id.clone();
     }
-    drop(config_guard);
-    let new_id = uuid::Uuid::new_v4().to_string();
-    if let Ok(mut guard) = config.write() {
-        guard
-            .session_ids
-            .entry(provider.to_string())
-            .or_insert(new_id.clone());
-    }
-    new_id
+    ensure_session_id_for_proxy_provider(config, provider)
 }
 fn normalize_native_anthropic_payload(mut payload: Value, provider: &str) -> Value {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
@@ -1499,6 +1544,7 @@ async fn proxy_kimi_codex_api_request(
     chat_payload: Value,
     api_key: &str,
     requested_stream: bool,
+    session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let anthropic_payload =
         chat_payload_to_anthropic_payload(chat_payload, requested_stream);
@@ -1524,9 +1570,9 @@ async fn proxy_kimi_codex_api_request(
         .to_string();
     if is_event_stream(&content_type) && status.is_success() {
         append_codex_api_proxy_log(
-            "codex_stream_convert provider=kimi_code upstream=anthropic_messages downstream=responses",
+           "codex_stream_convert provider=kimi_code upstream=anthropic_messages downstream=responses",
         );
-        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status));
+        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status, session_id));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -1553,7 +1599,11 @@ async fn proxy_kimi_codex_api_request(
     Ok(response)
 }
 
-fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::Result<Value> {
+fn responses_payload_to_chat_payload(
+    payload: Value,
+    provider: &str,
+    session_id: &str,
+) -> anyhow::Result<Value> {
     let mut messages = Vec::new();
     let instructions = payload
         .get("instructions")
@@ -1578,8 +1628,10 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
                     continue;
                 }
                 flush_pending_tool_calls(&mut messages, &mut pending_tool_calls);
-                if let Some(message) = responses_input_item_to_chat_message(item, provider)? {
-                    messages.push(message);
+                if let Some(message) =
+                    responses_input_item_to_chat_message(item, provider, session_id)?
+                {
+                    push_or_coalesce_message(&mut messages, message);
                 }
             }
             flush_pending_tool_calls(&mut messages, &mut pending_tool_calls);
@@ -1641,7 +1693,11 @@ fn responses_payload_to_chat_payload(payload: Value, provider: &str) -> anyhow::
     Ok(chat)
 }
 
-fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Value {
+fn normalize_chat_payload_for_provider(
+    mut payload: Value,
+    provider: &str,
+    session_id: &str,
+) -> Value {
     payload = normalize_chat_completion_model(payload, provider);
     if !chat_payload_needs_deepseek_reasoning_compat(&payload, provider) {
         return payload;
@@ -1659,7 +1715,7 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
                 .get("reasoning_content")
                 .and_then(Value::as_str)
                 .is_none_or(|value| value.trim().is_empty())
-                && reasoning_content_for_assistant_message(message).is_none()
+                && reasoning_content_for_assistant_message(session_id, message).is_none()
         })
         .count();
     if missing_tool_reasoning > 0 {
@@ -1693,8 +1749,8 @@ fn normalize_chat_payload_for_provider(mut payload: Value, provider: &str) -> Va
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(reasoning_content) = reasoning_content_for_assistant_message(message)
-            .or_else(|| reasoning_content_for_text(content))
+        if let Some(reasoning_content) = reasoning_content_for_assistant_message(session_id, message)
+            .or_else(|| reasoning_content_for_text(session_id, content))
         {
             message["reasoning_content"] = Value::String(reasoning_content);
         }
@@ -1743,16 +1799,126 @@ fn flush_pending_tool_calls(messages: &mut Vec<Value>, pending_tool_calls: &mut 
     if pending_tool_calls.is_empty() {
         return;
     }
+    let tool_calls = std::mem::take(pending_tool_calls);
+    // Merge the pending tool calls into the previous message when it is an
+    // assistant message that does not already carry tool_calls. This keeps an
+    // assistant text turn and the function calls it emitted as a single
+    // assistant message, which the Anthropic Messages API requires (no two
+    // adjacent assistant messages) and which avoids splitting one logical
+    // assistant turn into text + tool_calls pairs.
+    if let Some(last) = messages.last_mut() {
+        let is_assistant_without_tool_calls = last
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| role == "assistant")
+            && last
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_none();
+        if is_assistant_without_tool_calls {
+            last["tool_calls"] = Value::Array(tool_calls);
+            return;
+        }
+    }
     messages.push(json!({
         "role": "assistant",
         "content": Value::Null,
-        "tool_calls": std::mem::take(pending_tool_calls)
+        "tool_calls": tool_calls
     }));
+}
+
+/// Append a chat message, coalescing it into the previous message when both
+/// are assistant turns. The Responses-API history can carry several adjacent
+/// assistant items (e.g. multiple text segments, or a text turn followed by
+/// function calls already merged by `flush_pending_tool_calls`); collapsing
+/// them into a single assistant message keeps the OpenAI Chat Completions
+/// payload well-formed (no two adjacent assistant messages) and preserves all
+/// text so nothing is dropped.
+fn push_or_coalesce_message(messages: &mut Vec<Value>, message: Value) {
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+    if role == "assistant" {
+        if let Some(last) = messages.last_mut() {
+            let last_is_assistant = last
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r == "assistant");
+            if last_is_assistant {
+                merge_assistant_content(last, &message);
+                return;
+            }
+        }
+    }
+    messages.push(message);
+}
+
+/// Merge `incoming` assistant content/tool_calls into `last`. Text content is
+/// concatenated (separated by a newline when both sides have non-empty text),
+/// and tool_calls arrays are appended.
+fn merge_assistant_content(last: &mut Value, incoming: &Value) {
+    // tool_calls: append incoming into last.
+    if let Some(incoming_calls) = incoming.get("tool_calls").and_then(Value::as_array).cloned() {
+        if !incoming_calls.is_empty() {
+            let existing = last
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut merged = existing;
+            merged.extend(incoming_calls);
+            last["tool_calls"] = Value::Array(merged);
+        }
+    }
+    // content: concatenate text.
+    let last_text = text_content_of(last.get("content"));
+    let incoming_text = text_content_of(incoming.get("content"));
+    if !incoming_text.is_empty() {
+        let combined = if last_text.is_empty() {
+            incoming_text
+        } else {
+            format!("{last_text}\n{incoming_text}")
+        };
+        last["content"] = Value::String(combined);
+    } else if last_text.is_empty() && last.get("content").is_some() {
+        // Neither side has text; keep content as null to stay consistent with
+        // an assistant message that only carries tool_calls.
+        last["content"] = Value::Null;
+    }
+    // reasoning_content: keep last's if present, else take incoming's.
+    if last.get("reasoning_content").is_none()
+        || last
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.is_empty())
+    {
+        if let Some(rc) = incoming.get("reasoning_content") {
+            last["reasoning_content"] = rc.clone();
+        }
+    }
+}
+
+/// Best-effort extraction of plain text from a chat message `content` field
+/// (string or array of content parts).
+fn text_content_of(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| part.as_str().map(ToOwned::to_owned))
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
 }
 
 fn responses_input_item_to_chat_message(
     item: &Value,
     provider: &str,
+    session_id: &str,
 ) -> anyhow::Result<Option<Value>> {
     let item_type = item
         .get("type")
@@ -1785,7 +1951,7 @@ fn responses_input_item_to_chat_message(
             });
             if role == "assistant" {
                 if let Some(reasoning_content) =
-                    reasoning_content.or_else(|| reasoning_content_for_text(&content_text))
+                    reasoning_content.or_else(|| reasoning_content_for_text(session_id, &content_text))
                 {
                     message["reasoning_content"] = Value::String(reasoning_content);
                 }
@@ -1806,7 +1972,7 @@ fn responses_input_item_to_chat_message(
             })))
         }
         _ => {
-            let fallback = fallback_input_item_to_chat_message(item, provider);
+            let fallback = fallback_input_item_to_chat_message(item, provider, session_id);
             append_codex_api_proxy_log(&format!(
                 "unsupported_responses_input_item type={item_type} recovered={}",
                 fallback.is_some()
@@ -1847,7 +2013,7 @@ fn responses_tool_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> 
     }))
 }
 
-fn fallback_input_item_to_chat_message(item: &Value, provider: &str) -> Option<Value> {
+fn fallback_input_item_to_chat_message(item: &Value, provider: &str, session_id: &str) -> Option<Value> {
     let role = match item.get("role").and_then(Value::as_str).unwrap_or("user") {
         "developer" => "system",
         "assistant" => "assistant",
@@ -1869,7 +2035,7 @@ fn fallback_input_item_to_chat_message(item: &Value, provider: &str) -> Option<V
             .and_then(Value::as_str)
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty())
-            .or_else(|| reasoning_content_for_text(&content_text))
+            .or_else(|| reasoning_content_for_text(session_id, &content_text))
         {
             message["reasoning_content"] = Value::String(reasoning_content);
         }
@@ -2104,10 +2270,58 @@ fn add_non_gpt_edit_bridge_instructions(chat: Value) -> Value {
     add_system_instruction(chat, NON_GPT_EDIT_BRIDGE_INSTRUCTIONS)
 }
 
+/// Convert an OpenAI Chat Completions `tool_choice` to the Anthropic Messages
+/// `tool_choice` shape. OpenAI uses string modes ("auto", "required", "none")
+/// or a `{type:"function",function:{name}}` object to force a specific
+/// function. Anthropic expresses the same intent as
+/// `{"type":"auto"|"any"|"none"|"tool", ...}`; without this mapping the
+/// provider lost the hint and could prematurely end the turn.
+fn chat_tool_choice_to_anthropic(value: Option<&Value>) -> Option<Value> {
+    let choice = value?;
+    match choice {
+        Value::String(mode) => match mode.as_str() {
+            "auto" => Some(json!({ "type": "auto" })),
+            "required" => Some(json!({ "type": "any" })),
+            "none" => Some(json!({ "type": "none" })),
+            _ => None,
+        },
+        Value::Object(_) if choice.get("type").and_then(Value::as_str) == Some("function") => {
+            let name = choice
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)?;
+            Some(json!({ "type": "tool", "name": name }))
+        }
+        _ => None,
+    }
+}
+
 fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
     chat["stream"] = Value::Bool(stream);
     let mut system_parts = Vec::new();
     let mut anthropic_messages = Vec::new();
+
+    // Helper: append an anthropic message, coalescing into the previous one
+    // when the roles match. The Anthropic Messages API forbids two adjacent
+    // messages with the same role, so parallel tool_result blocks (each
+    // mapped from a `tool` chat message) must land in one `user` message and
+    // adjacent assistant text+tool_use segments must land in one `assistant`
+    // message.
+    let push_anthropic_coalesced = |messages: &mut Vec<Value>, role: &str, content: Vec<Value>| {
+        if let Some(last) = messages.last_mut() {
+            let same_role = last
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r == role);
+            if same_role {
+                if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
+                    existing.extend(content);
+                    return;
+                }
+            }
+        }
+        messages.push(json!({ "role": role, "content": content }));
+    };
 
     if let Some(messages) = chat.get("messages").and_then(Value::as_array) {
         for message in messages {
@@ -2130,14 +2344,15 @@ fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
                     .unwrap_or("call_unknown");
                 let content =
                     response_content_to_text(message.get("content").unwrap_or(&Value::Null));
-                anthropic_messages.push(json!({
-                    "role": "user",
-                    "content": [{
+                push_anthropic_coalesced(
+                    &mut anthropic_messages,
+                    "user",
+                    vec![json!({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
                         "content": content
-                    }]
-                }));
+                    })],
+                );
                 continue;
             }
 
@@ -2167,10 +2382,11 @@ fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
             if content.is_empty() {
                 continue;
             }
-            anthropic_messages.push(json!({
-                "role": if role == "assistant" { "assistant" } else { "user" },
-                "content": content
-            }));
+            push_anthropic_coalesced(
+                &mut anthropic_messages,
+                if role == "assistant" { "assistant" } else { "user" },
+                content,
+            );
         }
     }
 
@@ -2201,6 +2417,9 @@ fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
         if !converted.is_empty() {
             payload["tools"] = Value::Array(converted);
         }
+    }
+    if let Some(tool_choice) = chat_tool_choice_to_anthropic(chat.get("tool_choice")) {
+        payload["tool_choice"] = tool_choice;
     }
     payload
 }
@@ -2386,7 +2605,7 @@ fn anthropic_tool_choice_to_responses_tool_choice(value: Option<&Value>) -> Opti
     }
 }
 
-fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
+fn anthropic_payload_to_chat_payload(anthropic: Value, session_id: &str) -> Value {
     let mut messages = Vec::new();
     if let Some(system) = anthropic.get("system") {
         let text = response_content_to_text(system);
@@ -2394,14 +2613,17 @@ fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
             messages.push(json!({ "role": "system", "content": text }));
         }
     }
-    if let Some(items) = anthropic.get("messages").and_then(Value::as_array) {
-        for item in items {
-            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-            match role {
-                "assistant" => messages.push(anthropic_assistant_message_to_chat_message(item)),
-                _ => messages.extend(anthropic_user_message_to_chat_messages(item)),
+        if let Some(items) = anthropic.get("messages").and_then(Value::as_array) {
+            for item in items {
+                let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+                match role {
+                    "assistant" => messages.push(anthropic_assistant_message_to_chat_message(
+                        item,
+                        session_id,
+                    )),
+                    _ => messages.extend(anthropic_user_message_to_chat_messages(item)),
+                }
             }
-        }
     }
     let mut chat = json!({
         "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String(CHAT_MODEL_FALLBACK.to_string())),
@@ -2427,7 +2649,7 @@ fn anthropic_payload_to_chat_payload(anthropic: Value) -> Value {
 
 const CHAT_MODEL_FALLBACK: &str = "gpt-5.5";
 
-fn anthropic_assistant_message_to_chat_message(item: &Value) -> Value {
+fn anthropic_assistant_message_to_chat_message(item: &Value, session_id: &str) -> Value {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
     match item.get("content") {
@@ -2486,7 +2708,9 @@ fn anthropic_assistant_message_to_chat_message(item: &Value) -> Value {
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
     }
-    if let Some(reasoning_content) = reasoning_content_for_assistant_message(&message) {
+    if let Some(reasoning_content) =
+        reasoning_content_for_assistant_message(session_id, &message)
+    {
         message["reasoning_content"] = Value::String(reasoning_content);
     }
     message
@@ -3053,7 +3277,7 @@ fn responses_tool_choice_to_chat_tool_choice(value: Option<&Value>) -> Option<Va
     }
 }
 
-fn chat_response_to_responses_response(chat: Value) -> anyhow::Result<Value> {
+fn chat_response_to_responses_response(chat: Value, session_id: &str) -> anyhow::Result<Value> {
     let choice = chat
         .get("choices")
         .and_then(Value::as_array)
@@ -3063,7 +3287,7 @@ fn chat_response_to_responses_response(chat: Value) -> anyhow::Result<Value> {
         .get("message")
         .context("chat response did not contain message")?;
     let output = chat_message_to_responses_output(message);
-    remember_message_reasoning(message);
+    remember_message_reasoning(session_id, message);
     let usage = normalized_chat_usage(chat.get("usage"));
     Ok(json!({
         "id": chat.get("id").cloned().unwrap_or_else(|| Value::String("resp_proxy".to_string())),
@@ -3408,15 +3632,41 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
         output.push(response_message_item_with_reasoning(&text, None));
     }
     let usage = normalized_chat_usage(anthropic.get("usage"));
+    let (status, incomplete_details) = anthropic_stop_reason_to_responses_status(
+        anthropic.get("stop_reason").and_then(Value::as_str),
+    );
     json!({
         "id": anthropic.get("id").cloned().unwrap_or_else(|| Value::String("resp_kimi".to_string())),
         "object": "response",
         "created_at": 0,
         "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String("kimi-for-coding".to_string())),
-        "status": "completed",
+        "status": status,
         "output": output,
         "usage": usage,
+        "incomplete_details": incomplete_details,
     })
+}
+
+/// Map an Anthropic Messages `stop_reason` to a Responses-API `status` and
+/// `incomplete_details`. Truncation (`max_tokens`) and refusals must surface as
+/// `incomplete` so the client does not mistake a truncated/filtered turn for a
+/// normal completion. Normal end states (`end_turn`, `tool_use`) and a missing
+/// stop_reason stay `completed` to preserve parity with previous behavior.
+fn anthropic_stop_reason_to_responses_status(
+    stop_reason: Option<&str>,
+) -> (&'static str, Value) {
+    match stop_reason {
+        Some("max_tokens") => (
+            "incomplete",
+            json!({ "reason": "max_output_tokens" }),
+        ),
+        Some("refusal") => (
+            "incomplete",
+            json!({ "reason": "content_filter" }),
+        ),
+        // end_turn, tool_use, stop_sequence, or missing → completed.
+        _ => ("completed", Value::Null),
+    }
 }
 
 fn normalized_chat_usage(value: Option<&Value>) -> Value {
@@ -3626,7 +3876,7 @@ fn responses_response_to_sse(response: &Value) -> Vec<u8> {
     output.into_bytes()
 }
 
-fn remember_message_reasoning(message: &Value) {
+fn remember_message_reasoning(session_id: &str, message: &Value) {
     let Some(content) = message.get("content").and_then(Value::as_str) else {
         return;
     };
@@ -3638,14 +3888,30 @@ fn remember_message_reasoning(message: &Value) {
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    remember_assistant_reasoning(content, tool_calls, reasoning_content);
+    remember_assistant_reasoning(session_id, content, tool_calls, reasoning_content);
 }
 
-fn remember_reasoning_content(content: &str, reasoning_content: &str) {
-    remember_assistant_reasoning(content, &[], reasoning_content);
+fn remember_reasoning_content(session_id: &str, content: &str, reasoning_content: &str) {
+    remember_assistant_reasoning(session_id, content, &[], reasoning_content);
 }
 
-fn remember_assistant_reasoning(content: &str, tool_calls: &[Value], reasoning_content: &str) {
+/// Resolve the bucket key for a reasoning-history entry. Falls back to a
+/// shared anonymous bucket only when no session id was ever assigned.
+fn reasoning_history_bucket(session_id: &str) -> String {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        REASONING_HISTORY_ANONYMOUS_SESSION.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn remember_assistant_reasoning(
+    session_id: &str,
+    content: &str,
+    tool_calls: &[Value],
+    reasoning_content: &str,
+) {
     if content.trim().is_empty() || reasoning_content.trim().is_empty() {
         if tool_calls.is_empty() || reasoning_content.trim().is_empty() {
             return;
@@ -3655,11 +3921,13 @@ fn remember_assistant_reasoning(content: &str, tool_calls: &[Value], reasoning_c
         return;
     };
     let history = DEEPSEEK_REASONING_HISTORY
-        .get_or_init(|| Arc::new(RwLock::new(Vec::new())))
+        .get_or_init(|| Arc::new(RwLock::new(BTreeMap::new())))
         .clone();
-    let Ok(mut entries) = history.write() else {
+    let Ok(mut buckets) = history.write() else {
         return;
     };
+    let bucket_key = reasoning_history_bucket(session_id);
+    let entries = buckets.entry(bucket_key).or_default();
     if let Some(existing) = entries
         .iter_mut()
         .find(|entry| entry.assistant_signature == assistant_signature)
@@ -3679,12 +3947,13 @@ fn remember_assistant_reasoning(content: &str, tool_calls: &[Value], reasoning_c
     }
 }
 
-fn reasoning_content_for_text(content: &str) -> Option<String> {
+fn reasoning_content_for_text(session_id: &str, content: &str) -> Option<String> {
     if content.trim().is_empty() {
         return None;
     }
     let history = DEEPSEEK_REASONING_HISTORY.get()?.clone();
-    let entries = history.read().ok()?;
+    let buckets = history.read().ok()?;
+    let entries = buckets.get(&reasoning_history_bucket(session_id))?;
     entries
         .iter()
         .rev()
@@ -3692,7 +3961,7 @@ fn reasoning_content_for_text(content: &str) -> Option<String> {
         .map(|entry| entry.reasoning_content.clone())
 }
 
-fn reasoning_content_for_assistant_message(message: &Value) -> Option<String> {
+fn reasoning_content_for_assistant_message(session_id: &str, message: &Value) -> Option<String> {
     let content = message
         .get("content")
         .and_then(Value::as_str)
@@ -3704,7 +3973,8 @@ fn reasoning_content_for_assistant_message(message: &Value) -> Option<String> {
         .unwrap_or(&[]);
     let signature = assistant_reasoning_signature(content, tool_calls)?;
     let history = DEEPSEEK_REASONING_HISTORY.get()?.clone();
-    let entries = history.read().ok()?;
+    let buckets = history.read().ok()?;
+    let entries = buckets.get(&reasoning_history_bucket(session_id))?;
     entries
         .iter()
         .rev()

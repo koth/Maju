@@ -508,6 +508,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "codebuddy-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "codebuddy-sdk",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "codebuddy-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2130,6 +2164,7 @@ dependencies = [
  "acp-core",
  "anyhow",
  "app-core",
+ "codebuddy-proxy",
  "git-service",
  "git2",
  "libc",

@@ -37,12 +37,16 @@ pub(super) fn normalize_workspace_root(path: &Path) -> String {
 }
 
 pub(super) fn now_iso() -> String {
-    // Simple UTC timestamp without chrono dependency
+    // UTC timestamp as decimal epoch SECONDS (despite the `_iso` name, this is
+    // the numeric storage format, not ISO-8601). `created_at`/`updated_at`
+    // columns rely on fixed-width numeric strings for `CAST(created_at AS
+    // INTEGER)` date filters and `ORDER BY created_at`. Display-side ISO
+    // conversion happens at read boundaries via [`epoch_secs_to_iso_utc`] /
+    // [`instant_to_iso_utc`].
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = since_epoch.as_secs();
-    // Return as epoch seconds string (good enough for ordering)
     format!("{secs}")
 }
 
@@ -165,6 +169,61 @@ fn days_from_civil(y: i64, m: i32, d: i32) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
+/// Inverse of [`days_from_civil`]: days since 1970-01-01 -> `(year, month, day)`
+/// (Howard Hinnant, public domain). Used to format epoch seconds as ISO-8601.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (y + if m <= 2 { 1 } else { 0 }, m as u32, d as u32)
+}
+
+/// Format non-negative Unix epoch seconds as canonical ISO-8601 UTC
+/// `YYYY-MM-DDTHH:MM:SSZ` (no subseconds, `Z` suffix). Public so the app-core
+/// reducer can produce display timestamps without duplicating the calendar
+/// algorithm; storage stays epoch-seconds (see [`now_epoch_secs`]).
+pub fn epoch_secs_to_iso_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let tod = (secs % 86_400) as u64;
+    let h = tod / 3600;
+    let m = (tod % 3600) / 60;
+    let s = tod % 60;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Normalize a stored instant -- decimal epoch seconds OR any ISO-8601 (with
+/// optional offset/subseconds) -- into canonical ISO-8601 UTC for display.
+/// Used at usage read boundaries so the dock and summary panels show readable
+/// times regardless of the source row's format. Storage itself stays
+/// epoch-seconds to keep the `CAST(created_at AS INTEGER)` date filter working
+/// without a data migration.
+pub fn instant_to_iso_utc(value: &str) -> String {
+    match parse_instant_to_epoch_secs(value) {
+        Some(secs) if secs >= 0 => epoch_secs_to_iso_utc(secs as u64),
+        _ => value.trim().to_string(),
+    }
+}
+
+/// Normalize a stored instant into a UTC calendar date `YYYY-MM-DD` for
+/// daily usage bucketing. Returns `None` for inputs that cannot be parsed as
+/// epoch seconds or ISO-8601, so callers can skip unbucketable rows.
+pub fn instant_to_date_utc(value: &str) -> Option<String> {
+    let secs = parse_instant_to_epoch_secs(value)?;
+    if secs < 0 {
+        return None;
+    }
+    let days = (secs as u64) / 86_400;
+    let (y, mo, d) = civil_from_days(days as i64);
+    Some(format!("{y:04}-{mo:02}-{d:02}"))
+}
+
 pub(super) fn cap_string(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         s.to_string()
@@ -187,7 +246,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::parse_instant_to_epoch_secs;
+    use super::{epoch_secs_to_iso_utc, instant_to_iso_utc, parse_instant_to_epoch_secs};
+
+    #[test]
+    fn epoch_secs_format_iso_utc() {
+        assert_eq!(epoch_secs_to_iso_utc(0), "1970-01-01T00:00:00Z");
+        // Round-trips with parses_iso_utc_zulu: 2026-06-30T00:00:00Z == 1_782_777_600.
+        assert_eq!(epoch_secs_to_iso_utc(1_782_777_600), "2026-06-30T00:00:00Z");
+    }
+
+    #[test]
+    fn instant_to_iso_utc_normalizes_mixed_formats() {
+        assert_eq!(instant_to_iso_utc("1782777600"), "2026-06-30T00:00:00Z");
+        // Offset normalized to UTC.
+        assert_eq!(instant_to_iso_utc("2026-06-30T08:00:00+08:00"), "2026-06-30T00:00:00Z");
+        // Subseconds dropped.
+        assert_eq!(instant_to_iso_utc("2026-06-30T00:00:00.123Z"), "2026-06-30T00:00:00Z");
+        // Already-canonical ISO passes through unchanged.
+        assert_eq!(instant_to_iso_utc("2026-06-30T00:00:00Z"), "2026-06-30T00:00:00Z");
+        // Unparseable input is returned trimmed, not corrupted.
+        assert_eq!(instant_to_iso_utc("  yesterday  "), "yesterday");
+    }
 
     #[test]
     fn parses_decimal_seconds() {

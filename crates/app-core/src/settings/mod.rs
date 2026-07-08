@@ -71,7 +71,6 @@ const CODEBUDDY_PROVIDER_ID: &str = "codebuddy";
 const CODEBUDDY_PROVIDER_NAME: &str = "CodeBuddy";
 const CODEBUDDY_DEFAULT_PORT: u16 = 17856;
 const CODEBUDDY_SECRET_KEY: &str = "codebuddy:proxy-api-key";
-const CODEBUDDY_DEBUG_KEY: &str = "codebuddy:proxy-debug";
 const CODEBUDDY_INTERNET_ENV_KEY: &str = "codebuddy:internet-env";
 const CODEBUDDY_CATALOG_MODELS: &[&str] = &[];
 
@@ -2055,17 +2054,15 @@ pub fn reset_provider_models(paths: &AppPaths, provider: &str) -> Result<AgentSe
 /// Save the CodeBuddy proxy configuration: port goes into the provider-models
 /// catalog, API key into the secrets store. The proxy URL is derived from the
 /// port at read time, never persisted directly.
-/// Save CodeBuddy proxy config (port + debug) and the API key.
 ///
 /// An empty `api_key` is treated as "leave the stored key unchanged" so that
-/// re-saving after toggling only `debug` (the frontend clears the key draft
-/// after each save for security) does not wipe a previously configured key.
-/// To remove the key, use [`clear_codebuddy_config`].
+/// re-saving (the frontend clears the key draft after each save for security)
+/// does not wipe a previously configured key. To remove the key, use
+/// [`clear_codebuddy_config`].
 pub fn save_codebuddy_config(
     paths: &AppPaths,
     port: Option<u16>,
     api_key: String,
-    debug: bool,
     internet_environment: String,
 ) -> Result<AgentSettingsSnapshot> {
     let port = port.unwrap_or(CODEBUDDY_DEFAULT_PORT);
@@ -2085,11 +2082,6 @@ pub fn save_codebuddy_config(
         // Empty key means "unchanged"; keep any previously stored key.
     } else {
         secrets.insert(CODEBUDDY_SECRET_KEY.to_string(), trimmed.to_string());
-    }
-    if debug {
-        secrets.insert(CODEBUDDY_DEBUG_KEY.to_string(), "1".to_string());
-    } else {
-        secrets.remove(CODEBUDDY_DEBUG_KEY);
     }
     let env = match internet_environment.trim() {
         "ioa" => "ioa",
@@ -2116,7 +2108,6 @@ pub fn clear_codebuddy_config(paths: &AppPaths) -> Result<AgentSettingsSnapshot>
 
     let mut secrets = load_provider_secrets(paths);
     secrets.remove(CODEBUDDY_SECRET_KEY);
-    secrets.remove(CODEBUDDY_DEBUG_KEY);
     secrets.remove(CODEBUDDY_INTERNET_ENV_KEY);
     save_provider_secrets(paths, &secrets)?;
 
@@ -4072,11 +4063,3 @@ fn claude_proxy_kind_env(proxy_kind: AgentProviderProxyKind) -> &'static str {
 mod tests;
 #[cfg(test)]
 mod tests_model_attributes;
-/// Read the persisted codebuddy proxy debug flag (default false).
-pub fn codebuddy_debug(paths: &AppPaths) -> bool {
-    let secrets = load_provider_secrets(paths);
-    secrets
-        .get(CODEBUDDY_DEBUG_KEY)
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}

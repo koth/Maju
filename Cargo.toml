@@ -3,6 +3,8 @@ members = [
     "apps/desktop/src-tauri",
     "crates/acp-core",
     "crates/app-core",
+    "crates/codebuddy-proxy",
+    "crates/codebuddy-sdk",
     "crates/git-service",
     "crates/session-store",
     "crates/terminal-service",

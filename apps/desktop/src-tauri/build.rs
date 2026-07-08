@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 const CODEX_ACP_RESOURCE_DIR: &str = "resources/codex-acp";
 const CLAUDE_AGENT_ACP_RESOURCE_DIR: &str = "resources/claude-agent-acp";
-const CODEBUDDY_PROXY_RESOURCE_DIR: &str = "resources/codebuddy-proxy";
-const CODEBUDDY_PROXY_SOURCE_DIR: &str = "kodex-codebuddy/bin";
 
 fn main() {
     println!("cargo:rerun-if-changed=tauri.conf.json");
@@ -20,15 +18,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KODEX_CLAUDE_AGENT_ACP_BINARY");
     println!("cargo:rerun-if-env-changed=KODEX_STAGE_CLAUDE_AGENT_ACP");
     println!("cargo:rerun-if-env-changed=KODEX_STAGE_CLAUDE_AGENT_ACP_PACKAGE");
-    println!("cargo:rerun-if-env-changed=KODEX_STAGE_CODEBUDDY_PROXY");
     if should_stage_codex_acp_binary() {
         stage_codex_acp_binary();
     }
     if should_stage_claude_agent_acp() {
         stage_claude_agent_acp();
-    }
-    if should_stage_codebuddy_proxy() {
-        stage_codebuddy_proxy();
     }
     tauri_build::build()
 }
@@ -43,55 +37,9 @@ fn should_stage_claude_agent_acp() -> bool {
         || env::var_os("KODEX_STAGE_CLAUDE_AGENT_ACP").is_some()
 }
 
-fn should_stage_codebuddy_proxy() -> bool {
-    env::var("PROFILE").is_ok_and(|profile| profile == "release")
-        || env::var_os("KODEX_STAGE_CODEBUDDY_PROXY").is_some()
-}
 
-fn stage_codebuddy_proxy() {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("src-tauri should be nested under apps/desktop");
-    let resource_dir = manifest_dir.join(CODEBUDDY_PROXY_RESOURCE_DIR);
 
-    let source = workspace_root
-        .join(CODEBUDDY_PROXY_SOURCE_DIR)
-        .join(codebuddy_proxy_binary_name());
-    println!("cargo:rerun-if-changed={}", source.display());
 
-    if !source.is_file() {
-        println!(
-            "cargo:warning=No prebuilt codebuddy-proxy binary found at {}; run `npm --prefix kodex-codebuddy run build:binary` first.",
-            source.display()
-        );
-        return;
-    }
-
-    if let Err(error) = fs::create_dir_all(&resource_dir) {
-        println!(
-            "cargo:warning=Could not create codebuddy-proxy resource directory {}: {error}",
-            resource_dir.display()
-        );
-        return;
-    }
-
-    let target = resource_dir.join(codebuddy_proxy_binary_name());
-    if let Err(error) = fs::copy(&source, &target) {
-        println!(
-            "cargo:warning=Could not stage codebuddy-proxy from {} to {}: {error}",
-            source.display(),
-            target.display()
-        );
-        return;
-    }
-    println!(
-        "cargo:warning=Bundling codebuddy-proxy binary from {}",
-        source.display()
-    );
-}
 
 fn stage_claude_agent_acp() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -379,13 +327,5 @@ fn claude_agent_acp_binary_name() -> &'static str {
         "claude-agent-acp.exe"
     } else {
         "claude-agent-acp"
-    }
-}
-
-fn codebuddy_proxy_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "codebuddy-proxy.exe"
-    } else {
-        "codebuddy-proxy"
     }
 }

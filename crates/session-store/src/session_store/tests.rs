@@ -1361,3 +1361,185 @@ fn query_usage_summary_excludes_codebuddy_via_event_agent_cli_fallback() {
         .unwrap();
     assert!(rows.is_empty(), "CodeBuddy event must be excluded, got: {rows:?}");
 }
+
+#[test]
+fn usage_total_tokens_excludes_cache_to_avoid_double_count() {
+    use workspace_model::UsageTokenBreakdown;
+    // cache_read (80) is a subset of input (100); including it in the fallback
+    // would yield 200 and double-count the same input tokens.
+    let tokens = UsageTokenBreakdown {
+        input_tokens: Some(100),
+        output_tokens: Some(20),
+        cache_read_tokens: Some(80),
+        cache_write_tokens: Some(0),
+        reasoning_tokens: None,
+        total_tokens: None,
+    };
+    assert_eq!(super::usage_total_tokens(&tokens), 120);
+
+    // Authoritative total_tokens wins even when it differs from the sum.
+    let with_total = UsageTokenBreakdown {
+        total_tokens: Some(150),
+        ..tokens
+    };
+    assert_eq!(super::usage_total_tokens(&with_total), 150);
+}
+
+/// P2: daily series must bucket events by UTC calendar day, applying the
+/// same SessionTotal-overwrites / TurnDelta-accumulates rules per day, and
+/// sum each day's per-model totals into the bucket total.
+#[test]
+fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store
+        .update_session_agent_cli("s1", "codex-acp")
+        .unwrap();
+
+    // Day A (ts "1751328000" == midnight UTC of day N): an authoritative
+    // SessionTotal(1000) followed by a TurnDelta(200) later the same day
+    // (ts "1751330000"). The SessionTotal must win, so the TurnDelta must
+    // NOT accumulate on top of it.
+    let day_a_session_total = UsageEvent {
+        scope: UsageEventScope::SessionTotal,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("1751328000".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(1_000),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot::default(),
+        raw_json: None,
+    };
+    let day_a_turn_delta = make_usage_event("gpt-5.1", 200, "1751330000");
+    // Day B (ts "1751414400" == midnight UTC of day N+1): a lone TurnDelta
+    // (300) with no SessionTotal, so it accumulates into the day total.
+    let day_b_turn_delta = make_usage_event("gpt-5.1", 300, "1751414400");
+
+    store
+        .append_usage_event("s1", &day_a_session_total, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &day_a_turn_delta, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &day_b_turn_delta, None, None)
+        .unwrap();
+
+    let buckets = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(buckets.len(), 2, "two UTC days expected, got: {buckets:?}");
+    // BTreeMap keeps days sorted ascending.
+    assert!(
+        buckets[0].date < buckets[1].date,
+        "buckets must be sorted by date ascending: {buckets:?}"
+    );
+    assert_eq!(
+        buckets[0].date.len(),
+        10,
+        "date must be YYYY-MM-DD: {}",
+        buckets[0].date
+    );
+
+    // Day A: SessionTotal(1000) wins; TurnDelta(200) must not accumulate.
+    assert_eq!(buckets[0].tokens.total_tokens, Some(1_000));
+    assert_eq!(buckets[0].by_model.len(), 1);
+    assert_eq!(buckets[0].by_model[0].tokens.total_tokens, Some(1_000));
+    assert_eq!(buckets[0].by_model[0].event_count, 2);
+    assert_eq!(buckets[0].by_model[0].request_count, 2);
+
+    // Day B: lone TurnDelta(300) accumulates.
+    assert_eq!(buckets[1].tokens.total_tokens, Some(300));
+    assert_eq!(buckets[1].by_model.len(), 1);
+    assert_eq!(buckets[1].by_model[0].tokens.total_tokens, Some(300));
+    assert_eq!(buckets[1].by_model[0].event_count, 1);
+    assert_eq!(buckets[1].by_model[0].request_count, 1);
+}
+
+/// P5: `request_count` must count only token-reporting events
+/// (TurnDelta + SessionTotal), while `event_count` counts every row
+/// including ContextSnapshot occupancy-only reports. With
+/// 1×SessionTotal + 1×TurnDelta + 3×ContextSnapshot we expect
+/// event_count=5 and request_count=2.
+#[test]
+fn usage_summary_request_count_excludes_context_snapshot_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+
+    let session_total = UsageEvent {
+        scope: UsageEventScope::SessionTotal,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("10".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(1_600),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot::default(),
+        raw_json: None,
+    };
+    let turn_delta = UsageEvent {
+        scope: UsageEventScope::TurnDelta,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("11".into()),
+        tokens: UsageTokenBreakdown {
+            total_tokens: Some(180),
+            ..Default::default()
+        },
+        context: UsageContextSnapshot::default(),
+        raw_json: None,
+    };
+    let context_snapshot = UsageEvent {
+        scope: UsageEventScope::ContextSnapshot,
+        model: Some("gpt-5.1".into()),
+        provider: Some("openai".into()),
+        agent_cli: Some("codex-acp".into()),
+        timestamp: Some("12".into()),
+        tokens: UsageTokenBreakdown::default(),
+        context: UsageContextSnapshot {
+            used_tokens: Some(1_900),
+            window_tokens: Some(200_000),
+            updated_at: Some("12".into()),
+        },
+        raw_json: None,
+    };
+
+    store
+        .append_usage_event("s1", &session_total, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &turn_delta, None, None)
+        .unwrap();
+    for _ in 0..3 {
+        store
+            .append_usage_event("s1", &context_snapshot, None, None)
+            .unwrap();
+    }
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            include_archived: false,
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(rows[0].event_count, 5, "event_count must count all rows");
+    assert_eq!(
+        rows[0].request_count, 2,
+        "request_count must exclude ContextSnapshot occupancy-only reports"
+    );
+}

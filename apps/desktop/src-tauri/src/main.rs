@@ -56,11 +56,6 @@ fn main() {
                 {
                     app_core::startup_perf::mark("desktop/claude_agent_acp_install_failed", &error);
                 }
-                if let Err(error) =
-                    commands::settings::install_bundled_codebuddy_proxy_if_missing(app.handle())
-                {
-                    app_core::startup_perf::mark("desktop/codebuddy_proxy_install_failed", &error);
-                }
                 let terminal_app = app.handle().clone();
                 app.state::<AppState>()
                     .set_terminal_event_sink(Arc::new(move |event| {
@@ -105,6 +100,7 @@ fn main() {
             commands::session::session_delete_all_archived,
             commands::session::session_get_changes,
             commands::session::usage_get_summary,
+            commands::session::usage_get_daily_series,
             commands::session::session_list_change_sets,
             commands::session::session_list_change_set_files,
             commands::session::session_get_change_set_file_diff,
@@ -235,10 +231,9 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
         let port = app_core::settings::codebuddy_port(&paths);
         let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
         let default_model = app_core::settings::codebuddy_default_model(&paths);
-        let debug = app_core::settings::codebuddy_debug(&paths);
         let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
         let result = tokio::task::spawn_blocking(move || {
-            manager.ensure_running(&paths, port, &api_key, &default_model, debug, &internet_env)
+            manager.ensure_running(&paths, port, &api_key, &default_model, &internet_env)
         })
         .await;
         match result {

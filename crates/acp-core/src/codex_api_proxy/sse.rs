@@ -11,9 +11,9 @@ fn remember_stream_reasoning(state: &ChatStreamState) {
         .tool_calls
         .iter()
         .filter(|call| call.added)
-        .map(stream_tool_call_to_chat_tool_call)
-        .collect::<Vec<_>>();
-    remember_assistant_reasoning(&state.text, &tool_calls, &state.reasoning_content);
+    .map(stream_tool_call_to_chat_tool_call)
+    .collect::<Vec<_>>();
+    remember_assistant_reasoning(&state.session_id, &state.text, &tool_calls, &state.reasoning_content);
 }
 
 fn stream_tool_call_to_chat_tool_call(call: &StreamToolCall) -> Value {
@@ -40,6 +40,9 @@ struct ChatStreamState {
     stop_reason: Option<String>,
     tool_calls: Vec<StreamToolCall>,
     usage: Value,
+    /// Session id this stream belongs to, used to partition the
+    /// reasoning-history cache so concurrent sessions cannot cross-talk.
+    session_id: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -53,7 +56,7 @@ struct StreamToolCall {
 
 #[cfg(test)]
 pub(super) fn chat_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
-    let mut converter = ChatSseStreamConverter::new();
+    let mut converter = ChatSseStreamConverter::new("test-session");
     let mut output = converter.push_chunk(body);
     output.extend(converter.finish());
     output
@@ -291,7 +294,7 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
         );
         let item =
             response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
-        remember_reasoning_content(&state.text, &state.reasoning_content);
+        remember_reasoning_content(&state.session_id, &state.text, &state.reasoning_content);
         push_sse(
             output,
             "response.output_item.done",
@@ -384,10 +387,11 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
 pub(super) fn streaming_chat_sse_response(
     upstream: reqwest::Response,
     status: StatusCode,
+    session_id: &str,
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
-        (upstream_stream, ChatSseStreamConverter::new(), false),
+        (upstream_stream, ChatSseStreamConverter::new(session_id), false),
         |(mut upstream_stream, mut converter, done)| async move {
             if done {
                 return None;
@@ -442,12 +446,13 @@ pub(super) fn streaming_chat_sse_response(
 pub(super) fn streaming_chat_sse_to_anthropic_response(
     upstream: reqwest::Response,
     status: StatusCode,
+    session_id: &str,
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
         (
             upstream_stream,
-            ChatAnthropicSseStreamConverter::new(),
+            ChatAnthropicSseStreamConverter::new(session_id),
             false,
         ),
         |(mut upstream_stream, mut converter, done)| async move {
@@ -706,13 +711,14 @@ pub(super) struct ChatSseStreamConverter {
 }
 
 impl ChatSseStreamConverter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(session_id: &str) -> Self {
         Self {
             buffer: String::new(),
             state: ChatStreamState {
                 response_id: "resp_proxy".to_string(),
                 model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
+                session_id: session_id.to_string(),
                 ..Default::default()
             },
         }
@@ -741,7 +747,7 @@ impl ChatSseStreamConverter {
 
 #[cfg(test)]
 pub(super) fn chat_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
-    let mut converter = ChatAnthropicSseStreamConverter::new();
+    let mut converter = ChatAnthropicSseStreamConverter::new("test-session");
     let mut output = converter.push_chunk(body);
     output.extend(converter.finish());
     output
@@ -754,13 +760,14 @@ struct ChatAnthropicSseStreamConverter {
 }
 
 impl ChatAnthropicSseStreamConverter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(session_id: &str) -> Self {
         Self {
             buffer: String::new(),
             state: ChatStreamState {
                 response_id: "msg_proxy".to_string(),
                 model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
+                session_id: session_id.to_string(),
                 ..Default::default()
             },
         }
@@ -1069,6 +1076,9 @@ struct AnthropicToResponsesState {
     usage: Value,
     /// content_block_index of a finalized tool_use block (after content_block_stop).
     finalized_tool_blocks: BTreeSet<usize>,
+    /// Session id this stream belongs to, used to partition the
+    /// reasoning-history cache so concurrent sessions cannot cross-talk.
+    session_id: String,
 }
 
 impl AnthropicToResponsesState {
@@ -1094,13 +1104,14 @@ pub(super) struct AnthropicSseToResponsesConverter {
 }
 
 impl AnthropicSseToResponsesConverter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(session_id: &str) -> Self {
         Self {
             buffer: String::new(),
             state: AnthropicToResponsesState {
                 response_id: "resp_proxy".to_string(),
                 model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
+                session_id: session_id.to_string(),
                 ..Default::default()
             },
         }
@@ -1481,8 +1492,8 @@ fn emit_anthropic_to_responses_done(
             }),
         );
         let item =
-            response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
-        remember_reasoning_content(&state.text, &state.reasoning_content);
+           response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
+        remember_reasoning_content(&state.session_id, &state.text, &state.reasoning_content);
         push_sse(
             output,
             "response.output_item.done",
@@ -1582,7 +1593,7 @@ fn emit_anthropic_to_responses_done(
 
 #[cfg(test)]
 pub(super) fn anthropic_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
-    let mut converter = AnthropicSseToResponsesConverter::new();
+    let mut converter = AnthropicSseToResponsesConverter::new("test-session");
     let mut output = converter.push_chunk(body);
     output.extend(converter.finish());
     output
@@ -1591,12 +1602,13 @@ pub(super) fn anthropic_sse_to_responses_sse(body: &[u8]) -> Vec<u8> {
 pub(super) fn streaming_anthropic_sse_to_responses_response(
     upstream: reqwest::Response,
     status: StatusCode,
+    session_id: &str,
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
         (
             upstream_stream,
-            AnthropicSseToResponsesConverter::new(),
+            AnthropicSseToResponsesConverter::new(session_id),
             false,
         ),
         |(mut upstream_stream, mut converter, done)| async move {
@@ -1668,6 +1680,9 @@ struct ResponsesToAnthropicState {
     tool_calls: BTreeMap<usize, StreamToolCall>,
     stop_reason: Option<String>,
     usage: Value,
+    /// Session id this stream belongs to, used to partition the
+    /// reasoning-history cache so concurrent sessions cannot cross-talk.
+    session_id: String,
 }
 
 #[derive(Debug)]
@@ -1677,13 +1692,14 @@ pub(super) struct ResponsesSseToAnthropicConverter {
 }
 
 impl ResponsesSseToAnthropicConverter {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(session_id: &str) -> Self {
         Self {
             buffer: String::new(),
             state: ResponsesToAnthropicState {
                 message_id: "msg_proxy".to_string(),
                 model: CHAT_MODEL_FALLBACK.to_string(),
                 usage: normalized_chat_usage(None),
+                session_id: session_id.to_string(),
                 ..Default::default()
             },
         }
@@ -1997,7 +2013,7 @@ fn emit_responses_to_anthropic_done(
             );
         }
     }
-    remember_reasoning_content(&state.text, &state.reasoning_content);
+    remember_reasoning_content(&state.session_id, &state.text, &state.reasoning_content);
     // Finalize any tool blocks that did not receive response.output_item.done.
     for (_, call) in state.tool_calls.iter() {
         if let Some(block_index) = call.content_block_index {
@@ -2032,7 +2048,7 @@ fn emit_responses_to_anthropic_done(
 
 #[cfg(test)]
 pub(super) fn responses_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
-    let mut converter = ResponsesSseToAnthropicConverter::new();
+    let mut converter = ResponsesSseToAnthropicConverter::new("test-session");
     let mut output = converter.push_chunk(body);
     output.extend(converter.finish());
     output
@@ -2041,12 +2057,13 @@ pub(super) fn responses_sse_to_anthropic_sse(body: &[u8]) -> Vec<u8> {
 pub(super) fn streaming_responses_sse_to_anthropic_response(
     upstream: reqwest::Response,
     status: StatusCode,
+    session_id: &str,
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
         (
             upstream_stream,
-            ResponsesSseToAnthropicConverter::new(),
+            ResponsesSseToAnthropicConverter::new(session_id),
             false,
         ),
         |(mut upstream_stream, mut converter, done)| async move {

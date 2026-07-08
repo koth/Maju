@@ -1,0 +1,19 @@
+[package]
+name = "codebuddy-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-implemented Rust subset of the CodeBuddy SDK (CLI subprocess transport + stream-json control protocol + in-process MCP server)."
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "process", "io-util"] }
+tokio-util.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

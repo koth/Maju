@@ -430,6 +430,9 @@ export interface UsageModelSummary {
   session_id?: string | null;
   workspace_root?: string | null;
   event_count: number;
+  /** Token-reporting events only (TurnDelta + SessionTotal); excludes
+   *  ContextSnapshot occupancy-only reports. */
+  request_count: number;
   session_count: number;
   tokens: UsageTokenBreakdown;
   context_peak_tokens?: number | null;
@@ -440,6 +443,15 @@ export interface SessionUsageSnapshot {
   context: UsageContextSnapshot;
   current_turn: UsageTokenBreakdown;
   session_total: UsageTokenBreakdown;
+  by_model: UsageModelSummary[];
+}
+
+/** One UTC day's worth of usage for the daily chart. `date` is `YYYY-MM-DD`.
+ *  `tokens.total_tokens` is the sum of each per-model row's effective total;
+ *  `by_model` holds the stackable per-model segments. */
+export interface UsageDailyBucket {
+  date: string;
+  tokens: UsageTokenBreakdown;
   by_model: UsageModelSummary[];
 }
 

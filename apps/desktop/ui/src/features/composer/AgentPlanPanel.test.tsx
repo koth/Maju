@@ -95,6 +95,7 @@ describe("AgentPlanPanel", () => {
                 tokens: { total_tokens: 12345 },
                 context_peak_tokens: 12345,
                 event_count: 1,
+                request_count: 1,
                 session_count: 1,
               },
             ],
@@ -110,6 +111,63 @@ describe("AgentPlanPanel", () => {
     expect(screen.getByText("会话 12k")).toBeTruthy();
     expect(screen.getByRole("meter", { name: "上下文占用" })).toHaveAttribute("aria-valuenow", "10");
     expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
+  });
+  it("marks the context figure as pending-refresh while a turn is streaming", () => {
+    render(
+      <AgentPlanEnvironment
+        environment={{
+          changeCount: 0,
+          addedLines: 0,
+          removedLines: 0,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "工作区干净",
+          githubLabel: "GitHub CLI 不可用",
+          streaming: true,
+          usage: {
+            context: {
+              used_tokens: 12345,
+              window_tokens: 128000,
+              updated_at: "2026-06-23T00:00:00Z",
+            },
+            current_turn: {},
+            session_total: {},
+            by_model: [],
+          },
+        }}
+      />,
+    );
+    // codex-core only emits a context update at the next model response, so
+    // during an active turn the figure is marked pending-refresh.
+    expect(screen.getByText("更新中")).toBeInTheDocument();
+    expect(screen.queryByText(/上次更新/)).toBeNull();
+  });
+  it("shows a last-updated label for the context figure when idle", () => {
+    render(
+      <AgentPlanEnvironment
+        environment={{
+          changeCount: 0,
+          addedLines: 0,
+          removedLines: 0,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "工作区干净",
+          githubLabel: "GitHub CLI 不可用",
+          usage: {
+            context: {
+              used_tokens: 12345,
+              window_tokens: 128000,
+              updated_at: "2026-06-23T00:00:00Z",
+            },
+            current_turn: {},
+            session_total: {},
+            by_model: [],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/上次更新/)).toBeInTheDocument();
+    expect(screen.queryByText("更新中")).toBeNull();
   });
   it("hides the occupancy bar when context used_tokens is zero", () => {
     render(

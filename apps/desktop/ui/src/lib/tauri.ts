@@ -43,6 +43,7 @@ import type {
   RemoteMachineValidationRequest,
   RemoteOpenRequest,
   PermissionInputResponse,
+  UsageDailyBucket,
   UsageSummaryRequest,
   UsageSummaryRow,
   CustomProviderInput,
@@ -357,6 +358,15 @@ export async function usageGetSummary(
   });
 }
 
+/** P2: real daily usage series for the settings "每日用量" chart. */
+export async function usageGetDailySeries(
+  request?: UsageSummaryRequest,
+): Promise<UsageDailyBucket[]> {
+  return invoke<UsageDailyBucket[]>("usage_get_daily_series", {
+    request: request ?? null,
+  });
+}
+
 export async function sessionListChangeSets(
   request?: ListChangeSetsRequest,
 ): Promise<ChangeSetSummary[]> {
@@ -650,7 +660,6 @@ export async function settingsResetProviderModels(
 export interface CodebuddyProxyStatus {
   running: boolean;
   port: number | null;
-  debug: boolean;
   internet_environment: string;
 }
 
@@ -669,13 +678,11 @@ export async function codebuddyProxyStop(): Promise<void> {
 export async function settingsSaveCodebuddyConfig(
   port: number | null,
   apiKey: string,
-  debug: boolean,
   internetEnvironment: string,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_codebuddy_config", {
     port,
     apiKey,
-    debug,
     internetEnvironment,
   });
 }

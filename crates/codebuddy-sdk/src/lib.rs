@@ -1,0 +1,11 @@
+pub mod binary;
+pub mod error;
+pub mod mcp;
+pub mod options;
+pub mod protocol;
+pub mod query;
+pub mod session;
+pub mod transport;
+pub use error::{SdkError, SdkResult};
+pub use options::{ControlRequestPayload, SdkCapabilities, SdkMcpServerEntry, SessionOptions};
+pub use session::Session;

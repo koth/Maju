@@ -961,12 +961,12 @@ fn mock_agent_session_config_with_options(
         };
         format!(
             "{prompt_never_responds_env}KODEX_MOCK_ACP_STEER_TEST=1{never_responds_env} cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-            manifest.display()
+            shell_words::quote(&manifest.to_string_lossy())
         )
     } else {
         format!(
             "{prompt_never_responds_env}cargo run --manifest-path {} -p mock-acp-agent --quiet --",
-            manifest.display()
+            shell_words::quote(&manifest.to_string_lossy())
         )
     };
 

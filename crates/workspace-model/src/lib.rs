@@ -1092,6 +1092,13 @@ pub struct UsageModelSummary {
     pub workspace_root: Option<String>,
     #[serde(default)]
     pub event_count: u64,
+    /// Number of token-reporting events (scope = `TurnDelta` or
+    /// `SessionTotal`). Unlike `event_count`, this excludes
+    /// `ContextSnapshot` occupancy-only reports, so it approximates the
+    /// number of actual LLM requests that emitted a token count. Used by the
+    /// frontend to compute per-request averages and bar widths.
+    #[serde(default)]
+    pub request_count: u64,
     #[serde(default)]
     pub session_count: u64,
     #[serde(default)]
@@ -1103,6 +1110,16 @@ pub struct UsageModelSummary {
     /// True once a `SessionTotal` event has been observed for this group.
     /// Used by the aggregation layer to avoid double-counting TurnDelta
     /// events on top of an authoritative SessionTotal.
+    ///
+    /// The "group" here is always the row's key granularity —
+    /// `(model, provider, agent_cli)` for the model-keyed paths (single-session
+    /// snapshot and `group_by = Model`) — and is **independent** of the
+    /// [`UsageSummaryGroupBy`] used by the cross-session summary. When
+    /// `group_by = Session`, each per-session row carries its own
+    /// `has_session_total` that only governs that single session's
+    /// accumulation; a session whose model A saw a `SessionTotal` but whose
+    /// model B only emitted `TurnDelta` events will overwrite A's total while
+    /// accumulating B's deltas, so the two models must be read separately.
     /// Not serialized to the frontend; this is internal aggregation state.
     #[serde(default, skip)]
     pub has_session_total: bool,
@@ -1161,6 +1178,22 @@ pub struct UsageSummaryRequest {
 }
 
 pub type UsageSummaryRow = UsageModelSummary;
+
+/// One day's worth of usage for the daily usage chart. `date` is a UTC
+/// calendar date (`YYYY-MM-DD`). `tokens` is the aggregate breakdown for the
+/// day (its `total_tokens` is the sum of each per-model row's effective
+/// total). `by_model` holds the per-model rows that stack into the day's
+/// bar, reusing the same `SessionTotal`-overwrites / `TurnDelta`-accumulates
+/// aggregation rules as the cross-session summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UsageDailyBucket {
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub tokens: UsageTokenBreakdown,
+    #[serde(default)]
+    pub by_model: Vec<UsageModelSummary>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiSnapshot {

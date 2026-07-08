@@ -5,7 +5,8 @@ use workspace_model::{
     AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
     FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
     ListChangeSetsRequest, PermissionInputResponse, SessionConfigState, SessionFileChange,
-    UiSnapshot, UsageSummaryRequest, UsageSummaryRow, UserPromptContent, WorkspaceSessionList,
+    UiSnapshot, UsageDailyBucket, UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
+    WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -176,6 +177,14 @@ pub fn usage_get_summary(
     request: Option<UsageSummaryRequest>,
 ) -> Result<Vec<UsageSummaryRow>, String> {
     state.with_app(|app| Ok(app.usage_summary(request.unwrap_or_default())))
+}
+
+#[tauri::command]
+pub fn usage_get_daily_series(
+    state: State<'_, AppState>,
+    request: Option<UsageSummaryRequest>,
+) -> Result<Vec<UsageDailyBucket>, String> {
+    state.with_app(|app| Ok(app.usage_daily_series(request.unwrap_or_default())))
 }
 
 #[tauri::command]

@@ -638,6 +638,21 @@
   line-height: 1.2;
 }
 
+/* P2/P3 context-occupancy staleness cue: codex-core only emits a context
+ * update at the next model response, so during an active turn the figure is
+ * pending refresh. Show "更新中" while streaming and "上次更新 …" when idle
+ * so the dock never looks frozen. */
+.agent-plan-env-usage-staleness {
+  color: var(--text-faint, var(--text-muted));
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+.agent-plan-env-usage-staleness.is-pending {
+  opacity: 1;
+  color: var(--text-muted);
+}
+
 
 .agent-plan-env-usage {
   display: flex;

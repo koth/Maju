@@ -114,6 +114,9 @@ function buildAgentPlanEnvironmentInfo(
         : "工作区干净",
     githubLabel: "GitHub CLI 不可用",
     usage: snapshot.usage,
+    streaming:
+      snapshot.session.status === "Streaming" ||
+      snapshot.session.status === "WaitingForTool",
   };
 }
 
@@ -136,11 +139,11 @@ export function agentPlanProgressSignature(entries: AgentPlanEntry[]) {
 
 function usageTokenTotal(tokens: NonNullable<UiSnapshot["usage"]>["current_turn"] | undefined) {
   if (!tokens) return 0;
+  // cache_read is a subset of input; adding it would double-count. Keep
+  // cache_read/cache_write as display-only breakdown, not in the total.
   return tokens.total_tokens ?? (
     (tokens.input_tokens ?? 0) +
     (tokens.output_tokens ?? 0) +
-    (tokens.cache_read_tokens ?? 0) +
-    (tokens.cache_write_tokens ?? 0) +
     (tokens.reasoning_tokens ?? 0)
   );
 }

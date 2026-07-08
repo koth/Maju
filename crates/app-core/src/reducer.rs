@@ -1446,7 +1446,7 @@ fn last_message_id(item: &TimelineItem) -> Option<uuid::Uuid> {
 
 fn apply_usage_update(ui: &mut UiSnapshot, mut usage: UsageEvent) {
     if usage.timestamp.is_none() {
-        usage.timestamp = Some(chrono_now_iso());
+        usage.timestamp = Some(now_iso_utc());
     }
     if usage.context.updated_at.is_none()
         && (usage.context.used_tokens.is_some() || usage.context.window_tokens.is_some())
@@ -1529,6 +1529,7 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
             session_id: None,
             workspace_root: None,
             event_count: 0,
+            request_count: 0,
             session_count: 1,
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
@@ -1539,6 +1540,14 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
     };
 
     summary.event_count += 1;
+    // P5: only TurnDelta / SessionTotal represent an actual token-reporting
+    // request; ContextSnapshot is occupancy-only telemetry.
+    if matches!(
+        usage.scope,
+        UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
+    ) {
+        summary.request_count += 1;
+    }
     summary.latest_at = usage
         .timestamp
         .clone()
@@ -1634,13 +1643,30 @@ fn add_optional_u64(target: &mut Option<u64>, delta: Option<u64>) {
 }
 
 fn chrono_now_iso() -> String {
+    // NOTE: returns decimal epoch SECONDS (storage format), not ISO-8601,
+    // despite the name. Used for Message/ToolInvocation `created_at` which are
+    // persisted as epoch-seconds. Usage-event display timestamps use
+    // [`now_iso_utc`] instead.
     use std::time::SystemTime;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // Simple ISO 8601 timestamp without chrono dependency
     format!("{now}")
+}
+
+/// Canonical ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) for usage-event display
+/// timestamps (`UsageEvent.timestamp` / `UsageContextSnapshot.updated_at`).
+/// Delegates to `session_store` so the calendar algorithm lives in one place;
+/// storage in `usage_events.created_at` stays epoch-seconds (see
+/// `session_store::epoch_secs_to_iso_utc`).
+fn now_iso_utc() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    session_store::epoch_secs_to_iso_utc(secs)
 }
 
 #[cfg(test)]
@@ -2419,6 +2445,77 @@ mod tests {
     }
 
     #[test]
+    fn usage_by_model_request_count_excludes_context_snapshot_events() {
+        // P5: request_count counts only TurnDelta + SessionTotal (token-
+        // reporting) events; event_count counts all rows including
+        // ContextSnapshot occupancy-only reports.
+        let mut ui = empty_ui();
+        let model = Some("gpt-5.1".to_string());
+        let provider = Some("openai".to_string());
+        let agent_cli = Some("codex-acp".to_string());
+
+        let session_total = ClientEvent::UsageUpdated {
+            usage: workspace_model::UsageEvent {
+                scope: workspace_model::UsageEventScope::SessionTotal,
+                model: model.clone(),
+                provider: provider.clone(),
+                agent_cli: agent_cli.clone(),
+                tokens: workspace_model::UsageTokenBreakdown {
+                    total_tokens: Some(1_600),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        let turn_delta = ClientEvent::UsageUpdated {
+            usage: workspace_model::UsageEvent {
+                scope: workspace_model::UsageEventScope::TurnDelta,
+                model: model.clone(),
+                provider: provider.clone(),
+                agent_cli: agent_cli.clone(),
+                tokens: workspace_model::UsageTokenBreakdown {
+                    total_tokens: Some(180),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        let context_snapshot = ClientEvent::UsageUpdated {
+            usage: workspace_model::UsageEvent {
+                scope: workspace_model::UsageEventScope::ContextSnapshot,
+                model: model.clone(),
+                provider: provider.clone(),
+                agent_cli: agent_cli.clone(),
+                tokens: workspace_model::UsageTokenBreakdown::default(),
+                context: workspace_model::UsageContextSnapshot {
+                    used_tokens: Some(1_900),
+                    window_tokens: Some(200_000),
+                    updated_at: Some("12".into()),
+                },
+                ..Default::default()
+            },
+        };
+
+        apply_event(&mut ui, session_total);
+        apply_event(&mut ui, turn_delta);
+        for _ in 0..3 {
+            apply_event(&mut ui, context_snapshot.clone());
+        }
+
+        let row = ui
+            .usage
+            .by_model
+            .iter()
+            .find(|summary| summary.model == model)
+            .expect("gpt-5.1 model row must exist");
+        assert_eq!(row.event_count, 5, "event_count must count all rows");
+        assert_eq!(
+            row.request_count, 2,
+            "request_count must exclude ContextSnapshot occupancy-only reports"
+        );
+    }
+
+    #[test]
     fn usage_update_context_snapshot_only_updates_context_occupancy() {
         let mut ui = empty_ui();
         apply_event(
@@ -2494,5 +2591,20 @@ mod tests {
         assert_eq!(ui.usage.session_total.input_tokens, Some(400));
         assert_eq!(ui.usage.session_total.output_tokens, Some(200));
         assert_eq!(ui.usage.session_total.total_tokens, Some(600));
+    }
+
+    #[test]
+    fn now_iso_utc_emits_canonical_iso8601() {
+        // P1: usage display timestamps must be canonical ISO-8601 UTC
+        // (`YYYY-MM-DDTHH:MM:SSZ`, 20 chars) so the dock shows a readable time
+        // and `latest_at` string comparisons are chronological.
+        let ts = now_iso_utc();
+        assert_eq!(ts.len(), 20, "ts={ts}");
+        assert_eq!(ts.as_bytes()[4], b'-');
+        assert_eq!(ts.as_bytes()[7], b'-');
+        assert_eq!(ts.as_bytes()[10], b'T');
+        assert_eq!(ts.as_bytes()[13], b':');
+        assert_eq!(ts.as_bytes()[16], b':');
+        assert!(ts.ends_with('Z'), "ts={ts}");
     }
 }
