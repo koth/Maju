@@ -312,10 +312,8 @@ fn emit_usage_update(
                 timestamp: None,
                 raw_json,
             };
-            tx.send(ClientEvent::UsageUpdated {
-                usage: turn_event,
-            })
-            .map_err(|_| anyhow!("failed to emit usage update"))?;
+            tx.send(ClientEvent::UsageUpdated { usage: turn_event })
+                .map_err(|_| anyhow!("failed to emit usage update"))?;
         }
     }
 

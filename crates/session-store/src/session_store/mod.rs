@@ -353,6 +353,18 @@ impl SessionStore {
                 .execute_batch("ALTER TABLE sessions ADD COLUMN archived_at TEXT;")?;
         }
 
+        // Migration: add is_steer column to messages so the frontend can
+        // distinguish steer (追加指令) messages from regular turn-starting
+        // User messages and skip the premature turn-boundary fold.
+        let has_is_steer_col: bool = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'is_steer'")?
+            .query_row([], |row| row.get(0))?;
+        if !has_is_steer_col {
+            self.conn
+                .execute_batch("ALTER TABLE messages ADD COLUMN is_steer INTEGER NOT NULL DEFAULT 0;")?;
+        }
+
         Ok(())
     }
 
@@ -798,8 +810,26 @@ impl SessionStore {
         seq: i64,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO messages (id, session_id, role, body, seq, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO messages (id, session_id, role, body, seq, created_at, is_steer) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
             params![id, session_id, role, body, seq, now_iso()],
+        )?;
+        self.touch_session(session_id)?;
+        Ok(())
+    }
+
+    /// Insert a steer (追加指令) message. Same as [`insert_message`] but with
+    /// `is_steer = 1` so the frontend collapse logic can identify it and skip
+    /// the premature turn-boundary fold.
+    pub fn insert_steer_message(
+        &self,
+        session_id: &str,
+        id: &str,
+        body: &str,
+        seq: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO messages (id, session_id, role, body, seq, created_at, is_steer) VALUES (?1, ?2, 'User', ?3, ?4, ?5, 1)",
+            params![id, session_id, body, seq, now_iso()],
         )?;
         self.touch_session(session_id)?;
         Ok(())
@@ -976,23 +1006,43 @@ impl SessionStore {
         &self,
         request: UsageSummaryRequest,
     ) -> Result<Vec<UsageSummaryRow>> {
-        let events = self.load_usage_events_for_summary(&request)?;
-        Ok(usage_summary_from_events(&events, request.group_by))
+        let from_epoch = request
+            .from
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .and_then(parse_instant_to_epoch_secs);
+        let mut events = self.load_usage_events_for_summary(&request)?;
+        // Merge the carry-over baseline: the last SessionTotal per
+        // (session, model) BEFORE the `from` boundary. The aggregate subtracts
+        // this baseline from the in-range final SessionTotal so the result is
+        // an increment, not a cumulative total folded from prior days.
+        if let Some(from) = from_epoch {
+            let baseline = self.load_usage_baseline_before(&request, from)?;
+            events = merge_baseline_events(events, baseline);
+        }
+        Ok(usage_summary_from_events(&events, request.group_by, from_epoch))
     }
 
     /// P2: real daily usage series for the settings "每日用量" chart. Loads the
     /// same filtered event set as [`query_usage_summary`] (so workspace,
     /// archived, date-range and non-reporting-agent filters all apply), then
-    /// buckets events by UTC calendar day. Within each day, per-model rows are
-    /// aggregated with the same `SessionTotal`-overwrites /
-    /// `TurnDelta`-accumulates rules as the cross-session summary, producing
-    /// stackable `by_model` segments plus a day-total breakdown.
+    /// buckets events by UTC calendar day. Each day reports the **incremental**
+    /// usage (last SessionTotal of the day minus the last SessionTotal before
+    /// the day), so cumulative carry-over from prior days does not inflate
+    /// the daily figure.
     pub fn query_usage_daily_series(
         &self,
         request: UsageSummaryRequest,
     ) -> Result<Vec<UsageDailyBucket>> {
-        let events = self.load_usage_events_for_summary(&request)?;
-        Ok(usage_daily_series_from_events(&events))
+        // Load with a widened lower bound (no `from`) so we can compute
+        // per-day baselines; the daily series function itself splits into
+        // per-day increments. The `to` bound still applies.
+        let baseline_request = UsageSummaryRequest {
+            from: None,
+            ..request.clone()
+        };
+        let events = self.load_usage_events_for_summary(&baseline_request)?;
+        Ok(usage_daily_series_from_events(&events, request.from.as_deref()))
     }
 
     fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
@@ -1076,12 +1126,12 @@ impl SessionStore {
         // parse the bound with `parse_instant_to_epoch_secs` (which also accepts
         // raw decimal seconds for backward compatibility) and cast the stored
         // column to INTEGER so SQLite compares both sides as numbers.
-        if let Some(from) = request
+        let from_epoch = request
             .from
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .and_then(parse_instant_to_epoch_secs)
-        {
+            .and_then(parse_instant_to_epoch_secs);
+        if let Some(from) = from_epoch {
             sql.push_str(" AND CAST(u.created_at AS INTEGER) >= ?");
             params_vec.push(from.to_string());
         }
@@ -1094,10 +1144,95 @@ impl SessionStore {
             sql.push_str(" AND CAST(u.created_at AS INTEGER) <= ?");
             params_vec.push(to.to_string());
         }
-        sql.push_str(" ORDER BY u.created_at ASC");
+        // Stable tiebreaker by primary key so events sharing the same
+        // epoch-second timestamp (e.g. a SessionTotal + TurnDelta pair
+        // emitted from one ACP frame) always come back in insertion order,
+        // making aggregation deterministic across queries.
+        sql.push_str(" ORDER BY u.created_at ASC, u.id ASC");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs = params_vec.iter().map(|value| value as &dyn ToSql);
+        let rows = stmt.query_map(params_from_iter(param_refs), stored_usage_event_from_row)?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    /// Load the last `SessionTotal` event per `(session_id, model, provider,
+    /// agent_cli)` strictly before the `from` epoch boundary. These are the
+    /// carry-over baselines that [`compute_per_session_model_totals`] subtracts
+    /// from the in-range final SessionTotal so the reported figure is an
+    /// increment (today's consumption) rather than a cumulative total (which
+    /// would fold in yesterday's usage). Applies the same workspace / archived /
+    /// non-reporting-agent / session filters as the in-range query.
+    fn load_usage_baseline_before(
+        &self,
+        request: &UsageSummaryRequest,
+        from_epoch: i64,
+    ) -> Result<Vec<StoredUsageEvent>> {
+        // For each (session, model, provider, agent_cli), pick the latest
+        // SessionTotal row before `from`. We rely on a correlated subquery to
+        // select the single newest baseline row per group.
+        let mut sql = String::from(
+            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
+                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
+                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
+                    u.created_at
+             FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id
+             WHERE u.scope = 'session_total'
+               AND CAST(u.created_at AS INTEGER) < ?
+               AND COALESCE(s.agent_cli, u.agent_cli, '') != ?",
+        );
+        let mut params_vec = vec![from_epoch.to_string(), NON_REPORTING_AGENT_CLI.to_string()];
+        if !request.all_workspaces {
+            if let Some(workspace_root) = request
+                .workspace_root
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    if self.workspace_root.is_empty() {
+                        None
+                    } else {
+                        Some(self.workspace_root.clone())
+                    }
+                })
+            {
+                sql.push_str(" AND u.workspace_root = ?");
+                params_vec.push(workspace_root);
+            }
+        }
+        if !request.include_archived {
+            sql.push_str(" AND s.archived_at IS NULL");
+        }
+        if let Some(session_id) = request
+            .session_id
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            sql.push_str(" AND u.session_id = ?");
+            params_vec.push(session_id.to_string());
+        }
+        // Keep only the newest baseline per (session, model, provider,
+        // agent_cli) via a correlated subquery on `created_at, id`.
+        sql.push_str(
+            " AND NOT EXISTS (
+                 SELECT 1 FROM usage_events u2
+                 WHERE u2.session_id = u.session_id
+                   AND COALESCE(u2.model, '') = COALESCE(u.model, '')
+                   AND COALESCE(u2.provider, '') = COALESCE(u.provider, '')
+                   AND COALESCE(u2.agent_cli, '') = COALESCE(u.agent_cli, '')
+                   AND u2.scope = 'session_total'
+                   AND CAST(u2.created_at AS INTEGER) < ?
+                   AND (CAST(u2.created_at AS INTEGER), u2.id) > (CAST(u.created_at AS INTEGER), u.id)
+             ) ORDER BY u.created_at ASC, u.id ASC",
+        );
+        params_vec.push(from_epoch.to_string());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs = params_vec.iter().map(|v| v as &dyn ToSql);
         let rows = stmt.query_map(params_from_iter(param_refs), stored_usage_event_from_row)?;
         let mut events = Vec::new();
         for row in rows {
@@ -1123,6 +1258,7 @@ impl SessionStore {
                 role: String,
                 body: String,
                 created_at: String,
+                is_steer: bool,
             },
             Tool {
                 id: Uuid,
@@ -1145,10 +1281,11 @@ impl SessionStore {
         // Load messages
         {
             let mut stmt = self.conn.prepare(
-                "SELECT id, role, body, seq, created_at FROM messages WHERE session_id = ?1 ORDER BY seq",
+                "SELECT id, role, body, seq, created_at, is_steer FROM messages WHERE session_id = ?1 ORDER BY seq",
             )?;
             let rows = stmt.query_map(params![id], |row| {
                 let id_str: String = row.get(0)?;
+                let is_steer: bool = row.get::<_, i64>(5)? != 0;
                 Ok((
                     row.get::<_, i64>(3)?,
                     Entry::Message {
@@ -1156,6 +1293,7 @@ impl SessionStore {
                         role: row.get(1)?,
                         body: row.get(2)?,
                         created_at: row.get(4)?,
+                        is_steer,
                     },
                 ))
             })?;
@@ -1208,7 +1346,7 @@ impl SessionStore {
                     role,
                     body,
                     created_at,
-                    ..
+                    is_steer,
                 } => {
                     let role = match role.as_str() {
                         "User" => MessageRole::User,
@@ -1220,6 +1358,7 @@ impl SessionStore {
                         role,
                         body,
                         created_at,
+                        is_steer,
                     });
                     timeline.push(TimelineItem::Message(id));
                 }
@@ -2143,6 +2282,7 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
             None,
             None,
             event,
+            true,
         );
     }
 
@@ -2184,10 +2324,159 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
     snapshot
 }
 
+/// Per-(session, model) accumulator used by [`compute_per_session_model_totals`].
+/// `has_session_total` and `session_total` are tracked **per session** here,
+/// not per group row — this is the key difference from the old per-group
+/// `UsageModelSummary::has_session_total` flag which broke when multiple
+/// sessions shared a model group.
+///
+/// When a `from` boundary is supplied, `baseline` holds the last SessionTotal
+/// seen BEFORE that boundary (the cumulative consumption carried over from
+/// prior days). The effective in-range total is then
+/// `final - baseline` (an increment), not the cumulative `final`.
+#[derive(Default)]
+struct SessionModelTotalState {
+    has_session_total: bool,
+    session_total: UsageTokenBreakdown,
+    turn_delta_sum: UsageTokenBreakdown,
+    saw_turn_delta: bool,
+    /// Legacy fallback: sessions persisted by older Kodex builds may only have
+    /// `ContextSnapshot` rows carrying `total_tokens`. Surfaced when no
+    /// `SessionTotal` / `TurnDelta` events exist for the (session, model) pair.
+    legacy_total: Option<u64>,
+    /// Last `SessionTotal` seen strictly before the `from` boundary. Used to
+    /// subtract carry-over consumption when reporting an in-range increment.
+    baseline: Option<UsageTokenBreakdown>,
+    /// True once any event at-or-after the `from` boundary was observed.
+    /// When false the (session, model) pair had no in-range activity and must
+    /// not contribute tokens, even if a baseline exists.
+    saw_in_range: bool,
+}
+
+/// Pre-compute the effective token total for each `(session_id, model_key)`
+/// pair. For each pair:
+/// - If any `SessionTotal` event exists, the **last** one's tokens are
+///   authoritative (SessionTotal is cumulative per session).
+/// - Otherwise, all `TurnDelta` events are summed.
+/// - If neither exists but `ContextSnapshot` rows carry a legacy
+///   `total_tokens`, that is surfaced as a best-effort fallback.
+///
+/// When `from_epoch` is supplied, the result is an **increment**: the last
+/// Merge carry-over baseline events into the in-range event stream. Baselines
+/// (loaded by [`SessionStore::load_usage_baseline_before`]) carry timestamps
+/// strictly before `from`, so when [`compute_per_session_model_totals`] splits
+/// events at the `from` boundary the baselines populate the pre-range
+/// `baseline` field while in-range events populate the final SessionTotal.
+/// The merged vec stays sorted ascending by `(created_at, id)`.
+fn merge_baseline_events(
+    mut events: Vec<StoredUsageEvent>,
+    baseline: Vec<StoredUsageEvent>,
+) -> Vec<StoredUsageEvent> {
+    if baseline.is_empty() {
+        return events;
+    }
+    if events.is_empty() {
+        return baseline;
+    }
+    events.extend(baseline);
+    events.sort_by(|a, b| {
+        let a_secs = parse_instant_to_epoch_secs(&a.created_at).unwrap_or(0);
+        let b_secs = parse_instant_to_epoch_secs(&b.created_at).unwrap_or(0);
+        a_secs
+            .cmp(&b_secs)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    events
+}
+
+/// in-range SessionTotal minus the last pre-range SessionTotal (the baseline
+/// carried over from prior days). This prevents yesterday's cumulative
+/// consumption from being folded into "today". Events are assumed sorted
+/// ascending by `created_at` so "last" is well-defined.
+fn compute_per_session_model_totals<'a, I: IntoIterator<Item = &'a StoredUsageEvent>>(
+    events: I,
+    from_epoch: Option<i64>,
+) -> HashMap<(String, String), UsageTokenBreakdown> {
+    let mut state: HashMap<(String, String), SessionModelTotalState> = HashMap::new();
+    for event in events {
+        let model_key = usage_model_key_from_fields(
+            event.model.as_deref(),
+            event.provider.as_deref(),
+            event.agent_cli.as_deref(),
+        );
+        let event_secs = parse_instant_to_epoch_secs(&event.created_at).unwrap_or(0);
+        let in_range = from_epoch.map_or(true, |from| event_secs >= from);
+        let entry = state
+            .entry((event.session_id.clone(), model_key))
+            .or_default();
+        match event.scope {
+            UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
+                if !in_range {
+                    // Track the carry-over baseline (pre-range cumulative).
+                    entry.baseline = Some(event.tokens.clone());
+                } else {
+                    entry.has_session_total = true;
+                    entry.session_total = event.tokens.clone();
+                    entry.saw_in_range = true;
+                }
+            }
+            UsageEventScope::TurnDelta if !entry.has_session_total => {
+                if in_range {
+                    entry.saw_turn_delta = true;
+                    add_usage_tokens(&mut entry.turn_delta_sum, &event.tokens);
+                    entry.saw_in_range = true;
+                }
+            }
+            UsageEventScope::ContextSnapshot => {
+                if let Some(total) = event.tokens.total_tokens {
+                    entry.legacy_total = Some(total);
+                }
+            }
+            _ => {}
+        }
+    }
+    state
+        .into_iter()
+        .filter(|(_, st)| st.saw_in_range)
+        .map(|(pair, st)| {
+            let total = if st.has_session_total {
+                // Subtract the carry-over baseline so the result is the
+                // in-range increment, not the cumulative total.
+                if let Some(baseline) = &st.baseline {
+                    subtract_usage_tokens(&st.session_total, baseline)
+                } else {
+                    st.session_total
+                }
+            } else if st.saw_turn_delta {
+                st.turn_delta_sum
+            } else if let Some(legacy) = st.legacy_total {
+                UsageTokenBreakdown {
+                    total_tokens: Some(legacy),
+                    ..Default::default()
+                }
+            } else {
+                UsageTokenBreakdown::default()
+            };
+            (pair, total)
+        })
+        .collect()
+}
+
 fn usage_summary_from_events(
     events: &[StoredUsageEvent],
     group_by: UsageSummaryGroupBy,
+    from_epoch: Option<i64>,
 ) -> Vec<UsageSummaryRow> {
+    // Pre-compute per-(session, model) effective token totals. The
+    // SessionTotal-overwrites / TurnDelta-accumulates rule applies per
+    // (session, model), NOT per group — tracking it per group would break
+    // when multiple sessions share a model (one session's SessionTotal would
+    // suppress another session's TurnDelta, and SessionTotal would overwrite
+    // instead of sum across sessions).
+    let per_session_model = compute_per_session_model_totals(events, from_epoch);
+    let mut contributed: HashSet<(String, String)> = HashSet::new();
+
     let mut rows = Vec::<UsageSummaryRow>::new();
     let mut sessions_by_key = HashMap::<String, HashSet<String>>::new();
     for event in events {
@@ -2271,7 +2560,26 @@ fn usage_summary_from_events(
             session_id,
             workspace_root,
             event,
+            false,
         );
+
+        // Add this (session, model) pair's pre-computed effective total to
+        // the group row exactly once. Subsequent events for the same pair
+        // only update metadata (event_count, request_count, latest_at,
+        // context_peak) handled above.
+        let event_model_key = usage_model_key_from_fields(
+            event.model.as_deref(),
+            event.provider.as_deref(),
+            event.agent_cli.as_deref(),
+        );
+        let sm_pair = (event.session_id.clone(), event_model_key);
+        if contributed.insert(sm_pair.clone()) {
+            if let Some(total) = per_session_model.get(&sm_pair) {
+                if let Some(index) = rows.iter().position(|row| usage_row_matches_key(row, &key)) {
+                    add_usage_tokens(&mut rows[index].tokens, total);
+                }
+            }
+        }
     }
 
     for row in &mut rows {
@@ -2296,7 +2604,11 @@ fn usage_summary_from_events(
 /// and a day-total breakdown whose `total_tokens` is the sum of each
 /// per-model row's effective total. Days with no parseable timestamp are
 /// skipped. `BTreeMap` keeps buckets sorted by date ascending.
-fn usage_daily_series_from_events(events: &[StoredUsageEvent]) -> Vec<UsageDailyBucket> {
+fn usage_daily_series_from_events(events: &[StoredUsageEvent], from: Option<&str>) -> Vec<UsageDailyBucket> {
+    // Parse the `from` bound so days strictly before it are skipped entirely.
+    let from_epoch = from
+        .filter(|v| !v.trim().is_empty())
+        .and_then(parse_instant_to_epoch_secs);
     let mut events_by_date: BTreeMap<String, Vec<&StoredUsageEvent>> = BTreeMap::new();
     for event in events {
         let Some(date) = instant_to_date_utc(&event.created_at) else {
@@ -2304,10 +2616,39 @@ fn usage_daily_series_from_events(events: &[StoredUsageEvent]) -> Vec<UsageDaily
         };
         events_by_date.entry(date).or_default().push(event);
     }
+    // Compute the last SessionTotal per (session, model) seen before the first
+    // in-range day. This is the running baseline that each day's increment
+    // subtracts from. We process days ascending and advance the baseline as we
+    // encounter new SessionTotals, so each day subtracts the carry-over from
+    // all prior days (not just the immediately preceding one).
+    let mut running_baseline: HashMap<(String, String), UsageTokenBreakdown> = HashMap::new();
     let mut buckets = Vec::with_capacity(events_by_date.len());
-    for (date, day_events) in events_by_date {
+    for (date, day_events) in &events_by_date {
+        // Compute the epoch boundary for the start of this day so
+        // `compute_per_session_model_totals` can split baseline vs in-day.
+        let day_start_epoch = epoch_start_of_date_utc(date).unwrap_or(0);
+        // Skip days entirely before the `from` bound (they only served to
+        // build the running baseline).
+        if let Some(from) = from_epoch {
+            let day_end_epoch = day_start_epoch.saturating_add(86_399);
+            if day_end_epoch < from {
+                advance_baseline(&mut running_baseline, day_events);
+                continue;
+            }
+        }
+        // Pre-compute per-(session, model) effective totals for this day,
+        // subtracting the running baseline (last SessionTotal before this day).
+        let per_session_model = compute_daily_day_totals(
+            day_events,
+            &running_baseline,
+            day_start_epoch,
+        );
+        // Advance the baseline for the NEXT day with this day's SessionTotals.
+        advance_baseline(&mut running_baseline, day_events);
+        let mut contributed: HashSet<(String, String)> = HashSet::new();
+
         let mut by_model = Vec::<UsageModelSummary>::new();
-        for event in &day_events {
+        for event in day_events {
             let label = event
                 .model
                 .clone()
@@ -2326,7 +2667,27 @@ fn usage_daily_series_from_events(events: &[StoredUsageEvent]) -> Vec<UsageDaily
                 None,
                 None,
                 event,
+                false,
             );
+            // Add each (session, model) pair's effective total once.
+            let event_model_key = usage_model_key_from_fields(
+                event.model.as_deref(),
+                event.provider.as_deref(),
+                event.agent_cli.as_deref(),
+            );
+            let sm_pair = (event.session_id.clone(), event_model_key);
+            if contributed.insert(sm_pair.clone()) {
+                if let Some(total) = per_session_model.get(&sm_pair) {
+                    let key = usage_model_key_from_fields(
+                        event.model.as_deref(),
+                        event.provider.as_deref(),
+                        event.agent_cli.as_deref(),
+                    );
+                    if let Some(index) = by_model.iter().position(|row| usage_row_matches_key(row, &key)) {
+                        add_usage_tokens(&mut by_model[index].tokens, total);
+                    }
+                }
+            }
         }
         let mut tokens = UsageTokenBreakdown::default();
         let mut day_total: u64 = 0;
@@ -2344,12 +2705,91 @@ fn usage_daily_series_from_events(events: &[StoredUsageEvent]) -> Vec<UsageDaily
                 .then_with(|| a.label.cmp(&b.label))
         });
         buckets.push(UsageDailyBucket {
-            date,
+            date: date.clone(),
             tokens,
             by_model,
         });
     }
     buckets
+}
+
+/// Advance the running baseline with a day's SessionTotal events: for each
+/// `(session, model)` pair, the last SessionTotal of the day becomes the new
+/// baseline that the *next* day subtracts from.
+fn advance_baseline(
+    baseline: &mut HashMap<(String, String), UsageTokenBreakdown>,
+    day_events: &[&StoredUsageEvent],
+) {
+    for event in day_events {
+        if matches!(event.scope, UsageEventScope::SessionTotal) && has_usage_tokens(&event.tokens) {
+            let key = usage_model_key_from_fields(
+                event.model.as_deref(),
+                event.provider.as_deref(),
+                event.agent_cli.as_deref(),
+            );
+            baseline.insert((event.session_id.clone(), key), event.tokens.clone());
+        }
+    }
+}
+
+/// Per-(session, model) incremental total for a single day: last in-day
+/// SessionTotal minus the running baseline (last SessionTotal before the
+/// day). Falls back to TurnDelta accumulation when no SessionTotal exists.
+fn compute_daily_day_totals(
+    day_events: &[&StoredUsageEvent],
+    running_baseline: &HashMap<(String, String), UsageTokenBreakdown>,
+    day_start_epoch: i64,
+) -> HashMap<(String, String), UsageTokenBreakdown> {
+    let mut totals: HashMap<(String, String), UsageTokenBreakdown> = HashMap::new();
+    for event in day_events {
+        let key = usage_model_key_from_fields(
+            event.model.as_deref(),
+            event.provider.as_deref(),
+            event.agent_cli.as_deref(),
+        );
+        let pair = (event.session_id.clone(), key);
+        match event.scope {
+            UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
+                let total = if let Some(baseline) = running_baseline.get(&pair) {
+                    subtract_usage_tokens(&event.tokens, baseline)
+                } else {
+                    event.tokens.clone()
+                };
+                totals.insert(pair, total);
+            }
+            UsageEventScope::TurnDelta if !totals.contains_key(&pair) => {
+                add_usage_tokens(totals.entry(pair).or_default(), &event.tokens);
+            }
+            _ => {}
+        }
+    }
+    let _ = day_start_epoch;
+    totals
+}
+
+/// Convert a UTC date string `YYYY-MM-DD` to the epoch-seconds start of that
+/// day (00:00:00 UTC). Returns None on parse failure.
+fn epoch_start_of_date_utc(date: &str) -> Option<i64> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i64 = parts[0].parse().ok()?;
+    let m: i64 = parts[1].parse().ok()?;
+    let d: i64 = parts[2].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days since the Unix epoch (1970-01-01) using the civil-from-days
+    // algorithm (Howard Hinnant). `civil_to_days` returns the day count;
+    // multiply by 86400 for epoch seconds.
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = (y_adj - era * 400) as i64;
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86_400)
 }
 
 fn update_usage_summary_row(
@@ -2362,6 +2802,7 @@ fn update_usage_summary_row(
     session_id: Option<String>,
     workspace_root: Option<String>,
     event: &StoredUsageEvent,
+    track_tokens: bool,
 ) {
     let key = explicit_key.map(str::to_string).unwrap_or_else(|| {
         usage_model_key_from_fields(model.as_deref(), provider.as_deref(), agent_cli.as_deref())
@@ -2418,23 +2859,29 @@ fn update_usage_summary_row(
     if let Some(used) = event.context.used_tokens {
         row.context_peak_tokens = Some(row.context_peak_tokens.unwrap_or(0).max(used));
     }
-    match event.scope {
-        UsageEventScope::TurnDelta => {
-            // Only accumulate when no SessionTotal has been observed for
-            // this group yet; otherwise the per-turn delta is already
-            // included in the authoritative SessionTotal.
-            if !row.has_session_total {
-                add_usage_tokens(&mut row.tokens, &event.tokens);
+    // Token handling is only active for the single-session snapshot path
+    // (`track_tokens = true`), where `has_session_total` is effectively
+    // per-session because only one session's events are in scope. The
+    // cross-session summary and daily series pass `track_tokens = false`
+    // and compute token totals from [`compute_per_session_model_totals`]
+    // instead, because the per-group `has_session_total` flag would break
+    // when multiple sessions share a model group.
+    if track_tokens {
+        match event.scope {
+            UsageEventScope::TurnDelta => {
+                if !row.has_session_total {
+                    add_usage_tokens(&mut row.tokens, &event.tokens);
+                }
             }
+            UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
+                row.tokens = event.tokens.clone();
+                row.has_session_total = true;
+            }
+            // `ContextSnapshot` does not contribute to per-model token
+            // totals; context peak is already recorded above.
+            UsageEventScope::ContextSnapshot => {}
+            _ => {}
         }
-        UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
-            row.tokens = event.tokens.clone();
-            row.has_session_total = true;
-        }
-        // `ContextSnapshot` does not contribute to per-model token totals;
-        // context peak is already recorded above from `context.used_tokens`.
-        UsageEventScope::ContextSnapshot => {}
-        _ => {}
     }
 }
 
@@ -2537,6 +2984,27 @@ fn add_optional_u64(target: &mut Option<u64>, delta: Option<u64>) {
     if let Some(delta) = delta {
         *target = Some(target.unwrap_or(0).saturating_add(delta));
     }
+}
+
+/// Subtract one token breakdown from another (clamped at 0). Used to turn a
+/// cumulative `SessionTotal` into an in-range increment by removing the
+/// carry-over baseline. Missing fields on either side are treated as 0.
+fn subtract_usage_tokens(
+    value: &UsageTokenBreakdown,
+    baseline: &UsageTokenBreakdown,
+) -> UsageTokenBreakdown {
+    UsageTokenBreakdown {
+        input_tokens: sub_optional_u64(value.input_tokens, baseline.input_tokens),
+        output_tokens: sub_optional_u64(value.output_tokens, baseline.output_tokens),
+        cache_read_tokens: sub_optional_u64(value.cache_read_tokens, baseline.cache_read_tokens),
+        cache_write_tokens: sub_optional_u64(value.cache_write_tokens, baseline.cache_write_tokens),
+        reasoning_tokens: sub_optional_u64(value.reasoning_tokens, baseline.reasoning_tokens),
+        total_tokens: sub_optional_u64(value.total_tokens, baseline.total_tokens),
+    }
+}
+
+fn sub_optional_u64(value: Option<u64>, sub: Option<u64>) -> Option<u64> {
+    Some(value.unwrap_or(0).saturating_sub(sub.unwrap_or(0)))
 }
 
 fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {

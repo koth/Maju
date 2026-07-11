@@ -11,9 +11,14 @@ fn remember_stream_reasoning(state: &ChatStreamState) {
         .tool_calls
         .iter()
         .filter(|call| call.added)
-    .map(stream_tool_call_to_chat_tool_call)
-    .collect::<Vec<_>>();
-    remember_assistant_reasoning(&state.session_id, &state.text, &tool_calls, &state.reasoning_content);
+        .map(stream_tool_call_to_chat_tool_call)
+        .collect::<Vec<_>>();
+    remember_assistant_reasoning(
+        &state.session_id,
+        &state.text,
+        &tool_calls,
+        &state.reasoning_content,
+    );
 }
 
 fn stream_tool_call_to_chat_tool_call(call: &StreamToolCall) -> Value {
@@ -205,7 +210,7 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
         call.id = id.to_string();
     }
     if call.id.is_empty() {
-        call.id = format!("call_proxy_{index}");
+        call.id = next_synthetic_tool_call_id();
     }
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     if let Some(name) = function.get("name").and_then(Value::as_str) {
@@ -316,7 +321,11 @@ fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
         append_codex_api_proxy_log(&format!(
             "emit_stream_done_tool_call index={index} id={} name={} args_len={} added={}",
             call.id,
-            if call.name.is_empty() { "<empty>" } else { &call.name },
+            if call.name.is_empty() {
+                "<empty>"
+            } else {
+                &call.name
+            },
             call.arguments.len(),
             call.added,
         ));
@@ -391,7 +400,11 @@ pub(super) fn streaming_chat_sse_response(
 ) -> Response<ProxyBody> {
     let upstream_stream = upstream.bytes_stream();
     let stream = futures::stream::unfold(
-        (upstream_stream, ChatSseStreamConverter::new(session_id), false),
+        (
+            upstream_stream,
+            ChatSseStreamConverter::new(session_id),
+            false,
+        ),
         |(mut upstream_stream, mut converter, done)| async move {
             if done {
                 return None;
@@ -917,7 +930,7 @@ fn emit_anthropic_tool_call_delta(
         call.id = id.to_string();
     }
     if call.id.is_empty() {
-        call.id = format!("call_proxy_{index}");
+        call.id = next_synthetic_tool_call_id();
     }
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     if let Some(name) = function.get("name").and_then(Value::as_str) {
@@ -1255,8 +1268,9 @@ fn process_anthropic_to_responses_event(
                         .get("content_block")
                         .and_then(|b| b.get("id"))
                         .and_then(Value::as_str)
-                        .unwrap_or("call_proxy")
-                        .to_string();
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(next_synthetic_tool_call_id);
                     let name = value
                         .get("content_block")
                         .and_then(|b| b.get("name"))
@@ -1404,7 +1418,11 @@ fn process_anthropic_to_responses_event(
                         );
                         let item = namespaced_function_call_item(
                             &call.id,
-                            if call.name.is_empty() { "unknown" } else { &call.name },
+                            if call.name.is_empty() {
+                                "unknown"
+                            } else {
+                                &call.name
+                            },
                             &call.arguments,
                             "completed",
                         );
@@ -1420,7 +1438,11 @@ fn process_anthropic_to_responses_event(
                     } else {
                         let item = namespaced_function_call_item(
                             &call.id,
-                            if call.name.is_empty() { "unknown" } else { &call.name },
+                            if call.name.is_empty() {
+                                "unknown"
+                            } else {
+                                &call.name
+                            },
                             "",
                             "completed",
                         );
@@ -1456,10 +1478,7 @@ fn process_anthropic_to_responses_event(
     }
 }
 
-fn emit_anthropic_to_responses_done(
-    output: &mut String,
-    state: &mut AnthropicToResponsesState,
-) {
+fn emit_anthropic_to_responses_done(output: &mut String, state: &mut AnthropicToResponsesState) {
     append_codex_api_proxy_log(&format!(
         "anthropic_to_responses_stream_done stop_reason={} text_chars={} tool_calls={}",
         state.stop_reason.as_deref().unwrap_or("<missing>"),
@@ -1492,7 +1511,7 @@ fn emit_anthropic_to_responses_done(
             }),
         );
         let item =
-           response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
+            response_message_item_with_reasoning(&state.text, Some(&state.reasoning_content));
         remember_reasoning_content(&state.session_id, &state.text, &state.reasoning_content);
         push_sse(
             output,
@@ -1555,7 +1574,11 @@ fn emit_anthropic_to_responses_done(
             }
             let item = namespaced_function_call_item(
                 &call.id,
-                if call.name.is_empty() { "unknown" } else { &call.name },
+                if call.name.is_empty() {
+                    "unknown"
+                } else {
+                    &call.name
+                },
                 &call.arguments,
                 "completed",
             );
@@ -1795,10 +1818,7 @@ fn process_responses_to_anthropic_event(
             let Some(item) = value.get("item") else {
                 return;
             };
-            let item_type = item
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
             match item_type {
                 "message" => {
                     // Text deltas will follow via response.output_text.delta; no
@@ -1814,8 +1834,9 @@ fn process_responses_to_anthropic_event(
                         .get("call_id")
                         .or_else(|| item.get("id"))
                         .and_then(Value::as_str)
-                        .unwrap_or("call_proxy")
-                        .to_string();
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(next_synthetic_tool_call_id);
                     let name = item
                         .get("name")
                         .and_then(Value::as_str)
@@ -1928,10 +1949,7 @@ fn process_responses_to_anthropic_event(
             let Some(item) = value.get("item") else {
                 return;
             };
-            let item_type = item
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
             if item_type == "function_call" || item_type == "custom_tool_call" {
                 if let Some(call) = state.tool_calls.get_mut(&output_index) {
                     // Capture final arguments if not already accumulated.
@@ -1992,10 +2010,7 @@ fn process_responses_to_anthropic_event(
     }
 }
 
-fn emit_responses_to_anthropic_done(
-    output: &mut String,
-    state: &mut ResponsesToAnthropicState,
-) {
+fn emit_responses_to_anthropic_done(output: &mut String, state: &mut ResponsesToAnthropicState) {
     append_codex_api_proxy_log(&format!(
         "responses_to_anthropic_stream_done stop_reason={} text_chars={} tool_calls={}",
         state.stop_reason.as_deref().unwrap_or("<missing>"),

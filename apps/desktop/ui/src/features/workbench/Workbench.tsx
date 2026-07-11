@@ -972,6 +972,22 @@ export function Workbench() {
         <AgentPlanPanel entries={agentPlanEntries} />
       </aside>
     ) : null;
+  // Steers queued while a turn was running but not yet moved into the
+  // timeline by the backend. Rendered as a small pending area above the
+  // composer so the user sees their queued 追加指令 without it cutting the
+  // currently-streaming assistant output.
+  const pendingSteers = snapshot?.pending_steers ?? [];
+  const pendingSteersSlot =
+    pendingSteers.length > 0 ? (
+      <div className="composer-pending-steers" role="status" aria-label="待处理的追加指令">
+        {pendingSteers.map((steer) => (
+          <div key={steer.message_id} className="composer-pending-steer">
+            <span className="composer-pending-steer-badge">追加指令</span>
+            <span className="composer-pending-steer-body">{steer.body}</span>
+          </div>
+        ))}
+      </div>
+    ) : null;
   const composerStatusSlot =
     pendingPermissionRequests.length > 0 ? (
       <div className="composer-plan-slot">
@@ -1162,6 +1178,7 @@ export function Workbench() {
                   expandedReviewSideTreeVisible ? "has-review-side-tree" : ""
                 }`}
               >
+                {pendingSteersSlot}
                 {composerStatusSlot}
                 <Composer
                   snapshot={snapshot}
@@ -1216,6 +1233,7 @@ export function Workbench() {
                     )}
                   </section>
                 )}
+                {pendingSteersSlot}
                 {composerStatusSlot}
                 <Composer
                   snapshot={snapshot}

@@ -1,5 +1,5 @@
 use super::*;
-use workspace_model::UserPromptContent;
+use workspace_model::{PendingSteer, UserPromptContent};
 
 #[test]
 fn inline_think_filter_strips_complete_blocks_from_visible_text() {
@@ -58,12 +58,14 @@ fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
         role: MessageRole::User,
         body: "old prompt".into(),
         created_at: current_timestamp(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: system_id,
         role: MessageRole::System,
         body: "会话已断开：boom".into(),
         created_at: current_timestamp(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Thinking);
@@ -114,12 +116,14 @@ fn retry_user_message_is_rejected_after_assistant_started() {
         role: MessageRole::User,
         body: "old prompt".into(),
         created_at: current_timestamp(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "already replying".into(),
         created_at: current_timestamp(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -216,7 +220,7 @@ fn interleaved_assistant_messages_survive_session_restore() {
     app.session.shutdown();
 }
 #[test]
-fn steer_prompt_appends_user_message_and_preserves_turn_state() {
+fn steer_prompt_queues_pending_message_and_preserves_turn_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app_with_agent_command(&dir, steer_mock_agent_command());
     app.ui.prompt_capabilities.session_steer = true;
@@ -243,37 +247,65 @@ fn steer_prompt_appends_user_message_and_preserves_turn_state() {
     assert_eq!(app.ui.session.status, SessionStatus::WaitingForTool);
     assert_eq!(app.ui.agent_plan.len(), 1);
     assert!(app.review_changes_started);
-    let user_messages = app
+
+    // The steer is queued as pending — NOT yet in the timeline — so it does
+    // not cut the currently-streaming assistant message. It is, however,
+    // already persisted to SQLite (crash-safe) and tracked in messages so
+    // the frontend can show it above the composer.
+    assert_eq!(
+        app.ui
+            .timeline
+            .iter()
+            .filter(|item| matches!(item, TimelineItem::Message(id)
+                if app
+                    .ui
+                    .messages
+                    .iter()
+                    .find(|m| m.id == *id)
+                    .is_some_and(|m| m.role == MessageRole::User && m.body == "second prompt")))
+            .count(),
+        0,
+        "queued steer must not be in the timeline before the agent responds"
+    );
+    assert_eq!(app.ui.pending_steers.len(), 1);
+    assert_eq!(app.ui.pending_steers[0].body, "second prompt");
+    assert!(app
         .ui
         .messages
         .iter()
-        .filter(|message| message.role == MessageRole::User)
-        .collect::<Vec<_>>();
-    assert_eq!(user_messages.len(), 2);
-    assert_eq!(user_messages[1].body, "second prompt");
+        .any(|m| m.role == MessageRole::User && m.body == "second prompt"));
 
-    let (messages, _tools, timeline) = app
+    let (messages, _tools, _timeline) = app
         .store
         .load_session(&app.ui.session.id.to_string())
         .unwrap();
     assert!(
         messages
             .iter()
-            .any(|message| message.body == "second prompt")
-    );
-    assert_eq!(
-        timeline
-            .iter()
-            .filter(|item| matches!(item, TimelineItem::Message(_)))
-            .count(),
-        2
+            .any(|message| message.body == "second prompt"),
+        "queued steer must be persisted to SQLite immediately"
     );
 
     poll_until_prompt_finished(&mut app);
+
+    // After the agent responds, the steer is flushed into the timeline and
+    // the assistant response to the steer appears as a new message.
+    assert!(app.ui.pending_steers.is_empty(), "pending steers are flushed");
     assert!(app.ui.messages.iter().any(|message| {
         message.role == MessageRole::Assistant
             && message.body.contains("Steer accepted: second prompt")
     }));
+    // Exactly one user message with the steer body (the queued one); the
+    // agent's echoed UserMessageChunk must have been suppressed.
+    assert_eq!(
+        app.ui
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User && m.body == "second prompt")
+            .count(),
+        1,
+        "steer echo must be suppressed, not duplicated"
+    );
     app.session.shutdown();
 }
 
@@ -312,6 +344,157 @@ fn steer_prompt_is_rejected_when_session_capability_is_missing() {
     app.session.shutdown();
 }
 
+/// Deterministic test (no agent subprocess): a queued steer stays out of the
+/// timeline while the assistant is streaming, and is flushed into the
+/// timeline right before the assistant chunk that responds to it — placing
+/// the User steer message immediately before the new Assistant message
+/// without splitting the prior streaming message.
+#[test]
+fn pending_steer_flushes_before_assistant_response_chunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+
+    // The assistant is mid-stream (its message is the last timeline item).
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "正在分析问题".into(),
+    });
+    let streaming_assistant_id = app
+        .ui
+        .timeline
+        .last()
+        .and_then(|item| match item {
+            TimelineItem::Message(id) => Some(*id),
+            _ => None,
+        })
+        .expect("streaming assistant message is last");
+
+    // User steers; the steer is queued, NOT inserted into the timeline, so
+    // the streaming assistant stays the last timeline item (no visual cut).
+    let steer_id = uuid::Uuid::new_v4();
+    app.ui.pending_steers.push(PendingSteer {
+        message_id: steer_id,
+        body: "改为处理登录".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: steer_id,
+        role: MessageRole::User,
+        body: "改为处理登录".into(),
+        created_at: current_timestamp(),
+    ..Default::default()
+    });
+    let steer_body = app.ui.pending_steers[0].body.clone();
+    assert_eq!(app.ui.timeline.len(), 1);
+    assert_eq!(
+        app.ui.timeline.last(),
+        Some(&TimelineItem::Message(streaming_assistant_id))
+    );
+
+    // The agent's echoed UserMessageChunk for the steer must be suppressed
+    // (it would otherwise cut the stream and duplicate the queued message).
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::User,
+        content: steer_body.clone(),
+    });
+    assert_eq!(app.ui.timeline.len(), 1, "steer echo must not enter the timeline");
+    assert_eq!(
+        app.ui
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User && m.body == steer_body)
+            .count(),
+        1,
+        "steer echo must be suppressed, not duplicated"
+    );
+
+    // The agent starts responding to the steer — the assistant chunk flushes
+    // the queued steer into the timeline first.
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "好的，改为处理登录".into(),
+    });
+
+    assert!(app.ui.pending_steers.is_empty(), "steer flushed on assistant chunk");
+    let timeline_roles: Vec<MessageRole> = app
+        .ui
+        .timeline
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::Message(id) => app
+                .ui
+                .messages
+                .iter()
+                .find(|m| m.id == *id)
+                .map(|m| m.role.clone()),
+            _ => None,
+        })
+        .collect();
+    // Order: prior streaming assistant, flushed user steer, new assistant.
+    assert_eq!(
+        timeline_roles,
+        vec![MessageRole::Assistant, MessageRole::User, MessageRole::Assistant]
+    );
+    // The prior streaming assistant was not split — it stays a single message.
+    assert_eq!(
+        app.ui
+            .messages
+            .iter()
+            .filter(|m| m.id == streaming_assistant_id)
+            .count(),
+        1
+    );
+    app.session.shutdown();
+}
+
+/// Safety net: if the turn ends while steers are still queued (e.g. the agent
+/// never emitted an assistant chunk for them), they are flushed into the
+/// timeline so they are never lost.
+#[test]
+fn pending_steer_safety_net_flushes_on_turn_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::MessageChunk {
+        role: MessageRole::Assistant,
+        content: "处理中".into(),
+    });
+    let steer_id = uuid::Uuid::new_v4();
+    app.ui.pending_steers.push(PendingSteer {
+        message_id: steer_id,
+        body: "等下再说".into(),
+        created_at: current_timestamp(),
+    });
+    app.ui.messages.push(ChatMessage {
+        id: steer_id,
+        role: MessageRole::User,
+        body: "等下再说".into(),
+        created_at: current_timestamp(),
+    ..Default::default()
+    });
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::TurnFinished {
+        stop_reason: "end_turn".into(),
+    });
+
+    assert!(
+        app.ui.pending_steers.is_empty(),
+        "safety net flushes on TurnFinished"
+    );
+    assert!(
+        app.ui.timeline.iter().any(|item| matches!(item, TimelineItem::Message(id)
+            if app.ui.messages.iter().any(|m| m.id == *id
+                && m.role == MessageRole::User
+                && m.body == "等下再说"))),
+        "queued steer moved into timeline by safety net"
+    );
+    app.session.shutdown();
+}
+
 #[test]
 fn agent_title_matching_prompt_acknowledges_protocol_sync() {
     let dir = tempfile::tempdir().unwrap();
@@ -346,6 +529,7 @@ fn agent_title_matching_prompt_acknowledges_protocol_sync() {
         role: MessageRole::Assistant,
         body: "好的，我来修复登录流程。".into(),
         created_at: current_timestamp(),
+    ..Default::default()
     });
 
     if app.needs_title && !app.agent_title_received {
@@ -364,11 +548,26 @@ fn cancel_prompt_finishes_after_runtime_local_cancel() {
     app.send_prompt_background("first prompt").unwrap();
     assert!(app.has_in_flight_prompt());
 
+    // cancel_prompt is fire-and-forget: it returns immediately after marking
+    // the turn cancelled locally. The worker's TurnFinished event (which
+    // creates the inspector section) arrives shortly after.
     app.cancel_prompt().unwrap();
-    app.poll_prompt_progress();
 
+    // Local state is updated synchronously.
     assert!(!app.has_in_flight_prompt());
     assert_eq!(app.ui.session.status, SessionStatus::Idle);
+
+    // Poll until the worker emits and we drain TurnFinished.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline
+        && !app.ui.inspector_sections.iter().any(|section| {
+            section.title == "轮次异常"
+                && section.items.iter().any(|item| item == "cancelled")
+        })
+    {
+        app.poll_prompt_progress();
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(app.ui.inspector_sections.iter().any(|section| {
         section.title == "轮次异常" && section.items.iter().any(|item| item == "cancelled")
     }));

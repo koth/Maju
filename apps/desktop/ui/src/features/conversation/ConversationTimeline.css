@@ -151,6 +151,47 @@
   box-shadow: none;
 }
 
+/* Steer (追加指令) annotation — compact inline note, NOT a full bubble. */
+.msg-steer {
+  align-self: flex-end;
+  width: fit-content;
+  max-width: min(760px, 86%);
+  margin: 10px 0 2px auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px 6px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent-hover);
+  background: var(--surface-muted-bg);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.msg-steer-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.msg-steer-body {
+  min-width: 0;
+  word-break: break-word;
+}
+
+:root[data-theme="light"] .msg-steer {
+  background: #f4f4f1;
+  border-color: rgba(32, 33, 36, 0.10);
+  border-left-color: var(--accent-hover);
+}
+
 .msg-user-wrap {
   align-self: flex-end;
   display: flex;

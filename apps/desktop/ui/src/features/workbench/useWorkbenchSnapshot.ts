@@ -39,6 +39,9 @@ export function applySnapshotPatch(snapshot: UiSnapshot, patch: UiSnapshotPatch)
     review_changes: patch.review_changes,
     turn_changes: patch.turn_changes ?? snapshot.turn_changes ?? [],
     thinking_status: patch.thinking_status,
+    // The backend always sends the full replacement list of pending steers
+    // (empty once they have been moved into the timeline).
+    pending_steers: patch.pending_steers ?? snapshot.pending_steers ?? [],
   };
 }
 
@@ -130,7 +133,13 @@ export function materializeStreamingMessageBodies(snapshot: UiSnapshot): UiSnaps
 export function useWorkbenchSnapshot() {
   const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
   const [workspaceReady, setWorkspaceReady] = useState(false);
+  // Track BOTH session id and revision. Revision is per-session (starts at 1,
+  // bumps by 1), so two sessions can share the same revision value. Without
+  // the session-id guard a stale event from the previous session (same
+  // revision number) can block the new session's snapshot from being
+  // accepted after a switch.
   const prevSnapshotRevision = useRef<number>(0);
+  const prevSnapshotSessionId = useRef<string>("");
   const snapshotRef = useRef<UiSnapshot | null>(null);
   const firstSnapshotLogged = useRef(false);
   const firstWorkspaceReadyLogged = useRef(false);
@@ -155,7 +164,11 @@ export function useWorkbenchSnapshot() {
   const pollState = useCallback(async () => {
     try {
       const state = await sessionGetState();
-      if (state.revision !== prevSnapshotRevision.current) {
+      if (
+        state.session.id !== prevSnapshotSessionId.current ||
+        state.revision !== prevSnapshotRevision.current
+      ) {
+        prevSnapshotSessionId.current = state.session.id;
         prevSnapshotRevision.current = state.revision;
         setSnapshot(materializeStreamingMessageBodies(state));
       }
@@ -165,17 +178,20 @@ export function useWorkbenchSnapshot() {
   }, []);
 
   const acceptSnapshot = useCallback((nextSnapshot: UiSnapshot) => {
+    prevSnapshotSessionId.current = nextSnapshot.session.id;
     prevSnapshotRevision.current = nextSnapshot.revision;
     setWorkspaceReady(true);
     setSnapshot(materializeStreamingMessageBodies(nextSnapshot));
   }, []);
 
   const clearSnapshot = useCallback(() => {
+    prevSnapshotSessionId.current = "";
     prevSnapshotRevision.current = 0;
     setSnapshot(null);
   }, []);
 
   const clearWorkspace = useCallback(() => {
+    prevSnapshotSessionId.current = "";
     prevSnapshotRevision.current = 0;
     setWorkspaceReady(false);
     setSnapshot(null);
@@ -188,7 +204,12 @@ export function useWorkbenchSnapshot() {
 
     onUiSnapshot((nextSnapshot) => {
       if (disposed) return;
-      if (nextSnapshot.revision === prevSnapshotRevision.current) return;
+      if (
+        nextSnapshot.session.id === prevSnapshotSessionId.current &&
+        nextSnapshot.revision === prevSnapshotRevision.current
+      )
+        return;
+      prevSnapshotSessionId.current = nextSnapshot.session.id;
       prevSnapshotRevision.current = nextSnapshot.revision;
       setWorkspaceReady(true);
       if (!firstWorkspaceReadyLogged.current) {
@@ -211,10 +232,15 @@ export function useWorkbenchSnapshot() {
 
     onUiSnapshotPatch((patch) => {
       if (disposed) return;
-      if (patch.revision === prevSnapshotRevision.current) return;
+      if (
+        patch.session.id === prevSnapshotSessionId.current &&
+        patch.revision === prevSnapshotRevision.current
+      )
+        return;
       applyStreamingDeltas(patch);
       setWorkspaceReady(true);
       if (isStreamingDeltaOnlyPatch(patch)) {
+        prevSnapshotSessionId.current = patch.session.id;
         prevSnapshotRevision.current = patch.revision;
         if (!snapshotRef.current) {
           void pollState();
@@ -226,7 +252,14 @@ export function useWorkbenchSnapshot() {
           void pollState();
           return prev;
         }
-        if (patch.revision <= prev.revision) return prev;
+        // Reject stale patches that belong to a different session than the
+        // one currently rendered (e.g. a patch emitted by the bridge before a
+        // session switch that arrives after the switch).
+        if (patch.session.id !== prev.session.id || patch.revision <= prev.revision) {
+          void pollState();
+          return prev;
+        }
+        prevSnapshotSessionId.current = patch.session.id;
         prevSnapshotRevision.current = patch.revision;
         const next = applySnapshotPatch(prev, patch);
         return materializeStreamingMessageBodies(next);

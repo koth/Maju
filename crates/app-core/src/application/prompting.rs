@@ -232,7 +232,16 @@ impl Application {
             return Err(error);
         }
 
-        self.append_user_prompt_message(display_body);
+        // Queue the steer as pending instead of appending it to the timeline
+        // immediately. Appending right away would make the steer User message
+        // the last timeline item, which visually cuts the currently-streaming
+        // assistant output and forces the next assistant chunk into a new
+        // message (splitting the stream). Instead, the steer is persisted to
+        // SQLite now (crash-safe) and surfaced via `ui.pending_steers` so the
+        // frontend can render it as a small pending area above the composer.
+        // It is moved into the timeline once the agent actually starts
+        // responding to the steer (see `flush_pending_steers`).
+        self.queue_pending_steer(display_body);
         self.bump_revision();
         Ok(())
     }
@@ -370,6 +379,7 @@ impl Application {
             role: MessageRole::User,
             body,
             created_at: current_timestamp(),
+            ..Default::default()
         };
         let message_id = message.id;
 
@@ -385,6 +395,52 @@ impl Application {
         self.ui.timeline.push(TimelineItem::Message(message.id));
         self.ui.messages.push(message);
         message_id
+    }
+
+    /// Queue a steer (追加指令) as a pending item that is NOT yet in the
+    /// timeline. The message is persisted to SQLite immediately so it
+    /// survives a crash, and surfaced via `ui.pending_steers` for the
+    /// frontend to render above the composer. It is moved into the timeline
+    /// by `flush_pending_steers` once the agent starts responding to it.
+    fn queue_pending_steer(&mut self, body: String) {
+        let message_id = uuid::Uuid::new_v4();
+        let created_at = current_timestamp();
+        let seq = self.next_seq();
+        let _ = self.store.insert_steer_message(
+            &self.ui.session.id.to_string(),
+            &message_id.to_string(),
+            &body,
+            seq,
+        );
+        self.ui.pending_steers.push(PendingSteer {
+            message_id,
+            body: body.clone(),
+            created_at: created_at.clone(),
+        });
+        self.ui.messages.push(ChatMessage {
+            id: message_id,
+            role: MessageRole::User,
+            body,
+            created_at,
+            is_steer: true,
+        });
+    }
+
+    /// Move all queued steers into the timeline in order, right before the
+    /// agent's response to them. Each steer's User message is appended to the
+    /// timeline (the ChatMessage was already persisted to SQLite and added to
+    /// `messages` when queued, so this only links it into the timeline).
+    /// Returns true if any steers were flushed.
+    pub(super) fn flush_pending_steers(&mut self) -> bool {
+        if self.ui.pending_steers.is_empty() {
+            return false;
+        }
+        let steers = std::mem::take(&mut self.ui.pending_steers);
+        for steer in &steers {
+            self.ui.timeline.push(TimelineItem::Message(steer.message_id));
+        }
+        let _ = steers;
+        true
     }
 
     pub fn poll_prompt_progress(&mut self) {
@@ -1075,10 +1131,22 @@ impl Application {
         if self.in_flight_prompt.is_none() {
             return Ok(());
         }
+        // Fire-and-forget: send the CancelPrompt command without blocking on
+        // the worker's reply. The worker's command loop only drains
+        // rx_commands after each read_update() call returns or times out
+        // (50 ms). Blocking on the reply would hold the workspace mutex for
+        // that entire window, freezing session_get_state and the snapshot
+        // bridge. Instead we immediately reflect the cancel locally — status
+        // → Idle, tools → Interrupted — so the UI is responsive. The worker's
+        // subsequent TurnFinished event is a harmless no-op when it arrives.
         self.session
-            .cancel_prompt()
+            .cancel_prompt_fire_and_forget()
             .map_err(|error| error.to_string())?;
         self.mark_current_turn_cancelled();
+        self.ui.session.status = SessionStatus::Idle;
+        self.ui.thinking_status = None;
+        self.in_flight_prompt = None;
+        self.current_turn_user_message_id = None;
         self.bump_revision();
         Ok(())
     }
@@ -1208,6 +1276,7 @@ impl Application {
             role: MessageRole::System,
             body: body.into(),
             created_at: current_timestamp(),
+            ..Default::default()
         };
         let seq = self.next_seq();
         let _ = self.store.insert_message(

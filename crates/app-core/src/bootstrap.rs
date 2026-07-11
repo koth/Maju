@@ -45,12 +45,14 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
             descriptor.name
         ),
         created_at: created_at.clone(),
+        ..Default::default()
     };
     let system_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role: MessageRole::System,
         body: agent_idle_notice("智能体"),
         created_at: created_at.clone(),
+        ..Default::default()
     };
 
     Ok(UiSnapshot {
@@ -123,6 +125,7 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         turn_changes: Vec::new(),
         thinking_status: None,
         usage: Default::default(),
+        pending_steers: Vec::new(),
     })
 }
 

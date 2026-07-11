@@ -112,6 +112,7 @@ export function useWorkbenchGit({
     };
   }, [
     setSnapshot,
+    snapshot?.session.id,
     snapshot?.workspace.location?.kind,
     snapshot?.workspace.root,
     snapshot?.workspace_connected,

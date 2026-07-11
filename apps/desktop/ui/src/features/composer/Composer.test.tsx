@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Composer } from "./Composer";
+import { resetAllComposerDrafts } from "./composer-draft-store";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
 import type { UiSnapshot } from "../../types";
 
@@ -45,6 +46,7 @@ function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
 
 describe("Composer", () => {
   beforeEach(() => {
+    resetAllComposerDrafts();
     vi.stubGlobal(
       "Image",
       class Image {

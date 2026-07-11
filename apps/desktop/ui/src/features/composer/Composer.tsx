@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
+import { composerDraftKey, useComposerDraft, type ComposerAttachmentDraft } from "./composer-draft-store";
 import "./Composer.css";
 
 export interface ComposerReferenceRequest {
@@ -19,22 +20,7 @@ interface Props {
   compact?: boolean;
 }
 
-interface Attachment {
-  id: string;
-  name: string;
-  displayName: string;
-  mimeType: string;
-  data: string | null;
-  text: string | null;
-  uri: string | null;
-  kind: "image" | "file" | "workspace_file";
-  path: string | null;
-  startLine: number | null;
-  endLine: number | null;
-  previewUrl: string | null;
-  thumbnailData: string | null;
-  thumbnailMimeType: string | null;
-}
+type Attachment = ComposerAttachmentDraft;
 
 interface ModelProviderGroup {
   id: string;
@@ -54,20 +40,30 @@ export function Composer({
   onReferenceRequestConsumed,
   compact = false,
 }: Props) {
-  const [input, setInput] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
   const [pendingControlId, setPendingControlId] = useState<string | null>(null);
   const [openControlId, setOpenControlId] = useState<string | null>(null);
   const [optimisticTurnActive, setOptimisticTurnActive] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [activeImagePreviewId, setActiveImagePreviewId] = useState<string | null>(null);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashFilter, setSlashFilter] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const processingReferenceIds = useRef<Set<string>>(new Set());
+
+  // The prompt text and attachments are intentionally stored outside the
+  // React tree (see composer-draft-store.ts) so they survive transient
+  // unmounts such as opening the settings page, which swaps the entire
+  // <Workbench> subtree for <SettingsPage>.
+  const draftOwnerKey = composerDraftKey(snapshot.workspace.root, snapshot.session.id);
+  const {
+    input,
+    attachments,
+    setInput,
+    setAttachments,
+  } = useComposerDraft(draftOwnerKey);
 
   const isInterrupted = snapshot.session.status === "Interrupted";
   const controls = snapshot.session_config.controls;

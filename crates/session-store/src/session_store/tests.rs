@@ -1464,6 +1464,77 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
     assert_eq!(buckets[1].by_model[0].request_count, 1);
 }
 
+/// Regression: daily series must report INCREMENTS, not cumulative
+/// SessionTotals. A session with SessionTotal(1000) on day A and
+/// SessionTotal(1500) on day B must show day A = 1000 (first day, no
+/// baseline) and day B = 500 (1500 - 1000 baseline), NOT day B = 1500.
+#[test]
+fn usage_daily_series_reports_incremental_not_cumulative() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Day A: SessionTotal 1000 (first day → no baseline → 1000).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1751328000".into()), // day A
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_000),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    // Day B: SessionTotal 1500 (increment = 1500 - 1000 = 500).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1751414400".into()), // day B
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_500),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let buckets = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(buckets.len(), 2, "two days expected, got: {buckets:?}");
+    // Day A = 1000 (first day, no baseline to subtract).
+    assert_eq!(buckets[0].tokens.total_tokens, Some(1_000));
+    // Day B = 500 (1500 - 1000 carry-over baseline from day A).
+    assert_eq!(
+        buckets[1].tokens.total_tokens,
+        Some(500),
+        "day B must report the increment (1500 - 1000 = 500), not cumulative 1500"
+    );
+}
+
 /// P5: `request_count` must count only token-reporting events
 /// (TurnDelta + SessionTotal), while `event_count` counts every row
 /// including ContextSnapshot occupancy-only reports. With
@@ -1541,5 +1612,350 @@ fn usage_summary_request_count_excludes_context_snapshot_events() {
     assert_eq!(
         rows[0].request_count, 2,
         "request_count must exclude ContextSnapshot occupancy-only reports"
+    );
+}
+
+/// Regression ("today" range + default scope): two codex-acp sessions in the
+/// same workspace, both with usage events timestamped "today", must both be
+/// counted. The user reported seeing only 1 session despite working in 2+.
+#[test]
+fn usage_summary_today_range_counts_both_same_day_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    // Two sessions today. Use a fixed "today" epoch second and a from/to
+    // window that brackets it (mirroring the UI's "today" date range).
+    let today_secs = 1752200000i64;
+    let from_secs = today_secs - 3_600; // 1h before
+    let to_secs = today_secs + 3_600; // 1h after
+
+    for sid in ["s1", "s2"] {
+        store.create_session(sid, "gpt-5.1").unwrap();
+        store.update_session_agent_cli(sid, "codex-acp").unwrap();
+        store
+            .append_usage_event(
+                sid,
+                &UsageEvent {
+                    scope: UsageEventScope::TurnDelta,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(today_secs.to_string()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(50),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some(from_secs.to_string()),
+            to: Some(to_secs.to_string()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(
+        rows[0].session_count,
+        2,
+        "both today's sessions must be counted"
+    );
+    assert_eq!(rows[0].tokens.total_tokens, Some(100));
+}
+
+/// Regression ("today" must reflect INCREMENTAL usage, not cumulative
+/// SessionTotal). A session created yesterday with SessionTotal(1000) at
+/// yesterday-23:00, continuing today with SessionTotal(1500) at today-08:00.
+/// The "today" range must report an INCREMENT of 500 (= 1500 − 1000), not the
+/// cumulative 1500. Taking the last SessionTotal inside the range as the
+/// absolute total wrongly folds yesterday's consumption into today.
+#[test]
+fn usage_summary_today_range_reports_incremental_not_cumulative() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Yesterday: SessionTotal 1000 (cumulative baseline before today).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752134400".into()), // 2026-07-10 00:00:00 UTC
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_000),
+                    input_tokens: Some(800),
+                    output_tokens: Some(200),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    // Today: SessionTotal 1500 (cumulative; +500 since yesterday).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752220800".into()), // 2026-07-11 00:00:00 UTC
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_500),
+                    input_tokens: Some(1_200),
+                    output_tokens: Some(300),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    // "Today" range starts at midnight UTC of today; from is after yesterday.
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()), // today 00:00 UTC
+            to: Some("1752307200".into()),   // tomorrow 00:00 UTC
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(
+        rows[0].tokens.total_tokens,
+        Some(500),
+        "today must report the INCREMENT (1500 - 1000 = 500), not the cumulative 1500"
+    );
+    assert_eq!(
+        rows[0].tokens.input_tokens,
+        Some(400),
+        "component increments must also be 1200 - 800 = 400"
+    );
+    assert_eq!(
+        rows[0].tokens.output_tokens,
+        Some(100),
+        "output increment 300 - 200 = 100"
+    );
+    assert_eq!(rows[0].session_count, 1);
+}
+
+/// Regression (UI default scope): when two sessions in the SAME workspace use
+/// the same reporting agent and model, the default summary request
+/// (all_workspaces=false, no explicit workspace_root → store fallback) must
+/// count BOTH sessions. The user saw "1 session" despite working in 2+ sessions.
+#[test]
+fn usage_summary_default_scope_counts_all_sessions_in_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    // Two sessions, same workspace (the store's own workspace_root), same
+    // model/agent — mimicking the common "switched between two sessions
+    // of the same repo" scenario.
+    for (sid, ts) in [("s1", "100"), ("s2", "200")] {
+        store.create_session(sid, "gpt-5.1").unwrap();
+        store.update_session_agent_cli(sid, "codex-acp").unwrap();
+        store
+            .append_usage_event(
+                sid,
+                &UsageEvent {
+                    scope: UsageEventScope::TurnDelta,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(ts.into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(50),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Default request: all_workspaces=false, no explicit workspace_root.
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest::default())
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(
+        rows[0].session_count,
+        2,
+        "both sessions in the workspace must be counted"
+    );
+    assert_eq!(
+        rows[0].tokens.total_tokens,
+        Some(100),
+        "50 + 50 = 100"
+    );
+}
+
+/// Regression: when two sessions use the SAME model, each emitting its own
+/// SessionTotal (cumulative) + TurnDelta, the cross-session summary must SUM
+/// both sessions' SessionTotals (150 + 80 = 230). The old per-group
+/// `has_session_total` flag would let session A's SessionTotal suppress
+/// session B's TurnDelta AND let session B's SessionTotal overwrite (not
+/// add) the group row — yielding 80 instead of 230.
+#[test]
+fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("a", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("a", "codex-acp").unwrap();
+    store.create_session("b", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("b", "codex-acp").unwrap();
+
+    // Both sessions share timestamp "10" so the SQL ORDER BY tie-break is
+    // non-deterministic; the fix must produce the same total regardless of
+    // interleaving order.
+    for (sid, total) in [("a", 150u64), ("b", 80u64)] {
+        store
+            .append_usage_event(
+                sid,
+                &UsageEvent {
+                    scope: UsageEventScope::SessionTotal,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some("10".into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(total),
+                        input_tokens: Some(total),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .append_usage_event(
+                sid,
+                &UsageEvent {
+                    scope: UsageEventScope::TurnDelta,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some("10".into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(total / 2),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(
+        rows[0].tokens.total_tokens,
+        Some(230),
+        "SessionTotals from two sessions must SUM, not overwrite"
+    );
+    assert_eq!(
+        rows[0].tokens.input_tokens,
+        Some(230),
+        "component tokens must also SUM across sessions"
+    );
+    assert_eq!(rows[0].session_count, 2, "two sessions expected");
+    assert_eq!(
+        rows[0].request_count, 4,
+        "2 SessionTotal + 2 TurnDelta = 4 token-reporting events"
+    );
+    assert_eq!(rows[0].event_count, 4, "all 4 rows counted");
+}
+
+/// Regression: a session that only emits TurnDelta events (no SessionTotal)
+/// must still contribute its accumulated deltas even when another session
+/// using the same model has already emitted a SessionTotal. The old per-group
+/// flag would suppress the TurnDelta-only session's tokens.
+#[test]
+fn usage_summary_turn_delta_session_survives_after_peer_session_total() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("a", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("a", "codex-acp").unwrap();
+    store.create_session("b", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("b", "codex-acp").unwrap();
+
+    // Session A: authoritative SessionTotal(150).
+    store
+        .append_usage_event(
+            "a",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("10".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(150),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    // Session B: only TurnDelta(50), no SessionTotal.
+    store
+        .append_usage_event(
+            "b",
+            &make_usage_event("gpt-5.1", 50, "11"),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
+    assert_eq!(
+        rows[0].tokens.total_tokens,
+        Some(200),
+        "Session A's SessionTotal(150) + Session B's TurnDelta(50) = 200"
     );
 }

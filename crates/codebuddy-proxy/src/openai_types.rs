@@ -65,11 +65,40 @@ pub struct OaiChoiceMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OaiUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// OpenAI-style nested cache hit count. `codex_api_proxy` reads this via
+    /// `prompt_tokens_details.cached_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<OaiPromptTokensDetails>,
+    /// Anthropic-style cache-read count. Kept as a top-level alias so
+    /// `usage_cached_input_tokens` can pick it up without nested details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    /// Anthropic-style cache-write / creation count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
+impl OaiUsage {
+    pub fn zero() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            prompt_tokens_details: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OaiPromptTokensDetails {
+    pub cached_tokens: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OaiChatChunk {
@@ -78,6 +107,12 @@ pub struct OaiChatChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<OaiChunkChoice>,
+    /// OpenAI streams a terminal `choices: []` chunk carrying `usage` when
+    /// `stream_options.include_usage` is set. We emit it unconditionally
+    /// (internal reverse proxy for codex) so clients can account per-turn
+    /// tokens even without opting in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<OaiUsage>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OaiChunkChoice {

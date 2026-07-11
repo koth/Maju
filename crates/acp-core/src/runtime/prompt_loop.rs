@@ -221,11 +221,15 @@ pub(super) async fn run_command_loop(
                                             stop_reason: "cancelled".into(),
                                         });
                                         tool_execution_registry.clear();
-                                        let _ = reply_tx.send(Ok(()));
+                                        if let Some(reply_tx) = reply_tx {
+                                            let _ = reply_tx.send(Ok(()));
+                                        }
                                         break 'active_prompt;
                                     }
                                     Err(error) => {
-                                        let _ = reply_tx.send(Err(error));
+                                        if let Some(reply_tx) = reply_tx {
+                                            let _ = reply_tx.send(Err(error));
+                                        }
                                     }
                                 }
                             }
@@ -578,7 +582,9 @@ pub(super) async fn run_command_loop(
             }
             RuntimeCommand::CancelPrompt { reply_tx } => {
                 let _ = permission_broker.cancel_all();
-                let _ = reply_tx.send(Ok(()));
+                if let Some(reply_tx) = reply_tx {
+                    let _ = reply_tx.send(Ok(()));
+                }
             }
             RuntimeCommand::StopTool {
                 tool_call_id,

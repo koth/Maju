@@ -21,37 +21,9 @@ pub struct SubprocessTransport {
 impl SubprocessTransport {
     pub fn spawn(opts: &SessionOptions, cli_path: PathBuf) -> SdkResult<(Self, oneshot::Receiver<()>)> {
         let mut cmd = Command::new(&cli_path);
-        cmd.args([
-            // `--print` is mandatory: per `codebuddy --help`, `--input-format`/
-            // `--output-format` "only work with --print", and without it the
-            // CLI starts an *interactive* TUI session that ignores stream-json
-            // framing. That made our `initialize` control_request sit unread
-            // on stdin → 60s control timeout with empty stderr. The TS SDK
-            // sidesteps this by spawning the headless `dist/codebuddy-headless.js`
-            // variant; the `.exe` we resolve is the interactive binary, so we
-            // must opt into non-interactive stream-json mode explicitly.
-            "--print",
-            "--input-format=stream-json",
-            "--output-format=stream-json",
-            "--verbose",
-        ]);
-        if let Some(model) = &opts.model {
-            cmd.arg("--model").arg(model);
+        for arg in cli_args(opts) {
+            cmd.arg(arg);
         }
-        if let Some(mode) = &opts.permission_mode {
-            cmd.arg("--permission-mode").arg(mode);
-        }
-        if let Some(max_turns) = opts.max_turns {
-            cmd.arg("--max-turns").arg(max_turns.to_string());
-        }
-        if let Some(sid) = &opts.session_id {
-            cmd.arg("--session-id").arg(sid);
-        }
-        if let Some(sp) = &opts.system_prompt {
-            cmd.arg("--system-prompt").arg(sp);
-        }
-        cmd.arg("--setting-sources").arg("none");
-        cmd.arg("--include-partial-messages");
         if let Some(cwd) = &opts.cwd {
             cmd.current_dir(cwd);
         }
@@ -182,15 +154,93 @@ async fn snapshot_ring(ring: &Arc<Mutex<std::collections::VecDeque<String>>>) ->
     let guard = ring.lock().await;
     guard.iter().cloned().collect::<Vec<_>>().join("\n")
 }
+
+/// Build the CLI argv (excluding the binary path) from session options.
+///
+/// Kept pure so unit tests can lock the critical `--tools` contract without
+/// spawning a real CodeBuddy process.
+fn cli_args(opts: &SessionOptions) -> Vec<String> {
+    // `--print` is mandatory: per `codebuddy --help`, `--input-format`/
+    // `--output-format` "only work with --print", and without it the
+    // CLI starts an *interactive* TUI session that ignores stream-json
+    // framing. That made our `initialize` control_request sit unread
+    // on stdin → 60s control timeout with empty stderr. The TS SDK
+    // sidesteps this by spawning the headless `dist/codebuddy-headless.js`
+    // variant; the `.exe` we resolve is the interactive binary, so we
+    // must opt into non-interactive stream-json mode explicitly.
+    let mut args = vec![
+        "--print".to_string(),
+        "--input-format=stream-json".to_string(),
+        "--output-format=stream-json".to_string(),
+        "--verbose".to_string(),
+    ];
+    if let Some(model) = &opts.model {
+        args.push("--model".to_string());
+        args.push(model.clone());
+    }
+    if let Some(mode) = &opts.permission_mode {
+        args.push("--permission-mode".to_string());
+        args.push(mode.clone());
+    }
+    // Built-in tool filter. Empty list → `--tools ""` disables ALL built-ins
+    // (CLI help: `Use "" to disable all`). The reverse proxy always sets
+    // `tools: Some(vec![])` so CodeBuddy cannot execute Bash/Edit/Read
+    // itself; only the in-process MCP proxy tools remain available.
+    if let Some(tools) = &opts.tools {
+        args.push("--tools".to_string());
+        args.push(tools.join(","));
+    }
+    if let Some(max_turns) = opts.max_turns {
+        args.push("--max-turns".to_string());
+        args.push(max_turns.to_string());
+    }
+    if let Some(sid) = &opts.session_id {
+        args.push("--session-id".to_string());
+        args.push(sid.clone());
+    }
+    if let Some(sp) = &opts.system_prompt {
+        args.push("--system-prompt".to_string());
+        args.push(sp.clone());
+    }
+    args.push("--setting-sources".to_string());
+    args.push("none".to_string());
+    args.push("--include-partial-messages".to_string());
+    args
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     #[tokio::test]
     async fn spawn_missing_binary_returns_cli_not_found() {
         let opts = SessionOptions::default();
         let err = SubprocessTransport::spawn(&opts, PathBuf::from("/nonexistent/codebuddy"))
             .err();
         assert!(matches!(err, Some(SdkError::Spawn(_))), "got {err:?}");
+    }
+
+    #[test]
+    fn empty_tools_list_disables_all_builtins() {
+        // Contract parity with TS/Python: `tools: []` → `--tools ""`.
+        let mut opts = SessionOptions::default();
+        opts.tools = Some(Vec::new());
+        let args = cli_args(&opts);
+        let tools_idx = args.iter().position(|a| a == "--tools").expect("--tools present");
+        assert_eq!(args.get(tools_idx + 1).map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn tools_none_omits_flag() {
+        let opts = SessionOptions::default();
+        let args = cli_args(&opts);
+        assert!(!args.iter().any(|a| a == "--tools"));
+    }
+
+    #[test]
+    fn tools_list_is_comma_joined() {
+        let mut opts = SessionOptions::default();
+        opts.tools = Some(vec!["Bash".into(), "Read".into()]);
+        let args = cli_args(&opts);
+        let tools_idx = args.iter().position(|a| a == "--tools").expect("--tools present");
+        assert_eq!(args.get(tools_idx + 1).map(String::as_str), Some("Bash,Read"));
     }
 }

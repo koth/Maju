@@ -229,11 +229,25 @@ export interface ChatMessage {
   role: MessageRole;
   body: string;
   created_at?: string;
+  /** True for steer (追加指令) messages. Steers are not turn boundaries;
+   * the timeline collapse logic skips flushTurn() for them. */
+  is_steer?: boolean;
 }
 
 export interface ChatMessageDelta {
   id: string;
   append: string;
+}
+
+/**
+ * A steer (追加指令) the user sent while a turn was already running.
+ * Shown as a small pending area above the composer until the agent starts
+ * responding to it, at which point the backend moves it into the timeline.
+ */
+export interface PendingSteer {
+  message_id: string;
+  body: string;
+  created_at?: string;
 }
 
 export interface ToolLogEntry {
@@ -487,6 +501,7 @@ export interface UiSnapshot {
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
   usage?: SessionUsageSnapshot;
+  pending_steers?: PendingSteer[];
 }
 
 export interface UiSnapshotPatch {
@@ -509,6 +524,7 @@ export interface UiSnapshotPatch {
   turn_changes: TurnFileChanges[];
   thinking_status: ThinkingStatus | null;
   usage?: SessionUsageSnapshot;
+  pending_steers?: PendingSteer[];
 }
 
 export interface TurnFileChanges {

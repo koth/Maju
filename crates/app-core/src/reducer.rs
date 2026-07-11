@@ -548,6 +548,7 @@ fn push_message(ui: &mut UiSnapshot, role: workspace_model::MessageRole, content
         role,
         body: content,
         created_at: chrono_now_iso(),
+        is_steer: false,
     };
     ui.timeline.push(TimelineItem::Message(message.id));
     ui.messages.push(message);
@@ -567,6 +568,7 @@ fn push_standalone_message(
         role,
         body: content,
         created_at: chrono_now_iso(),
+        is_steer: false,
     };
     ui.timeline.push(TimelineItem::Message(message.id));
     ui.messages.push(message);
@@ -1719,6 +1721,7 @@ mod tests {
             turn_changes: Vec::new(),
             thinking_status: None,
             usage: Default::default(),
+            pending_steers: Vec::new(),
         }
     }
 

@@ -498,8 +498,8 @@ fn usage_update_skips_zero_turn_delta() {
     let (tx, rx) = mpsc::channel();
     let notification = SessionNotification::new(
         "session-1",
-        SessionUpdate::UsageUpdate(UsageUpdate::new(100, 10_000).meta(
-            serde_json::Map::from_iter([(
+        SessionUpdate::UsageUpdate(
+            UsageUpdate::new(100, 10_000).meta(serde_json::Map::from_iter([(
                 "kodex.ai/usage".to_string(),
                 serde_json::json!({
                     "scope": "session_total",
@@ -512,8 +512,8 @@ fn usage_update_skips_zero_turn_delta() {
                         "total_tokens": 0
                     }
                 }),
-            )]),
-        )),
+            )])),
+        ),
     );
 
     emit_notification(&tx, "", notification).unwrap();
@@ -556,8 +556,8 @@ fn usage_update_maps_codex_field_aliases() {
     let (tx, rx) = mpsc::channel();
     let notification = SessionNotification::new(
         "session-1",
-        SessionUpdate::UsageUpdate(UsageUpdate::new(300, 50_000).meta(
-            serde_json::Map::from_iter([(
+        SessionUpdate::UsageUpdate(
+            UsageUpdate::new(300, 50_000).meta(serde_json::Map::from_iter([(
                 "kodex.ai/usage".to_string(),
                 serde_json::json!({
                     "scope": "session_total",
@@ -567,8 +567,8 @@ fn usage_update_maps_codex_field_aliases() {
                     "reasoning_output_tokens": 20,
                     "total_tokens": 300
                 }),
-            )]),
-        )),
+            )])),
+        ),
     );
 
     emit_notification(&tx, "", notification).unwrap();

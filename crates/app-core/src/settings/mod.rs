@@ -79,6 +79,20 @@ fn codebuddy_model_list_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/v1/models")
 }
 
+/// Base URL for the local CodeBuddy reverse proxy.
+pub fn codebuddy_proxy_base_url(paths: &AppPaths) -> String {
+    format!("http://127.0.0.1:{}", codebuddy_port(paths))
+}
+
+/// Session-eviction URL for a specific ACP/session id on the CodeBuddy proxy.
+pub fn codebuddy_session_url(paths: &AppPaths, session_id: &str) -> String {
+    format!(
+        "{}/v1/sessions/{}",
+        codebuddy_proxy_base_url(paths),
+        session_id
+    )
+}
+
 /// Read the persisted codebuddy proxy port (defaults to `CODEBUDDY_DEFAULT_PORT`).
 pub fn codebuddy_port(paths: &AppPaths) -> u16 {
     provider_catalog_entry(paths, CODEBUDDY_PROVIDER_ID)
@@ -3690,6 +3704,21 @@ pub(crate) fn model_context_window(model: &str) -> i64 {
 }
 
 pub(crate) fn model_context_window_for_provider(model: &str, provider: &str) -> i64 {
+    if provider == CODEBUDDY_PROVIDER_ID {
+        // CodeBuddy runs behind a stateful reverse proxy that reuses a pooled
+        // CLI session and only sends incremental turns — the proxy (not codex
+        // CLI) owns context continuity. Report an enormous context window so
+        // codex CLI never auto-compacts its own transcript: a codex CLI compact
+        // would rewrite what it sends to the proxy and desync from the CLI's
+        // real (self-managed) history. The CodeBuddy agent compacts its own
+        // context when needed and that is transparent to us.
+        //
+        // TRADE-OFF: with no compact, codex CLI's own transcript grows
+        // unbounded and the messages body it POSTs to the (localhost) proxy
+        // keeps growing too. Acceptable for a few hundred turns; if it scales
+        // poorly, route kodex directly to the proxy (skip codex CLI) instead.
+        return 1_000_000_000;
+    }
     if provider == COMMANDCODE_PROVIDER_ID {
         return model_i64_metadata(
             model,

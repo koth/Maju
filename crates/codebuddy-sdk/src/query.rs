@@ -65,6 +65,10 @@ impl Query {
         let mcp_servers = self.mcp_servers.clone();
         let transport = self.transport.clone();
         let close_rx = self.close_tx.subscribe();
+        // Per-session ack channel: cloned into each `tools/call` spawn so the
+        // proxy can await "placeholder result written to CLI stdin" before
+        // interrupting, avoiding the `undefined` tool_result race.
+        let tool_call_ack = self.options.tool_call_ack.clone();
         tokio::spawn(async move {
             while let Some(item) = rx.recv().await {
                 match item {
@@ -115,6 +119,7 @@ impl Query {
                                         let server_name = server_name.clone();
                                         let message = message.clone();
                                         let req_id = req_id.clone();
+                                        let tool_call_ack = tool_call_ack.clone();
                                         tokio::spawn(async move {
                                             let result = tokio::select! {
                                                 r = mcp::transport::handle_mcp_message(&mcp_servers, &server_name, &message) => r,
@@ -133,6 +138,14 @@ impl Query {
                                                 },
                                             });
                                             let _ = transport.write_json(&reply).await;
+                                            // Signal the proxy that this tool's
+                                            // result has been written to CLI
+                                            // stdin, so it can interrupt AFTER
+                                            // the placeholder lands (not before,
+                                            // which leaves a `undefined` result).
+                                            if let Some(tx) = tool_call_ack.as_ref() {
+                                                let _ = tx.send(());
+                                            }
                                         });
                                     } else {
                                         write_mcp_reply(&transport, &mcp_servers, &server_name, &message, &req_id).await;

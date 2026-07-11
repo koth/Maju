@@ -6,3 +6,4 @@ pub mod pending;
 pub mod prompt_builder;
 pub mod server;
 pub mod session_pool;
+pub mod usage;

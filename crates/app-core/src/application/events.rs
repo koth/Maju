@@ -186,6 +186,16 @@ impl Application {
                         let _ = self.store.update_message_body(&id_str, &body);
                     }
                 }
+
+                // NOTE: we intentionally do NOT evict the CodeBuddy proxy
+                // session on a ContextCompacted event. The CodeBuddy agent
+                // manages its own context compaction transparently; the proxy
+                // reuses the pooled CLI session and only sends incremental
+                // turns, so evicting would discard the CLI's (self-compacted)
+                // history and force a cold reseed. codex CLI itself never
+                // auto-compacts for the CodeBuddy provider (catalog reports a
+                // ~1B context window), so there is no codex-side compact to
+                // resync from either.
             }
             ClientEvent::TurnFinished { .. } => {
                 // Keep legacy final-message persistence as a fallback for old event flows.
@@ -264,6 +274,7 @@ impl Application {
             role: MessageRole::Assistant,
             body: markdown,
             created_at: current_timestamp(),
+            ..Default::default()
         };
         self.ui.timeline.push(TimelineItem::Message(message.id));
         self.ui.messages.push(message.clone());
@@ -281,6 +292,30 @@ impl Application {
         let Some(event) = self.prepare_event_for_application(event) else {
             return;
         };
+        // When the agent starts producing output for a steer (the first
+        // Assistant message chunk after the steer was accepted) or when the
+        // turn ends while steers are still queued, move the queued steers
+        // into the timeline first. This places each steer's User message
+        // right before the assistant response to it, without cutting the
+        // previously-streaming assistant message.
+        let flush_for_assistant_chunk = matches!(
+            &event,
+            ClientEvent::MessageChunk {
+                role: workspace_model::MessageRole::Assistant,
+                ..
+            }
+        );
+        let flush_for_turn_end = matches!(
+            &event,
+            ClientEvent::TurnFinished { .. } | ClientEvent::Interrupted { .. }
+        );
+        if (flush_for_assistant_chunk || flush_for_turn_end)
+            && self.flush_pending_steers()
+        {
+            // The flushed User messages now sit at the end of the timeline,
+            // so the following assistant chunk coalesces into a brand-new
+            // Assistant message instead of appending to the prior one.
+        }
         let message_before = match &event {
             ClientEvent::MessageChunk { .. } => Some(self.message_persistence_snapshot()),
             _ => None,
@@ -404,8 +439,39 @@ impl Application {
                 let _ = self.session.set_permission_mode(value_id);
                 Some(event.clone())
             }
+            // Agents echo the user's prompt back as a UserMessageChunk. For a
+            // queued steer this echo would re-insert the User message into the
+            // timeline mid-stream (cutting the streaming assistant output) and
+            // create a duplicate of the already-queued/pending message. Drop
+            // the echo when it matches a pending steer; the canonical message
+            // is moved into the timeline by `flush_pending_steers` once the
+            // agent actually starts responding to the steer.
+            ClientEvent::MessageChunk {
+                role: workspace_model::MessageRole::User,
+                content,
+            } if self.steer_echo_matches_pending(content) => None,
             _ => Some(event.clone()),
         }
+    }
+
+    /// Whether a streamed User message chunk is the agent echoing back a
+    /// queued steer prompt. The echo is suppressed so it does not cut the
+    /// streaming assistant output or duplicate the pending steer message.
+    /// Matches when the chunk content is a prefix of (or exactly) a pending
+    /// steer body — covering the common single-chunk echo and the first
+    /// chunk of a multi-chunk echo.
+    pub(super) fn steer_echo_matches_pending(&self, content: &str) -> bool {
+        if self.ui.pending_steers.is_empty() {
+            return false;
+        }
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        self.ui.pending_steers.iter().any(|steer| {
+            let body = steer.body.trim();
+            !body.is_empty() && body.starts_with(trimmed)
+        })
     }
 
     pub(super) fn prepare_session_config_update(

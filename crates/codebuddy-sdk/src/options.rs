@@ -37,6 +37,16 @@ pub struct SessionOptions {
     pub env: BTreeMap<String, String>,
     /// Permission mode. Defaults to `bypassPermissions` in the proxy.
     pub permission_mode: Option<String>,
+    /// Built-in tool allow-list passed as `--tools`.
+    ///
+    /// - `None` — omit the flag (CLI keeps its default built-ins).
+    /// - `Some([])` — pass `--tools ""`, which **disables all built-in tools**
+    ///   (Bash/Edit/Read/…). Required by the reverse proxy so only the
+    ///   client-declared MCP tools (registered via `mcp_servers`) are available;
+    ///   otherwise the CLI can execute tools itself instead of the proxy
+    ///   placeholder path.
+    /// - `Some(names)` — restrict to the listed built-in tool names.
+    pub tools: Option<Vec<String>>,
     /// Maximum number of agentic turns the CLI may run before returning.
     /// `None` means no limit.
     pub max_turns: Option<u32>,
@@ -49,6 +59,14 @@ pub struct SessionOptions {
     pub request_timeout_ms: Option<u64>,
     /// Path to the CLI binary. `None` resolves via [`crate::binary::resolve_cli_path`].
     pub codebuddy_code_path: Option<PathBuf>,
+    /// Optional ack channel: the SDK sends a unit on it **after** a
+    /// `tools/call` handler's result has been written back to the CLI stdin
+    /// (`transport.write_json`). The proxy uses this to wait until the
+    /// placeholder `tool_result` has actually reached the CLI before issuing
+    /// `interrupt()` — otherwise the interrupt (also a stdin write) can win
+    /// the mutex race and the CLI fills the tool_result with `undefined`.
+    /// `None` disables ack (no wait). Per-session; the proxy owns the receiver.
+    pub tool_call_ack: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 }
 
 impl Default for SessionOptions {
@@ -59,11 +77,13 @@ impl Default for SessionOptions {
             cwd: None,
             env: BTreeMap::new(),
             permission_mode: None,
+            tools: None,
             max_turns: None,
             system_prompt: None,
             mcp_servers: Vec::new(),
             request_timeout_ms: None,
             codebuddy_code_path: None,
+            tool_call_ack: None,
         }
     }
 }

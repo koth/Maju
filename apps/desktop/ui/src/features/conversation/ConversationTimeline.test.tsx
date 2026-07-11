@@ -638,6 +638,72 @@ describe("ThinkingIndicator", () => {
     );
   });
 
+  it("keeps the active-turn timer anchored to the original user message when a steer enters the timeline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-12T00:00:09Z"));
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Streaming",
+      },
+      timeline: [
+        { Message: "user-original" },
+        { Message: "steer-1" },
+      ],
+      messages: [
+        {
+          id: "user-original",
+          role: "User",
+          body: "fix the bug",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "steer-1",
+          role: "User",
+          body: "追加：先看日志",
+          is_steer: true,
+          created_at: "2026-05-12T00:00:05Z",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    // The active-turn summary should be anchored right after the ORIGINAL
+    // user message (9s elapsed from 00:00:00), not after the steer
+    // (which would be 4s from 00:00:05).
+    const summaries = container.querySelectorAll(".timeline-turn-summary.is-active");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].textContent).toContain("正在处理 9s");
+
+    // The summary must be rendered right after the original user message,
+    // before the steer — not jumped to the steer's position.
+    const allTurnItems = container.querySelectorAll(
+      ".timeline-item-wrapper, .msg-steer, .timeline-turn-summary",
+    );
+    let summaryIndex = -1;
+    let steerIndex = -1;
+    allTurnItems.forEach((el, idx) => {
+      if (el.classList.contains("timeline-turn-summary")) summaryIndex = idx;
+      if (el.classList.contains("msg-steer")) steerIndex = idx;
+    });
+    expect(summaryIndex).toBeGreaterThanOrEqual(0);
+    expect(steerIndex).toBeGreaterThanOrEqual(0);
+    expect(summaryIndex).toBeLessThan(steerIndex);
+
+    // Advance time — the timer must continue from the original start, not
+    // restart when the steer was inserted.
+    await act(async () => {
+      vi.advanceTimersByTime(52_000);
+    });
+
+    expect(container.querySelector(".timeline-turn-summary.is-active")?.textContent).toContain(
+      "正在处理 1m 1s",
+    );
+  });
+
   it("renders the active streaming assistant message as markdown", async () => {
     const snapshot = makeSnapshot({
       session: {

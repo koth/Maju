@@ -472,10 +472,23 @@ export function ReviewPanel({
     return groups;
   }, [visibleFiles]);
 
+  // Track the session id for which changeSetState was last populated so we
+  // can immediately clear stale data when the session changes, before the
+  // async reload completes.
+  const loadedChangeSetSessionIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     if (!workspaceConnected || !hydrated) {
+      loadedChangeSetSessionIdRef.current = null;
       setChangeSetState({ summaries: [], filesById: {} });
       return;
+    }
+
+    // Immediately clear stale data from a previous session so the panel never
+    // shows another session's change sets while the new data loads.
+    if (loadedChangeSetSessionIdRef.current !== snapshot.session.id) {
+      loadedChangeSetSessionIdRef.current = snapshot.session.id;
+      setChangeSetState({ summaries: [], filesById: {} });
     }
 
     let cancelled = false;

@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use crate::adapter::{AdapterOptions, build_session_options, run_non_streaming, run_streaming};
 use crate::logging::append_codebuddy_proxy_log;
 use crate::openai_types::OaiChatRequest;
-use crate::session_pool::{SessionPool, tool_signature_of};
+use crate::session_pool::{ContextResetRequest, SessionPool, tool_signature_of};
 pub struct ProxyConfig {
     pub port: u16,
     pub default_model: String,
@@ -132,6 +132,16 @@ async fn handle_chat(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let context_reset = parse_context_reset_header(
+        req.headers()
+            .get("x-context-reset")
+            .and_then(|v| v.to_str().ok()),
+    );
+    let context_epoch = parse_context_epoch_header(
+        req.headers()
+            .get("x-context-epoch")
+            .and_then(|v| v.to_str().ok()),
+    );
     let body = req.into_body().collect().await?.to_bytes();
     let chat_req: OaiChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -156,12 +166,14 @@ async fn handle_chat(
     };
     let tool_sig = tool_signature_of(&chat_req.tools);
     append_codebuddy_proxy_log(&format!(
-        "chat session_id={session_id} sid_source={sid_source} model={} stream={} tools={} messages={} tool_sig={}",
+        "chat session_id={session_id} sid_source={sid_source} model={} stream={} tools={} messages={} tool_sig={} context_reset={} context_epoch={:?}",
         chat_req.model.as_deref().unwrap_or("<default>"),
         chat_req.stream.unwrap_or(false),
         chat_req.tools.as_ref().map(Vec::len).unwrap_or(0),
         chat_req.messages.len(),
         if tool_sig.is_empty() { "<none>" } else { &tool_sig },
+        context_reset,
+        context_epoch,
     ));
     let adapter_opts = AdapterOptions {
         default_model: cfg.default_model.clone(),
@@ -175,7 +187,14 @@ async fn handle_chat(
     // on a pool hit it is discarded in favor of the existing entry's queue.
     let pending = crate::pending::PendingQueue::new();
     let opts = build_session_options(&chat_req, &adapter_opts, &session_id, &pending);
-    let entry = match pool.acquire(&session_id, opts, &tool_sig, pending).await {
+    let reset = ContextResetRequest {
+        force: context_reset,
+        requested_epoch: context_epoch,
+    };
+    let entry = match pool
+        .acquire(&session_id, opts, &tool_sig, pending, reset)
+        .await
+    {
         Ok(e) => e,
         Err(e) => {
             append_codebuddy_proxy_log(&format!(
@@ -188,12 +207,25 @@ async fn handle_chat(
         }
     };
     let is_new = entry.is_new.load(std::sync::atomic::Ordering::SeqCst);
+    let entry_epoch = entry
+        .context_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
     let stream = chat_req.stream.unwrap_or(false);
     append_codebuddy_proxy_log(&format!(
-        "chat_dispatch session_id={session_id} is_new={is_new} stream={stream}"
+        "chat_dispatch session_id={session_id} is_new={is_new} stream={stream} epoch={entry_epoch}"
     ));
     if stream {
-        match run_streaming(&entry.session, &chat_req, &adapter_opts, &entry.pending, is_new).await {
+        match run_streaming(
+            &entry.session,
+            &chat_req,
+            &adapter_opts,
+            &entry.pending,
+            &entry.ack_rx,
+            is_new,
+            &entry.last_cli_usage,
+        )
+        .await
+        {
             Ok(frames) => {
                 let body = frames.join("");
                 Ok(Response::builder()
@@ -201,6 +233,8 @@ async fn handle_chat(
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
                     .header("x-session-id", &session_id)
+                    .header("x-session-epoch", entry_epoch.to_string())
+                    .header("x-context-reset", if is_new && (context_reset || context_epoch.is_some()) { "1" } else { "0" })
                     .header("x-accel-buffering", "no")
                     .body(Full::new(Bytes::from(body)))
                     .unwrap())
@@ -216,13 +250,25 @@ async fn handle_chat(
             }
         }
     } else {
-        match run_non_streaming(&entry.session, &chat_req, &adapter_opts, &entry.pending, is_new).await {
+        match run_non_streaming(
+            &entry.session,
+            &chat_req,
+            &adapter_opts,
+            &entry.pending,
+            &entry.ack_rx,
+            is_new,
+            &entry.last_cli_usage,
+        )
+        .await
+        {
             Ok(resp) => {
                 let body = serde_json::to_vec(&resp).unwrap_or_default();
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "application/json")
                     .header("x-session-id", &session_id)
+                    .header("x-session-epoch", entry_epoch.to_string())
+                    .header("x-context-reset", if is_new && (context_reset || context_epoch.is_some()) { "1" } else { "0" })
                     .body(Full::new(Bytes::from(body)))
                     .unwrap())
             }
@@ -268,6 +314,22 @@ fn resolve_session_id(header: Option<&str>, extra: &Value) -> Option<(String, &'
     None
 }
 
+fn parse_context_reset_header(raw: Option<&str>) -> bool {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(v) => matches!(
+            v.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "reset"
+        ),
+        None => false,
+    }
+}
+
+fn parse_context_epoch_header(raw: Option<&str>) -> Option<u64> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
 fn json_response(status: StatusCode, body: &Value) -> Response<Full<Bytes>> {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     Response::builder()
@@ -279,7 +341,7 @@ fn json_response(status: StatusCode, body: &Value) -> Response<Full<Bytes>> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_session_id;
+    use super::{parse_context_epoch_header, parse_context_reset_header, resolve_session_id};
     use serde_json::json;
 
     #[test]
@@ -317,5 +379,24 @@ mod tests {
             resolve_session_id(None, &json!({ "extra_body": { "session_id": 42 } })),
             None
         );
+    }
+
+    #[test]
+    fn parses_context_reset_truthy_values() {
+        assert!(parse_context_reset_header(Some("1")));
+        assert!(parse_context_reset_header(Some("true")));
+        assert!(parse_context_reset_header(Some("YES")));
+        assert!(parse_context_reset_header(Some("reset")));
+        assert!(!parse_context_reset_header(Some("0")));
+        assert!(!parse_context_reset_header(Some("false")));
+        assert!(!parse_context_reset_header(None));
+    }
+
+    #[test]
+    fn parses_context_epoch_header() {
+        assert_eq!(parse_context_epoch_header(Some("3")), Some(3));
+        assert_eq!(parse_context_epoch_header(Some(" 12 ")), Some(12));
+        assert_eq!(parse_context_epoch_header(Some("nope")), None);
+        assert_eq!(parse_context_epoch_header(None), None);
     }
 }

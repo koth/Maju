@@ -525,12 +525,46 @@ pub struct ChatMessage {
     pub body: String,
     #[serde(default)]
     pub created_at: String,
+    /// True for steer (追加指令) messages queued while a turn was running.
+    /// Steers are NOT turn boundaries — the frontend collapse logic skips
+    /// `flushTurn()` for them so the previous turn's tools + responses are
+    /// not prematurely folded when the steer enters the timeline.
+    #[serde(default)]
+    pub is_steer: bool,
+}
+
+impl Default for ChatMessage {
+    fn default() -> Self {
+        Self {
+            id: Uuid::nil(),
+            role: MessageRole::User,
+            body: String::new(),
+            created_at: String::new(),
+            is_steer: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatMessageDelta {
     pub id: Uuid,
     pub append: String,
+}
+
+/// A steer (追加指令) the user sent while a turn was already running.
+///
+/// The steer is queued here instead of being inserted into the timeline
+/// immediately, so it does not visually cut the currently-streaming
+/// assistant message. The frontend renders queued steers as a small
+/// pending area above the composer; the backend moves them into the
+/// timeline (`messages`/`timeline`) once the agent actually starts
+/// responding to the steer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingSteer {
+    pub message_id: Uuid,
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1231,6 +1265,11 @@ pub struct UiSnapshot {
     pub thinking_status: Option<ThinkingStatus>,
     #[serde(default)]
     pub usage: SessionUsageSnapshot,
+    /// Steers queued while a turn was running but not yet moved into the
+    /// timeline. Rendered as a pending area above the composer by the
+    /// frontend until the agent starts responding to them.
+    #[serde(default)]
+    pub pending_steers: Vec<PendingSteer>,
 }
 
 fn default_true() -> bool {
@@ -1273,6 +1312,11 @@ pub struct UiSnapshotPatch {
     pub thinking_status: Option<ThinkingStatus>,
     #[serde(default)]
     pub usage: SessionUsageSnapshot,
+    /// Replacement list of queued steers. Because steers are removed from
+    /// the queue once moved into the timeline, the patch always carries the
+    /// full replacement list (empty when none remain).
+    #[serde(default)]
+    pub pending_steers: Vec<PendingSteer>,
 }
 
 // ── Search types ──

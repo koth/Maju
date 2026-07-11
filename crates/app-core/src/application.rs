@@ -11,10 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use workspace_model::{
-    AgentCliId, ChatMessage, MessageRole, RemoteLinuxWorkspace, SessionAttentionState,
-    SessionConfigSource, SessionListItem, SessionRuntimeStatus, SessionStatus, TimelineItem,
-    ToolInvocation, ToolLogEntry, ToolStatus, UsageDailyBucket, UsageSummaryRequest,
-    UsageSummaryRow, UserPromptContent,
+    AgentCliId, ChatMessage, MessageRole, PendingSteer, RemoteLinuxWorkspace,
+    SessionAttentionState, SessionConfigSource, SessionListItem, SessionRuntimeStatus,
+    SessionStatus, TimelineItem, ToolInvocation, ToolLogEntry, ToolStatus, UsageDailyBucket,
+    UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
 };
 
 mod bootstrap;

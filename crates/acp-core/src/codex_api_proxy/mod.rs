@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::convert::Infallible;
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 type ProxyBody = BoxBody<Bytes, Infallible>;
@@ -124,6 +124,26 @@ struct ProxyProviderConfig {
 static CODEX_API_PROXY_CONFIG: OnceLock<Arc<RwLock<CodexApiProxyConfig>>> = OnceLock::new();
 static CODEX_API_PROXY_RUNNING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static CODEX_API_PROXY_PORT: OnceLock<Arc<RwLock<u16>>> = OnceLock::new();
+/// Monotonically increasing counter for synthetic tool-call ids. When an
+/// upstream provider omits the tool-call `id` (common for some Chat
+/// Completions / Anthropic bridges), the proxy must mint a fallback id that
+/// the downstream consumer (codex → ACP → UI) uses to correlate a
+/// `function_call` with its eventual `function_call_output`. The previous
+/// fallback `call_proxy_{index}` used the per-stream tool-call index, which
+/// resets to 0 for every new response — so across turns every "first" tool
+/// call collided on `call_proxy_0`, scrambling the UI's tool-call tracking.
+/// A process-global counter guarantees globally unique fallback ids instead.
+static SYNTHETIC_TOOL_CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Mint a fresh, process-unique synthetic tool-call id. Used only for the
+/// **response** direction (ids the downstream will see). Request-direction
+/// conversions keep the bare `call_proxy` constant so that a missing
+/// `tool_use.id` and its matching missing `tool_result.tool_use_id` still
+/// pair together when forwarded to the upstream.
+fn next_synthetic_tool_call_id() -> String {
+    let n = SYNTHETIC_TOOL_CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("call_proxy_{n}")
+}
 /// DeepSeek reasoning history, **partitioned by session id** so concurrent
 /// requests for different sessions cannot cross-contaminate each other's
 /// `reasoning_content`. The previous design used a single shared `Vec` keyed
@@ -131,8 +151,9 @@ static CODEX_API_PROXY_PORT: OnceLock<Arc<RwLock<u16>>> = OnceLock::new();
 /// similar agent phrasing would match each other's entries and inject the
 /// wrong reasoning into the next turn. Each session now owns an isolated
 /// bucket.
-static DEEPSEEK_REASONING_HISTORY: OnceLock<Arc<RwLock<BTreeMap<String, Vec<ReasoningHistoryEntry>>>>> =
-    OnceLock::new();
+static DEEPSEEK_REASONING_HISTORY: OnceLock<
+    Arc<RwLock<BTreeMap<String, Vec<ReasoningHistoryEntry>>>>,
+> = OnceLock::new();
 
 /// Sentinel session id used when no session id is available (e.g. legacy
 /// callers that never sent the `session-id` header). Requests that fall back
@@ -562,7 +583,9 @@ async fn proxy_codex_api_request(
         let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id);
         append_codex_api_proxy_log(&format!(
             "session_id_for_provider provider={} session_id={} acp={}",
-            provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
+            provider,
+            session_id,
+            acp_session_id.as_deref().unwrap_or("<none>"),
         ));
         return proxy_custom_codex_responses_request(
             payload,
@@ -588,8 +611,7 @@ async fn proxy_codex_api_request(
             ));
         }
     };
-    let chat_payload =
-        normalize_chat_payload_for_provider(chat_payload, &provider, &session_id);
+    let chat_payload = normalize_chat_payload_for_provider(chat_payload, &provider, &session_id);
     if normalize_proxy_provider(&provider) == "timiai" {
         log_chat_payload_summary("timiai_chat_completions_request", &chat_payload);
         // session_id already resolved above; reuse it.
@@ -618,7 +640,9 @@ async fn proxy_codex_api_request(
     // session_id already resolved above; reuse it.
     append_codex_api_proxy_log(&format!(
         "session_id_for_provider provider={} session_id={} acp={}",
-        provider, session_id, acp_session_id.as_deref().unwrap_or("<none>"),
+        provider,
+        session_id,
+        acp_session_id.as_deref().unwrap_or("<none>"),
     ));
     proxy_chat_completions_codex_responses_request(
         chat_payload,
@@ -646,8 +670,7 @@ async fn proxy_custom_codex_responses_request(
         }
         ProxyProviderProtocol::ChatCompletions => {
             let session_id = session_id.unwrap_or_default();
-            let chat_payload =
-                responses_payload_to_chat_payload(payload, provider, &session_id)?;
+            let chat_payload = responses_payload_to_chat_payload(payload, provider, &session_id)?;
             let chat_payload =
                 normalize_chat_payload_for_provider(chat_payload, provider, &session_id);
             proxy_chat_completions_codex_responses_request(
@@ -662,8 +685,7 @@ async fn proxy_custom_codex_responses_request(
         }
         ProxyProviderProtocol::AnthropicMessages => {
             let session_id = session_id.unwrap_or_default();
-            let chat_payload =
-                responses_payload_to_chat_payload(payload, provider, &session_id)?;
+            let chat_payload = responses_payload_to_chat_payload(payload, provider, &session_id)?;
             proxy_anthropic_messages_codex_responses_request(
                 chat_payload,
                 api_key,
@@ -730,8 +752,7 @@ async fn proxy_anthropic_messages_codex_responses_request(
     requested_stream: bool,
     session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let anthropic_payload =
-        chat_payload_to_anthropic_payload(chat_payload, requested_stream);
+    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload, requested_stream);
     log_anthropic_payload_summary(
         &format!("{}_request", normalize_proxy_provider(provider)),
         &anthropic_payload,
@@ -757,7 +778,9 @@ async fn proxy_anthropic_messages_codex_responses_request(
             "codex_stream_convert provider={} upstream=anthropic_messages downstream=responses",
             normalize_proxy_provider(provider)
         ));
-        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status, session_id));
+        return Ok(streaming_anthropic_sse_to_responses_response(
+            upstream, status, session_id,
+        ));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -830,7 +853,11 @@ async fn proxy_chat_completions_codex_responses_request(
             append_codex_api_proxy_log(&format!(
                 "codex_stream_convert provider={provider} upstream=chat_completions downstream=responses"
             ));
-            return Ok(streaming_chat_sse_response(upstream, status, session_id.unwrap_or_default()));
+            return Ok(streaming_chat_sse_response(
+                upstream,
+                status,
+                session_id.unwrap_or_default(),
+            ));
         }
         return Ok(streaming_passthrough_response(
             upstream,
@@ -1092,7 +1119,9 @@ async fn proxy_responses_to_anthropic_messages_request(
             "anthropic_stream_convert provider={} upstream=responses downstream=anthropic_messages",
             normalize_proxy_provider(provider)
         ));
-        return Ok(streaming_responses_sse_to_anthropic_response(upstream, status, session_id));
+        return Ok(streaming_responses_sse_to_anthropic_response(
+            upstream, status, session_id,
+        ));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -1323,7 +1352,9 @@ async fn proxy_completion_to_anthropic_messages_request_with_url(
         .unwrap_or("application/json")
         .to_string();
     if is_event_stream(&content_type) {
-        return Ok(streaming_chat_sse_to_anthropic_response(upstream, status, session_id));
+        return Ok(streaming_chat_sse_to_anthropic_response(
+            upstream, status, session_id,
+        ));
     }
 
     let body = upstream.bytes().await?;
@@ -1546,8 +1577,7 @@ async fn proxy_kimi_codex_api_request(
     requested_stream: bool,
     session_id: &str,
 ) -> anyhow::Result<Response<ProxyBody>> {
-    let anthropic_payload =
-        chat_payload_to_anthropic_payload(chat_payload, requested_stream);
+    let anthropic_payload = chat_payload_to_anthropic_payload(chat_payload, requested_stream);
     log_anthropic_payload_summary("kimi_request", &anthropic_payload);
 
     let client = reqwest::Client::new();
@@ -1564,15 +1594,15 @@ async fn proxy_kimi_codex_api_request(
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-
-
         .unwrap_or("application/json")
         .to_string();
     if is_event_stream(&content_type) && status.is_success() {
         append_codex_api_proxy_log(
-           "codex_stream_convert provider=kimi_code upstream=anthropic_messages downstream=responses",
+            "codex_stream_convert provider=kimi_code upstream=anthropic_messages downstream=responses",
         );
-        return Ok(streaming_anthropic_sse_to_responses_response(upstream, status, session_id));
+        return Ok(streaming_anthropic_sse_to_responses_response(
+            upstream, status, session_id,
+        ));
     }
     let body = upstream.bytes().await?;
     let mut response_content_type = content_type.clone();
@@ -1749,8 +1779,9 @@ fn normalize_chat_payload_for_provider(
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(reasoning_content) = reasoning_content_for_assistant_message(session_id, message)
-            .or_else(|| reasoning_content_for_text(session_id, content))
+        if let Some(reasoning_content) =
+            reasoning_content_for_assistant_message(session_id, message)
+                .or_else(|| reasoning_content_for_text(session_id, content))
         {
             message["reasoning_content"] = Value::String(reasoning_content);
         }
@@ -1811,10 +1842,7 @@ fn flush_pending_tool_calls(messages: &mut Vec<Value>, pending_tool_calls: &mut 
             .get("role")
             .and_then(Value::as_str)
             .is_some_and(|role| role == "assistant")
-            && last
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .is_none();
+            && last.get("tool_calls").and_then(Value::as_array).is_none();
         if is_assistant_without_tool_calls {
             last["tool_calls"] = Value::Array(tool_calls);
             return;
@@ -1856,7 +1884,11 @@ fn push_or_coalesce_message(messages: &mut Vec<Value>, message: Value) {
 /// and tool_calls arrays are appended.
 fn merge_assistant_content(last: &mut Value, incoming: &Value) {
     // tool_calls: append incoming into last.
-    if let Some(incoming_calls) = incoming.get("tool_calls").and_then(Value::as_array).cloned() {
+    if let Some(incoming_calls) = incoming
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+    {
         if !incoming_calls.is_empty() {
             let existing = last
                 .get("tool_calls")
@@ -1950,8 +1982,8 @@ fn responses_input_item_to_chat_message(
                 "content": chat_content.unwrap_or_else(|| Value::String(String::new()))
             });
             if role == "assistant" {
-                if let Some(reasoning_content) =
-                    reasoning_content.or_else(|| reasoning_content_for_text(session_id, &content_text))
+                if let Some(reasoning_content) = reasoning_content
+                    .or_else(|| reasoning_content_for_text(session_id, &content_text))
                 {
                     message["reasoning_content"] = Value::String(reasoning_content);
                 }
@@ -2013,7 +2045,11 @@ fn responses_tool_call_to_chat_tool_call(item: &Value) -> anyhow::Result<Value> 
     }))
 }
 
-fn fallback_input_item_to_chat_message(item: &Value, provider: &str, session_id: &str) -> Option<Value> {
+fn fallback_input_item_to_chat_message(
+    item: &Value,
+    provider: &str,
+    session_id: &str,
+) -> Option<Value> {
     let role = match item.get("role").and_then(Value::as_str).unwrap_or("user") {
         "developer" => "system",
         "assistant" => "assistant",
@@ -2384,7 +2420,11 @@ fn chat_payload_to_anthropic_payload(mut chat: Value, stream: bool) -> Value {
             }
             push_anthropic_coalesced(
                 &mut anthropic_messages,
-                if role == "assistant" { "assistant" } else { "user" },
+                if role == "assistant" {
+                    "assistant"
+                } else {
+                    "user"
+                },
                 content,
             );
         }
@@ -2613,17 +2653,16 @@ fn anthropic_payload_to_chat_payload(anthropic: Value, session_id: &str) -> Valu
             messages.push(json!({ "role": "system", "content": text }));
         }
     }
-        if let Some(items) = anthropic.get("messages").and_then(Value::as_array) {
-            for item in items {
-                let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-                match role {
-                    "assistant" => messages.push(anthropic_assistant_message_to_chat_message(
-                        item,
-                        session_id,
-                    )),
-                    _ => messages.extend(anthropic_user_message_to_chat_messages(item)),
-                }
+    if let Some(items) = anthropic.get("messages").and_then(Value::as_array) {
+        for item in items {
+            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+            match role {
+                "assistant" => messages.push(anthropic_assistant_message_to_chat_message(
+                    item, session_id,
+                )),
+                _ => messages.extend(anthropic_user_message_to_chat_messages(item)),
             }
+        }
     }
     let mut chat = json!({
         "model": anthropic.get("model").cloned().unwrap_or_else(|| Value::String(CHAT_MODEL_FALLBACK.to_string())),
@@ -2708,9 +2747,7 @@ fn anthropic_assistant_message_to_chat_message(item: &Value, session_id: &str) -
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
     }
-    if let Some(reasoning_content) =
-        reasoning_content_for_assistant_message(session_id, &message)
-    {
+    if let Some(reasoning_content) = reasoning_content_for_assistant_message(session_id, &message) {
         message["reasoning_content"] = Value::String(reasoning_content);
     }
     message
@@ -3336,7 +3373,9 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
     let id = tool_call
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("call_proxy");
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(next_synthetic_tool_call_id);
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     let name = function
         .get("name")
@@ -3348,15 +3387,15 @@ fn chat_tool_call_to_responses_item(tool_call: &Value) -> Value {
         .unwrap_or("{}");
     if tool_call_outputs_as_apply_patch(name) {
         return json!({
-            "id": id,
+            "id": id.as_str(),
             "type": "custom_tool_call",
-            "call_id": id,
+            "call_id": id.as_str(),
             "name": "apply_patch",
             "input": apply_patch_input_for_tool_call(name, arguments),
             "status": "completed"
         });
     }
-    namespaced_function_call_item(id, name, arguments, "completed")
+    namespaced_function_call_item(&id, name, arguments, "completed")
 }
 
 fn apply_patch_input_from_function_arguments(arguments: &str) -> String {
@@ -3652,18 +3691,10 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
 /// `incomplete` so the client does not mistake a truncated/filtered turn for a
 /// normal completion. Normal end states (`end_turn`, `tool_use`) and a missing
 /// stop_reason stay `completed` to preserve parity with previous behavior.
-fn anthropic_stop_reason_to_responses_status(
-    stop_reason: Option<&str>,
-) -> (&'static str, Value) {
+fn anthropic_stop_reason_to_responses_status(stop_reason: Option<&str>) -> (&'static str, Value) {
     match stop_reason {
-        Some("max_tokens") => (
-            "incomplete",
-            json!({ "reason": "max_output_tokens" }),
-        ),
-        Some("refusal") => (
-            "incomplete",
-            json!({ "reason": "content_filter" }),
-        ),
+        Some("max_tokens") => ("incomplete", json!({ "reason": "max_output_tokens" })),
+        Some("refusal") => ("incomplete", json!({ "reason": "content_filter" })),
         // end_turn, tool_use, stop_sequence, or missing → completed.
         _ => ("completed", Value::Null),
     }

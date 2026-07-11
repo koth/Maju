@@ -71,6 +71,51 @@
   margin-top: 8px;
 }
 
+/* Pending steers (追加指令) queued while a turn is running. Shown as a
+   small chip area above the composer until the agent starts responding. */
+.composer-pending-steers {
+  flex-shrink: 0;
+  width: min(var(--conversation-column-width), var(--conversation-composer-max));
+  min-width: min(var(--conversation-column-min), 100%);
+  max-width: var(--conversation-composer-max);
+  margin: 0 auto;
+  padding: 0 0 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composer-pending-steer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px 7px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent-hover);
+  background: var(--surface-muted-bg);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.composer-pending-steer-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.composer-pending-steer-body {
+  min-width: 0;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
 .permission-request {
   display: flex;
   flex-direction: column;
@@ -1994,6 +2039,18 @@
 
 :root[data-theme="light"] .composer {
   padding: 10px 0 12px;
+}
+
+:root[data-theme="light"] .composer-pending-steer {
+  background: #f4f4f1;
+  border-color: rgba(32, 33, 36, 0.10);
+  border-left-color: var(--accent-hover);
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .composer-pending-steer-badge {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
 }
 
 :root[data-theme="light"] .composer-inner {

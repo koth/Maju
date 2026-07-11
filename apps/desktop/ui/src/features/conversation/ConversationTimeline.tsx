@@ -45,6 +45,7 @@ interface MessageRowProps {
   role: MessageRole;
   body: string;
   streaming: boolean;
+  isSteer?: boolean;
   retryable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
 }
@@ -280,6 +281,7 @@ const MessageRow = memo(function MessageRow({
   role,
   body,
   streaming,
+  isSteer = false,
   retryable = false,
   onRetry,
 }: MessageRowProps) {
@@ -311,6 +313,20 @@ const MessageRow = memo(function MessageRow({
   if (role === "User") {
     const { text, images } = splitUserMessageBody(body);
     const canRetry = retryable && images.length === 0 && !!onRetry;
+
+    // Steers (追加指令) render as a compact annotation rather than a full
+    // user-message bubble, visually distinguishing them from turn-starting
+    // prompts while still showing the instruction text inline in the timeline.
+    if (isSteer) {
+      return (
+        <div key={id} className="msg msg-steer" role="note" aria-label="追加指令">
+          <span className="msg-steer-badge">追加指令</span>
+          <span className="msg-steer-body">
+            <UserMessageText text={text || body} />
+          </span>
+        </div>
+      );
+    }
     if (editing && canRetry) {
       const normalizedBody = normalizeUserMessageText(body).trim();
       const normalizedDraft = normalizeUserMessageText(draft).trim();
@@ -632,6 +648,13 @@ function buildTimelineCollapseState({
       if (!message) continue;
 
       if (message.role === "User") {
+        // Steers (追加指令) are NOT turn boundaries: they don't end the
+        // previous turn and don't start a new one. Skipping flushTurn() here
+        // prevents the original query's tools + responses from being
+        // prematurely collapsed when the steer enters the timeline.
+        if (message.is_steer) {
+          continue;
+        }
         flushTurn();
         turnStartMessage = message;
         continue;
@@ -849,7 +872,11 @@ export function ConversationTimeline({
       const item = snapshot.timeline[index];
       if (typeof item !== "object" || !("Message" in item)) continue;
       const message = allMessagesById.get(item.Message);
-      if (message?.role === "User") return index;
+      // Steers (追加指令) are NOT turn boundaries — skip them so the
+      // active-turn summary (and its timer) stays anchored to the original
+      // user message instead of jumping to the steer and resetting the
+      // elapsed-time clock.
+      if (message?.role === "User" && !message.is_steer) return index;
     }
     return -1;
   }, [allMessagesById, snapshot.timeline, turnIsActive]);
@@ -1041,6 +1068,7 @@ export function ConversationTimeline({
               role={msg.role}
               body={msg.body}
               streaming={isStreaming}
+              isSteer={msg.is_steer}
               retryable={retryableMessages.has(msg.id)}
               onRetry={onRetryUserMessage}
             />

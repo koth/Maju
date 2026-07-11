@@ -323,6 +323,7 @@ impl Application {
             turn_changes: self.ui.turn_changes.clone(),
             thinking_status: self.ui.thinking_status.clone(),
             usage: self.ui.usage.clone(),
+            pending_steers: self.ui.pending_steers.clone(),
         }
     }
 
@@ -463,6 +464,7 @@ impl Application {
             turn_changes: self.ui.turn_changes.clone(),
             thinking_status: self.ui.thinking_status.clone(),
             usage: self.ui.usage.clone(),
+            pending_steers: self.ui.pending_steers.clone(),
         }))
     }
 }

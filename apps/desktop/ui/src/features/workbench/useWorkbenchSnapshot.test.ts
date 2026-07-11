@@ -153,4 +153,29 @@ describe("applySnapshotPatch", () => {
     expect(next.timeline).toEqual([{ Message: "msg-before-tool" }, { Tool: "tool-1" }]);
     expect(next.messages[0].body).toBe("I will inspect the file first.");
   });
+
+  it("carries pending steers from the patch replacement list", () => {
+    const snapshot = makeSnapshot({
+      pending_steers: [{ message_id: "steer-1", body: "改为处理登录" }],
+    });
+    // Backend moves the steer into the timeline and clears pending_steers.
+    const patch = makePatch(snapshot, { pending_steers: [] });
+
+    const next = applySnapshotPatch(snapshot, patch);
+
+    expect(next.pending_steers).toEqual([]);
+  });
+
+  it("renders a newly queued steer from the patch", () => {
+    const snapshot = makeSnapshot({ pending_steers: [] });
+    const patch = makePatch(snapshot, {
+      pending_steers: [{ message_id: "steer-1", body: "追加：先看日志" }],
+    });
+
+    const next = applySnapshotPatch(snapshot, patch);
+
+    expect(next.pending_steers).toEqual([
+      { message_id: "steer-1", body: "追加：先看日志" },
+    ]);
+  });
 });

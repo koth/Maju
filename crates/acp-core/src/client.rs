@@ -278,11 +278,27 @@ impl SessionHandle {
         self.permission_broker.cancel_all()?;
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_tx
-            .send(RuntimeCommand::CancelPrompt { reply_tx })
+            .send(RuntimeCommand::CancelPrompt {
+                reply_tx: Some(reply_tx),
+            })
             .map_err(|_| anyhow!("ACP command channel closed"))?;
         reply_rx
             .recv()
             .map_err(|_| anyhow!("ACP command reply channel closed"))?
+    }
+
+    /// Fire-and-forget variant of [`cancel_prompt`].
+    ///
+    /// Sends the `CancelPrompt` command to the worker but does **not** block
+    /// waiting for the worker to process it. The caller is expected to
+    /// immediately mark the turn as cancelled locally (status → Idle, tools →
+    /// Interrupted) so the UI reflects the stop instantly. The worker's
+    /// subsequent `TurnFinished` event is a harmless no-op when it arrives.
+    pub fn cancel_prompt_fire_and_forget(&self) -> anyhow::Result<()> {
+        self.permission_broker.cancel_all()?;
+        self.command_tx
+            .send(RuntimeCommand::CancelPrompt { reply_tx: None })
+            .map_err(|_| anyhow!("ACP command channel closed"))
     }
 
     pub fn stop_tool(&self, tool_call_id: &str) -> anyhow::Result<Vec<ClientEvent>> {

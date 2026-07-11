@@ -26,12 +26,14 @@ fn tracker_missing_baseline_uses_tool_diff_preview_hunks_for_review_changes() {
         role: MessageRole::User,
         body: "edit".into(),
         created_at: "2026-06-28T00:00:00Z".into(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-06-28T00:00:01Z".into(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -113,12 +115,14 @@ fn codex_acp_edit_tool_with_file_path_hint_populates_review_changes() {
         role: MessageRole::User,
         body: "edit".into(),
         created_at: "2026-06-28T00:00:00Z".into(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-06-28T00:00:01Z".into(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -2682,12 +2686,14 @@ fn late_codebuddy_edit_prefers_exact_turn_diff_over_git_cumulative_diff() {
         role: MessageRole::User,
         body: "fix deploy preview".into(),
         created_at: "1".into(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2".into(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -3793,12 +3799,14 @@ fn idle_late_created_file_preview_does_not_persist_completed_turn_change_set() {
         role: MessageRole::User,
         body: "add query understanding files".into(),
         created_at: "2026-06-04T00:00:00Z".into(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-06-04T00:00:01Z".into(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));
@@ -3873,12 +3881,14 @@ fn preview_before_file_create_does_not_retry_into_review_after_landing() {
         role: MessageRole::User,
         body: "add query understanding files".into(),
         created_at: "2026-06-04T00:00:00Z".into(),
+    ..Default::default()
     });
     app.ui.messages.push(ChatMessage {
         id: assistant_id,
         role: MessageRole::Assistant,
         body: "done".into(),
         created_at: "2026-06-04T00:00:01Z".into(),
+    ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
     app.ui.timeline.push(TimelineItem::Message(assistant_id));

@@ -223,7 +223,8 @@ fn parallel_tool_outputs_collapse_into_single_anthropic_user_message() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     let anthropic = chat_payload_to_anthropic_payload(chat, false);
 
     let roles: Vec<&str> = anthropic["messages"]
@@ -264,7 +265,8 @@ fn consecutive_assistant_text_messages_are_not_dropped() {
         ]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
 
     let roles: Vec<&str> = chat["messages"]
         .as_array()
@@ -330,7 +332,8 @@ fn full_responses_to_anthropic_chain_enforces_strict_alternation() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     let anthropic = chat_payload_to_anthropic_payload(chat, false);
 
     let roles: Vec<&str> = anthropic["messages"]
@@ -376,7 +379,8 @@ fn assistant_text_then_tool_call_stays_one_chat_assistant_message() {
         }]
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
 
     // user, assistant(text+tool_calls) — exactly two messages, no
     // adjacent assistant pair.
@@ -392,10 +396,7 @@ fn assistant_text_then_tool_call_stays_one_chat_assistant_message() {
     let assistant = &chat["messages"][1];
     assert_eq!(assistant["content"], "I'll read it");
     assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
-    assert_eq!(
-        assistant["tool_calls"][0]["function"]["name"],
-        "read_file"
-    );
+    assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read_file");
 }
 
 #[test]
@@ -904,7 +905,10 @@ fn model_provider_map_parser_preserves_custom_provider_identity() {
     let config = provider_configs
         .get("custom_cline")
         .expect("custom_cline provider config preserved");
-    assert_eq!(config.base_url, "https://api.cline.bot/api/v1/chat/completions");
+    assert_eq!(
+        config.base_url,
+        "https://api.cline.bot/api/v1/chat/completions"
+    );
     assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
     assert!(provider_configs.get("timiai").is_none());
     assert_eq!(duplicate_count, 0);
@@ -957,7 +961,8 @@ fn decodes_provider_qualified_model_ids() {
     assert_eq!(model.provider, "timiai");
     assert_eq!(model.model, "gpt-5.5");
 
-    let model = decode_provider_model_id("kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max").unwrap();
+    let model =
+        decode_provider_model_id("kodex-provider/byok/commandcode/Qwen/Qwen3.7-Max").unwrap();
     assert_eq!(model.provider, "commandcode");
     assert_eq!(model.model, "Qwen/Qwen3.7-Max");
 }
@@ -1726,7 +1731,10 @@ fn anthropic_non_stream_max_tokens_maps_to_responses_incomplete() {
     let response = anthropic_response_to_responses_response(anthropic);
 
     assert_eq!(response["status"], "incomplete");
-    assert_eq!(response["incomplete_details"]["reason"], "max_output_tokens");
+    assert_eq!(
+        response["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
     // The text block is still preserved so nothing is lost.
     assert_eq!(response["output"][0]["type"], "message");
 }
@@ -1744,7 +1752,9 @@ fn anthropic_non_stream_end_turn_maps_to_responses_completed() {
     let response = anthropic_response_to_responses_response(anthropic);
 
     assert_eq!(response["status"], "completed");
-    assert!(response.get("incomplete_details").is_none() || response["incomplete_details"].is_null());
+    assert!(
+        response.get("incomplete_details").is_none() || response["incomplete_details"].is_null()
+    );
 }
 
 #[test]
@@ -2050,8 +2060,7 @@ fn reasoning_history_isolated_per_session() {
         }]
     });
 
-    let chat =
-        responses_payload_to_chat_payload(payload, "deepseek", "session-b").unwrap();
+    let chat = responses_payload_to_chat_payload(payload, "deepseek", "session-b").unwrap();
 
     assert_eq!(chat["messages"][0]["role"], "assistant");
     assert_eq!(chat["messages"][0]["content"], "shared answer text");
@@ -2378,7 +2387,12 @@ fn converts_anthropic_stream_incrementally_across_chunks() {
         b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel",
     );
     // The partial event at the end should not emit yet.
-    assert!(first.is_empty() || !String::from_utf8(first.clone()).unwrap().contains("\"delta\":\"hel"));
+    assert!(
+        first.is_empty()
+            || !String::from_utf8(first.clone())
+                .unwrap()
+                .contains("\"delta\":\"hel")
+    );
 
     let second = converter.push_chunk(b"lo\"}}\n\n");
     let second = String::from_utf8(second).unwrap();
@@ -2497,7 +2511,12 @@ fn converts_responses_stream_incrementally_across_chunks() {
     let first = converter.push_chunk(
         b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"g\"}}\n\nevent: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hel",
     );
-    assert!(first.is_empty() || !String::from_utf8(first.clone()).unwrap().contains("\"text\":\"hel"));
+    assert!(
+        first.is_empty()
+            || !String::from_utf8(first.clone())
+                .unwrap()
+                .contains("\"text\":\"hel")
+    );
 
     let second = converter.push_chunk(b"lo\"}\n\n");
     let second = String::from_utf8(second).unwrap();
@@ -2545,4 +2564,80 @@ fn handles_empty_anthropic_stream_text_gracefully() {
     assert!(!text.contains("event: response.output_text.delta"));
     assert!(text.contains("event: response.completed"));
     assert!(text.contains("data: [DONE]"));
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic tool-call id uniqueness
+// ---------------------------------------------------------------------------
+//
+// When an upstream Chat Completions provider omits the `id` field on
+// streamed tool-call deltas (observed with several non-OpenAI bridges), the
+// proxy must still mint ids that are unique across *responses*, not just
+// within a single stream. The old fallback `call_proxy_{index}` reset to 0
+// for every new response, so two consecutive single-tool-call turns both
+// produced `call_proxy_0` and the downstream UI could not tell them apart.
+
+fn chat_sse_tool_call_stream_without_ids() -> String {
+    // A single-turn stream that emits one tool call with NO `id` field.
+    concat!(
+        "data:{\"id\":\"chatcmpl_a\",\"model\":\"glm-5.2-ioa\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"list_files\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n"
+    ).to_string()
+}
+
+#[test]
+fn synthetic_tool_call_ids_are_unique_across_streams() {
+    let body = chat_sse_tool_call_stream_without_ids();
+
+    // Two independent responses (two fresh converters) — previously both
+    // would have produced `call_proxy_0`.
+    let first = String::from_utf8(chat_sse_to_responses_sse(body.as_bytes())).unwrap();
+    let second = String::from_utf8(chat_sse_to_responses_sse(body.as_bytes())).unwrap();
+
+    let first_id = synthetic_tool_call_id_from_responses_sse(&first);
+    let second_id = synthetic_tool_call_id_from_responses_sse(&second);
+
+    // Each stream must still produce a synthetic id (not empty, not a bare
+    // unindexed `call_proxy`).
+    assert!(
+        first_id.starts_with("call_proxy_"),
+        "expected a numbered synthetic id, got {first_id:?}"
+    );
+    assert!(
+        second_id.starts_with("call_proxy_"),
+        "expected a numbered synthetic id, got {second_id:?}"
+    );
+
+    // The whole point: they must NOT collide.
+    assert_ne!(
+        first_id, second_id,
+        "synthetic tool-call ids collided across streams: {first_id}"
+    );
+}
+
+/// Extract the synthetic `call_id` from a responses SSE stream produced by
+/// `chat_sse_to_responses_sse`. Returns the first `call_proxy_*` value found
+/// in a `function_call` / `custom_tool_call` output item.
+fn synthetic_tool_call_id_from_responses_sse(text: &str) -> String {
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("response.output_item.added")
+            && let Some(item) = value.get("item")
+        {
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+            if item_type == "function_call" || item_type == "custom_tool_call" {
+                if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+                    if call_id.starts_with("call_proxy_") {
+                        return call_id.to_string();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
 }

@@ -51,7 +51,7 @@ pub(crate) enum RuntimeCommand {
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
     },
     CancelPrompt {
-        reply_tx: mpsc::Sender<anyhow::Result<()>>,
+        reply_tx: Option<mpsc::Sender<anyhow::Result<()>>>,
     },
     StopTool {
         tool_call_id: String,
