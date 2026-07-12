@@ -1536,6 +1536,12 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
             latest_at: None,
+            avg_latency_ms: None,
+            avg_ttft_ms: None,
+            avg_tokens_per_second: None,
+            latency_count: 0,
+            ttft_count: 0,
+            tps_count: 0,
             has_session_total: false,
         });
         ui.usage.by_model.last_mut().expect("summary just inserted")

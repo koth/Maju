@@ -78,7 +78,7 @@ pub struct RemoteSshReverseForward {
     pub local_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClientEvent {
     SessionStarted {
         session_id: String,

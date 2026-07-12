@@ -4001,7 +4001,7 @@ describe("result origin handling", () => {
     expect(usageUpdate).toBeDefined();
     expect(usageUpdate.update._meta).toEqual({
       "_claude/origin": { kind: "channel", server: "acp" },
-      "kodex.ai/usage": {
+      "kodex.ai/usage": expect.objectContaining({
         scope: "turn_delta",
         agent_cli: "claude-agent-acp",
         provider: "anthropic",
@@ -4011,7 +4011,7 @@ describe("result origin handling", () => {
         cache_read_tokens: 0,
         cache_write_tokens: 0,
         total_tokens: 15,
-      },
+      }),
     });
   });
 

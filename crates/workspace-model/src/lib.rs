@@ -1065,7 +1065,7 @@ impl Default for UsageEventScope {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct UsageTokenBreakdown {
     #[serde(default)]
     pub input_tokens: Option<u64>,
@@ -1079,6 +1079,19 @@ pub struct UsageTokenBreakdown {
     pub reasoning_tokens: Option<u64>,
     #[serde(default)]
     pub total_tokens: Option<u64>,
+    /// End-to-end request latency in milliseconds (request start → last
+    /// token). Only present on `TurnDelta` events sourced from a timed
+    /// model call; `None` for `SessionTotal` / `ContextSnapshot`.
+    #[serde(default)]
+    pub latency_ms: Option<u64>,
+    /// Time-to-first-token in milliseconds (request start → first output
+    /// delta). Same scoping as `latency_ms`.
+    #[serde(default)]
+    pub ttft_ms: Option<u64>,
+    /// Generation speed in output tokens per second
+    /// (`output_tokens / (latency - ttft)`). Same scoping as `latency_ms`.
+    #[serde(default)]
+    pub tokens_per_second: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1091,7 +1104,7 @@ pub struct UsageContextSnapshot {
     pub updated_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct UsageEvent {
     #[serde(default)]
     pub scope: UsageEventScope,
@@ -1111,7 +1124,7 @@ pub struct UsageEvent {
     pub raw_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct UsageModelSummary {
     pub label: String,
     #[serde(default)]
@@ -1141,6 +1154,27 @@ pub struct UsageModelSummary {
     pub context_peak_tokens: Option<u64>,
     #[serde(default)]
     pub latest_at: Option<String>,
+    /// Average end-to-end latency (ms) over timed `TurnDelta` requests.
+    /// `None` when no timed requests have been recorded for this group.
+    #[serde(default)]
+    pub avg_latency_ms: Option<f64>,
+    /// Average time-to-first-token (ms) over timed `TurnDelta` requests.
+    #[serde(default)]
+    pub avg_ttft_ms: Option<f64>,
+    /// Average generation speed (output tokens/sec) over timed requests.
+    #[serde(default)]
+    pub avg_tokens_per_second: Option<f64>,
+    /// Per-field sample counts backing the `avg_*` rolling averages. Not
+    /// serialized; internal aggregation state. Each field tracks its own
+    /// count because a timed event may carry `latency_ms` without
+    /// `ttft_ms`/`tokens_per_second` (e.g. a model call that produced no
+    /// output), so a shared counter would skew the absent fields' averages.
+    #[serde(default, skip)]
+    pub latency_count: u32,
+    #[serde(default, skip)]
+    pub ttft_count: u32,
+    #[serde(default, skip)]
+    pub tps_count: u32,
     /// True once a `SessionTotal` event has been observed for this group.
     /// Used by the aggregation layer to avoid double-counting TurnDelta
     /// events on top of an authoritative SessionTotal.
@@ -1159,7 +1193,7 @@ pub struct UsageModelSummary {
     pub has_session_total: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SessionUsageSnapshot {
     #[serde(default)]
     pub context: UsageContextSnapshot,
@@ -1209,17 +1243,25 @@ pub struct UsageSummaryRequest {
     pub include_archived: bool,
     #[serde(default)]
     pub group_by: UsageSummaryGroupBy,
+    /// UTC offset in minutes, using the JS `getTimezoneOffset()` convention
+    /// (`UTC − local`; e.g. `-480` for Asia/Shanghai). The daily-series
+    /// chart buckets events into **local** calendar days when this is set;
+    /// `None` falls back to UTC bucketing for backward compatibility.
+    #[serde(default)]
+    pub utc_offset_minutes: Option<i32>,
 }
 
 pub type UsageSummaryRow = UsageModelSummary;
 
-/// One day's worth of usage for the daily usage chart. `date` is a UTC
-/// calendar date (`YYYY-MM-DD`). `tokens` is the aggregate breakdown for the
-/// day (its `total_tokens` is the sum of each per-model row's effective
-/// total). `by_model` holds the per-model rows that stack into the day's
-/// bar, reusing the same `SessionTotal`-overwrites / `TurnDelta`-accumulates
-/// aggregation rules as the cross-session summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// One day's worth of usage for the daily usage chart. `date` is a calendar
+/// date (`YYYY-MM-DD`) in the bucketing timezone used by the request — local
+/// time when `utc_offset_minutes` is set, UTC otherwise. `tokens` is the
+/// aggregate breakdown for the day (its `total_tokens` is the sum of each
+/// per-model row's effective total). `by_model` holds the per-model rows
+/// that stack into the day's bar, reusing the same
+/// `SessionTotal`-overwrites / `TurnDelta`-accumulates aggregation rules as
+/// the cross-session summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct UsageDailyBucket {
     #[serde(default)]
     pub date: String,
@@ -1229,7 +1271,7 @@ pub struct UsageDailyBucket {
     pub by_model: Vec<UsageModelSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSnapshot {
     #[serde(default)]
     pub revision: u64,
@@ -1276,7 +1318,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSnapshotPatch {
     pub revision: u64,
     pub session: SessionSummary,

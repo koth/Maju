@@ -417,7 +417,10 @@ fn usage_update_maps_full_breakdown_into_session_total_and_turn_delta() {
                         "output_tokens": 30,
                         "cache_read_tokens": 40,
                         "reasoning_tokens": 10,
-                        "total_tokens": 180
+                        "total_tokens": 180,
+                        "latency_ms": 1500,
+                        "ttft_ms": 300,
+                        "tokens_per_second": 42.5
                     }
                 }),
             )]),
@@ -443,6 +446,11 @@ fn usage_update_maps_full_breakdown_into_session_total_and_turn_delta() {
     assert_eq!(session_event.tokens.cache_write_tokens, Some(50));
     assert_eq!(session_event.tokens.reasoning_tokens, Some(100));
     assert_eq!(session_event.tokens.total_tokens, Some(1650));
+    // SessionTotal is sourced from top-level fields only; timing lives in
+    // the nested turn_delta object, so it must be absent here.
+    assert_eq!(session_event.tokens.latency_ms, None);
+    assert_eq!(session_event.tokens.ttft_ms, None);
+    assert_eq!(session_event.tokens.tokens_per_second, None);
 
     // Second event: TurnDelta populated from the nested object.
     let turn_event = match rx.try_recv().unwrap() {
@@ -457,6 +465,10 @@ fn usage_update_maps_full_breakdown_into_session_total_and_turn_delta() {
     assert_eq!(turn_event.tokens.cache_read_tokens, Some(40));
     assert_eq!(turn_event.tokens.reasoning_tokens, Some(10));
     assert_eq!(turn_event.tokens.total_tokens, Some(180));
+    // Timing fields are extracted from the nested turn_delta object.
+    assert_eq!(turn_event.tokens.latency_ms, Some(1500));
+    assert_eq!(turn_event.tokens.ttft_ms, Some(300));
+    assert_eq!(turn_event.tokens.tokens_per_second, Some(42.5));
 
     // No further events.
     assert!(rx.try_recv().is_err());

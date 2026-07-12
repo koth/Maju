@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -38,6 +39,13 @@ pub struct SessionPool {
     entries: Mutex<HashMap<String, Arc<PoolEntry>>>,
     max_sessions: usize,
     idle_timeout: Duration,
+    /// CodeBuddy home dir (`~/.codebuddy` or `CODEBUDDY_HOME`) used to locate
+    /// persisted session rollouts. When set, a pool miss resumes an existing
+    /// conversation via `--resume <id>` if its rollout file exists on disk;
+    /// otherwise a fresh session is created with `--session-id <id>`. `None`
+    /// (e.g. in tests) disables resume and always creates fresh — matching
+    /// the pre-resume behavior.
+    codebuddy_home: Option<PathBuf>,
 }
 
 /// Request-side signal that the pooled CLI context should be recreated under
@@ -52,18 +60,19 @@ pub struct ContextResetRequest {
 }
 
 impl SessionPool {
-    pub fn new(max_sessions: usize, idle_timeout: Duration) -> Self {
+    pub fn new(max_sessions: usize, idle_timeout: Duration, codebuddy_home: Option<PathBuf>) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             max_sessions,
             idle_timeout,
+            codebuddy_home,
         }
     }
 
     pub async fn acquire(
         &self,
         session_id: &str,
-        opts: SessionOptions,
+        mut opts: SessionOptions,
         tool_sig: &str,
         pending: Arc<PendingQueue>,
         reset: ContextResetRequest,
@@ -123,6 +132,24 @@ impl SessionPool {
         }
         drop(entries);
         let initial_epoch = reset.requested_epoch.unwrap_or(0);
+        // Genuine pool miss (not an explicit context reset/epoch recreate):
+        // if a persisted CodeBuddy rollout exists for this session id under
+        // the request's cwd, resume it so the warm CLI picks up prior context
+        // and the proxy can keep sending only the incremental tail. Otherwise
+        // start a fresh session pinned to this id. The explicit-reset branches
+        // above intentionally bypass this — a reset means "fresh context".
+        if let Some(home) = &self.codebuddy_home {
+            if let Some(cwd) = opts.cwd.as_ref() {
+                if rollout_exists(home, cwd, session_id) {
+                    append_codebuddy_proxy_log(&format!(
+                        "pool resume_from_rollout session_id={session_id} cwd={}",
+                        cwd.display(),
+                    ));
+                    opts.resume = Some(session_id.to_string());
+                    opts.session_id = None;
+                }
+            }
+        }
         self.create(session_id, opts, tool_sig, pending, initial_epoch)
             .await
     }
@@ -213,5 +240,85 @@ pub fn tool_signature_of(tools: &Option<Vec<crate::openai_types::OaiTool>>) -> S
             names.sort();
             serde_json::to_string(&names).unwrap_or_default()
         }
+    }
+}
+
+/// Slug a working directory the way the CodeBuddy CLI names its per-project
+/// rollout directory: canonicalize (so symlinks like `/tmp`→`/private/tmp`
+/// match), drop the leading separator, then replace every remaining separator
+/// with `-`. e.g. `/Users/kothchen/code/Kodex` → `Users-kothchen-code-Kodex`.
+fn project_dir_slug(cwd: &Path) -> String {
+    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let s = resolved.to_string_lossy();
+    let s = s.strip_prefix(std::path::MAIN_SEPARATOR).unwrap_or(&s);
+    s.replace(std::path::MAIN_SEPARATOR, "-")
+}
+
+/// On-disk rollout path the CLI writes for a session: `<home>/projects/<slug>/<id>.jsonl`.
+fn rollout_path(home: &Path, cwd: &Path, session_id: &str) -> PathBuf {
+    home.join("projects").join(project_dir_slug(cwd)).join(format!("{session_id}.jsonl"))
+}
+
+/// Whether a persisted rollout exists for this session id under the given cwd.
+/// Used to decide `--resume` (exists) vs `--session-id` (new) on a pool miss.
+fn rollout_exists(home: &Path, cwd: &Path, session_id: &str) -> bool {
+    rollout_path(home, cwd, session_id).is_file()
+}
+
+/// Resolve the CodeBuddy home directory from `CODEBUDDY_HOME` or the user's
+/// home `.codebuddy`, mirroring the CLI's default. `None` when neither is
+/// available (resume then disabled).
+pub fn default_codebuddy_home() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("CODEBUDDY_HOME") {
+        return Some(PathBuf::from(v));
+    }
+    let home_key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+    std::env::var_os(home_key)
+        .map(PathBuf::from)
+        .map(|h| h.join(".codebuddy"))
+}
+
+#[cfg(test)]
+mod rollout_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn slug_strips_leading_separator_and_replaces_rest() {
+        let tmp = tempdir().unwrap();
+        let cwd = tmp.path().to_path_buf();
+        let slug = project_dir_slug(&cwd);
+        assert!(!slug.contains(std::path::MAIN_SEPARATOR), "slug={slug}");
+        assert!(!slug.starts_with(std::path::MAIN_SEPARATOR));
+    }
+
+    #[test]
+    fn rollout_exists_detects_present_and_absent() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let cwd = tmp.path().join("proj");
+        fs::create_dir_all(&cwd).unwrap();
+        let slug = project_dir_slug(&cwd);
+        let dir = home.join("projects").join(&slug);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("acme-1.jsonl"), "{}").unwrap();
+        assert!(rollout_exists(&home, &cwd, "acme-1"));
+        assert!(!rollout_exists(&home, &cwd, "acme-2"));
+    }
+
+    #[test]
+    fn slug_handles_tmp_symlink_canonicalization() {
+        // `/tmp` is a symlink to `/private/tmp` on macOS; the CLI stores under
+        // the resolved path. canonicalize must match so resume finds it.
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let slug = project_dir_slug(Path::new("/tmp"));
+        assert!(slug.starts_with("private-tmp"), "slug={slug}");
     }
 }

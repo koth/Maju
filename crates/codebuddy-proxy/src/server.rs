@@ -45,7 +45,11 @@ pub struct ProxyConfig {
 }
 pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
     set_debug_enabled(cfg.debug);
-    let pool = Arc::new(SessionPool::new(cfg.max_sessions, cfg.idle_timeout));
+    let pool = Arc::new(SessionPool::new(
+        cfg.max_sessions,
+        cfg.idle_timeout,
+        crate::session_pool::default_codebuddy_home(),
+    ));
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
     append_codebuddy_proxy_log(&format!(
@@ -150,6 +154,19 @@ async fn handle_chat(
             .get("x-context-epoch")
             .and_then(|v| v.to_str().ok()),
     );
+    // Per-request working directory forwarded by `codex_api_proxy` as
+    // `X-Session-Dir` (the conversation's project root). The CLI spawns in
+    // this dir, and — critically for resume — its rollout is stored under
+    // the slug of this exact path, so a pool miss can locate the prior
+    // conversation by id+cwd. Falls back to the proxy's configured cwd
+    // when the header is absent (e.g. standalone CLI clients).
+    let session_dir = req
+        .headers()
+        .get("x-session-dir")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
     let body = req.into_body().collect().await?.to_bytes();
     let chat_req: OaiChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -205,7 +222,7 @@ async fn handle_chat(
     ));
     let adapter_opts = AdapterOptions {
         default_model: cfg.default_model.clone(),
-        cwd: cfg.cwd.clone(),
+        cwd: session_dir.or_else(|| cfg.cwd.clone()),
         max_turns: cfg.max_turns,
         cli_path: cfg.cli_path.clone(),
         cli_env: cfg.cli_env.clone(),

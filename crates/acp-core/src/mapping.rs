@@ -404,6 +404,11 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
             }
         });
 
+    let latency_ms = usage_u64_field(meta, &["latency_ms", "latencyMs"]);
+    let ttft_ms = usage_u64_field(meta, &["ttft_ms", "ttftMs"]);
+    let tokens_per_second =
+        usage_f64_field(meta, &["tokens_per_second", "tokensPerSecond"]);
+
     UsageTokenBreakdown {
         input_tokens,
         output_tokens,
@@ -411,7 +416,22 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
         cache_write_tokens,
         reasoning_tokens,
         total_tokens,
+        latency_ms,
+        ttft_ms,
+        tokens_per_second,
     }
+}
+
+fn usage_f64_field(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|field| {
+            field
+                .as_f64()
+                .or_else(|| field.as_i64().map(|v| v as f64))
+                .or_else(|| field.as_u64().map(|v| v as f64))
+                .or_else(|| field.as_str().and_then(|v| v.trim().parse().ok()))
+        })
+    })
 }
 
 fn usage_u64_field(value: &Value, keys: &[&str]) -> Option<u64> {

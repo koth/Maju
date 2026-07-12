@@ -26,8 +26,19 @@ pub struct SdkMcpServerEntry {
 /// `SessionOptions`, with the subset that the proxy actually uses.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
-    /// Custom session id to resume or pin; the SDK does NOT generate one.
+    /// Custom session id to pin for a NEW conversation; the SDK does NOT
+    /// generate one. Mutually exclusive with [`SessionOptions::resume`]:
+    /// setting both is a programming error — `cli_args` lets `resume` win.
+    /// On a fresh CLI process this becomes `--session-id <id>`, which labels
+    /// a new session (it does NOT load any prior history).
     pub session_id: Option<String>,
+    /// Resume an existing conversation by id, loading its rollout history
+    /// into the CLI's in-memory state so subsequent incremental turns carry
+    /// prior context. Becomes `--resume <id>` on the CLI argv. Mutually
+    /// exclusive with [`SessionOptions::session_id`]. Use this when the
+    /// proxy's pool misses but a persisted rollout exists on disk; use
+    /// `session_id` for a genuinely new conversation.
+    pub resume: Option<String>,
     /// Model name (passed as `--model`).
     pub model: Option<String>,
     /// Working directory for the CLI process. `None` inherits from the SDK process.
@@ -73,6 +84,7 @@ impl Default for SessionOptions {
     fn default() -> Self {
         Self {
             session_id: None,
+            resume: None,
             model: None,
             cwd: None,
             env: BTreeMap::new(),

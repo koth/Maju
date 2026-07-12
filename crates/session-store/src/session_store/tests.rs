@@ -1374,6 +1374,7 @@ fn usage_total_tokens_excludes_cache_to_avoid_double_count() {
         cache_write_tokens: Some(0),
         reasoning_tokens: None,
         total_tokens: None,
+        ..Default::default()
     };
     assert_eq!(super::usage_total_tokens(&tokens), 120);
 
@@ -1385,8 +1386,9 @@ fn usage_total_tokens_excludes_cache_to_avoid_double_count() {
     assert_eq!(super::usage_total_tokens(&with_total), 150);
 }
 
-/// P2: daily series must bucket events by UTC calendar day, applying the
-/// same SessionTotal-overwrites / TurnDelta-accumulates rules per day, and
+/// P2: daily series must bucket events by calendar day (UTC by default,
+/// i.e. when `utc_offset_minutes` is `None`), applying the same
+/// SessionTotal-overwrites / TurnDelta-accumulates rules per day, and
 /// sum each day's per-model totals into the bucket total.
 #[test]
 fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
@@ -1533,6 +1535,140 @@ fn usage_daily_series_reports_incremental_not_cumulative() {
         Some(500),
         "day B must report the increment (1500 - 1000 = 500), not cumulative 1500"
     );
+}
+
+/// Local-timezone bucketing: with `utc_offset_minutes = -480` (Asia/Shanghai,
+/// UTC+8), an event at UTC 16:00 of day N-1 (== local 00:00 of day N) and an
+/// event at UTC 00:00 of day N (== local 08:00 of day N) must land in the
+/// SAME local day, whereas the default UTC bucketing splits them across two
+/// days. Regression guard for the settings "每日用量" chart showing usage in
+/// the user's local timezone instead of UTC.
+#[test]
+fn usage_daily_series_buckets_by_local_timezone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // 1751328000 == 00:00 UTC of day N. Shanghai (UTC+8) local midnight of
+    // day N is 8h earlier: 1751328000 - 28800 == 1751299200 (16:00 UTC of
+    // day N-1). Both wall-clock instants are the SAME local day (day N). Two
+    // distinct models avoid the per-(session,model) "first TurnDelta only"
+    // rule so each event contributes its own total.
+    let local_midnight = make_usage_event("gpt-5.1", 100, "1751299200");
+    let local_morning = make_usage_event("gpt-5.2", 200, "1751328000");
+    store
+        .append_usage_event("s1", &local_midnight, None, None)
+        .unwrap();
+    store
+        .append_usage_event("s1", &local_morning, None, None)
+        .unwrap();
+
+    // Local bucketing (Shanghai, UTC+8): both events share one local day.
+    let local_buckets = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            utc_offset_minutes: Some(-480),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        local_buckets.len(),
+        1,
+        "both events share one local day: {local_buckets:?}"
+    );
+    assert_eq!(local_buckets[0].tokens.total_tokens, Some(300));
+
+    // Default UTC bucketing (None): the two events straddle a UTC midnight.
+    let utc_buckets = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        utc_buckets.len(),
+        2,
+        "UTC bucketing must split across midnight: {utc_buckets:?}"
+    );
+}
+
+/// Timing rolling-average must use per-field counters. When an event carries
+/// `latency_ms` but no `ttft_ms`/`tokens_per_second` (a model call that
+/// produced no output tokens), the absent fields must not be divided by an
+/// inflated shared counter — each field tracks its own sample count.
+/// Regression guard for the settings "LATENCY / TTFT / SPEED" columns.
+#[test]
+fn usage_summary_timing_averages_use_per_field_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Three timed TurnDelta events for the same model. Event 2 carries only
+    // latency (no ttft/tps — e.g. a zero-output turn). With a shared counter
+    // the ttft/tps averages would be divided by 3 instead of 2.
+    let timed_event = |total: u64,
+                       ts: &str,
+                       latency: u64,
+                       ttft: Option<u64>,
+                       tps: Option<f64>| {
+        UsageEvent {
+            scope: UsageEventScope::TurnDelta,
+            model: Some("gpt-5.1".into()),
+            provider: Some("openai".into()),
+            agent_cli: Some("codex-acp".into()),
+            timestamp: Some(ts.into()),
+            tokens: UsageTokenBreakdown {
+                total_tokens: Some(total),
+                latency_ms: Some(latency),
+                ttft_ms: ttft,
+                tokens_per_second: tps,
+                ..Default::default()
+            },
+            context: UsageContextSnapshot::default(),
+            raw_json: None,
+        }
+    };
+    store
+        .append_usage_event(
+            "s1",
+            &timed_event(100, "1751328000", 1000, Some(200), Some(50.0)),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &timed_event(50, "1751328060", 2000, None, None),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &timed_event(200, "1751328120", 3000, Some(400), Some(60.0)),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "one model row: {rows:?}");
+    let row = &rows[0];
+    // latency present on all 3 events → (1000+2000+3000)/3 = 2000
+    assert_eq!(row.avg_latency_ms, Some(2000.0));
+    // ttft present on 2 of 3 events → (200+400)/2 = 300
+    assert_eq!(row.avg_ttft_ms, Some(300.0));
+    // tps present on 2 of 3 events → (50+60)/2 = 55
+    assert_eq!(row.avg_tokens_per_second, Some(55.0));
 }
 
 /// P5: `request_count` must count only token-reporting events

@@ -1242,6 +1242,7 @@ fn timiai_session_id_is_reused_from_proxy_config() {
         session_ids,
         model_providers: BTreeMap::new(),
         provider_configs: BTreeMap::new(),
+        workspace_root: None,
     };
 
     assert_eq!(

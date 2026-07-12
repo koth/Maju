@@ -797,6 +797,7 @@ export function SettingsPage({
         include_archived: usageIncludeArchived,
         from: range.from,
         to: range.to,
+        utc_offset_minutes: new Date().getTimezoneOffset(),
       };
       // The "24H REQ" card is a fixed rolling-24h window, independent of
       // the date-range filter above but still scoped to the current
@@ -3231,7 +3232,7 @@ export function SettingsPage({
                 <div className="settings-usage-daily-chart-title">DAILY USAGE</div>
                 <div className="settings-usage-daily-chart-hint">
                   {usageDailyBuckets.length > 0
-                    ? "近 30 天每日 token 用量（UTC）"
+                    ? "近 30 天每日 token 用量（本地时间）"
                     : "暂无每日用量数据"}
                 </div>
               </div>
@@ -3319,21 +3320,33 @@ export function SettingsPage({
                         </div>
                       </td>
                       <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-value">
+                          {row.avg_latency_ms != null
+                            ? formatUsageLatency(row.avg_latency_ms)
+                            : "—"}
+                        </div>
                         <div className="settings-usage-model-cell-hint">
-                          后端未上报
+                          {row.avg_latency_ms != null ? "平均延迟" : "后端未上报"}
                         </div>
                       </td>
                       <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-value">
+                          {row.avg_ttft_ms != null
+                            ? formatUsageLatency(row.avg_ttft_ms)
+                            : "—"}
+                        </div>
                         <div className="settings-usage-model-cell-hint">
-                          后端未上报
+                          {row.avg_ttft_ms != null ? "平均首 token" : "后端未上报"}
                         </div>
                       </td>
                       <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value is-placeholder">—</div>
+                        <div className="settings-usage-model-cell-value">
+                          {row.avg_tokens_per_second != null
+                            ? formatUsageSpeed(row.avg_tokens_per_second)
+                            : "—"}
+                        </div>
                         <div className="settings-usage-model-cell-hint">
-                          后端未上报
+                          {row.avg_tokens_per_second != null ? "平均速度" : "后端未上报"}
                         </div>
                       </td>
                     </tr>
@@ -4622,6 +4635,16 @@ function formatUsageTokens(value: number): string {
   return value.toLocaleString("en-US");
 }
 
+function formatUsageLatency(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+  return `${Math.round(ms)}ms`;
+}
+
+function formatUsageSpeed(tokensPerSecond: number): string {
+  if (tokensPerSecond <= 0) return "—";
+  return `${tokensPerSecond.toFixed(tokensPerSecond >= 100 ? 0 : 1)} tok/s`;
+}
+
 function usageBreakdownParts(
   tokens: UsageSummaryRow["tokens"],
 ): Array<{ label: string; value: number }> {
@@ -4695,7 +4718,7 @@ function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
   const innerHeight = chartHeight - paddingTop - paddingBottom;
   const barWidth = innerWidth / dayCount;
 
-  // P2: index real daily buckets by UTC date for O(1) lookup and derive a
+  // P2: index real daily buckets by local date for O(1) lookup and derive a
   // dynamic Y axis from the peak day total instead of hardcoded ticks.
   const bucketsByDate = new Map<string, UsageDailyBucket>();
   for (const bucket of buckets) {
@@ -4730,16 +4753,19 @@ function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
     colorIndexByLabel.set(label, index);
   });
 
-  // Build the last `dayCount` UTC days ending today.
+  // Build the last `dayCount` LOCAL days ending today, matching the
+  // backend's local-timezone bucketing (`utc_offset_minutes`).
   const now = new Date();
   const dayDates: { key: string; date: Date }[] = [];
   for (let i = dayCount - 1; i >= 0; i -= 1) {
     const d = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i),
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - i,
     );
-    const key = `${d.getUTCFullYear()}-${String(
-      d.getUTCMonth() + 1,
-    ).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+    const key = `${d.getFullYear()}-${String(
+      d.getMonth() + 1,
+    ).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     dayDates.push({ key, date: d });
   }
 
@@ -4843,7 +4869,6 @@ function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
                     {date.toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
-                      timeZone: "UTC",
                     })}
                   </text>
                 )}
@@ -4889,7 +4914,6 @@ function UsageDailyChart({ buckets }: { buckets: UsageDailyBucket[] }) {
                   {date.toLocaleDateString("en-US", {
                     month: "short",
                     day: "numeric",
-                    timeZone: "UTC",
                   })}
                 </text>
               )}

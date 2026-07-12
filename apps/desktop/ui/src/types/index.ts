@@ -428,6 +428,12 @@ export interface UsageTokenBreakdown {
   cache_write_tokens?: number | null;
   reasoning_tokens?: number | null;
   total_tokens?: number | null;
+  /** End-to-end request latency (ms). Only on timed TurnDelta events. */
+  latency_ms?: number | null;
+  /** Time-to-first-token (ms). Only on timed TurnDelta events. */
+  ttft_ms?: number | null;
+  /** Generation speed (output tokens/sec). Only on timed TurnDelta events. */
+  tokens_per_second?: number | null;
 }
 
 export interface UsageContextSnapshot {
@@ -451,6 +457,12 @@ export interface UsageModelSummary {
   tokens: UsageTokenBreakdown;
   context_peak_tokens?: number | null;
   latest_at?: string | null;
+  /** Average end-to-end latency (ms) over timed requests. */
+  avg_latency_ms?: number | null;
+  /** Average time-to-first-token (ms) over timed requests. */
+  avg_ttft_ms?: number | null;
+  /** Average generation speed (output tokens/sec) over timed requests. */
+  avg_tokens_per_second?: number | null;
 }
 
 export interface SessionUsageSnapshot {
@@ -460,7 +472,8 @@ export interface SessionUsageSnapshot {
   by_model: UsageModelSummary[];
 }
 
-/** One UTC day's worth of usage for the daily chart. `date` is `YYYY-MM-DD`.
+/** One calendar day's worth of usage for the daily chart (bucketed in the
+ *  user's local timezone). `date` is `YYYY-MM-DD`.
  *  `tokens.total_tokens` is the sum of each per-model row's effective total;
  *  `by_model` holds the stackable per-model segments. */
 export interface UsageDailyBucket {
@@ -477,6 +490,10 @@ export interface UsageSummaryRequest {
   all_workspaces?: boolean;
   include_archived?: boolean;
   group_by?: UsageSummaryGroupBy;
+  /** UTC offset in minutes (JS `getTimezoneOffset()`: UTC − local, e.g.
+   *  -480 for Asia/Shanghai). Drives local-timezone bucketing of the daily
+   *  series chart; omitted/0 falls back to UTC. */
+  utc_offset_minutes?: number | null;
 }
 
 export type UsageSummaryRow = UsageModelSummary;

@@ -19,8 +19,9 @@ use legacy::{
     legacy_agent_turn_id, legacy_records_from_session_changes, summarize_change_records,
 };
 use util::{
-    cap_string, decode_json_vec, instant_to_date_utc, normalize_change_path,
-    normalize_workspace_root, now_iso, parse_instant_to_epoch_secs, upsert_loaded_change,
+    cap_string, decode_json_vec, epoch_start_of_date_local, instant_to_date_local,
+    normalize_change_path, normalize_workspace_root, now_iso, parse_instant_to_epoch_secs,
+    upsert_loaded_change,
 };
 // Re-export the display timestamp helpers so app-core can produce ISO-8601
 // without duplicating the calendar algorithm; storage stays epoch-seconds.
@@ -232,7 +233,10 @@ impl SessionStore {
                 context_used_tokens INTEGER,
                 context_window_tokens INTEGER,
                 raw_json TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                latency_ms INTEGER,
+                ttft_ms INTEGER,
+                tokens_per_second REAL
             );
 
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
@@ -363,6 +367,18 @@ impl SessionStore {
         if !has_is_steer_col {
             self.conn
                 .execute_batch("ALTER TABLE messages ADD COLUMN is_steer INTEGER NOT NULL DEFAULT 0;")?;
+        }
+
+        let has_latency_col: bool = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = 'latency_ms'")?
+            .query_row([], |row| row.get(0))?;
+        if !has_latency_col {
+            self.conn.execute_batch(
+                "ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER;
+                 ALTER TABLE usage_events ADD COLUMN ttft_ms INTEGER;
+                 ALTER TABLE usage_events ADD COLUMN tokens_per_second REAL;",
+            )?;
         }
 
         Ok(())
@@ -971,8 +987,8 @@ impl SessionStore {
                 id, session_id, workspace_root, agent_cli, provider, model, scope,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                 reasoning_tokens, total_tokens, context_used_tokens, context_window_tokens,
-                raw_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                raw_json, created_at, latency_ms, ttft_ms, tokens_per_second
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 Uuid::new_v4().to_string(),
                 session_id,
@@ -991,6 +1007,9 @@ impl SessionStore {
                 opt_i64(event.context.window_tokens),
                 event.raw_json,
                 created_at,
+                opt_i64(event.tokens.latency_ms),
+                opt_i64(event.tokens.ttft_ms),
+                event.tokens.tokens_per_second,
             ],
         )?;
         self.touch_session(session_id)?;
@@ -1026,10 +1045,11 @@ impl SessionStore {
     /// P2: real daily usage series for the settings "每日用量" chart. Loads the
     /// same filtered event set as [`query_usage_summary`] (so workspace,
     /// archived, date-range and non-reporting-agent filters all apply), then
-    /// buckets events by UTC calendar day. Each day reports the **incremental**
-    /// usage (last SessionTotal of the day minus the last SessionTotal before
-    /// the day), so cumulative carry-over from prior days does not inflate
-    /// the daily figure.
+    /// buckets events by calendar day in the request's timezone (local time
+    /// when `utc_offset_minutes` is set, UTC otherwise). Each day reports the
+    /// **incremental** usage (last SessionTotal of the day minus the last
+    /// SessionTotal before the day), so cumulative carry-over from prior
+    /// days does not inflate the daily figure.
     pub fn query_usage_daily_series(
         &self,
         request: UsageSummaryRequest,
@@ -1037,12 +1057,17 @@ impl SessionStore {
         // Load with a widened lower bound (no `from`) so we can compute
         // per-day baselines; the daily series function itself splits into
         // per-day increments. The `to` bound still applies.
+        let utc_offset_minutes = request.utc_offset_minutes;
         let baseline_request = UsageSummaryRequest {
             from: None,
             ..request.clone()
         };
         let events = self.load_usage_events_for_summary(&baseline_request)?;
-        Ok(usage_daily_series_from_events(&events, request.from.as_deref()))
+        Ok(usage_daily_series_from_events(
+            &events,
+            request.from.as_deref(),
+            utc_offset_minutes,
+        ))
     }
 
     /// Count token-reporting usage events (`TurnDelta` + `SessionTotal`) in
@@ -1074,7 +1099,7 @@ impl SessionStore {
             "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
                     u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
                     u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
-                    u.created_at
+                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
              FROM usage_events u
              LEFT JOIN sessions s ON s.id = u.session_id
              WHERE u.session_id = ?1
@@ -1096,7 +1121,7 @@ impl SessionStore {
             "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
                     u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
                     u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
-                    u.created_at
+                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
              FROM usage_events u
              LEFT JOIN sessions s ON s.id = u.session_id
              WHERE 1 = 1",
@@ -1203,7 +1228,7 @@ impl SessionStore {
             "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
                     u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
                     u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
-                    u.created_at
+                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
              FROM usage_events u
              LEFT JOIN sessions s ON s.id = u.session_id
              WHERE u.scope = 'session_total'
@@ -2236,6 +2261,9 @@ fn stored_usage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stor
             cache_write_tokens: opt_u64(row.get::<_, Option<i64>>(10)?),
             reasoning_tokens: opt_u64(row.get::<_, Option<i64>>(11)?),
             total_tokens: opt_u64(row.get::<_, Option<i64>>(12)?),
+            latency_ms: opt_u64(row.get::<_, Option<i64>>(16)?),
+            ttft_ms: opt_u64(row.get::<_, Option<i64>>(17)?),
+            tokens_per_second: row.get::<_, Option<f64>>(18)?,
         },
         context: UsageContextSnapshot {
             used_tokens: opt_u64(row.get::<_, Option<i64>>(13)?),
@@ -2622,20 +2650,25 @@ fn usage_summary_from_events(
     rows
 }
 
-/// P2: bucket usage events into UTC calendar days. Each bucket carries a
+/// P2: bucket usage events into calendar days (local time when
+/// `utc_offset_minutes` is set, UTC otherwise). Each bucket carries a
 /// per-model breakdown (reusing [`update_usage_summary_row`] so the
 /// `SessionTotal`-overwrites / `TurnDelta`-accumulates rules apply per day)
 /// and a day-total breakdown whose `total_tokens` is the sum of each
 /// per-model row's effective total. Days with no parseable timestamp are
 /// skipped. `BTreeMap` keeps buckets sorted by date ascending.
-fn usage_daily_series_from_events(events: &[StoredUsageEvent], from: Option<&str>) -> Vec<UsageDailyBucket> {
+fn usage_daily_series_from_events(
+    events: &[StoredUsageEvent],
+    from: Option<&str>,
+    utc_offset_minutes: Option<i32>,
+) -> Vec<UsageDailyBucket> {
     // Parse the `from` bound so days strictly before it are skipped entirely.
     let from_epoch = from
         .filter(|v| !v.trim().is_empty())
         .and_then(parse_instant_to_epoch_secs);
     let mut events_by_date: BTreeMap<String, Vec<&StoredUsageEvent>> = BTreeMap::new();
     for event in events {
-        let Some(date) = instant_to_date_utc(&event.created_at) else {
+        let Some(date) = instant_to_date_local(&event.created_at, utc_offset_minutes) else {
             continue;
         };
         events_by_date.entry(date).or_default().push(event);
@@ -2650,7 +2683,8 @@ fn usage_daily_series_from_events(events: &[StoredUsageEvent], from: Option<&str
     for (date, day_events) in &events_by_date {
         // Compute the epoch boundary for the start of this day so
         // `compute_per_session_model_totals` can split baseline vs in-day.
-        let day_start_epoch = epoch_start_of_date_utc(date).unwrap_or(0);
+        let day_start_epoch =
+            epoch_start_of_date_local(date, utc_offset_minutes).unwrap_or(0);
         // Skip days entirely before the `from` bound (they only served to
         // build the running baseline).
         if let Some(from) = from_epoch {
@@ -2791,31 +2825,6 @@ fn compute_daily_day_totals(
     totals
 }
 
-/// Convert a UTC date string `YYYY-MM-DD` to the epoch-seconds start of that
-/// day (00:00:00 UTC). Returns None on parse failure.
-fn epoch_start_of_date_utc(date: &str) -> Option<i64> {
-    let parts: Vec<&str> = date.split('-').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let y: i64 = parts[0].parse().ok()?;
-    let m: i64 = parts[1].parse().ok()?;
-    let d: i64 = parts[2].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    // Days since the Unix epoch (1970-01-01) using the civil-from-days
-    // algorithm (Howard Hinnant). `civil_to_days` returns the day count;
-    // multiply by 86400 for epoch seconds.
-    let y_adj = if m <= 2 { y - 1 } else { y };
-    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
-    let yoe = (y_adj - era * 400) as i64;
-    let m_adj = if m > 2 { m - 3 } else { m + 9 };
-    let doy = (153 * m_adj + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146097 + doe - 719468) * 86_400)
-}
-
 fn update_usage_summary_row(
     rows: &mut Vec<UsageModelSummary>,
     explicit_key: Option<&str>,
@@ -2848,6 +2857,12 @@ fn update_usage_summary_row(
             tokens: UsageTokenBreakdown::default(),
             context_peak_tokens: None,
             latest_at: None,
+            avg_latency_ms: None,
+            avg_ttft_ms: None,
+            avg_tokens_per_second: None,
+            latency_count: 0,
+            ttft_count: 0,
+            tps_count: 0,
             has_session_total: false,
         });
         rows.last_mut().expect("usage row just inserted")
@@ -2883,6 +2898,27 @@ fn update_usage_summary_row(
     if let Some(used) = event.context.used_tokens {
         row.context_peak_tokens = Some(row.context_peak_tokens.unwrap_or(0).max(used));
     }
+    // Timing metrics: per-field rolling average. Each field uses its own
+    // counter because a timed event may carry `latency_ms` without
+    // `ttft_ms`/`tokens_per_second` (e.g. a model call that produced no
+    // output tokens), so a shared counter would divide by an inflated n
+    // and understate the absent fields' averages. Independent of the
+    // token SessionTotal/TurnDelta accounting below.
+    if let Some(v) = event.tokens.latency_ms {
+        row.latency_count += 1;
+        row.avg_latency_ms =
+            Some(rolling_avg(row.avg_latency_ms, v as f64, row.latency_count as f64));
+    }
+    if let Some(v) = event.tokens.ttft_ms {
+        row.ttft_count += 1;
+        row.avg_ttft_ms =
+            Some(rolling_avg(row.avg_ttft_ms, v as f64, row.ttft_count as f64));
+    }
+    if let Some(v) = event.tokens.tokens_per_second {
+        row.tps_count += 1;
+        row.avg_tokens_per_second =
+            Some(rolling_avg(row.avg_tokens_per_second, v, row.tps_count as f64));
+    }
     // Token handling is only active for the single-session snapshot path
     // (`track_tokens = true`), where `has_session_total` is effectively
     // per-session because only one session's events are in scope. The
@@ -2906,6 +2942,13 @@ fn update_usage_summary_row(
             UsageEventScope::ContextSnapshot => {}
             _ => {}
         }
+    }
+}
+
+fn rolling_avg(prev: Option<f64>, new: f64, n: f64) -> f64 {
+    match prev {
+        Some(p) => p + (new - p) / n,
+        None => new,
     }
 }
 
@@ -3024,6 +3067,9 @@ fn subtract_usage_tokens(
         cache_write_tokens: sub_optional_u64(value.cache_write_tokens, baseline.cache_write_tokens),
         reasoning_tokens: sub_optional_u64(value.reasoning_tokens, baseline.reasoning_tokens),
         total_tokens: sub_optional_u64(value.total_tokens, baseline.total_tokens),
+        latency_ms: None,
+        ttft_ms: None,
+        tokens_per_second: None,
     }
 }
 

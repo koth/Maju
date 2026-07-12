@@ -106,6 +106,11 @@ struct CodexApiProxyConfig {
     session_ids: BTreeMap<String, String>,
     model_providers: BTreeMap<String, String>,
     provider_configs: BTreeMap<String, ProxyProviderConfig>,
+    /// Project workspace root forwarded to codebuddy-proxy as `X-Session-Dir`
+    /// so the CLI spawns in the conversation's project dir and its rollout is
+    /// stored under the matching path slug (enabling `--resume` on pool miss).
+    /// Set once from `Application::bootstrap_with_app_paths`.
+    workspace_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +182,35 @@ pub fn codex_api_proxy_base_url() -> String {
     format!("http://127.0.0.1:{port}/v1")
 }
 
+/// Register the active project workspace root so the proxy can forward it to
+/// codebuddy-proxy as `X-Session-Dir`. The CLI spawns in this dir and stores
+/// its rollout under the matching path slug, which is what lets a later pool
+/// miss `--resume` the conversation by id. Call once from
+/// `Application::bootstrap_with_app_paths` (before or after
+/// [`ensure_codex_api_proxy`]; the config static is created on demand).
+pub fn set_codex_api_proxy_workspace_root(root: &str) {
+    let root = root.trim();
+    if root.is_empty() {
+        return;
+    }
+    let config = CODEX_API_PROXY_CONFIG
+        .get_or_init(|| {
+            Arc::new(RwLock::new(CodexApiProxyConfig {
+                provider: "timiai".to_string(),
+                api_key: String::new(),
+                api_keys: BTreeMap::new(),
+                session_ids: BTreeMap::new(),
+                model_providers: BTreeMap::new(),
+                provider_configs: BTreeMap::new(),
+                workspace_root: None,
+            }))
+        })
+        .clone();
+    if let Ok(mut current) = config.write() {
+        current.workspace_root = Some(root.to_string());
+    }
+}
+
 pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
     let config = CODEX_API_PROXY_CONFIG
         .get_or_init(|| {
@@ -187,6 +221,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                workspace_root: None,
             }))
         })
         .clone();
@@ -246,6 +281,7 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                workspace_root: None,
             }))
         })
         .clone();
@@ -269,6 +305,7 @@ pub fn clear_codex_api_proxy_model_provider_map() {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                workspace_root: None,
             }))
         })
         .clone();
@@ -304,6 +341,7 @@ pub fn register_codex_api_proxy_provider_key(provider: &str, api_key: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                workspace_root: None,
             }))
         })
         .clone();
@@ -552,7 +590,12 @@ async fn proxy_codex_api_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            workspace_root: None,
         });
+    // Project root forwarded to codebuddy-proxy as `X-Session-Dir` so the CLI
+    // spawns in this dir and its rollout lands under the matching path slug
+    // (enabling `--resume` on a later pool miss).
+    let session_dir = config.workspace_root.clone();
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
         .get("stream")
@@ -609,6 +652,7 @@ async fn proxy_codex_api_request(
             &custom_config,
             requested_stream,
             Some(&session_id),
+            session_dir.as_deref(),
         )
         .await;
     }
@@ -637,6 +681,7 @@ async fn proxy_codex_api_request(
             TIMIAI_CHAT_COMPLETIONS_URL,
             requested_stream,
             Some(&session_id),
+            session_dir.as_deref(),
         )
         .await;
     }
@@ -666,6 +711,7 @@ async fn proxy_codex_api_request(
         upstream_url,
         requested_stream,
         Some(&session_id),
+        session_dir.as_deref(),
     )
     .await
 }
@@ -677,6 +723,7 @@ async fn proxy_custom_codex_responses_request(
     custom_config: &ProxyProviderConfig,
     requested_stream: bool,
     session_id: Option<&str>,
+    session_dir: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::Responses => {
@@ -695,6 +742,7 @@ async fn proxy_custom_codex_responses_request(
                 &custom_config.base_url,
                 requested_stream,
                 Some(&session_id),
+                session_dir,
             )
             .await
         }
@@ -826,6 +874,7 @@ async fn proxy_chat_completions_codex_responses_request(
     upstream_url: &str,
     requested_stream: bool,
     session_id: Option<&str>,
+    session_dir: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let client = reqwest::Client::new();
     let request = client
@@ -835,8 +884,15 @@ async fn proxy_chat_completions_codex_responses_request(
         with_timiai_headers(request, api_key, session_id.unwrap_or_default())
     } else {
         let req = request.bearer_auth(api_key);
-        if let Some(sid) = session_id {
+        let req = if let Some(sid) = session_id {
             req.header("X-Session-Id", sid)
+        } else {
+            req
+        };
+        // Forward the project root so codebuddy-proxy spawns the CLI in this
+        // dir and can resume the conversation by id+cwd on a pool miss.
+        if let Some(dir) = session_dir {
+            req.header("X-Session-Dir", dir)
         } else {
             req
         }
@@ -923,6 +979,7 @@ async fn proxy_native_codex_responses_compact_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            workspace_root: None,
         });
     let provider = explicit_provider
         .clone()
@@ -987,6 +1044,7 @@ async fn proxy_anthropic_messages_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            workspace_root: None,
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_model = payload

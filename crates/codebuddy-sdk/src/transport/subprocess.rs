@@ -194,7 +194,13 @@ fn cli_args(opts: &SessionOptions) -> Vec<String> {
         args.push("--max-turns".to_string());
         args.push(max_turns.to_string());
     }
-    if let Some(sid) = &opts.session_id {
+    // `--resume <id>` and `--session-id <id>` are mutually exclusive on the
+    // CLI: resume loads a prior session's rollout, session-id labels a new
+    // session. Passing both is undefined; `resume` wins when both are set.
+    if let Some(id) = &opts.resume {
+        args.push("--resume".to_string());
+        args.push(id.clone());
+    } else if let Some(sid) = &opts.session_id {
         args.push("--session-id".to_string());
         args.push(sid.clone());
     }
@@ -242,5 +248,36 @@ mod tests {
         let args = cli_args(&opts);
         let tools_idx = args.iter().position(|a| a == "--tools").expect("--tools present");
         assert_eq!(args.get(tools_idx + 1).map(String::as_str), Some("Bash,Read"));
+    }
+
+    #[test]
+    fn session_id_emits_session_id_flag() {
+        let mut opts = SessionOptions::default();
+        opts.session_id = Some("acme-123".into());
+        let args = cli_args(&opts);
+        let idx = args.iter().position(|a| a == "--session-id").expect("--session-id present");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("acme-123"));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn resume_wins_over_session_id_when_both_set() {
+        let mut opts = SessionOptions::default();
+        opts.session_id = Some("pinned-1".into());
+        opts.resume = Some("prior-2".into());
+        let args = cli_args(&opts);
+        assert!(!args.iter().any(|a| a == "--session-id"));
+        let idx = args.iter().position(|a| a == "--resume").expect("--resume present");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("prior-2"));
+    }
+
+    #[test]
+    fn resume_alone_emits_resume_flag() {
+        let mut opts = SessionOptions::default();
+        opts.resume = Some("prior-2".into());
+        let args = cli_args(&opts);
+        let idx = args.iter().position(|a| a == "--resume").expect("--resume present");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("prior-2"));
+        assert!(!args.iter().any(|a| a == "--session-id"));
     }
 }

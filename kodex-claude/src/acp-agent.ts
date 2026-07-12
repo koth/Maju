@@ -751,6 +751,8 @@ export class ClaudeAcpAgent implements Agent {
     }
 
     session.promptRunning = true;
+    const turnStartMs = Date.now();
+    let firstTokenMs: number | null = null;
     let handedOff = false;
     let stopReason: StopReason = "end_turn";
     let shouldSyncSessionInfo = false;
@@ -898,7 +900,12 @@ export class ClaudeAcpAgent implements Agent {
                   },
                   _meta: {
                     ...(message.origin ? { "_claude/origin": message.origin } : {}),
-                    ...kodexUsageMeta("turn_delta", lastAssistantModel, snapshotFromUsage(message.usage)),
+                    ...kodexUsageMeta(
+                      "turn_delta",
+                      lastAssistantModel,
+                      snapshotFromUsage(message.usage),
+                      usageTiming(turnStartMs, firstTokenMs, message.usage.output_tokens),
+                    ),
                   },
                 },
               });
@@ -1066,6 +1073,9 @@ export class ClaudeAcpAgent implements Agent {
           case "assistant": {
             if (session.cancelled) {
               break;
+            }
+            if (firstTokenMs === null) {
+              firstTokenMs = Date.now();
             }
 
             // Check for prompt replay
@@ -2685,6 +2695,7 @@ function kodexUsageMeta(
   scope: "context_snapshot" | "turn_delta" | "session_total",
   model: string | null,
   usage: UsageSnapshot | null,
+  timing?: { latency_ms: number; ttft_ms: number | null; tokens_per_second: number | null } | null,
 ) {
   const total = usage ? totalTokens(usage) : undefined;
   return {
@@ -2702,6 +2713,13 @@ function kodexUsageMeta(
             total_tokens: total,
           }
         : {}),
+      ...(timing && scope === "turn_delta"
+        ? {
+            latency_ms: timing.latency_ms,
+            ttft_ms: timing.ttft_ms,
+            tokens_per_second: timing.tokens_per_second,
+          }
+        : {}),
     },
   };
 }
@@ -2713,6 +2731,23 @@ function totalTokens(usage: UsageSnapshot): number {
     usage.cache_read_input_tokens +
     usage.cache_creation_input_tokens
   );
+}
+
+/** Derive latency/TTFT/speed for the current model call from wall-clock
+ *  timestamps captured in the prompt loop (turn start → first assistant
+ *  message → result). `outputTokens` is the per-turn output count used for
+ *  generation speed. */
+function usageTiming(
+  turnStartMs: number,
+  firstTokenMs: number | null,
+  outputTokens: number,
+): { latency_ms: number; ttft_ms: number | null; tokens_per_second: number | null } {
+  const latency_ms = Date.now() - turnStartMs;
+  const ttft_ms = firstTokenMs != null ? firstTokenMs - turnStartMs : null;
+  const genMs = ttft_ms != null ? latency_ms - ttft_ms : latency_ms;
+  const tokens_per_second =
+    outputTokens > 0 && genMs > 0 ? outputTokens / (genMs / 1000) : null;
+  return { latency_ms, ttft_ms, tokens_per_second };
 }
 
 /**

@@ -211,17 +211,60 @@ pub fn instant_to_iso_utc(value: &str) -> String {
     }
 }
 
-/// Normalize a stored instant into a UTC calendar date `YYYY-MM-DD` for
-/// daily usage bucketing. Returns `None` for inputs that cannot be parsed as
-/// epoch seconds or ISO-8601, so callers can skip unbucketable rows.
-pub fn instant_to_date_utc(value: &str) -> Option<String> {
+/// Normalize a stored instant into a calendar date `YYYY-MM-DD` for daily
+/// usage bucketing. `utc_offset_minutes` uses the JS `getTimezoneOffset()`
+/// convention (`UTC − local`, e.g. `-480` for Asia/Shanghai); `None` or `0`
+/// buckets by UTC (legacy behavior). Returns `None` for inputs that cannot
+/// be parsed as epoch seconds or ISO-8601, so callers can skip unbucketable
+/// rows.
+pub fn instant_to_date_local(value: &str, utc_offset_minutes: Option<i32>) -> Option<String> {
     let secs = parse_instant_to_epoch_secs(value)?;
     if secs < 0 {
         return None;
     }
-    let days = (secs as u64) / 86_400;
+    // Shift the UTC instant into local wall-clock seconds so the subsequent
+    // `secs / 86_400` floor lands on the local calendar day. `offset` is
+    // "UTC − local" (JS getTimezoneOffset), so subtracting it adds the local
+    // lead (e.g. -480 min ⇒ +28800 s for Asia/Shanghai).
+    let offset_secs = (utc_offset_minutes.unwrap_or(0) as i64) * 60;
+    let local_secs = secs - offset_secs;
+    if local_secs < 0 {
+        return None;
+    }
+    let days = (local_secs as u64) / 86_400;
     let (y, mo, d) = civil_from_days(days as i64);
     Some(format!("{y:04}-{mo:02}-{d:02}"))
+}
+
+/// Convert a calendar date `YYYY-MM-DD` (in the timezone implied by
+/// `utc_offset_minutes`, UTC when `None`/`0`) to the epoch-seconds start of
+/// that day (local 00:00:00 expressed as a UTC epoch). Returns None on parse
+/// failure. Inverse of [`instant_to_date_local`]'s day boundary.
+pub fn epoch_start_of_date_local(date: &str, utc_offset_minutes: Option<i32>) -> Option<i64> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i64 = parts[0].parse().ok()?;
+    let m: i64 = parts[1].parse().ok()?;
+    let d: i64 = parts[2].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Days since the Unix epoch (1970-01-01) using the civil-from-days
+    // algorithm (Howard Hinnant). `civil_to_days` yields the day count whose
+    // 00:00 is the UTC midnight of `date`; the local-midnight UTC epoch is
+    // that plus the offset (e.g. Shanghai local midnight = UTC midnight − 8h,
+    // offset -480 min ⇒ −28800 s).
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = (y_adj - era * 400) as i64;
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let utc_midnight_epoch = (era * 146097 + doe - 719468) * 86_400;
+    let offset_secs = (utc_offset_minutes.unwrap_or(0) as i64) * 60;
+    Some(utc_midnight_epoch + offset_secs)
 }
 
 pub(super) fn cap_string(s: &str, max_bytes: usize) -> String {
