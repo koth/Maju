@@ -72,6 +72,7 @@ const CODEBUDDY_PROVIDER_NAME: &str = "CodeBuddy";
 const CODEBUDDY_DEFAULT_PORT: u16 = 17856;
 const CODEBUDDY_SECRET_KEY: &str = "codebuddy:proxy-api-key";
 const CODEBUDDY_INTERNET_ENV_KEY: &str = "codebuddy:internet-env";
+const CODEBUDDY_DEBUG_KEY: &str = "codebuddy:debug";
 const CODEBUDDY_CATALOG_MODELS: &[&str] = &[];
 
 /// Derive the codebuddy proxy model-list URL from a port.
@@ -124,6 +125,18 @@ pub fn codebuddy_internet_environment(paths: &AppPaths) -> String {
         Some(v) if v == "ioa" => "ioa".to_string(),
         _ => "internal".to_string(),
     }
+}
+
+/// Read the persisted codebuddy proxy debug flag. When `true` the proxy
+/// appends debug lines to `~/.kodex/logs/codebuddy-proxy.log`; when `false`
+/// (the default) file logging is suppressed. Surfaced on the CodeBuddy
+/// settings page so log output is opt-in.
+pub fn codebuddy_debug(paths: &AppPaths) -> bool {
+    let secrets = load_provider_secrets(paths);
+    matches!(
+        secrets.get(CODEBUDDY_DEBUG_KEY).map(|v| v.trim().to_ascii_lowercase()),
+        Some(v) if v == "true" || v == "1" || v == "yes" || v == "on"
+    )
 }
 
 /// Look up a raw catalog entry by provider id (no normalization side effects).
@@ -2078,6 +2091,7 @@ pub fn save_codebuddy_config(
     port: Option<u16>,
     api_key: String,
     internet_environment: String,
+    debug: bool,
 ) -> Result<AgentSettingsSnapshot> {
     let port = port.unwrap_or(CODEBUDDY_DEFAULT_PORT);
     let mut catalog = read_provider_models_catalog(paths)?;
@@ -2105,6 +2119,10 @@ pub fn save_codebuddy_config(
         CODEBUDDY_INTERNET_ENV_KEY.to_string(),
         env.to_string(),
     );
+    secrets.insert(
+        CODEBUDDY_DEBUG_KEY.to_string(),
+        if debug { "true" } else { "false" }.to_string(),
+    );
     save_provider_secrets(paths, &secrets)?;
 
     Ok(settings_snapshot(paths))
@@ -2123,6 +2141,7 @@ pub fn clear_codebuddy_config(paths: &AppPaths) -> Result<AgentSettingsSnapshot>
     let mut secrets = load_provider_secrets(paths);
     secrets.remove(CODEBUDDY_SECRET_KEY);
     secrets.remove(CODEBUDDY_INTERNET_ENV_KEY);
+    secrets.remove(CODEBUDDY_DEBUG_KEY);
     save_provider_secrets(paths, &secrets)?;
 
     Ok(settings_snapshot(paths))
@@ -3589,7 +3608,7 @@ fn repair_byok_model_slug_with_paths(
         return slug;
     };
     if provider_catalog_contains_model(paths, &provider, upstream_model) {
-        return slug;
+        return byok_encoded_model_slug(upstream_model, &provider);
     }
 
     let inferred_provider = byok_source_provider_for_model_with_hint(upstream_model, None);

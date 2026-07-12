@@ -71,6 +71,7 @@ import {
   sessionListArchived,
   sessionUnarchive,
   usageGetDailySeries,
+  usageGetRequestCount,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -662,6 +663,7 @@ export function SettingsPage({
   const [codebuddyPortDraft, setCodebuddyPortDraft] = useState("17856");
   const [codebuddyApiKeyDraft, setCodebuddyApiKeyDraft] = useState("");
   const [codebuddyInternetEnv, setCodebuddyInternetEnv] = useState("internal");
+  const [codebuddyDebug, setCodebuddyDebug] = useState(false);
   const [codebuddyStatus, setCodebuddyStatus] =
     useState<CodebuddyProxyStatus | null>(null);
   const [codebuddyMessage, setCodebuddyMessage] = useState<
@@ -705,6 +707,9 @@ export function SettingsPage({
   >([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState<string | null>(null);
+  const [usageRequests24h, setUsageRequests24h] = useState<number | null>(
+    null,
+  );
   const byokProviderMenuRef = useRef<HTMLDivElement>(null);
   const canUseRemoteSettings = !!remoteContext?.profileId;
   const settingsRemoteProfileId =
@@ -793,14 +798,26 @@ export function SettingsPage({
         from: range.from,
         to: range.to,
       };
+      // The "24H REQ" card is a fixed rolling-24h window, independent of
+      // the date-range filter above but still scoped to the current
+      // workspace / archived toggles so it matches the rest of the dashboard.
+      const now = new Date();
+      const requests24hRequest = {
+        all_workspaces: usageWorkspaceScope === "all",
+        include_archived: usageIncludeArchived,
+        from: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+        to: now.toISOString(),
+      };
       // P2: fetch the model summary and the daily series in parallel so the
       // "每日用量" chart renders real per-day buckets instead of placeholders.
-      const [rows, dailyBuckets] = await Promise.all([
+      const [rows, dailyBuckets, requests24h] = await Promise.all([
         usageGetSummary(summaryRequest),
         usageGetDailySeries(summaryRequest),
+        usageGetRequestCount(requests24hRequest),
       ]);
       setUsageRows(rows);
       setUsageDailyBuckets(dailyBuckets);
+      setUsageRequests24h(requests24h);
     } catch (e) {
       setUsageError(String(e));
     } finally {
@@ -828,6 +845,7 @@ export function SettingsPage({
       setCodebuddyStatus(status);
       if (status) {
         setCodebuddyInternetEnv(status.internet_environment ?? "internal");
+        setCodebuddyDebug(status.debug ?? false);
       }
     } catch {
       setCodebuddyStatus(null);
@@ -3178,9 +3196,17 @@ export function SettingsPage({
             </article>
             <article className="settings-usage-stat-card">
               <div className="settings-usage-stat-card-kicker">24H REQ</div>
-              <div className="settings-usage-stat-card-value is-placeholder">—</div>
+              <div
+                className={`settings-usage-stat-card-value${
+                  usageRequests24h == null ? " is-placeholder" : ""
+                }`}
+              >
+                {usageRequests24h == null
+                  ? "—"
+                  : usageRequests24h.toLocaleString("en-US")}
+              </div>
               <div className="settings-usage-stat-card-sub">
-                后端尚未上报 24 小时请求计数
+                {usageRequests24h == null ? "尚无请求" : "过去 24 小时请求数"}
               </div>
             </article>
             <article className="settings-usage-stat-card">
@@ -3715,6 +3741,7 @@ export function SettingsPage({
           port,
           codebuddyApiKeyDraft,
           codebuddyInternetEnv,
+          codebuddyDebug,
         );
           setSnapshot(nextSnapshot);
           setCodebuddyApiKeyDraft("");
@@ -3741,6 +3768,7 @@ export function SettingsPage({
             startPort,
             codebuddyApiKeyDraft,
             codebuddyInternetEnv,
+            codebuddyDebug,
           );
           setSnapshot(savedSnapshot);
           setCodebuddyApiKeyDraft("");
@@ -3879,6 +3907,21 @@ export function SettingsPage({
                     ]}
                   />
                 </label>
+                <div className="settings-codebuddy-field">
+                  <span>调试日志</span>
+                  <label className="settings-switch">
+                    <input
+                      type="checkbox"
+                      checked={codebuddyDebug}
+                      disabled={busyCodebuddy}
+                      aria-label="codebuddy_debug"
+                      onChange={(event) =>
+                        setCodebuddyDebug(event.currentTarget.checked)
+                      }
+                    />
+                    <span>{codebuddyDebug ? "已开启" : "已关闭"}</span>
+                  </label>
+                </div>
               </div>
             </div>
 

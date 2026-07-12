@@ -542,7 +542,7 @@ fn codebuddy_configured_after_saving_key_and_port() {
     assert!(!profile.configured);
 
     // Save config with a custom port + key
-    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string()).unwrap();
+    let snap = save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string(), false).unwrap();
     let profile = snap
         .codex_acp
         .profiles
@@ -578,7 +578,7 @@ fn codebuddy_save_with_empty_key_keeps_existing_key() {
     let paths = AppPaths::from_root(dir.path().join(".kodex"));
 
     // Seed a configured key + port.
-    save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, Some(17870), "secret-key".to_string(), "internal".to_string(), false).unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
@@ -586,7 +586,7 @@ fn codebuddy_save_with_empty_key_keeps_existing_key() {
     );
 
     // Re-save with an empty key — the stored key must survive.
-    save_codebuddy_config(&paths, Some(17870), String::new(), "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, Some(17870), String::new(), "internal".to_string(), false).unwrap();
     assert_eq!(
         codebuddy_secret(&paths).as_deref(),
         Some("secret-key"),
@@ -662,7 +662,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
     )
     .unwrap();
     // Save the proxy key through the same entry point the settings UI uses.
-    save_codebuddy_config(&paths, None, "ck-secret".to_string(), "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, None, "ck-secret".to_string(), "internal".to_string(), false).unwrap();
 
     // byok_source_secret must now resolve the dedicated codebuddy slot.
     let resolved = byok_source_secret(&paths, AgentProviderFamily::Codex, CODEBUDDY_PROVIDER_ID);
@@ -733,7 +733,7 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
     )
     .unwrap();
     // Buying a port + key registers the codebuddy BYOK source.
-    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string(), "internal".to_string()).unwrap();
+    save_codebuddy_config(&paths, Some(17870), "ck-secret".to_string(), "internal".to_string(), false).unwrap();
     save_provider_models_with_model_list_url(
         &paths,
         CODEBUDDY_PROVIDER_ID,

@@ -101,6 +101,7 @@ fn main() {
             commands::session::session_get_changes,
             commands::session::usage_get_summary,
             commands::session::usage_get_daily_series,
+            commands::session::usage_get_request_count,
             commands::session::session_list_change_sets,
             commands::session::session_list_change_set_files,
             commands::session::session_get_change_set_file_diff,
@@ -232,8 +233,9 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
         let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
         let default_model = app_core::settings::codebuddy_default_model(&paths);
         let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
+        let debug = app_core::settings::codebuddy_debug(&paths);
         let result = tokio::task::spawn_blocking(move || {
-            manager.ensure_running(&paths, port, &api_key, &default_model, &internet_env)
+            manager.ensure_running(&paths, port, &api_key, &default_model, &internet_env, debug)
         })
         .await;
         match result {

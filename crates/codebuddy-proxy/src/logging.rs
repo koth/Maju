@@ -6,16 +6,41 @@
 //! do not touch the real log file.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Global debug-logging gate. The desktop app flips this from the CodeBuddy
+/// settings page "debug" toggle (persisted as `codebuddy:debug` and plumbed
+/// through `ProxyConfig::debug`) before the proxy starts serving, so the
+/// `~/.kodex/logs/codebuddy-proxy.log` file stays empty unless the user
+/// explicitly opts in. Default `false`.
+static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable or disable file debug logging for the proxy. Called once from
+/// [`crate::server::run`] using the `debug` flag in `ProxyConfig`, which the
+/// desktop launcher derives from the persisted CodeBuddy setting.
+pub fn set_debug_enabled(enabled: bool) {
+    DEBUG_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// Whether debug file logging is currently enabled.
+pub fn debug_enabled() -> bool {
+    DEBUG_ENABLED.load(Ordering::SeqCst)
+}
 
 /// Append a single debug line to the codebuddy-proxy log file.
 ///
 /// Each line is prefixed with a wall-clock time-of-day (UTC) so that the
 /// request lifecycle can be correlated against the sibling
 /// `codex-api-proxy.log`. Failures (missing home dir, unwritable file) are
-/// silently dropped to keep the proxy hot path crash-free.
+/// silently dropped to keep the proxy hot path crash-free. Writing is gated
+/// by the global [`set_debug_enabled`] flag — when debug is off (the
+/// default) this is a cheap atomic read and touches no filesystem.
 #[cfg(not(test))]
 pub fn append_codebuddy_proxy_log(line: &str) {
+    if !DEBUG_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return;
     };
@@ -71,5 +96,13 @@ mod tests {
     fn log_is_noop_in_tests() {
         // Should not panic and should not write any file.
         append_codebuddy_proxy_log("test-line");
+    }
+
+    #[test]
+    fn debug_toggle_roundtrips() {
+        set_debug_enabled(true);
+        assert!(debug_enabled());
+        set_debug_enabled(false);
+        assert!(!debug_enabled());
     }
 }

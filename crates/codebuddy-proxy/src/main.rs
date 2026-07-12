@@ -21,6 +21,10 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(600);
+        let debug: bool = std::env::var("CODEBUDDY_DEBUG")
+            .ok()
+            .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
         let cwd = std::env::current_dir().ok();
         // Standalone binary: forward the upstream CodeBuddy API key +
         // internet environment from this process's env to each CLI
@@ -50,6 +54,7 @@ fn main() -> anyhow::Result<()> {
             // CODEBUDDY_CODE_PATH or exe-relative search).
             cli_path: None,
             cli_env,
+            debug,
         };
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
         codebuddy_proxy::server::run(cfg, rx).await

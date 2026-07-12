@@ -731,7 +731,8 @@ fn model_from_provider_value(value: &str) -> Option<&str> {
 
 fn byok_source_provider_id(provider: &str) -> Option<&str> {
     match provider {
-        "timiai" | "commandcode" | "deepseek" | "kimi_code" | "xiaomi_mimo" | "custom" => {
+        "timiai" | "commandcode" | "codebuddy" | "deepseek" | "kimi_code" | "xiaomi_mimo"
+        | "custom" => {
             Some(provider)
         }
         _ => None,

@@ -12,6 +12,7 @@ struct RunningConfig {
     api_key: String,
     default_model: String,
     internet_environment: String,
+    debug: bool,
 }
 pub struct CodebuddyProxyManager {
     task: Mutex<Option<JoinHandle<()>>>,
@@ -24,24 +25,26 @@ pub struct CodebuddyProxyStatus {
     pub running: bool,
     pub port: Option<u16>,
     pub internet_environment: String,
+    pub debug: bool,
 }
 impl CodebuddyProxyManager {
     pub fn new() -> Self {
         Self { task: Mutex::new(None), shutdown_tx: Mutex::new(None), running: Mutex::new(None), alive: AtomicBool::new(false) }
     }
-    pub fn status(&self, internet_environment: &str) -> CodebuddyProxyStatus {
+    pub fn status(&self, internet_environment: &str, debug: bool) -> CodebuddyProxyStatus {
         let running = self.running.lock().ok().and_then(|g| g.clone());
         CodebuddyProxyStatus {
             running: self.is_alive(),
             port: running.map(|c| c.port),
             internet_environment: internet_environment.to_string(),
+            debug,
         }
     }
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
-    pub fn ensure_running(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str) -> Result<(), String> {
-        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string() };
+    pub fn ensure_running(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str, debug: bool) -> Result<(), String> {
+        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string(), debug };
         if self.is_alive() {
             let current = self.running.lock().ok().and_then(|g| g.clone());
             if current.as_ref() == Some(&desired) { return Ok(()); }
@@ -51,8 +54,8 @@ impl CodebuddyProxyManager {
         self.wait_until_healthy(port, Duration::from_secs(15)).map_err(|e| format!("codebuddy proxy failed to become healthy: {e}"))?;
         Ok(())
     }
-    pub fn restart_if_changed(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str) -> Result<(), String> {
-        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string() };
+    pub fn restart_if_changed(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str, debug: bool) -> Result<(), String> {
+        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string(), debug };
         if !self.is_alive() { return Ok(()); }
         let current = self.running.lock().ok().and_then(|g| g.clone());
         if current.as_ref() == Some(&desired) { return Ok(()); }
@@ -116,7 +119,7 @@ impl CodebuddyProxyManager {
         if let Ok(joined) = std::env::join_paths(app_core::settings::search_paths()) {
             cli_env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
         }
-        let proxy_cfg = codebuddy_proxy::server::ProxyConfig { port, default_model, cwd, max_turns, max_sessions, idle_timeout, api_key, cli_path, cli_env };
+        let proxy_cfg = codebuddy_proxy::server::ProxyConfig { port, default_model, cwd, max_turns, max_sessions, idle_timeout, api_key, cli_path, cli_env, debug: config.debug };
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let handle = tauri::async_runtime::spawn(async move {
             if let Err(e) = codebuddy_proxy::server::run(proxy_cfg, shutdown_rx).await {

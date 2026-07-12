@@ -1045,6 +1045,30 @@ impl SessionStore {
         Ok(usage_daily_series_from_events(&events, request.from.as_deref()))
     }
 
+    /// Count token-reporting usage events (`TurnDelta` + `SessionTotal`) in
+    /// the request's date range. Unlike [`query_usage_summary`], this does NOT
+    /// merge carry-over baseline events, so the count reflects only in-range
+    /// requests. Used by the settings "24H REQ" card, which needs an accurate
+    /// rolling-24h request count undiluted by pre-range `SessionTotal`
+    /// baselines (those would otherwise be folded in by
+    /// [`merge_baseline_events`] and counted by [`update_usage_summary_row`]).
+    pub fn query_usage_request_count(
+        &self,
+        request: UsageSummaryRequest,
+    ) -> Result<u64> {
+        let events = self.load_usage_events_for_summary(&request)?;
+        let count = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.scope,
+                    UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
+                )
+            })
+            .count() as u64;
+        Ok(count)
+    }
+
     fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,

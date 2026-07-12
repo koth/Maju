@@ -94,6 +94,9 @@ vi.mock("../../lib/tauri", async () => {
     // P2: default to an empty daily series so the usage dashboard renders
     // without real Tauri `invoke` calls in tests.
     usageGetDailySeries: vi.fn().mockResolvedValue([]),
+    // 24H REQ card: default to 0 so the usage dashboard renders without a
+    // real Tauri `invoke` call in tests.
+    usageGetRequestCount: vi.fn().mockResolvedValue(0),
   };
 });
 

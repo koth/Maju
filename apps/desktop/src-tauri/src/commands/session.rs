@@ -188,6 +188,14 @@ pub fn usage_get_daily_series(
 }
 
 #[tauri::command]
+pub fn usage_get_request_count(
+    state: State<'_, AppState>,
+    request: Option<UsageSummaryRequest>,
+) -> Result<u64, String> {
+    state.with_app(|app| Ok(app.usage_request_count(request.unwrap_or_default())))
+}
+
+#[tauri::command]
 pub async fn session_list_change_sets(
     app: AppHandle,
     request: Option<ListChangeSetsRequest>,

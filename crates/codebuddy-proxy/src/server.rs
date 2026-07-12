@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use bytes::Bytes;
@@ -11,7 +12,7 @@ use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use crate::adapter::{AdapterOptions, build_session_options, run_non_streaming, run_streaming};
-use crate::logging::append_codebuddy_proxy_log;
+use crate::logging::{append_codebuddy_proxy_log, set_debug_enabled};
 use crate::openai_types::OaiChatRequest;
 use crate::session_pool::{ContextResetRequest, SessionPool, tool_signature_of};
 pub struct ProxyConfig {
@@ -35,8 +36,15 @@ pub struct ProxyConfig {
     /// `node`. Mirrors the env the legacy TS/desktop launcher set on the
     /// CLI child.
     pub cli_env: std::collections::BTreeMap<String, String>,
+    /// When `true`, the proxy appends debug lines to
+    /// `~/.kodex/logs/codebuddy-proxy.log` (via [`set_debug_enabled`]);
+    /// when `false` (the default) file logging is fully suppressed. The
+    /// desktop launcher derives this from the CodeBuddy settings page
+    /// "debug" toggle so log output stays opt-in.
+    pub debug: bool,
 }
 pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
+    set_debug_enabled(cfg.debug);
     let pool = Arc::new(SessionPool::new(cfg.max_sessions, cfg.idle_timeout));
     let addr: SocketAddr = format!("127.0.0.1:{}", cfg.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
@@ -162,8 +170,28 @@ async fn handle_chat(
     }
     let (session_id, sid_source) = match resolve_session_id(sid_header.as_deref(), &chat_req.extra) {
         Some((id, src)) => (id, src),
-        None => (format!("ps-{}", uuid::Uuid::new_v4().simple()), "minted"),
+        None => {
+            append_codebuddy_proxy_log("chat missing_session_id");
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": {"message": "missing required `X-Session-Id` header or `extra_body.session_id`", "type": "invalid_request_error"}}),
+            ));
+        }
     };
+    // Dump the full first request body once per process for debugging the initial prompt assembly.
+    static FIRST_REQUEST_DUMPED: AtomicBool = AtomicBool::new(false);
+    if !FIRST_REQUEST_DUMPED.swap(true, Ordering::SeqCst) {
+        let pretty = serde_json::to_string_pretty(&chat_req).unwrap_or_else(|e| format!("<serialize error: {e}>"));
+        let header = format!(
+            "first_request session_id={session_id} model={} stream={} tools={} messages={}",
+            chat_req.model.as_deref().unwrap_or("<default>"),
+            chat_req.stream.unwrap_or(false),
+            chat_req.tools.as_ref().map(Vec::len).unwrap_or(0),
+            chat_req.messages.len(),
+        );
+        append_codebuddy_proxy_log(&format!("{header}\n{pretty}"));
+        eprintln!("[codebuddy-proxy] {header}\n{pretty}");
+    }
     let tool_sig = tool_signature_of(&chat_req.tools);
     append_codebuddy_proxy_log(&format!(
         "chat session_id={session_id} sid_source={sid_source} model={} stream={} tools={} messages={} tool_sig={} context_reset={} context_epoch={:?}",
@@ -288,12 +316,14 @@ async fn handle_chat(
 /// reference TS `resolveSessionId`: prefer the `X-Session-Id` header, then
 /// fall back to `extra_body.session_id` in the request body. Returns the id
 /// plus its origin so callers can log affinity. `None` when the client
-/// supplied neither — the caller mints a fresh id.
+/// supplied neither — the caller MUST reject the request, since a missing id
+/// means the conversation cannot be mapped to a warm CodeBuddy SDK session.
 ///
-/// Without this the pool keyed every request under a freshly minted UUID, so
-/// `acquire` always missed and `is_new` was always true — i.e. each turn
-/// spawned a new CodeBuddy CLI and multi-turn reuse never engaged even though
-/// `codex_api_proxy` forwards a stable ACP session id via `X-Session-Id`.
+/// Previously the caller minted a fresh `ps-{uuid}` on `None`, which made the
+/// pool key every request under a fresh id so `acquire` always missed and
+/// `is_new` was always true — i.e. each turn spawned a new CodeBuddy CLI and
+/// multi-turn reuse never engaged. Minting also silently masked callers that
+/// forgot to forward the ACP session id.
 fn resolve_session_id(header: Option<&str>, extra: &Value) -> Option<(String, &'static str)> {
     if let Some(h) = header {
         let t = h.trim();

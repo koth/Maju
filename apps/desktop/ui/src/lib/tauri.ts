@@ -367,6 +367,17 @@ export async function usageGetDailySeries(
   });
 }
 
+/** Count of token-reporting requests in the request's date range. Backs the
+ *  settings "24H REQ" card; unlike `usageGetSummary` it does not fold in
+ *  carry-over baseline events, so the count reflects only in-range requests. */
+export async function usageGetRequestCount(
+  request?: UsageSummaryRequest,
+): Promise<number> {
+  return invoke<number>("usage_get_request_count", {
+    request: request ?? null,
+  });
+}
+
 export async function sessionListChangeSets(
   request?: ListChangeSetsRequest,
 ): Promise<ChangeSetSummary[]> {
@@ -661,6 +672,7 @@ export interface CodebuddyProxyStatus {
   running: boolean;
   port: number | null;
   internet_environment: string;
+  debug: boolean;
 }
 
 export async function codebuddyProxyStatus(): Promise<CodebuddyProxyStatus> {
@@ -679,11 +691,13 @@ export async function settingsSaveCodebuddyConfig(
   port: number | null,
   apiKey: string,
   internetEnvironment: string,
+  debug: boolean,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_codebuddy_config", {
     port,
     apiKey,
     internetEnvironment,
+    debug,
   });
 }
 

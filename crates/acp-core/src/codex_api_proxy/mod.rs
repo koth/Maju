@@ -524,6 +524,21 @@ async fn proxy_codex_api_request(
             "text/plain; charset=utf-8",
         ));
     }
+    // The ACP `session-id` header is mandatory on the responses path: it is
+    // forwarded to codebuddy proxy as `X-Session-Id` so a multi-turn ACP
+    // conversation reuses one warm CodeBuddy SDK session. Reject instead of
+    // falling back to a provider-scoped id — that would collapse distinct
+    // conversations onto a single shared session and silently mask callers
+    // that forget to forward the header.
+    if acp_session_id.is_none() {
+        append_codex_api_proxy_log("responses_missing_session_id");
+        return Ok(response_with_status(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "missing required `session-id` header", "type": "invalid_request_error" } })
+                .to_string(),
+            "application/json",
+        ));
+    }
 
     let body = request.into_body().collect().await?.to_bytes();
     let config_arc = config.clone();

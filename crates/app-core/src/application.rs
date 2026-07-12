@@ -501,6 +501,12 @@ impl Application {
             .unwrap_or_default()
     }
 
+    /// Count of token-reporting requests in the request's date range (no
+    /// carry-over baseline). Backs the settings "24H REQ" card.
+    pub fn usage_request_count(&self, request: UsageSummaryRequest) -> u64 {
+        self.store.query_usage_request_count(request).unwrap_or(0)
+    }
+
     #[cfg(test)]
     pub(super) fn set_runtime_clock_now(&mut self, now: Instant) {
         self.runtime_clock.fixed_now = Some(now);

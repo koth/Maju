@@ -1759,6 +1759,90 @@ fn usage_summary_today_range_reports_incremental_not_cumulative() {
     assert_eq!(rows[0].session_count, 1);
 }
 
+/// `query_usage_request_count` must count only in-range token-reporting
+/// events (`TurnDelta` + `SessionTotal`), excluding both the pre-range
+/// `SessionTotal` baseline (which `query_usage_summary` merges in via
+/// `merge_baseline_events` and would otherwise inflate the count) and
+/// `ContextSnapshot` occupancy-only telemetry.
+#[test]
+fn query_usage_request_count_excludes_baseline_and_context_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Pre-range carry-over baseline: a SessionTotal strictly before `from`.
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752134400".into()), // 2026-07-10 00:00:00 UTC
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_000),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    // In-range: 2×TurnDelta + 1×SessionTotal + 1×ContextSnapshot.
+    let in_range_base = 1_752_220_800_i64; // 2026-07-11 00:00:00 UTC
+    for (offset, scope) in [
+        (0, UsageEventScope::TurnDelta),
+        (1, UsageEventScope::TurnDelta),
+        (2, UsageEventScope::SessionTotal),
+        (3, UsageEventScope::ContextSnapshot),
+    ] {
+        let tokens = if matches!(scope, UsageEventScope::ContextSnapshot) {
+            UsageTokenBreakdown::default()
+        } else {
+            UsageTokenBreakdown {
+                total_tokens: Some(100),
+                ..Default::default()
+            }
+        };
+        store
+            .append_usage_event(
+                "s1",
+                &UsageEvent {
+                    scope,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(format!("{}", in_range_base + offset)),
+                    tokens,
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    let count = store
+        .query_usage_request_count(UsageSummaryRequest {
+            from: Some("1752220800".into()),
+            to: Some("1752307200".into()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        count, 3,
+        "must count only in-range token-reporting events (2 TurnDelta + 1 SessionTotal), \
+         excluding the pre-range baseline and the ContextSnapshot"
+    );
+}
+
 /// Regression (UI default scope): when two sessions in the SAME workspace use
 /// the same reporting agent and model, the default summary request
 /// (all_workspaces=false, no explicit workspace_root → store fallback) must
