@@ -17,11 +17,13 @@ impl Application {
         app_paths: AppPaths,
     ) -> anyhow::Result<Self> {
         let workspace_root = normalize_workspace_root(workspace_root.as_ref());
-        // Register the project root with the in-process codex_api_proxy so it
-        // forwards `X-Session-Dir` to codebuddy-proxy; the CLI then spawns in
-        // this dir and stores its rollout under the matching path slug, which
-        // is what lets a later pool miss `--resume` the conversation by id.
-        acp_core::set_codex_api_proxy_workspace_root(&workspace_root.to_string_lossy());
+        // Register the project name with the in-process codex_api_proxy so it
+        // forwards `X-Project-Name` to codebuddy-proxy. The name (the workspace
+        // root's final path component) is a logical identifier, not a path — the
+        // proxy may run on a different machine/OS than the client, so a path
+        // would not resolve there. The CLI's working directory is the unified
+        // `~/.kodex/codebuddy` on the proxy side.
+        acp_core::set_codex_api_proxy_project_name(&workspace_root.to_string_lossy());
         let workspace_root = workspace_root.as_path();
         let requested_agent_command = agent_command.into();
         crate::startup_perf::mark(

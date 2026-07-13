@@ -9,7 +9,7 @@ pub use client::{PromptTask, SessionHandle};
 pub use codex_api_proxy::{
     clear_codex_api_proxy_model_provider_map, codex_api_proxy_base_url,
     configure_codex_api_proxy_model_provider_map, ensure_codex_api_proxy,
-    register_codex_api_proxy_provider_key, set_codex_api_proxy_workspace_root,
+    register_codex_api_proxy_provider_key, set_codex_api_proxy_project_name,
 };
 pub use events::{ClientEvent, RemoteSshReverseForward, RemoteSshSessionConfig, SessionConfig};
 pub use mapping::diff_to_hunks;

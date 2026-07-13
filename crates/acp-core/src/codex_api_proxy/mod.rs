@@ -106,11 +106,14 @@ struct CodexApiProxyConfig {
     session_ids: BTreeMap<String, String>,
     model_providers: BTreeMap<String, String>,
     provider_configs: BTreeMap<String, ProxyProviderConfig>,
-    /// Project workspace root forwarded to codebuddy-proxy as `X-Session-Dir`
-    /// so the CLI spawns in the conversation's project dir and its rollout is
-    /// stored under the matching path slug (enabling `--resume` on pool miss).
-    /// Set once from `Application::bootstrap_with_app_paths`.
-    workspace_root: Option<String>,
+    /// Project name forwarded to codebuddy-proxy as `X-Project-Name` so the
+    /// proxy can identify which project a request belongs to. Derived from
+    /// the workspace root's final path component at bootstrap. The CLI's
+    /// working directory is the unified `~/.kodex/codebuddy` (created on
+    /// startup by the codebuddy-proxy), NOT this name — the name is a logical
+    /// identifier, never a path, so it stays valid regardless of which machine
+    /// the proxy runs on.
+    project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,17 +185,31 @@ pub fn codex_api_proxy_base_url() -> String {
     format!("http://127.0.0.1:{port}/v1")
 }
 
-/// Register the active project workspace root so the proxy can forward it to
-/// codebuddy-proxy as `X-Session-Dir`. The CLI spawns in this dir and stores
-/// its rollout under the matching path slug, which is what lets a later pool
-/// miss `--resume` the conversation by id. Call once from
+/// Register the active project name so the proxy can forward it to
+/// codebuddy-proxy as `X-Project-Name`. The value is the workspace root's
+/// final path component (e.g. `D:\work\kodex` → `kodex`) — a logical
+/// identifier, not a path, so it remains valid even when the proxy and the
+/// client run on different machines or operating systems. The CLI's working
+/// directory is the unified `~/.kodex/codebuddy` (created on startup by the
+/// codebuddy-proxy), NOT this name. Call once from
 /// `Application::bootstrap_with_app_paths` (before or after
 /// [`ensure_codex_api_proxy`]; the config static is created on demand).
-pub fn set_codex_api_proxy_workspace_root(root: &str) {
+pub fn set_codex_api_proxy_project_name(root: &str) {
     let root = root.trim();
     if root.is_empty() {
         return;
     }
+    // Derive a logical project name from the workspace root's final path
+    // component. A full filesystem path is intentionally NOT forwarded: the
+    // proxy may run on a different machine/OS than the client, so the path
+    // would not resolve there. The name is used only for identification on
+    // the proxy side.
+    let project_name = std::path::Path::new(root)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(root);
     let config = CODEX_API_PROXY_CONFIG
         .get_or_init(|| {
             Arc::new(RwLock::new(CodexApiProxyConfig {
@@ -202,12 +219,12 @@ pub fn set_codex_api_proxy_workspace_root(root: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
-                workspace_root: None,
+                project_name: None,
             }))
         })
         .clone();
     if let Ok(mut current) = config.write() {
-        current.workspace_root = Some(root.to_string());
+        current.project_name = Some(project_name.to_string());
     }
 }
 
@@ -221,7 +238,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
-                workspace_root: None,
+                project_name: None,
             }))
         })
         .clone();
@@ -281,7 +298,7 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
-                workspace_root: None,
+                project_name: None,
             }))
         })
         .clone();
@@ -305,7 +322,7 @@ pub fn clear_codex_api_proxy_model_provider_map() {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
-                workspace_root: None,
+                project_name: None,
             }))
         })
         .clone();
@@ -341,7 +358,7 @@ pub fn register_codex_api_proxy_provider_key(provider: &str, api_key: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
-                workspace_root: None,
+                project_name: None,
             }))
         })
         .clone();
@@ -590,12 +607,14 @@ async fn proxy_codex_api_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
-            workspace_root: None,
+            project_name: None,
         });
-    // Project root forwarded to codebuddy-proxy as `X-Session-Dir` so the CLI
-    // spawns in this dir and its rollout lands under the matching path slug
-    // (enabling `--resume` on a later pool miss).
-    let session_dir = config.workspace_root.clone();
+    // Project name forwarded to codebuddy-proxy as `X-Project-Name`. This is
+    // a logical identifier (the workspace root's final path component), NOT a
+    // filesystem path — the proxy may run on a different machine/OS than the
+    // client, so a path would not resolve. The CLI's working directory is the
+    // unified `~/.kodex/codebuddy` on the proxy side.
+    let project_name = config.project_name.clone();
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_stream = payload
         .get("stream")
@@ -652,7 +671,7 @@ async fn proxy_codex_api_request(
             &custom_config,
             requested_stream,
             Some(&session_id),
-            session_dir.as_deref(),
+            project_name.as_deref(),
         )
         .await;
     }
@@ -681,7 +700,7 @@ async fn proxy_codex_api_request(
             TIMIAI_CHAT_COMPLETIONS_URL,
             requested_stream,
             Some(&session_id),
-            session_dir.as_deref(),
+            project_name.as_deref(),
         )
         .await;
     }
@@ -711,7 +730,7 @@ async fn proxy_codex_api_request(
         upstream_url,
         requested_stream,
         Some(&session_id),
-        session_dir.as_deref(),
+        project_name.as_deref(),
     )
     .await
 }
@@ -723,7 +742,7 @@ async fn proxy_custom_codex_responses_request(
     custom_config: &ProxyProviderConfig,
     requested_stream: bool,
     session_id: Option<&str>,
-    session_dir: Option<&str>,
+    project_name: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     match custom_config.protocol {
         ProxyProviderProtocol::Responses => {
@@ -742,7 +761,7 @@ async fn proxy_custom_codex_responses_request(
                 &custom_config.base_url,
                 requested_stream,
                 Some(&session_id),
-                session_dir,
+                project_name,
             )
             .await
         }
@@ -874,7 +893,7 @@ async fn proxy_chat_completions_codex_responses_request(
     upstream_url: &str,
     requested_stream: bool,
     session_id: Option<&str>,
-    session_dir: Option<&str>,
+    project_name: Option<&str>,
 ) -> anyhow::Result<Response<ProxyBody>> {
     let client = reqwest::Client::new();
     let request = client
@@ -889,10 +908,11 @@ async fn proxy_chat_completions_codex_responses_request(
         } else {
             req
         };
-        // Forward the project root so codebuddy-proxy spawns the CLI in this
-        // dir and can resume the conversation by id+cwd on a pool miss.
-        if let Some(dir) = session_dir {
-            req.header("X-Session-Dir", dir)
+        // Forward the project name so codebuddy-proxy can identify which
+        // project a request belongs to. The CLI's working directory is the
+        // unified `~/.kodex/codebuddy` on the proxy side (not this name).
+        if let Some(name) = project_name {
+            req.header("X-Project-Name", name)
         } else {
             req
         }
@@ -979,7 +999,7 @@ async fn proxy_native_codex_responses_compact_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
-            workspace_root: None,
+            project_name: None,
         });
     let provider = explicit_provider
         .clone()
@@ -1044,7 +1064,7 @@ async fn proxy_anthropic_messages_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
-            workspace_root: None,
+            project_name: None,
         });
     let payload: Value = serde_json::from_slice(&body)?;
     let requested_model = payload

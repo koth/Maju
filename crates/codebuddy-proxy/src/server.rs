@@ -45,6 +45,23 @@ pub struct ProxyConfig {
 }
 pub async fn run(cfg: ProxyConfig, mut shutdown: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
     set_debug_enabled(cfg.debug);
+    // Ensure the unified working directory exists. The CLI spawns every
+    // session here (not in the client's project dir, which may not exist on
+    // the proxy's machine — the proxy may run on a different OS than the
+    // client). Created once at startup.
+    if let Some(workdir) = crate::session_pool::default_codebuddy_workdir() {
+        if let Err(e) = std::fs::create_dir_all(&workdir) {
+            append_codebuddy_proxy_log(&format!(
+                "workdir_create_failed path={} error={e}",
+                workdir.display(),
+            ));
+        } else {
+            append_codebuddy_proxy_log(&format!(
+                "workdir_ensured path={}",
+                workdir.display(),
+            ));
+        }
+    }
     let pool = Arc::new(SessionPool::new(
         cfg.max_sessions,
         cfg.idle_timeout,
@@ -154,19 +171,20 @@ async fn handle_chat(
             .get("x-context-epoch")
             .and_then(|v| v.to_str().ok()),
     );
-    // Per-request working directory forwarded by `codex_api_proxy` as
-    // `X-Session-Dir` (the conversation's project root). The CLI spawns in
-    // this dir, and — critically for resume — its rollout is stored under
-    // the slug of this exact path, so a pool miss can locate the prior
-    // conversation by id+cwd. Falls back to the proxy's configured cwd
-    // when the header is absent (e.g. standalone CLI clients).
-    let session_dir = req
+    // Project name forwarded by `codex_api_proxy` as `X-Project-Name`. This
+    // is a logical identifier (the workspace root's final path component),
+    // NOT a filesystem path — the proxy may run on a different machine/OS
+    // than the client, so a path would not resolve here. Used for
+    // logging/identification only; the CLI's working directory is the
+    // unified `~/.kodex/codebuddy` (see `default_codebuddy_workdir`), not
+    // this name.
+    let project_name = req
         .headers()
-        .get("x-session-dir")
+        .get("x-project-name")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
+        .map(str::to_string);
     let body = req.into_body().collect().await?.to_bytes();
     let chat_req: OaiChatRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -211,7 +229,8 @@ async fn handle_chat(
     }
     let tool_sig = tool_signature_of(&chat_req.tools);
     append_codebuddy_proxy_log(&format!(
-        "chat session_id={session_id} sid_source={sid_source} model={} stream={} tools={} messages={} tool_sig={} context_reset={} context_epoch={:?}",
+        "chat session_id={session_id} sid_source={sid_source} project_name={} model={} stream={} tools={} messages={} tool_sig={} context_reset={} context_epoch={:?}",
+        project_name.as_deref().unwrap_or("<none>"),
         chat_req.model.as_deref().unwrap_or("<default>"),
         chat_req.stream.unwrap_or(false),
         chat_req.tools.as_ref().map(Vec::len).unwrap_or(0),
@@ -222,7 +241,7 @@ async fn handle_chat(
     ));
     let adapter_opts = AdapterOptions {
         default_model: cfg.default_model.clone(),
-        cwd: session_dir.or_else(|| cfg.cwd.clone()),
+        cwd: crate::session_pool::default_codebuddy_workdir().or_else(|| cfg.cwd.clone()),
         max_turns: cfg.max_turns,
         cli_path: cfg.cli_path.clone(),
         cli_env: cfg.cli_env.clone(),

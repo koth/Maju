@@ -282,6 +282,30 @@ pub fn default_codebuddy_home() -> Option<PathBuf> {
         .map(|h| h.join(".codebuddy"))
 }
 
+/// Resolve the unified CodeBuddy working directory `~/.kodex/codebuddy` (or
+/// `$KODEX_DATA_ROOT/codebuddy` when the env override is set). Unlike the
+/// project-root path previously forwarded as `X-Session-Dir` — which could
+/// not resolve when the proxy and client ran on different machines/OSes —
+/// this is a local directory on the proxy's own machine. The proxy creates
+/// it on startup (see `run` in `server.rs`) and spawns every CodeBuddy CLI
+/// session here, so its rollout slug is stable regardless of which client
+/// connects.
+pub fn default_codebuddy_workdir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("KODEX_DATA_ROOT") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v).join("codebuddy"));
+        }
+    }
+    let home_key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+    std::env::var_os(home_key)
+        .map(PathBuf::from)
+        .map(|h| h.join(".kodex").join("codebuddy"))
+}
+
 #[cfg(test)]
 mod rollout_tests {
     use super::*;
