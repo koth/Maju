@@ -149,6 +149,10 @@ where
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(0);
                 let prompt_text = prompt_text(&request.prompt);
+                let prompt_error = env::var("KODEX_MOCK_ACP_PROMPT_ERROR")
+                    .ok()
+                    .as_deref()
+                    == Some("1");
 
                 for item in request.prompt {
                     connection.send_notification(
@@ -159,6 +163,12 @@ where
                             ),
                         ),
                     )?;
+                }
+
+                if prompt_error {
+                    return responder.respond_with_internal_error(
+                        "exceeded retry limit, last status: 429 Too Many Requests",
+                    );
                 }
 
                 if steer_test {

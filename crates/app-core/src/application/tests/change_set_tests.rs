@@ -1,4 +1,5 @@
 use super::*;
+use workspace_model::ChangeSetStatus;
 
 #[test]
 fn multiple_files_with_nonzero_changes_keep_change_set_after_turn() {
@@ -837,4 +838,173 @@ fn scoped_change_set_queries_expose_git_worktree_without_persistence() {
     assert_eq!(diff.old_text.as_deref(), Some("before\n"));
     assert_eq!(diff.new_text.as_deref(), Some("after\n"));
     assert!(persisted_git_sets.is_empty());
+}
+
+#[test]
+fn cancel_prompt_finalizes_pending_change_set() {
+    // Regression: cancel_prompt must finalize the current turn's pending
+    // AgentTurn change set (status Pending → Complete) before clearing the
+    // turn state. Without this the review panel falls back to the previous
+    // turn's changes because selectReviewChangeSet cannot match a Pending
+    // change set with message_id=None after the turn ends.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    // ── Previous turn (so there is a prior change set to fall back to) ──
+    let prev_user = uuid::Uuid::new_v4();
+    let prev_assistant = uuid::Uuid::new_v4();
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: prev_user,
+        role: MessageRole::User,
+        body: "first".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+        ..Default::default()
+    });
+    app.ui.messages.push(ChatMessage {
+        id: prev_assistant,
+        role: MessageRole::Assistant,
+        body: "done".into(),
+        created_at: "2026-05-13T00:00:01Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(prev_user));
+    app.ui.timeline.push(TimelineItem::Message(prev_assistant));
+    app.current_turn_user_message_id = Some(prev_user);
+    app.review_changes_started = false;
+    app.upsert_review_file_change(
+        "src/prev.rs",
+        FileChangeType::Modified,
+        Some("A\n".into()),
+        "B\n".into(),
+    );
+    assert!(app.persist_current_turn_file_changes());
+
+    // ── Current turn (will be cancelled) ──
+    let cur_user = uuid::Uuid::new_v4();
+    let cur_assistant = uuid::Uuid::new_v4();
+    app.ui.messages.push(ChatMessage {
+        id: cur_user,
+        role: MessageRole::User,
+        body: "second".into(),
+        created_at: "2026-05-13T00:00:10Z".into(),
+        ..Default::default()
+    });
+    app.ui.messages.push(ChatMessage {
+        id: cur_assistant,
+        role: MessageRole::Assistant,
+        body: "partial".into(),
+        created_at: "2026-05-13T00:00:11Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(cur_user));
+    app.ui.timeline.push(TimelineItem::Message(cur_assistant));
+    app.current_turn_user_message_id = Some(cur_user);
+    app.review_changes_started = false;
+    app.ui.session.status = SessionStatus::Streaming;
+    app.in_flight_prompt = Some(InFlightPrompt {
+        task: PromptTask::test_placeholder(),
+    });
+    app.upsert_review_file_change(
+        "src/cur.rs",
+        FileChangeType::Modified,
+        Some("X\n".into()),
+        "Y\n".into(),
+    );
+
+    // The pending change set should exist with status Pending.
+    let before = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let pending_before = before
+        .iter()
+        .find(|s| s.status == ChangeSetStatus::Pending)
+        .expect("pending change set should exist during the turn");
+    assert!(pending_before.message_id.is_none());
+
+    // Cancel the turn.
+    app.cancel_prompt().unwrap();
+
+    // After cancel the current turn's change set must be Complete (not
+    // orphaned as Pending), so the frontend can select it.
+    let after = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let cur_set = after
+        .iter()
+        .find(|s| {
+            s.message_id == Some(cur_assistant)
+        })
+        .expect("cancelled turn's change set should be finalized with the assistant message id");
+    assert_eq!(cur_set.status, ChangeSetStatus::Complete);
+
+    let cur_files = app.list_change_set_files(ListChangeSetFilesRequest {
+        change_set_id: cur_set.id.clone(),
+    });
+    assert_eq!(cur_files.files.len(), 1);
+    assert_eq!(cur_files.files[0].path, "src/cur.rs");
+}
+
+#[test]
+fn cancel_prompt_finalizes_pending_change_set_without_assistant_message() {
+    // Edge case: the turn is cancelled during a tool call before the agent
+    // produced any assistant text. There is no assistant message_id to
+    // attach, but the change set must still be finalized as Complete so it
+    // does not disappear from the review panel.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    let cur_user = uuid::Uuid::new_v4();
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: cur_user,
+        role: MessageRole::User,
+        body: "edit file".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(cur_user));
+    app.current_turn_user_message_id = Some(cur_user);
+    app.review_changes_started = false;
+    app.ui.session.status = SessionStatus::Streaming;
+    app.in_flight_prompt = Some(InFlightPrompt {
+        task: PromptTask::test_placeholder(),
+    });
+    app.upsert_review_file_change(
+        "src/main.rs",
+        FileChangeType::Modified,
+        Some("A\n".into()),
+        "B\n".into(),
+    );
+
+    app.cancel_prompt().unwrap();
+
+    let after = app
+        .store
+        .list_change_sets(
+            Some(&app.ui.session.id.to_string()),
+            Some(ChangeSetSource::AgentTurn),
+        )
+        .unwrap();
+    let cur_set = after
+        .iter()
+        .find(|s| s.status == ChangeSetStatus::Complete)
+        .expect("cancelled turn's change set should be finalized as Complete");
+    assert!(cur_set.message_id.is_none());
+
+    let cur_files = app.list_change_set_files(ListChangeSetFilesRequest {
+        change_set_id: cur_set.id.clone(),
+    });
+    assert_eq!(cur_files.files.len(), 1);
+    assert_eq!(cur_files.files[0].path, "src/main.rs");
 }

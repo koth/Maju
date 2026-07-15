@@ -2407,9 +2407,14 @@ struct SessionModelTotalState {
 
 /// Pre-compute the effective token total for each `(session_id, model_key)`
 /// pair. For each pair:
-/// - If any `SessionTotal` event exists, the **last** one's tokens are
-///   authoritative (SessionTotal is cumulative per session).
-/// - Otherwise, all `TurnDelta` events are summed.
+/// - If any in-range `TurnDelta` events exist, they are **summed** and preferred.
+///   `TurnDelta` is request-scoped and model-accurate (stamped with the model
+///   active when that request completed).
+/// - Else if any in-range `SessionTotal` event exists, the **last** one's
+///   tokens are used as a fallback, minus the last pre-range `SessionTotal`
+///   baseline so the result is an increment. `SessionTotal` is cumulative for
+///   the whole session and may be mis-attributed after a mid-session model
+///   switch, so it is only used when no `TurnDelta` rows exist.
 /// - If neither exists but `ContextSnapshot` rows carry a legacy
 ///   `total_tokens`, that is surfaced as a best-effort fallback.
 ///
@@ -2473,7 +2478,11 @@ fn compute_per_session_model_totals<'a, I: IntoIterator<Item = &'a StoredUsageEv
                     entry.saw_in_range = true;
                 }
             }
-            UsageEventScope::TurnDelta if !entry.has_session_total => {
+            // Always accumulate TurnDeltas (even after a SessionTotal has been
+            // seen). Historical summaries prefer the TurnDelta sum because it
+            // is request-scoped and model-accurate; SessionTotal is only used
+            // as a fallback when no TurnDelta rows exist for the pair.
+            UsageEventScope::TurnDelta => {
                 if in_range {
                     entry.saw_turn_delta = true;
                     add_usage_tokens(&mut entry.turn_delta_sum, &event.tokens);
@@ -2492,7 +2501,12 @@ fn compute_per_session_model_totals<'a, I: IntoIterator<Item = &'a StoredUsageEv
         .into_iter()
         .filter(|(_, st)| st.saw_in_range)
         .map(|(pair, st)| {
-            let total = if st.has_session_total {
+            // Prefer request-scoped TurnDeltas when available. SessionTotal is
+            // only a fallback for older/partial streams that never emitted
+            // TurnDelta rows (and may mis-attribute after a model switch).
+            let total = if st.saw_turn_delta {
+                st.turn_delta_sum
+            } else if st.has_session_total {
                 // Subtract the carry-over baseline so the result is the
                 // in-range increment, not the cumulative total.
                 if let Some(baseline) = &st.baseline {
@@ -2500,8 +2514,6 @@ fn compute_per_session_model_totals<'a, I: IntoIterator<Item = &'a StoredUsageEv
                 } else {
                     st.session_total
                 }
-            } else if st.saw_turn_delta {
-                st.turn_delta_sum
             } else if let Some(legacy) = st.legacy_total {
                 UsageTokenBreakdown {
                     total_tokens: Some(legacy),
@@ -2532,6 +2544,18 @@ fn usage_summary_from_events(
     let mut rows = Vec::<UsageSummaryRow>::new();
     let mut sessions_by_key = HashMap::<String, HashSet<String>>::new();
     for event in events {
+        // Carry-over baselines loaded by `merge_baseline_events` keep
+        // timestamps strictly before `from`. They exist only so
+        // `compute_per_session_model_totals` can subtract prior cumulative
+        // SessionTotals. They must NOT create summary rows, inflate
+        // request/event counts, or surface models that had no in-range
+        // activity (e.g. a model only used yesterday should not appear
+        // under "今天" with request_count=1).
+        let event_secs = parse_instant_to_epoch_secs(&event.created_at).unwrap_or(0);
+        if from_epoch.is_some_and(|from| event_secs < from) {
+            continue;
+        }
+
         let (key, label, model, provider, agent_cli, session_id, workspace_root) = match group_by {
             UsageSummaryGroupBy::Model => {
                 let label = event
@@ -2798,7 +2822,13 @@ fn compute_daily_day_totals(
     running_baseline: &HashMap<(String, String), UsageTokenBreakdown>,
     day_start_epoch: i64,
 ) -> HashMap<(String, String), UsageTokenBreakdown> {
-    let mut totals: HashMap<(String, String), UsageTokenBreakdown> = HashMap::new();
+    #[derive(Default)]
+    struct DayTotalState {
+        session_total: Option<UsageTokenBreakdown>,
+        turn_delta_sum: UsageTokenBreakdown,
+        saw_turn_delta: bool,
+    }
+    let mut state: HashMap<(String, String), DayTotalState> = HashMap::new();
     for event in day_events {
         let key = usage_model_key_from_fields(
             event.model.as_deref(),
@@ -2806,21 +2836,39 @@ fn compute_daily_day_totals(
             event.agent_cli.as_deref(),
         );
         let pair = (event.session_id.clone(), key);
+        let entry = state.entry(pair).or_default();
         match event.scope {
             UsageEventScope::SessionTotal if has_usage_tokens(&event.tokens) => {
-                let total = if let Some(baseline) = running_baseline.get(&pair) {
+                let model_key = usage_model_key_from_fields(
+                    event.model.as_deref(),
+                    event.provider.as_deref(),
+                    event.agent_cli.as_deref(),
+                );
+                let baseline_key = (event.session_id.clone(), model_key);
+                let total = if let Some(baseline) = running_baseline.get(&baseline_key) {
                     subtract_usage_tokens(&event.tokens, baseline)
                 } else {
                     event.tokens.clone()
                 };
-                totals.insert(pair, total);
+                entry.session_total = Some(total);
             }
-            UsageEventScope::TurnDelta if !totals.contains_key(&pair) => {
-                add_usage_tokens(totals.entry(pair).or_default(), &event.tokens);
+            UsageEventScope::TurnDelta => {
+                entry.saw_turn_delta = true;
+                add_usage_tokens(&mut entry.turn_delta_sum, &event.tokens);
             }
             _ => {}
         }
     }
+    let totals = state
+        .into_iter()
+        .filter_map(|(pair, st)| {
+            if st.saw_turn_delta {
+                Some((pair, st.turn_delta_sum))
+            } else {
+                st.session_total.map(|total| (pair, total))
+            }
+        })
+        .collect();
     let _ = day_start_epoch;
     totals
 }

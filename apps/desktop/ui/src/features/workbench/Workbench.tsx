@@ -26,6 +26,7 @@ import { ReviewPanel } from "../review/ReviewPanel";
 import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet } from "../review/ReviewPanel";
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
+import { isModelDirty } from "../editor/monaco-model-registry";
 import { WelcomeLauncher } from "./WelcomeLauncher";
 import { SessionList, type ArchivedSessionNotice } from "../session/SessionList";
 import { TabBar } from "./TabBar";
@@ -281,6 +282,15 @@ export function Workbench() {
     await handleRefreshGit();
     await pollState();
   }, [handleRefreshGit, pollState]);
+  const [editorReloadTokens, setEditorReloadTokens] = useState<Record<string, number>>({});
+  const lastExternalFileRevisionRef = useRef<string>("");
+
+  const bumpEditorReload = useCallback((filePath: string) => {
+    setEditorReloadTokens((prev) => ({
+      ...prev,
+      [filePath]: (prev[filePath] ?? 0) + 1,
+    }));
+  }, []);
   const {
     activeTab,
     activeTabId,
@@ -752,6 +762,45 @@ export function Workbench() {
     setComposerReferenceRequests((current) => current.filter((request) => request.id !== id));
   }, []);
 
+  // When the agent writes files, reload any clean open editor models so the
+  // right-side file viewer (and center tabs) show disk content B instead of A.
+  useEffect(() => {
+    if (!snapshot) return;
+    const signatures = [
+      ...snapshot.session_changes.map(
+        (change) =>
+          `${change.path}|${change.change_type}|${change.added_lines}|${change.removed_lines}|${change.timestamp}`,
+      ),
+      ...snapshot.turn_changes.flatMap((turn) =>
+        turn.changes.map(
+          (change) =>
+            `${turn.message_id}|${change.path}|${change.change_type}|${change.added_lines}|${change.removed_lines}|${change.timestamp}`,
+        ),
+      ),
+    ].sort();
+    const revision = signatures.join("||");
+    if (!revision || revision === lastExternalFileRevisionRef.current) {
+      lastExternalFileRevisionRef.current = revision;
+      return;
+    }
+    lastExternalFileRevisionRef.current = revision;
+
+    const changedPaths = new Set<string>();
+    for (const change of snapshot.session_changes) {
+      changedPaths.add(change.path);
+    }
+    for (const turn of snapshot.turn_changes) {
+      for (const change of turn.changes) {
+        changedPaths.add(change.path);
+      }
+    }
+
+    for (const path of changedPaths) {
+      if (isModelDirty(path)) continue;
+      bumpEditorReload(path);
+    }
+  }, [bumpEditorReload, snapshot]);
+
   const renderReviewFileTab = useCallback((
     path: string,
     context?: {
@@ -768,6 +817,7 @@ export function Workbench() {
       lineNumber={context?.lineNumber}
       searchQuery={context?.searchQuery}
       navToken={context?.navToken}
+      reloadToken={editorReloadTokens[path] ?? 0}
       appTheme={appTheme}
       toolbarMode="breadcrumbs"
       workspaceName={snapshot?.workspace.name}
@@ -781,7 +831,7 @@ export function Workbench() {
       }}
       onAddComposerReference={enqueueComposerReference}
     />
-  ), [appTheme, handleEditorDirtyChange, handleEditorSaved, handleEditorUserInteraction, enqueueComposerReference, snapshot?.workspace.name]);
+  ), [appTheme, editorReloadTokens, handleEditorDirtyChange, handleEditorSaved, handleEditorUserInteraction, enqueueComposerReference, snapshot?.workspace.name]);
 
   const allPendingPermissionRequests = useMemo(
     () => (snapshot ? findPendingPermissionRequests(snapshot.tools) : []),
@@ -1224,6 +1274,7 @@ export function Workbench() {
                         lineNumber={activeTab.lineNumber}
                         searchQuery={activeTab.searchQuery}
                         navToken={activeTab.navToken}
+                        reloadToken={editorReloadTokens[activeTab.filePath] ?? 0}
                         appTheme={appTheme}
                         onDirtyChange={handleEditorDirtyChange}
                         onSaved={handleEditorSaved}

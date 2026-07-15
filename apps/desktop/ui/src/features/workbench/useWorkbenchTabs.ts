@@ -68,11 +68,19 @@ function openEditorTab(
   // re-uses a single ephemeral slot.  The preview tab is replaced
   // unless the user has interacted with it (scroll, click, type).
   // Non-ephemeral and dirty tabs are always kept.
-  const kept = currentTabs.filter(
-    (tab) => tab.type !== "editor" || !tab.ephemeral || tab.dirty,
-  );
+  // Dispose clean ephemeral models that are being replaced so reopen reads disk.
+  const nextTabs: TabDescriptor[] = [];
+  for (const tab of currentTabs) {
+    const isReplaceableEditor =
+      tab.type === "editor" && Boolean(tab.ephemeral) && !tab.dirty && !isModelDirty(tab.filePath ?? "");
+    if (isReplaceableEditor && tab.filePath) {
+      disposeModel(tab.filePath);
+      continue;
+    }
+    nextTabs.push(tab);
+  }
 
-  return [...kept, createEditorTab(filePath, options)];
+  return [...nextTabs, createEditorTab(filePath, options)];
 }
 
 export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
@@ -84,7 +92,14 @@ export function useWorkbenchTabs({ onAfterEditorSave }: UseWorkbenchTabsArgs) {
   >(null);
 
   const resetTabs = useCallback(() => {
-    setTabs([CONVERSATION_TAB]);
+    setTabs((prev) => {
+      for (const tab of prev) {
+        if (tab.type === "editor" && tab.filePath) {
+          disposeModel(tab.filePath);
+        }
+      }
+      return [CONVERSATION_TAB];
+    });
     setActiveTabId("conversation");
     setPendingCloseTab(null);
   }, []);
@@ -131,9 +146,17 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
  }, []);
 
   const closeTabById = useCallback(
-    (id: string) => {
+    (id: string, options?: { disposeEditorModel?: boolean }) => {
       if (id === "conversation") return;
       setTabs((prev) => {
+        const closing = prev.find((tab) => tab.id === id);
+        if (
+          options?.disposeEditorModel !== false &&
+          closing?.type === "editor" &&
+          closing.filePath
+        ) {
+          disposeModel(closing.filePath);
+        }
         const filtered = prev.filter((t) => t.id !== id);
         if (activeTabId === id) {
           const idx = prev.findIndex((t) => t.id === id);
@@ -168,7 +191,7 @@ const handleOpenEditorTab = useCallback((filePath: string) => {
         filePath: closing.filePath,
       });
     },
-    [tabs],
+    [closeTabById, tabs],
   );
 
   const handleConfirmSaveClose = useCallback(async () => {

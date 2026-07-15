@@ -859,6 +859,37 @@ fn cancel_active_prompt_finishes_locally_when_agent_never_responds() {
 }
 
 #[test]
+fn prompt_completion_error_finishes_turn_instead_of_hanging() {
+    // When the agent's prompt request completes with an internal error
+    // (e.g. upstream 429 / exceeded retry limit) and there is no other
+    // in-flight generation, the runtime must end the turn so the app-core
+    // clears its in-flight prompt state. Without the fix the turn hangs
+    // forever in Streaming (no StopReason ever arrives) and
+    // `collect_prompt_events_until_finished` times out.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = mock_agent_session_config(dir.path(), false);
+    config.agent_command = format!(
+        "KODEX_MOCK_ACP_PROMPT_ERROR=1 {}",
+        config.agent_command
+    );
+    let mut session = SessionHandle::start(config).unwrap();
+    let mut task = session
+        .send_prompt_content_async(vec![UserPromptContent::text("rate limited")])
+        .unwrap();
+
+    let events = collect_prompt_events_until_finished(&mut session, &mut task);
+    session.shutdown();
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::TurnFinished { stop_reason } if stop_reason == "refusal"
+        )),
+        "expected TurnFinished with refusal stop_reason; events: {events:#?}",
+    );
+}
+
+#[test]
 fn late_prompt_response_after_cancel_does_not_disconnect_session() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = mock_agent_session_config_with_options(dir.path(), false, false, false);

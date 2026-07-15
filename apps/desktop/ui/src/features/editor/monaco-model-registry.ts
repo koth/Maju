@@ -25,12 +25,16 @@ export function getOrCreateModel(
   if (cached && !cached.model.isDisposed()) {
     ensureModelLanguage(monacoInstance, cached.model, language);
     const current = cached.model.getValue();
+    // Clean models always track the latest disk/base content. Dirty models keep
+    // local edits so reopen/switch can restore unsaved work.
     if (current === cached.baseContent) {
+      // Update baseline before setValue so sync onChange handlers don't see a
+      // temporary dirty state.
+      cached.baseContent = content;
       if (current !== content) {
         cached.model.setValue(content);
-        cached.baseVersionId = cached.model.getVersionId();
       }
-      cached.baseContent = content;
+      cached.baseVersionId = cached.model.getVersionId();
     }
     return cached.model;
   }
@@ -58,6 +62,32 @@ export function getOrCreateModel(
     baseVersionId: model.getVersionId(),
   });
   return model;
+}
+
+/** Force a clean model onto new disk content and reset the dirty baseline. */
+export function replaceCleanModelContent(
+  path: string,
+  content: string,
+  baseVersion?: EditorFileVersion,
+): boolean {
+  const cached = models.get(path);
+  if (!cached || cached.model.isDisposed()) {
+    models.delete(path);
+    return false;
+  }
+  if (cached.model.getValue() !== cached.baseContent) {
+    return false;
+  }
+  // Baseline first so sync onChange handlers don't mark the model dirty.
+  cached.baseContent = content;
+  if (baseVersion) {
+    cached.baseVersion = baseVersion;
+  }
+  if (cached.model.getValue() !== content) {
+    cached.model.setValue(content);
+  }
+  cached.baseVersionId = cached.model.getVersionId();
+  return true;
 }
 
 function ensureModelLanguage(

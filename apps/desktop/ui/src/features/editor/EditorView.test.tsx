@@ -305,7 +305,7 @@ describe("EditorView editable state", () => {
     )?.[0];
 
     expect(action).toMatchObject({
-      label: "发送选区到 Composer",
+      label: "发送到上下文",
       precondition: "editorHasSelection",
       contextMenuGroupId: "navigation",
     });
@@ -387,6 +387,70 @@ describe("EditorView editable state", () => {
 
     rerender(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
     await waitFor(() => expect(screen.getByLabelText("mock editor")).toHaveValue("dirty main edit"));
+  });
+
+  it("reloads clean cached content when disk content changes", async () => {
+    const { unmount } = render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    await waitFor(() => expect(screen.getByLabelText("mock editor")).toHaveValue("base"));
+    unmount();
+
+    vi.mocked(editorOpenFile).mockResolvedValueOnce({
+      path: "src/main.ts",
+      content: "content after agent edit",
+      version: { ...version, content_hash: "hash-b", size: 24 },
+      kind: "text",
+    });
+
+    render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mock editor")).toHaveValue("content after agent edit");
+    });
+  });
+
+  it("reloads clean open file when reloadToken bumps after agent writes", async () => {
+    const { rerender } = render(
+      <EditorView path="src/main.ts" appTheme="kodex_dark" reloadToken={0} />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("mock editor")).toHaveValue("base"));
+
+    vi.mocked(editorOpenFile).mockResolvedValueOnce({
+      path: "src/main.ts",
+      content: "agent wrote this",
+      version: { ...version, content_hash: "hash-agent", size: 16 },
+      kind: "text",
+    });
+
+    rerender(<EditorView path="src/main.ts" appTheme="kodex_dark" reloadToken={1} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mock editor")).toHaveValue("agent wrote this");
+    });
+  });
+
+  it("keeps dirty local edits when disk content changes", async () => {
+    const { unmount } = render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    const editor = await screen.findByLabelText("mock editor");
+    fireEvent.change(editor, { target: { value: "my local draft" } });
+    await waitFor(() => expect(editor).toHaveValue("my local draft"));
+    unmount();
+
+    vi.mocked(editorOpenFile).mockResolvedValueOnce({
+      path: "src/main.ts",
+      content: "agent wrote this",
+      version: { ...version, content_hash: "hash-agent", size: 16 },
+      kind: "text",
+    });
+
+    render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("mock editor")).toHaveValue("my local draft");
+    });
+    expect(await screen.findByText("磁盘内容已变化（本地有未保存修改）")).toBeInTheDocument();
   });
 
   it("does not show an unavailable badge for unsupported languages", async () => {

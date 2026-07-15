@@ -635,10 +635,12 @@ impl Application {
         self.agent_title_received = false;
         self.provisional_prompt_title = None;
         self.skip_replay = has_resume_id;
-        self.pending_model_restore = Some(ModelSelection::new(
-            self.ui.session.model.clone(),
-            self.current_model_provider_for_persistence(),
-        ));
+        let reconnect_provider = self.current_model_provider_for_persistence();
+        let reconnect_model = super::config::provider_qualified_model_value(
+            &self.ui.session.model,
+            reconnect_provider.as_deref(),
+        );
+        self.pending_model_restore = Some(ModelSelection::new(reconnect_model, reconnect_provider));
         self.authoritative_model_selection = None;
         self.bump_revision();
         Ok(())
@@ -720,7 +722,10 @@ impl Application {
         let pending_model_restore =
             Some(ModelSelection::new(model.clone(), model_provider.clone()));
         ui.session.id = uuid::Uuid::parse_str(id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        ui.session.model = model;
+        // `model` is stored provider-qualified; show the bare label in the UI
+        // while keeping the qualified value in `pending_model_restore` for
+        // provider-aware restore.
+        ui.session.model = super::config::display_model_from_persisted(&model);
         ui.session.mode = mode;
         ui.session.agent_cli = Some(agent_cli_label);
         ui.session_config = Default::default();
@@ -751,10 +756,21 @@ impl Application {
                 let _ = self.store.update_session_codex_provider(id, &provider);
             }
         }
+        // Re-qualify so the persisted `model` column keeps the provider
+        // embedded (ui.session.model holds the bare display label). When the
+        // separate `model_provider` column is NULL (e.g. pre-migration
+        // sessions), recover the provider from the qualified `model` value so
+        // re-qualification does not downgrade `kodex-provider/<p>/<m>` to a
+        // bare model name and lose the provider across session reopens.
+        let (persisted_model, effective_provider) = super::config::requalify_persisted_model(
+            &ui.session.model,
+            &model,
+            model_provider.as_deref(),
+        );
         let _ = self.store.update_session_model_mode_provider(
             id,
-            &ui.session.model,
-            model_provider.as_deref(),
+            &persisted_model,
+            effective_provider.as_deref(),
             ui.session.mode.as_deref(),
         );
 

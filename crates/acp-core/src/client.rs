@@ -421,6 +421,14 @@ impl PromptTask {
     pub fn into_events(self) -> Vec<ClientEvent> {
         self.events
     }
+
+    #[doc(hidden)]
+    pub fn test_placeholder() -> Self {
+        Self {
+            events: Vec::new(),
+            finished: false,
+        }
+    }
 }
 
 fn coalesce_ready_events(events: Vec<ClientEvent>) -> Vec<ClientEvent> {

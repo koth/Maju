@@ -322,6 +322,13 @@ impl Application {
         };
         self.mark_event_tools_dirty(&event);
         apply_event(&mut self.ui, event.clone());
+        if let ClientEvent::ToolPermissionRequest { id, input, .. } = &event {
+            if let Some(request) = input.clone() {
+                self.broadcast_permission_request(id, request);
+            }
+        } else {
+            self.broadcast_ui_updated();
+        }
         if let (ClientEvent::MessageChunk { role, .. }, Some(message_before)) =
             (&event, message_before)
         {

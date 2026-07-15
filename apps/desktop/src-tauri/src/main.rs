@@ -6,6 +6,9 @@ mod events;
 mod lsp;
 mod open_workspaces;
 mod recent_workspaces;
+mod remote_control;
+mod remote_control_bridge;
+mod remote_control_manager;
 mod state;
 
 use app_core::{UiPatchCursor, UiSnapshotUpdate};
@@ -62,6 +65,10 @@ fn main() {
                         events::emit_terminal_event(&terminal_app, event);
                     }));
                 start_snapshot_bridge(app.handle().clone(), snapshot_bridge_running);
+                if let Err(e) = app.state::<AppState>().remote_control().ensure_device_identity() {
+                    app_core::startup_perf::mark("desktop/remote_control_identity_failed", &e.to_string());
+                }
+                start_remote_control_driver(app.handle().clone());
                 // If the CodeBuddy provider is configured and selected, eagerly
                 // start the managed proxy at app launch.
                 // Spawn the codebuddy proxy boot in the background so the
@@ -183,6 +190,9 @@ fn main() {
             commands::terminal::terminal_terminate,
             commands::terminal::terminal_restart,
             commands::terminal::terminal_list,
+            commands::remote_control::remote_control_set_enabled,
+            commands::remote_control::remote_control_pairing_qr,
+            commands::remote_control::remote_control_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Kodex")
@@ -246,13 +256,112 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
     });
 }
 
+/// Start the outbound relay-client driver loop. Fail-open: any dial/auth/run
+/// failure logs at debug and backs off; local sessions are never affected.
+/// The loop dials the relay endpoint, authenticates with the device
+/// identity, then runs the control-request router + event pusher. The E2E
+/// session key is installed after a pairing handshake completes (the
+/// pairing interaction is driven from the UI via
+/// `remote_control_pairing_qr`); until then the driver runs in plaintext
+/// auth mode and only the handshake messages flow. When a real relay is
+/// reachable, control requests route through `DesktopControlHandler` and
+/// events stream through `AppUpdateEventSource`.
+fn start_remote_control_driver(app: tauri::AppHandle) {
+    use relay_client::{ControlHandler, EventSource, RelayDriver, dial_plain};
+    use std::time::Duration;
+
+    let manager = app.state::<AppState>().remote_control();
+    if !manager.status().enabled {
+        return;
+    }
+    let endpoint = std::env::var("KODEX_RELAY_ENDPOINT").unwrap_or_default();
+    if endpoint.is_empty() {
+        return;
+    }
+
+    let app_for_loop = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut backoff = Duration::from_secs(2);
+        loop {
+            if !app_for_loop
+                .state::<AppState>()
+                .remote_control()
+                .status()
+                .enabled
+            {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+            let dial = dial_plain(&endpoint, Duration::from_secs(30)).await;
+            let conn = match dial {
+                Ok(conn) => {
+                    backoff = Duration::from_secs(2);
+                    conn
+                }
+                Err(_) => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                    continue;
+                }
+            };
+            // Auth + run. The session key is installed later by the pairing
+            // flow; until then this drives the handshake channel only.
+            let handler =
+                crate::remote_control_bridge::DesktopControlHandler::new(app_for_loop.clone());
+            let events =
+                crate::remote_control_bridge::AppUpdateEventSource::new(app_for_loop.clone());
+            let driver = RelayDriver::new(conn, handler, events);
+            let _ = driver.run().await;
+            app_for_loop
+                .state::<AppState>()
+                .remote_control()
+                .set_connected(false);
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+        }
+    });
+}
+
 fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
     app_core::startup_perf::mark("desktop/snapshot_bridge_spawn", "");
-    std::thread::spawn(move || {
+    tauri::async_runtime::spawn(async move {
         app_core::startup_perf::mark("desktop/snapshot_bridge_thread_start", "");
         let mut cursor = UiPatchCursor::default();
+        let mut last_key: Option<String> = None;
+        let mut rx: Option<tokio::sync::broadcast::Receiver<app_core::AppUpdate>> = None;
 
         while running.load(Ordering::Acquire) {
+            // Re-subscribe to the active workspace's update signals when the
+            // active workspace changes. The broadcast receiver is bound to a
+            // single `Application`; a workspace switch swaps in a new one, so
+            // we refresh the receiver and reset the cursor (next poll emits a
+            // Full snapshot for the new workspace).
+            let current_key = app
+                .state::<AppState>()
+                .active_workspace_key()
+                .ok()
+                .flatten();
+            if current_key != last_key {
+                last_key = current_key;
+                rx = app
+                    .state::<AppState>()
+                    .subscribe_active_updates()
+                    .ok()
+                    .flatten();
+                cursor = UiPatchCursor::default();
+            }
+
+            // Signal-driven wake: block until an update signal arrives or the
+            // 220ms fallback timeout elapses (so a missed signal never
+            // starves the UI). Both local frontend and the relay phone path
+            // consume the same `subscribe_updates` source.
+            match rx.as_mut() {
+                Some(receiver) => {
+                    let _ = tokio::time::timeout(Duration::from_millis(220), receiver.recv()).await;
+                }
+                None => tokio::time::sleep(Duration::from_millis(220)).await,
+            }
+
             let next_update = app
                 .state::<AppState>()
                 .poll_active_and_get_update(&mut cursor)
@@ -270,8 +379,6 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
                     cursor = UiPatchCursor::default();
                 }
             }
-
-            std::thread::sleep(Duration::from_millis(220));
         }
     });
 }

@@ -161,7 +161,11 @@ impl Application {
                         store.get_session_model_provider_mode(session_id)
                     {
                         pending_model_restore = Some(ModelSelection::new(model.clone(), provider));
-                        ui.session.model = model;
+                        // `model` is stored provider-qualified; show the bare
+                        // label in the UI while keeping the qualified value in
+                        // `pending_model_restore` for provider-aware restore.
+                        ui.session.model =
+                            super::config::display_model_from_persisted(&model);
                         ui.session.mode = mode;
                     }
                     ui.messages = messages;
@@ -253,12 +257,24 @@ impl Application {
             )
         });
         let _ = crate::startup_perf::measure("app/bootstrap/update_session_model_mode", "", || {
+            // Re-qualify so the persisted `model` column keeps the provider
+            // embedded (ui.session.model holds the bare display label). When
+            // the `model_provider` column is NULL (pre-migration sessions),
+            // recover the provider from the qualified `model` value so
+            // re-qualification does not downgrade it to a bare model name and
+            // lose the provider across reopens.
+            let (persisted_model, persisted_provider) = match pending_model_restore.as_ref() {
+                Some(selection) => super::config::requalify_persisted_model(
+                    &ui.session.model,
+                    &selection.value,
+                    selection.provider.as_deref(),
+                ),
+                None => (ui.session.model.clone(), None),
+            };
             store.update_session_model_mode_provider(
                 &ui.session.id.to_string(),
-                &ui.session.model,
-                pending_model_restore
-                    .as_ref()
-                    .and_then(|selection| selection.provider.as_deref()),
+                &persisted_model,
+                persisted_provider.as_deref(),
                 ui.session.mode.as_deref(),
             )
         });
@@ -306,6 +322,8 @@ impl Application {
         Ok(Self {
             ui,
             session,
+            update_tx: tokio::sync::broadcast::channel(64).0,
+            remote_mode: false,
             runtime_registry: SessionRuntimeRegistry::default(),
             runtime_clock: RuntimeClock::default(),
             store,
@@ -459,7 +477,11 @@ impl Application {
                         store.get_session_model_provider_mode(session_id)
                     {
                         pending_model_restore = Some(ModelSelection::new(model.clone(), provider));
-                        ui.session.model = model;
+                        // `model` is stored provider-qualified; show the bare
+                        // label in the UI while keeping the qualified value in
+                        // `pending_model_restore` for provider-aware restore.
+                        ui.session.model =
+                            super::config::display_model_from_persisted(&model);
                         ui.session.mode = mode;
                     }
                     ui.messages = messages;
@@ -518,12 +540,18 @@ impl Application {
             is_codex_agent_label(&agent_cli_label),
             ui.session.mode.as_deref(),
         );
+        let (persisted_model, persisted_provider) = match pending_model_restore.as_ref() {
+            Some(selection) => super::config::requalify_persisted_model(
+                &ui.session.model,
+                &selection.value,
+                selection.provider.as_deref(),
+            ),
+            None => (ui.session.model.clone(), None),
+        };
         let _ = store.update_session_model_mode_provider(
             &ui.session.id.to_string(),
-            &ui.session.model,
-            pending_model_restore
-                .as_ref()
-                .and_then(|selection| selection.provider.as_deref()),
+            &persisted_model,
+            persisted_provider.as_deref(),
             ui.session.mode.as_deref(),
         );
 
@@ -533,6 +561,8 @@ impl Application {
         Ok(Self {
             ui,
             session,
+            update_tx: tokio::sync::broadcast::channel(64).0,
+            remote_mode: false,
             runtime_registry: SessionRuntimeRegistry::default(),
             runtime_clock: RuntimeClock::default(),
             store,
@@ -1026,6 +1056,7 @@ mod remote_tests {
     }
 
     #[test]
+    #[ignore = "requires a reachable SSH host (devbox:2222); run with --ignored when configured"]
     fn remote_workspace_bootstrap_builds_remote_snapshot_and_session_config() {
         let dir = tempfile::tempdir().unwrap();
         let app = Application::bootstrap_remote_linux_with_app_paths(
@@ -1050,6 +1081,7 @@ mod remote_tests {
     }
 
     #[test]
+    #[ignore = "requires a reachable SSH host (devbox:2222); run with --ignored when configured"]
     fn remote_workspace_rejects_shell_resolution_for_local_only_commands() {
         let dir = tempfile::tempdir().unwrap();
         let app = Application::bootstrap_remote_linux_with_app_paths(

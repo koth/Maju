@@ -178,9 +178,6 @@ impl Application {
             }
         };
 
-        for event in events {
-            self.apply_event_with_dirty_tracking(&event);
-        }
         if is_model_control {
             self.pending_model_restore = None;
             // Capture the provider for image-capability re-resolution before it
@@ -190,6 +187,13 @@ impl Application {
                 request_value_id.clone(),
                 selected_provider_for_state,
             ));
+            // Install the authoritative selection before applying agent-side
+            // config events. Those events call `persist_session_model_mode`,
+            // which must not fall back to inferring a provider from bare model
+            // names when the same model id is offered by multiple providers.
+            for event in events {
+                self.apply_event_with_dirty_tracking(&event);
+            }
             let ui_value_id = provider_qualified_model_value(
                 &request_value_id,
                 self.current_model_provider_for_persistence().as_deref(),
@@ -204,6 +208,10 @@ impl Application {
             // offered tool set (and the prompt-capability gate) without
             // restarting the server (design D10).
             self.reapply_image_capabilities(&request_value_id, caps_provider.as_deref());
+        } else {
+            for event in events {
+                self.apply_event_with_dirty_tracking(&event);
+            }
         }
         self.persist_session_model_mode();
         self.bump_revision();
@@ -271,6 +279,11 @@ impl Application {
         &mut self,
         request_id: &str,
     ) -> bool {
+        // Remote (relay/phone) sessions never auto-approve destructive
+        // permissions, even in full-access mode — the phone must approve.
+        if self.remote_mode {
+            return false;
+        }
         if !session_mode_is_full_access(self.ui.session.mode.as_deref()) {
             return false;
         }
@@ -348,10 +361,55 @@ impl Application {
     }
 
     pub(super) fn persist_session_model_mode(&self) {
+        // Persist the provider-qualified model value so the provider is
+        // always embedded in the non-null `model` column and survives a
+        // session reopen even when the separate `model_provider` column is
+        // empty. On restore the provider is recovered via
+        // `provider_from_model_value` and the bare label via
+        // `display_model_from_persisted`.
+        let session_id = self.ui.session.id.to_string();
+        let existing = self
+            .store
+            .get_session_model_provider_mode(&session_id)
+            .ok()
+            .flatten();
+        // Prefer the live selection. If it is temporarily unavailable (e.g.
+        // agent config events land while restore is still pending, or the
+        // control only carries a bare model id shared by multiple providers),
+        // keep the previously persisted provider instead of writing NULL and
+        // downgrading `kodex-provider/<p>/<m>` to a bare model name. That
+        // downgrade is what makes session A reopen as session B's provider
+        // when both use the same model id.
+        let provider = self.current_model_provider_for_persistence().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|(_, provider, _)| {
+                    provider.as_deref().and_then(real_provider).map(str::to_string)
+                })
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|(model, _, _)| provider_from_model_value(model).map(str::to_string))
+                })
+        });
+        let display_model = display_model_from_persisted(&self.ui.session.model);
+        let persisted_model = if let Some(provider) = provider.as_deref() {
+            provider_qualified_model_value(&display_model, Some(provider))
+        } else if let Some((existing_model, _, _)) = existing.as_ref() {
+            // Unknown provider: never replace a still-qualified stored value
+            // with the bare UI label.
+            if provider_from_model_value(existing_model).is_some() {
+                existing_model.clone()
+            } else {
+                display_model
+            }
+        } else {
+            display_model
+        };
         let _ = self.store.update_session_model_mode_provider(
-            &self.ui.session.id.to_string(),
-            &self.ui.session.model,
-            self.current_model_provider_for_persistence().as_deref(),
+            &session_id,
+            &persisted_model,
+            provider.as_deref(),
             self.ui.session.mode.as_deref(),
         );
     }
@@ -371,23 +429,57 @@ impl Application {
             return;
         };
 
-        let Some(choice) = model_control
-            .choices
-            .iter()
-            .find(|choice| choice_matches_model_selection(choice, &saved_model))
-            .cloned()
-        else {
+        let saved_provider = saved_model
+            .provider
+            .as_deref()
+            .and_then(real_provider)
+            .map(str::to_string)
+            .or_else(|| provider_from_model_value(&saved_model.value).map(str::to_string));
+
+        // `choice_matches_model_selection` is provider-aware when the provider
+        // is known. When it cannot be recovered (e.g. a pre-migration row
+        // downgraded to a bare model name), it would otherwise match the first
+        // choice offering that model name, silently switching the session to
+        // whichever provider happens to be listed first. In that case only
+        // restore when the model is offered by a single provider; otherwise
+        // leave `pending_model_restore` intact so a later, richer config
+        // update resolves it instead of committing a guessed provider.
+        let choice = match saved_provider.as_deref() {
+            Some(_) => model_control
+                .choices
+                .iter()
+                .find(|choice| choice_matches_model_selection(choice, &saved_model))
+                .cloned(),
+            None => {
+                let value =
+                    model_from_provider_value(&saved_model.value).unwrap_or(&saved_model.value);
+                let mut providers: Vec<String> = model_control
+                    .choices
+                    .iter()
+                    .filter(|choice| choice_matches_model_value(choice, value))
+                    .filter_map(choice_provider)
+                    .collect();
+                providers.sort();
+                providers.dedup();
+                if providers.len() == 1 {
+                    model_control
+                        .choices
+                        .iter()
+                        .find(|choice| choice_matches_model_value(choice, value))
+                        .cloned()
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(choice) = choice else {
             return;
         };
 
         let control_id = model_control.id.clone();
         let value_id = choice.id.clone();
         let value_label = choice.label.clone();
-        let value_provider = saved_model
-            .provider
-            .clone()
-            .or_else(|| provider_from_model_value(&saved_model.value).map(str::to_string))
-            .or_else(|| choice_provider(&choice));
+        let value_provider = saved_provider.or_else(|| choice_provider(&choice));
         let (request_value_id, request_provider) =
             model_request_value_and_provider(&value_id, value_provider.clone());
         let result = match model_control.source {
@@ -407,13 +499,18 @@ impl Application {
             return;
         };
         self.pending_model_restore = None;
-        for event in events {
-            self.apply_event_with_dirty_tracking(&event);
-        }
+        // Install the authoritative selection before applying agent-side
+        // config events. Intermediate `SessionConfigUpdated` /
+        // `SessionConfigValueChanged` events persist model mode and must not
+        // fall back to bare-model provider inference while restore is still
+        // in flight.
         self.authoritative_model_selection = Some(ModelSelection::new(
             request_value_id.clone(),
             value_provider.clone(),
         ));
+        for event in events {
+            self.apply_event_with_dirty_tracking(&event);
+        }
         self.apply_event_with_dirty_tracking(&ClientEvent::SessionConfigValueChanged {
             control_id,
             value_id: provider_qualified_model_value(&request_value_id, value_provider.as_deref()),
@@ -422,19 +519,23 @@ impl Application {
     }
 
     pub(super) fn current_model_provider_for_persistence(&self) -> Option<String> {
-        if let Some(provider) = self
-            .authoritative_model_selection
-            .as_ref()
-            .and_then(|selection| selection.provider.clone())
-        {
-            return Some(provider);
-        }
-        if let Some(provider) = self
-            .authoritative_model_selection
-            .as_ref()
-            .and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string))
-        {
-            return Some(provider);
+        let authoritative = self.authoritative_model_selection.as_ref();
+        let pending = self.pending_model_restore.as_ref();
+        let candidates = [
+            authoritative.and_then(|selection| selection.provider.clone()),
+            authoritative
+                .and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string)),
+            pending.and_then(|selection| selection.provider.clone()),
+            pending.and_then(|selection| provider_from_model_value(&selection.value).map(str::to_string)),
+        ];
+        // Skip the generic "byok" wrapper id: it is not a per-model source
+        // provider and writing it to the `model_provider` column (or embedding
+        // it into the model value) corrupts the row so the real provider is
+        // lost across reopens. Fall through to the next candidate instead.
+        for candidate in candidates {
+            if let Some(provider) = candidate.as_deref().and_then(real_provider) {
+                return Some(provider.to_string());
+            }
         }
 
         let model_control =
@@ -443,6 +544,7 @@ impl Application {
             })?;
 
         infer_current_model_provider(model_control)
+            .and_then(|provider| real_provider(&provider).map(str::to_string))
     }
 }
 
@@ -568,29 +670,68 @@ pub(super) fn apply_model_selection_to_control(
     control: &mut workspace_model::SessionConfigControl,
     selection: &ModelSelection,
 ) {
-    if let Some(choice) = control
-        .choices
-        .iter()
-        .find(|choice| choice_matches_model_selection(choice, selection))
-    {
-        let provider = selection
-            .provider
-            .as_deref()
-            .or_else(|| provider_from_model_value(&selection.value))
-            .or_else(|| choice.provider.as_deref());
-        control.current_value_id = provider_qualified_model_value(&choice.id, provider);
+    let selection_provider = selection
+        .provider
+        .as_deref()
+        .and_then(real_provider)
+        .or_else(|| provider_from_model_value(&selection.value))
+        .map(str::to_string);
+    let selection_label = model_from_provider_value(&selection.value).unwrap_or(&selection.value);
+
+    // When the provider is known, match provider-aware so reopening a session
+    // restored as provider p1 does not snap to whichever provider happens to
+    // list the model first.
+    //
+    // When the provider cannot be recovered (a bare model id with a NULL
+    // model_provider column) and the model is offered by more than one
+    // provider, do NOT commit the first matching provider — that both
+    // displays the wrong provider and corrupts the persisted row so every
+    // later reopen keeps the guessed provider (session A reopens as session
+    // B's provider when both share the same model id). Leave the control
+    // unqualified so a later, richer config update (or the user) resolves
+    // the provider, mirroring `restore_pending_model_selection`'s skip-guess
+    // branch.
+    let matched = if selection_provider.is_some() {
+        control
+            .choices
+            .iter()
+            .find(|choice| choice_matches_model_selection(choice, selection))
+            .cloned()
+    } else {
+        // Provider unrecoverable. Only skip guessing when the bare model is
+        // provably offered by more than one *known* provider. When choices
+        // carry no provider meta we cannot establish ambiguity, so fall back
+        // to a label/id match (the historical behavior) — otherwise sessions
+        // whose agent catalog only has bare model ids would never resolve.
+        let matching: Vec<&workspace_model::SessionConfigChoice> = control
+            .choices
+            .iter()
+            .filter(|choice| choice_matches_model_value(choice, selection_label))
+            .collect();
+        let mut known_providers: Vec<String> =
+            matching.iter().filter_map(|&choice| choice_provider(choice)).collect();
+        known_providers.sort();
+        known_providers.dedup();
+        if known_providers.len() > 1 {
+            None
+        } else {
+            matching.into_iter().next().cloned()
+        }
+    };
+
+    if let Some(choice) = matched {
+        let provider = selection_provider
+            .clone()
+            .or_else(|| choice_provider(&choice));
+        control.current_value_id = provider_qualified_model_value(&choice.id, provider.as_deref());
         control.current_value_label = choice.label.clone();
         return;
     }
 
-    let selection_label = model_from_provider_value(&selection.value).unwrap_or(&selection.value);
-    control.current_value_id = provider_qualified_model_value(
-        selection_label,
-        selection
-            .provider
-            .as_deref()
-            .or_else(|| provider_from_model_value(&selection.value)),
-    );
+    // Fallback: keep the bare label unqualified when no provider is known, so
+    // the persisted row is not downgraded to a guessed provider.
+    control.current_value_id =
+        provider_qualified_model_value(selection_label, selection_provider.as_deref());
     control.current_value_label = selection_label.to_string();
 }
 
@@ -603,13 +744,14 @@ pub(super) fn choice_provider(choice: &workspace_model::SessionConfigChoice) -> 
 }
 
 pub(super) fn provider_qualified_model_value(value: &str, provider: Option<&str>) -> String {
-    if let Some(provider) = provider {
-        if provider_from_model_value(value).is_none() {
-            if byok_source_provider_id(provider).is_some() {
-                return format!("kodex-provider/byok/{provider}/{value}");
-            }
-            return format!("kodex-provider/{provider}/{value}");
+    let Some(provider) = provider.and_then(real_provider) else {
+        return value.to_string();
+    };
+    if provider_from_model_value(value).is_none() {
+        if byok_source_provider_id(provider).is_some() {
+            return format!("kodex-provider/byok/{provider}/{value}");
         }
+        return format!("kodex-provider/{provider}/{value}");
     }
     value.to_string()
 }
@@ -627,6 +769,28 @@ pub(super) fn qualify_current_model_control_provider(
     control.current_value_id =
         provider_qualified_model_value(current_model_value(control), Some(&provider));
 }
+
+/// Re-qualify a persisted model value so the `model` column keeps the provider
+/// embedded. `display_model` is the bare label shown in the UI; `persisted_model`
+/// is the raw value read from storage (possibly already provider-qualified).
+/// When the separate `model_provider` column is NULL (e.g. pre-migration
+/// sessions), recover the provider from the qualified `persisted_model` value
+/// so re-qualification does not downgrade `kodex-provider/<p>/<m>` to a bare
+/// model name and lose the provider across session reopens. Returns the
+/// re-qualified model value and the effective provider to persist.
+pub(super) fn requalify_persisted_model(
+    display_model: &str,
+    persisted_model: &str,
+    provider: Option<&str>,
+) -> (String, Option<String>) {
+    let effective = provider
+        .and_then(real_provider)
+        .map(str::to_string)
+        .or_else(|| provider_from_model_value(persisted_model).map(str::to_string));
+    let qualified = provider_qualified_model_value(display_model, effective.as_deref());
+    (qualified, effective)
+}
+
 
 fn infer_current_model_provider(control: &workspace_model::SessionConfigControl) -> Option<String> {
     provider_from_model_value(&control.current_value_id)
@@ -701,6 +865,12 @@ pub(super) fn provider_from_model_value(value: &str) -> Option<&str> {
                     return Some(source_provider);
                 }
             }
+            // `kodex-provider/byok/<model>` without a source-provider segment
+            // is malformed and unrecoverable: the generic "byok" id is not a
+            // per-model source provider. Returning None (rather than "byok")
+            // keeps the preserve-existing / skip-guess restore logic engaged so
+            // a session is not snapped to another session's provider.
+            return None;
         }
         return Some(provider);
     }
@@ -729,14 +899,48 @@ fn model_from_provider_value(value: &str) -> Option<&str> {
     None
 }
 
+/// Strip the provider prefix from a persisted model value so the UI can show
+/// the bare model label. Persisted values are stored with the provider
+/// embedded (see [`provider_qualified_model_value`]) so the provider survives
+/// a session reopen even when the separate `model_provider` column is empty.
+pub(super) fn display_model_from_persisted(stored: &str) -> String {
+    model_from_provider_value(stored)
+        .unwrap_or(stored.trim())
+        .to_string()
+}
+
 fn byok_source_provider_id(provider: &str) -> Option<&str> {
-    match provider {
+    // User-configured BYOK sources are generated as `custom_*` ids (see
+    // `custom_provider_id_base`), so recognize them structurally in addition to
+    // the built-in sources. Without this, a correctly-encoded value like
+    // `kodex-provider/byok/custom_quest/<model>` fails the static match below,
+    // falls back to the generic "byok" id, and is then persisted as the
+    // malformed `kodex-provider/byok/<model>` — losing the real provider so
+    // every reopen snaps to whichever session wrote last.
+    let trimmed = provider.trim();
+    let is_byok_source = matches!(
+        trimmed,
         "timiai" | "commandcode" | "codebuddy" | "deepseek" | "kimi_code" | "xiaomi_mimo"
-        | "custom" => {
-            Some(provider)
-        }
-        _ => None,
+            | "custom"
+    ) || trimmed.starts_with("custom_");
+    if is_byok_source {
+        Some(trimmed)
+    } else {
+        None
     }
+}
+
+/// Returns the provider unless it is the generic BYOK wrapper id ("byok"),
+/// which is not a per-model source provider. The generic id can never be
+/// embedded into a qualified model value (the result
+/// `kodex-provider/byok/<model>` is missing the source-provider segment and
+/// decodes back to "byok" instead of the real provider) and can never match a
+/// model choice's source provider. Treating it as unrecoverable keeps
+/// restore/persist from snapping a session to another session's provider when
+/// the real provider was lost (e.g. legacy rows persisted with the generic id).
+fn real_provider(provider: &str) -> Option<&str> {
+    let trimmed = provider.trim();
+    (!trimmed.is_empty() && trimmed != "byok").then_some(trimmed)
 }
 
 fn permission_selection_is_allow(

@@ -380,6 +380,16 @@ pub(super) async fn run_command_loop(
                                         {
                                             finished_reason = Some(reason);
                                             break;
+                                        } else {
+                                            // The latest in-flight generation failed with no
+                                            // other pending generations and no stale completion
+                                            // to recover. End the turn (refusal = upstream
+                                            // failure/limit such as 429) so the app-core clears
+                                            // its in-flight prompt state instead of hanging in
+                                            // Streaming forever waiting for a StopReason that
+                                            // will never arrive.
+                                            finished_reason = Some(StopReason::Refusal);
+                                            break;
                                         }
                                     }
                                 }

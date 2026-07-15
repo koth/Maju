@@ -1,4 +1,5 @@
 use super::*;
+use workspace_model::ChangeSetStatus;
 
 pub(super) struct RuntimeEventApplyResult {
     pub(super) ui_changed: bool,
@@ -1142,6 +1143,21 @@ impl Application {
         self.session
             .cancel_prompt_fire_and_forget()
             .map_err(|error| error.to_string())?;
+
+        // Finalize the current turn's file changes BEFORE clearing the turn
+        // state. Without this the pending AgentTurn change set is left with
+        // status=Pending and message_id=None, which the frontend's
+        // selectReviewChangeSet cannot match after the turn ends — causing
+        // the review panel to fall back to the previous turn's changes.
+        let persisted = self.persist_current_turn_file_changes();
+        if !persisted && self.review_changes_started {
+            // No assistant message was produced (e.g. cancelled during a tool
+            // call before any text). Finalize the pending change set as
+            // Complete without a message_id so it remains visible.
+            self.persist_current_agent_turn_change_set(None, ChangeSetStatus::Complete);
+            self.persist_agent_conversation_change_set_from_turns();
+        }
+
         self.mark_current_turn_cancelled();
         self.ui.session.status = SessionStatus::Idle;
         self.ui.thinking_status = None;

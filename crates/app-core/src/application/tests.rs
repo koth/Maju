@@ -10,11 +10,20 @@ use super::diff_utils::{
 use super::inline_think::InlineThinkFilter;
 use super::titles::is_placeholder_session_title;
 use super::{
-    Application, ModelSelection, current_timestamp, humanize_acp_disconnect_reason,
+    Application, InFlightPrompt, ModelSelection, current_timestamp,
+    humanize_acp_disconnect_reason,
+    update_signal::AppUpdate,
     normalize_tracked_path, turn_finished_notice,
 };
-use acp_core::{ClientEvent, RemoteSshSessionConfig, diff_to_hunks};
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use acp_core::{ClientEvent, PromptTask, RemoteSshSessionConfig, diff_to_hunks};
+use crate::{AppCoreRemoteControl, RemoteControl};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use workspace_model::{
     AgentCliId, ChangeSetSource, ChangeSetStatus, ChatMessage, DiffHunk, DiffLine, DiffLineKind,
     DiffQuality, FileChangeType, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
@@ -690,6 +699,420 @@ fn new_session_model_config_hydrate_infers_provider_for_duplicate_kimi_model_id(
 }
 
 #[test]
+fn persist_session_model_mode_stores_provider_qualified_model_value() {
+    // The session must persist the model name WITH its provider so reopening
+    // a historical session restores the provider actually used, not just the
+    // bare model id (which may be shared across multiple providers).
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    app.ui.session.model = "claude-opus-4.8".into();
+    app.authoritative_model_selection =
+        Some(ModelSelection::new("claude-opus-4.8", Some("timiai".into())));
+    app.persist_session_model_mode();
+
+    let session_id = app.ui.session.id.to_string();
+    let (stored_model, stored_provider, _mode) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    // The persisted `model` column embeds the provider so it survives reopen
+    // even if the separate `model_provider` column were ever empty.
+    assert_eq!(stored_model, "kodex-provider/byok/timiai/claude-opus-4.8");
+    assert_eq!(stored_provider.as_deref(), Some("timiai"));
+    // The display form strips the provider prefix back to the bare label.
+    assert_eq!(
+        super::config::display_model_from_persisted(&stored_model),
+        "claude-opus-4.8"
+    );
+    assert_eq!(super::config::provider_from_model_value(&stored_model), Some("timiai"));
+}
+
+#[test]
+fn requalify_persisted_model_recovers_provider_when_column_null() {
+    // A historical session may have its provider only embedded in the
+    // provider-qualified `model` value while the separate `model_provider`
+    // column is NULL (pre-migration rows). Re-qualification must recover the
+    // provider from the qualified value instead of downgrading it to a bare
+    // model name, otherwise the provider is lost across reopens.
+    use super::config::requalify_persisted_model;
+
+    let (model, provider) = requalify_persisted_model(
+        "claude-opus-4.8",
+        "kodex-provider/byok/timiai/claude-opus-4.8",
+        None,
+    );
+    assert_eq!(model, "kodex-provider/byok/timiai/claude-opus-4.8");
+    assert_eq!(provider.as_deref(), Some("timiai"));
+
+    // An explicit provider column wins and is preserved.
+    let (model, provider) = requalify_persisted_model(
+        "claude-opus-4.8",
+        "kodex-provider/byok/timiai/claude-opus-4.8",
+        Some("timiai"),
+    );
+    assert_eq!(model, "kodex-provider/byok/timiai/claude-opus-4.8");
+    assert_eq!(provider.as_deref(), Some("timiai"));
+
+    // A bare model with no recoverable provider is not fabricated; the caller
+    // must not invent a provider here.
+    let (model, provider) = requalify_persisted_model("shared-model", "shared-model", None);
+    assert_eq!(model, "shared-model");
+    assert!(provider.is_none());
+}
+
+#[test]
+fn restore_pending_model_selection_skips_guess_when_provider_unrecoverable() {
+    // When a session's provider cannot be recovered (e.g. a pre-migration row
+    // downgraded to a bare model name) and the model is offered by more than
+    // one provider, restore must not silently commit the first matching
+    // provider. It leaves `pending_model_restore` and
+    // `authoritative_model_selection` untouched so a later, richer config
+    // update can resolve it instead of switching the session to a guessed
+    // provider.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let state = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "shared-model",
+        &[("timiai", "shared-model"), ("commandcode", "shared-model")],
+    );
+    app.ui.session.model = "shared-model".into();
+    app.pending_model_restore = Some(ModelSelection::new("shared-model", None));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: state.clone(),
+    });
+
+    assert!(
+        app.authoritative_model_selection.is_none(),
+        "must not commit a guessed provider when the model is ambiguous"
+    );
+    assert!(
+        app.pending_model_restore.is_some(),
+        "pending restore must remain so a richer config update can resolve it"
+    );
+}
+
+#[test]
+fn prepare_session_config_does_not_guess_provider_for_ambiguous_bare_model() {
+    // Repro for "reopen session A → shows session B's provider": a session
+    // persisted with a bare model id and no model_provider (pre-migration or
+    // bare-persisted row) is reopened while the live agent catalog offers the
+    // same model id under two providers. `prepare_session_config_update` must
+    // NOT silently qualify the model control to the first matching provider,
+    // because that both displays the wrong provider and corrupts the persisted
+    // row so every later reopen keeps the guessed provider.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let session_id = app.ui.session.id.to_string();
+    app.store
+        .update_session_model_mode_provider(&session_id, "shared-model", None, Some("Build"))
+        .unwrap();
+    app.ui.session.model = "shared-model".into();
+    app.pending_model_restore = Some(ModelSelection::new("shared-model", None));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: provider_model_config_state(
+            SessionConfigSource::ConfigOption,
+            "shared-model",
+            &[("commandcode", "shared-model"), ("timiai", "shared-model")],
+        ),
+    });
+
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert!(
+        super::config::provider_from_model_value(&model_control.current_value_id).is_none(),
+        "must not commit a guessed provider when the bare model is ambiguous: {}",
+        model_control.current_value_id
+    );
+
+    let (stored_model, stored_provider, _) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "shared-model");
+    assert!(
+        stored_provider.is_none(),
+        "persisted provider must stay NULL instead of guessing: {:?}",
+        stored_provider
+    );
+}
+
+#[test]
+fn restore_pending_model_keeps_qualified_provider_against_bare_agent_choices() {
+    // A session stored as provider p1 + qualified model m is reopened. The
+    // agent (which may run with a different global provider) reports a bare
+    // current model and bare choices without provider meta. The qualified
+    // provider stored on the session must survive this config refresh.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let session_id = app.ui.session.id.to_string();
+    app.store
+        .update_session_model_mode_provider(
+            &session_id,
+            "kodex-provider/byok/timiai/shared-model",
+            Some("timiai"),
+            Some("Build"),
+        )
+        .unwrap();
+    app.ui.session.model = "shared-model".into();
+    app.pending_model_restore = Some(ModelSelection::new(
+        "kodex-provider/byok/timiai/shared-model",
+        Some("timiai".into()),
+    ));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: model_config_state(
+            SessionConfigSource::SessionModel,
+            "shared-model",
+            &["shared-model", "other-model"],
+        ),
+    });
+
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/byok/timiai/shared-model",
+        "qualified provider must survive a bare-choice agent config update"
+    );
+
+    let (stored_model, stored_provider, _) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "kodex-provider/byok/timiai/shared-model");
+    assert_eq!(stored_provider.as_deref(), Some("timiai"));
+}
+
+#[test]
+fn byok_custom_source_provider_round_trips_through_qualified_model_value() {
+    // User-configured BYOK sources are named `custom_*` (e.g. custom_quest).
+    // Before the fix `byok_source_provider_id` only knew the built-in ids, so a
+    // correctly-encoded `kodex-provider/byok/custom_quest/<model>` decoded back
+    // to the generic "byok" and was re-persisted as the malformed
+    // `kodex-provider/byok/<model>` — losing the real provider across reopens.
+    use super::config::{provider_from_model_value, provider_qualified_model_value};
+
+    let qualified = provider_qualified_model_value("glm-5.2", Some("custom_quest"));
+    assert_eq!(qualified, "kodex-provider/byok/custom_quest/glm-5.2");
+    assert_eq!(provider_from_model_value(&qualified), Some("custom_quest"));
+
+    // The generic "byok" wrapper is never a valid provider to embed: qualifying
+    // with it would produce the malformed `kodex-provider/byok/<model>`.
+    assert_eq!(provider_qualified_model_value("glm-5.2", Some("byok")), "glm-5.2");
+    // A malformed persisted value (no source segment) is unrecoverable, not
+    // the generic "byok", so the skip-guess restore path stays engaged.
+    assert_eq!(provider_from_model_value("kodex-provider/byok/glm-5.2"), None);
+}
+
+#[test]
+fn persist_session_model_mode_stores_custom_byok_source_provider() {
+    // Repro: selecting a user-configured BYOK source (custom_*) must persist the
+    // real source provider, not the generic "byok". Before the fix the decoder
+    // did not recognize custom_* ids, so the authoritative selection's provider
+    // leaked in as "byok" and the model column was written as the malformed
+    // `kodex-provider/byok/<model>`.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    app.ui.session.model = "glm-5.2".into();
+    app.authoritative_model_selection = Some(ModelSelection::new(
+        "kodex-provider/byok/custom_quest/glm-5.2",
+        Some("custom_quest".into()),
+    ));
+    app.persist_session_model_mode();
+
+    let session_id = app.ui.session.id.to_string();
+    let (stored_model, stored_provider, _mode) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "kodex-provider/byok/custom_quest/glm-5.2");
+    assert_eq!(stored_provider.as_deref(), Some("custom_quest"));
+    assert_eq!(
+        super::config::provider_from_model_value(&stored_model),
+        Some("custom_quest")
+    );
+}
+
+#[test]
+fn restore_pending_model_keeps_custom_byok_source_provider_against_bare_choices() {
+    // Step-5 repro: a session stored as custom_* + qualified model is reopened
+    // while the agent reports a bare current model and bare choices (no provider
+    // meta). The custom_* source provider must survive the config refresh
+    // instead of being downgraded to the generic "byok" (which would then snap
+    // to whichever session wrote last).
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let session_id = app.ui.session.id.to_string();
+    app.store
+        .update_session_model_mode_provider(
+            &session_id,
+            "kodex-provider/byok/custom_quest/glm-5.2",
+            Some("custom_quest"),
+            Some("Build"),
+        )
+        .unwrap();
+    app.ui.session.model = "glm-5.2".into();
+    app.pending_model_restore = Some(ModelSelection::new(
+        "kodex-provider/byok/custom_quest/glm-5.2",
+        Some("custom_quest".into()),
+    ));
+
+    app.apply_event_and_restore_model(ClientEvent::SessionConfigUpdated {
+        state: model_config_state(
+            SessionConfigSource::SessionModel,
+            "glm-5.2",
+            &["glm-5.2", "other-model"],
+        ),
+    });
+
+    let model_control = app
+        .ui
+        .session_config
+        .controls
+        .iter()
+        .find(|control| control.category == SessionConfigCategory::Model)
+        .expect("model control should exist");
+    assert_eq!(
+        model_control.current_value_id,
+        "kodex-provider/byok/custom_quest/glm-5.2",
+        "custom_* source provider must survive a bare-choice agent config update"
+    );
+
+    let (stored_model, stored_provider, _) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "kodex-provider/byok/custom_quest/glm-5.2");
+    assert_eq!(stored_provider.as_deref(), Some("custom_quest"));
+}
+
+#[test]
+fn current_model_provider_for_persistence_skips_generic_byok_wrapper() {
+    // A legacy/restore selection may carry the generic "byok" wrapper as its
+    // provider while the value still embeds the real source provider. The
+    // generic id must be skipped (fall through to decoding the value) instead
+    // of being written to the model_provider column, which would corrupt the
+    // row and snap reopens to another session's provider.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    app.authoritative_model_selection = Some(ModelSelection::new(
+        "kodex-provider/byok/custom_quest/glm-5.2",
+        Some("byok".into()),
+    ));
+    assert_eq!(
+        app.current_model_provider_for_persistence().as_deref(),
+        Some("custom_quest"),
+        "must fall through the generic byok wrapper to the embedded source provider"
+    );
+}
+
+#[test]
+fn persist_session_model_mode_preserves_existing_provider_when_live_selection_is_ambiguous() {
+    // Repro path:
+    // 1. Session A stored as provider1 + shared model m
+    // 2. Later a config event only carries bare model m (shared by provider1/2)
+    // 3. Without a live authoritative selection, persistence must keep provider1
+    //    instead of writing NULL / bare m. Otherwise reopen infers provider2.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let session_id = app.ui.session.id.to_string();
+    app.store
+        .update_session_model_mode_provider(
+            &session_id,
+            "kodex-provider/byok/timiai/shared-model",
+            Some("timiai"),
+            Some("Build"),
+        )
+        .unwrap();
+
+    app.ui.session.model = "shared-model".into();
+    app.authoritative_model_selection = None;
+    app.pending_model_restore = None;
+    app.ui.session_config = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "shared-model",
+        &[("timiai", "shared-model"), ("commandcode", "shared-model")],
+    );
+
+    app.persist_session_model_mode();
+
+    let (stored_model, stored_provider, _mode) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "kodex-provider/byok/timiai/shared-model");
+    assert_eq!(stored_provider.as_deref(), Some("timiai"));
+}
+
+#[test]
+fn persist_session_model_mode_uses_pending_restore_provider_before_agent_ack() {
+    // While a restored session is waiting for agent config ack, intermediate
+    // SessionConfig events must still persist the pending provider instead of
+    // falling back to bare-model inference / NULL.
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    let session_id = app.ui.session.id.to_string();
+    app.ui.session.model = "shared-model".into();
+    app.authoritative_model_selection = None;
+    app.pending_model_restore = Some(ModelSelection::new(
+        "kodex-provider/byok/timiai/shared-model",
+        Some("timiai".into()),
+    ));
+    app.ui.session_config = provider_model_config_state(
+        SessionConfigSource::ConfigOption,
+        "shared-model",
+        &[("commandcode", "shared-model"), ("timiai", "shared-model")],
+    );
+
+    app.persist_session_model_mode();
+
+    let (stored_model, stored_provider, _mode) = app
+        .store
+        .get_session_model_provider_mode(&session_id)
+        .unwrap()
+        .expect("session metadata should exist");
+    assert_eq!(stored_model, "kodex-provider/byok/timiai/shared-model");
+    assert_eq!(stored_provider.as_deref(), Some("timiai"));
+}
+
+#[test]
 fn live_runtime_reuse_avoids_session_load_when_switching_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app(&dir);
@@ -1243,4 +1666,173 @@ fn wait_for_session_attention_from_list_refresh(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!("session {session_id} did not reach attention state {expected:?} from list refresh");
+}
+
+#[test]
+fn broadcast_emits_ui_updated_on_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let mut rx = app.subscribe_updates();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
+        usage: usage_event("gpt-5.1", 10, "1751328000"),
+    });
+
+    let update = rx.try_recv().expect("UiUpdated signal should be broadcast");
+    match update {
+        AppUpdate::UiUpdated { revision } => {
+            assert_eq!(revision, app.ui.revision);
+        }
+        other => panic!("expected UiUpdated, got {other:?}"),
+    }
+}
+
+#[test]
+fn broadcast_emits_permission_requested_for_tool_permission_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let mut rx = app.subscribe_updates();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "call-1".to_string(),
+        name: "shell".to_string(),
+        options: Vec::new(),
+        details: None,
+        input: Some(workspace_model::PermissionInputRequest::default()),
+    });
+
+    let mut saw_permission = false;
+    while let Ok(update) = rx.try_recv() {
+        if let AppUpdate::PermissionRequested { tool_call_id, .. } = update {
+            assert_eq!(tool_call_id, "call-1");
+            saw_permission = true;
+        }
+    }
+    assert!(saw_permission, "PermissionRequested signal should be broadcast");
+}
+
+/// In-process loopback: validates the `RemoteControl` gateway end-to-end
+/// without a network. Wraps a real `Application` (mock ACP) in
+/// `AppCoreRemoteControl`, subscribes to update signals, drives an event by
+/// locking the shared handle (simulating the agent producing output), and
+/// asserts the subscriber receives `UiUpdated`, then exercises the trait
+/// command methods (`create_session`, `get_state`).
+#[test]
+fn loopback_remote_control_drives_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = test_app(&dir);
+    let app = Arc::new(Mutex::new(app));
+    let control = AppCoreRemoteControl::new(app.clone(), || Ok(Vec::new()));
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut rx = control.subscribe_updates();
+
+    {
+        let mut app = app.lock().unwrap();
+        app.apply_event_with_dirty_tracking(&ClientEvent::UsageUpdated {
+            usage: usage_event("gpt-5.1", 10, "1751328000"),
+        });
+    }
+
+    let update = rx
+        .try_recv()
+        .expect("loopback subscriber should receive UiUpdated after an event");
+    assert!(matches!(update, AppUpdate::UiUpdated { .. }));
+
+    let session_id = rt
+        .block_on(control.create_session(None, None))
+        .expect("create_session via trait should succeed");
+    assert!(!session_id.is_empty());
+
+    let snapshot = rt
+        .block_on(control.get_state())
+        .expect("get_state via trait should succeed");
+    assert_eq!(snapshot.session.id.to_string(), session_id);
+
+    let mut rx2 = control.subscribe_updates();
+    {
+        let mut app = app.lock().unwrap();
+        app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+            id: "loopback-call".to_string(),
+            name: "shell".to_string(),
+            options: Vec::new(),
+            details: None,
+            input: Some(workspace_model::PermissionInputRequest::default()),
+        });
+    }
+    let mut saw_permission = false;
+    while let Ok(update) = rx2.try_recv() {
+        if let AppUpdate::PermissionRequested { tool_call_id, .. } = update {
+            assert_eq!(tool_call_id, "loopback-call");
+            saw_permission = true;
+        }
+    }
+    assert!(saw_permission, "loopback should surface PermissionRequested");
+}
+
+/// Remote-mode permission gating: in full-access mode, a destructive
+/// permission is auto-resolved locally, but NOT when the prompt originated
+/// from a remote (relay/phone) caller — the phone must approve explicitly.
+#[test]
+fn remote_mode_blocks_full_access_auto_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    app.ui.session.mode = Some("full-access".to_string());
+
+    // Inject a tool with a destructive permission request (a shell tool with
+    // an "allow" option) so auto-resolve would fire in local full-access mode.
+    let mut tool = workspace_model::ToolInvocation {
+        id: uuid::Uuid::new_v4(),
+        call_id: "remote-gate-call".to_string(),
+        parent_call_id: None,
+        name: "shell".to_string(),
+        kind: "permission".to_string(),
+        summary: "等待权限".to_string(),
+        status: workspace_model::ToolStatus::Running,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: vec![workspace_model::PermissionOption {
+            id: "allow".to_string(),
+            label: "Allow".to_string(),
+            kind: "allow".to_string(),
+        }],
+        permission_input: None,
+        permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
+    };
+    app.ui.tools.push(tool);
+
+    // Remote mode: auto-resolve is suppressed; the phone must approve.
+    // `auto_resolve` short-circuits on `remote_mode` before touching the
+    // session, so the tool's permission stays unresolved.
+    app.set_remote_mode(true);
+    let delivered = app.auto_resolve_full_access_permission_if_applicable("remote-gate-call");
+    assert!(
+        !delivered,
+        "remote mode must NOT auto-resolve; the phone must approve"
+    );
+    assert!(app.is_remote_mode());
+    let tool = app
+        .ui
+        .tools
+        .iter()
+        .find(|t| t.call_id == "remote-gate-call")
+        .unwrap();
+    assert!(
+        tool.permission_decision.is_none(),
+        "remote mode must leave the permission unresolved for the phone"
+    );
 }

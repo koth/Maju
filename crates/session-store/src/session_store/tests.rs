@@ -1401,8 +1401,9 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
 
     // Day A (ts "1751328000" == midnight UTC of day N): an authoritative
     // SessionTotal(1000) followed by a TurnDelta(200) later the same day
-    // (ts "1751330000"). The SessionTotal must win, so the TurnDelta must
-    // NOT accumulate on top of it.
+    // (ts "1751330000"). Historical summaries prefer request-scoped
+    // TurnDeltas, so the day total is the TurnDelta sum (200), not the
+    // cumulative SessionTotal.
     let day_a_session_total = UsageEvent {
         scope: UsageEventScope::SessionTotal,
         model: Some("gpt-5.1".into()),
@@ -1451,10 +1452,10 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
         buckets[0].date
     );
 
-    // Day A: SessionTotal(1000) wins; TurnDelta(200) must not accumulate.
-    assert_eq!(buckets[0].tokens.total_tokens, Some(1_000));
+    // Day A: TurnDelta(200) is preferred over SessionTotal(1000).
+    assert_eq!(buckets[0].tokens.total_tokens, Some(200));
     assert_eq!(buckets[0].by_model.len(), 1);
-    assert_eq!(buckets[0].by_model[0].tokens.total_tokens, Some(1_000));
+    assert_eq!(buckets[0].by_model[0].tokens.total_tokens, Some(200));
     assert_eq!(buckets[0].by_model[0].event_count, 2);
     assert_eq!(buckets[0].by_model[0].request_count, 2);
 
@@ -1893,6 +1894,285 @@ fn usage_summary_today_range_reports_incremental_not_cumulative() {
         "output increment 300 - 200 = 100"
     );
     assert_eq!(rows[0].session_count, 1);
+    assert_eq!(
+        rows[0].request_count, 1,
+        "baseline SessionTotal must not inflate request_count"
+    );
+    assert_eq!(
+        rows[0].event_count, 1,
+        "baseline SessionTotal must not inflate event_count"
+    );
+}
+
+/// Regression: carry-over baselines loaded for incremental "today" totals
+/// must not surface models that only had activity before the range.
+///
+/// Scenario:
+/// - yesterday: model A SessionTotal (baseline only)
+/// - today: model B SessionTotal (actual in-range activity)
+///
+/// "今天" must list only model B. Before the fix, merge_baseline_events
+/// re-injected model A's pre-range SessionTotal into the summary loop, so
+/// Settings → 用量 showed unused models with request_count=1.
+#[test]
+fn usage_summary_today_range_excludes_baseline_only_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Yesterday: model A only (carry-over baseline; no in-range activity).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("model-a-yesterday".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752134400".into()), // 2026-07-10 00:00:00 UTC
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_000),
+                    input_tokens: Some(800),
+                    output_tokens: Some(200),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Today: model B only (actual activity inside the selected range).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("model-b-today".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752220800".into()), // 2026-07-11 00:00:00 UTC
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(250),
+                    input_tokens: Some(200),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()), // today 00:00 UTC
+            to: Some("1752307200".into()),   // tomorrow 00:00 UTC
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "baseline-only models must not appear in the today range, got: {rows:?}"
+    );
+    assert_eq!(rows[0].model.as_deref(), Some("model-b-today"));
+    assert_eq!(rows[0].tokens.total_tokens, Some(250));
+    assert_eq!(
+        rows[0].request_count, 1,
+        "only the in-range SessionTotal should count as a request"
+    );
+    assert_eq!(rows[0].event_count, 1);
+    assert_eq!(rows[0].session_count, 1);
+}
+
+/// Regression: when a session switches models mid-day, each model's token
+/// total must come from its own in-range TurnDeltas. Preferring SessionTotal
+/// would dump the whole-session cumulative total onto whichever model was
+/// current when the latest SessionTotal arrived, so model B would steal model
+/// A's historical consumption under "今天".
+#[test]
+fn usage_summary_today_prefers_turn_deltas_after_model_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "model-a").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // Today morning: two requests on model A.
+    // codex-acp emits SessionTotal (session-wide cumulative) + TurnDelta
+    // (request-scoped) for every token-count frame.
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("model-a".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(100),
+                    input_tokens: Some(80),
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("model-a".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(100),
+                    input_tokens: Some(80),
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("model-a".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752224400".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(250),
+                    input_tokens: Some(200),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("model-a".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752224400".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(150),
+                    input_tokens: Some(120),
+                    output_tokens: Some(30),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    // Today afternoon: switch to model B for one request.
+    // SessionTotal is still the whole-session cumulative (250 + 80 = 330),
+    // but it is stamped with model B (the current model). The old logic would
+    // therefore report model B = 330 and model A = 0/250 incorrectly.
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("model-b".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752231600".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(330),
+                    input_tokens: Some(260),
+                    output_tokens: Some(70),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("model-b".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1752231600".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(80),
+                    input_tokens: Some(60),
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let mut rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()),
+            to: Some("1752307200".into()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    rows.sort_by(|a, b| a.model.cmp(&b.model));
+
+    assert_eq!(rows.len(), 2, "both models with real requests must appear: {rows:?}");
+    assert_eq!(rows[0].model.as_deref(), Some("model-a"));
+    assert_eq!(
+        rows[0].tokens.total_tokens,
+        Some(250),
+        "model A tokens must be 100 + 150 TurnDeltas, not the later SessionTotal"
+    );
+    assert_eq!(rows[0].tokens.input_tokens, Some(200));
+    assert_eq!(rows[0].tokens.output_tokens, Some(50));
+    assert_eq!(rows[1].model.as_deref(), Some("model-b"));
+    assert_eq!(
+        rows[1].tokens.total_tokens,
+        Some(80),
+        "model B tokens must be its own TurnDelta, not the whole-session SessionTotal 330"
+    );
+    assert_eq!(rows[1].tokens.input_tokens, Some(60));
+    assert_eq!(rows[1].tokens.output_tokens, Some(20));
 }
 
 /// `query_usage_request_count` must count only in-range token-reporting
@@ -2035,10 +2315,9 @@ fn usage_summary_default_scope_counts_all_sessions_in_workspace() {
 
 /// Regression: when two sessions use the SAME model, each emitting its own
 /// SessionTotal (cumulative) + TurnDelta, the cross-session summary must SUM
-/// both sessions' SessionTotals (150 + 80 = 230). The old per-group
-/// `has_session_total` flag would let session A's SessionTotal suppress
-/// session B's TurnDelta AND let session B's SessionTotal overwrite (not
-/// add) the group row — yielding 80 instead of 230.
+/// both sessions' request-scoped TurnDeltas (75 + 40 = 115). SessionTotal is
+/// retained only as a no-TurnDelta fallback; preferring it would mis-attribute
+/// after mid-session model switches and double-count once TurnDeltas exist.
 #[test]
 fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -2105,13 +2384,13 @@ fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
     assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
     assert_eq!(
         rows[0].tokens.total_tokens,
-        Some(230),
-        "SessionTotals from two sessions must SUM, not overwrite"
+        Some(115),
+        "TurnDeltas from two sessions must SUM (75 + 40), not SessionTotals"
     );
     assert_eq!(
         rows[0].tokens.input_tokens,
-        Some(230),
-        "component tokens must also SUM across sessions"
+        None,
+        "TurnDelta fixtures only populate total_tokens"
     );
     assert_eq!(rows[0].session_count, 2, "two sessions expected");
     assert_eq!(

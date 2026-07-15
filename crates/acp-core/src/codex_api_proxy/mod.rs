@@ -39,6 +39,7 @@ use provider::{
     timiai_authorization_log_state, upstream_chat_completion_model, upstream_chat_completions_url,
     upstream_messages_url, upstream_native_anthropic_model, with_timiai_headers,
 };
+use provider::{ANTHROPIC_VERSION_HEADER, anthropic_messages_base_request};
 #[cfg(test)]
 use provider::{is_claude_family_model, timiai_authorization_header_value};
 
@@ -840,10 +841,7 @@ async fn proxy_anthropic_messages_codex_responses_request(
         &anthropic_payload,
     );
     let client = reqwest::Client::new();
-    let upstream = client
-        .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json")
-        .header("User-Agent", "claude-code/0.2.0")
+    let upstream = anthropic_messages_base_request(&client, upstream_url)
         .header("x-api-key", api_key)
         .body(serde_json::to_vec(&anthropic_payload)?)
         .send()
@@ -1325,10 +1323,7 @@ async fn proxy_native_anthropic_messages_request_with_url(
         x_api_key_log_state,
         session_log_state
     ));
-    let request = client
-        .post(upstream_url)
-        .header(CONTENT_TYPE, "application/json")
-        .header("User-Agent", "claude-code/0.2.0");
+    let request = anthropic_messages_base_request(&client, upstream_url);
     let request = if normalize_proxy_provider(provider) == "timiai" {
         with_timiai_headers(request, api_key, session_id)
     } else {
@@ -1674,10 +1669,7 @@ async fn proxy_kimi_codex_api_request(
     log_anthropic_payload_summary("kimi_request", &anthropic_payload);
 
     let client = reqwest::Client::new();
-    let upstream = client
-        .post(KIMI_UPSTREAM_MESSAGES_URL)
-        .header(CONTENT_TYPE, "application/json")
-        .header("User-Agent", "claude-code/0.2.0")
+    let upstream = anthropic_messages_base_request(&client, KIMI_UPSTREAM_MESSAGES_URL)
         .header("x-api-key", api_key)
         .body(serde_json::to_vec(&anthropic_payload)?)
         .send()

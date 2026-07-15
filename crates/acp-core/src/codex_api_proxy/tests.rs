@@ -1306,6 +1306,33 @@ fn timiai_upstream_headers_include_x_api_key() {
 }
 
 #[test]
+fn anthropic_messages_base_request_includes_version_header() {
+    // Anthropic Messages upstream (`/v1/messages`) rejects requests missing
+    // `anthropic-version` with 400 invalid_params. Every native-Anthropic
+    // upstream call is built from this helper, so it must always set the
+    // header (plus content-type and user-agent).
+    let request = anthropic_messages_base_request(
+        &reqwest::Client::new(),
+        "http://example.com/v1/messages",
+    )
+    .build()
+    .unwrap();
+    let headers = request.headers();
+    assert_eq!(
+        headers.get("anthropic-version").and_then(|v| v.to_str().ok()),
+        Some(ANTHROPIC_VERSION_HEADER.1),
+    );
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+    );
+    assert_eq!(
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+        Some("claude-code/0.2.0"),
+    );
+}
+
+#[test]
 fn converts_chat_response_to_responses_response() {
     let chat = json!({
         "id": "chatcmpl_1",

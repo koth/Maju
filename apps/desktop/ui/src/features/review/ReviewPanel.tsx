@@ -6,6 +6,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
 import { fsListDir, gitStage, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { DiffTab } from "../editor/DiffTab";
+import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
@@ -365,7 +366,17 @@ export function ReviewPanel({
       // Ephemeral file tabs: when opening a new file, close all existing
       // unpinned file tabs so rapid browsing doesn't stack.
       if (tab.kind === "file") {
-        return [...current.filter((t) => t.kind !== "file" || pinnedFilePathsRef.current.has(t.path)), tab];
+        const kept: ReviewPanelOpenTab[] = [];
+        for (const openTab of current) {
+          if (openTab.kind === "file" && !pinnedFilePathsRef.current.has(openTab.path)) {
+            if (!isModelDirty(openTab.path)) {
+              disposeModel(openTab.path);
+            }
+            continue;
+          }
+          kept.push(openTab);
+        }
+        return [...kept, tab];
       }
       return [...current, tab];
     });
@@ -387,6 +398,10 @@ export function ReviewPanel({
 
   const handleOpenTabClose = useCallback((tab: ReviewPanelOpenTab) => {
     const closingTabId = reviewOpenTabId(tab);
+    if (tab.kind === "file" && !isModelDirty(tab.path)) {
+      disposeModel(tab.path);
+    }
+    pinnedFilePathsRef.current.delete(tab.path);
     const remainingTabs = openTabs.filter((openTab) => reviewOpenTabId(openTab) !== closingTabId);
     setOpenTabs(remainingTabs);
     setActiveTab((current) =>

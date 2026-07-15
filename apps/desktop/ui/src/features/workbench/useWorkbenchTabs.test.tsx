@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isModelDirty } from "../editor/monaco-model-registry";
+import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
 import { useWorkbenchTabs } from "./useWorkbenchTabs";
 
 vi.mock("../../lib/tauri", () => ({
@@ -19,6 +19,7 @@ vi.mock("../editor/monaco-model-registry", () => ({
 
 describe("useWorkbenchTabs", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(isModelDirty).mockReturnValue(false);
   });
 
@@ -54,5 +55,26 @@ describe("useWorkbenchTabs", () => {
 
     const editorTabs = result.current.tabs.filter((tab) => tab.type === "editor");
     expect(editorTabs.map((tab) => tab.filePath)).toEqual(["src/first.ts", "src/second.ts"]);
+  });
+
+  it("disposes a clean editor model when the tab is closed", async () => {
+    const { result } = renderHook(() => useWorkbenchTabs({ onAfterEditorSave: async () => {} }));
+
+    act(() => result.current.handleOpenEditorTab("src/first.ts"));
+    await act(async () => {
+      await result.current.handleCloseTab(result.current.activeTabId);
+    });
+
+    expect(disposeModel).toHaveBeenCalledWith("src/first.ts");
+    expect(result.current.tabs.some((tab) => tab.filePath === "src/first.ts")).toBe(false);
+  });
+
+  it("disposes a replaced clean ephemeral editor model", () => {
+    const { result } = renderHook(() => useWorkbenchTabs({ onAfterEditorSave: async () => {} }));
+
+    act(() => result.current.handleOpenEditorTab("src/first.ts"));
+    act(() => result.current.handleOpenEditorTab("src/second.ts"));
+
+    expect(disposeModel).toHaveBeenCalledWith("src/first.ts");
   });
 });

@@ -1,11 +1,14 @@
 [workspace]
 members = [
     "apps/desktop/src-tauri",
+    "server",
     "crates/acp-core",
     "crates/app-core",
     "crates/codebuddy-proxy",
     "crates/codebuddy-sdk",
     "crates/git-service",
+    "crates/relay-client",
+    "crates/relay-protocol",
     "crates/session-store",
     "crates/terminal-service",
     "crates/workspace-model",

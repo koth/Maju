@@ -1,0 +1,22 @@
+[package]
+name = "kodex-relay-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kodex public relay service: WebSocket routing of E2E-encrypted frames between desktop and mobile."
+publish = false
+
+[dependencies]
+relay-protocol = { path = "../crates/relay-protocol" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros", "signal"] }
+tokio-tungstenite = "0.27"
+futures.workspace = true
+uuid.workspace = true
+rusqlite = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"

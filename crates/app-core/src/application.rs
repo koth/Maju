@@ -34,6 +34,9 @@ mod tests;
 mod titles;
 mod tool_diffs;
 mod ui_snapshot;
+mod update_signal;
+
+pub use update_signal::AppUpdate;
 use diff_utils::{
     expand_tool_diff_fragment_from_disk, looks_like_fragment_to_full_file_text,
     normalize_diff_text_for_session_change, raw_input_has_write_payload, tool_event_hint_paths,
@@ -227,6 +230,11 @@ impl Default for RuntimeClock {
 pub struct Application {
     pub ui: workspace_model::UiSnapshot,
     session: SessionHandle,
+    update_tx: tokio::sync::broadcast::Sender<update_signal::AppUpdate>,
+    /// Whether the current in-flight prompt originated from a remote
+    /// (relay/phone) caller. When true, destructive permissions are NOT
+    /// auto-resolved even in full-access mode; the phone must approve.
+    remote_mode: bool,
     runtime_registry: SessionRuntimeRegistry,
     runtime_clock: RuntimeClock,
     store: SessionStore,
@@ -484,6 +492,44 @@ fn display_codex_provider(provider: &str) -> &str {
 impl Application {
     pub(super) fn bump_revision(&mut self) {
         self.ui.revision = self.ui.revision.saturating_add(1);
+    }
+
+    /// Subscribe to UI/permission update signals. Each subscriber keeps its
+    /// own `UiPatchCursor` and fetches its Full/Patch delta on each signal.
+    pub fn subscribe_updates(&self) -> tokio::sync::broadcast::Receiver<update_signal::AppUpdate> {
+        self.update_tx.subscribe()
+    }
+
+    /// Mark the in-flight prompt as originating from a remote (relay/phone)
+    /// caller so destructive permissions require explicit phone approval.
+    /// Set before dispatching a remote prompt; cleared on turn end.
+    pub fn set_remote_mode(&mut self, enabled: bool) {
+        self.remote_mode = enabled;
+    }
+
+    pub fn is_remote_mode(&self) -> bool {
+        self.remote_mode
+    }
+
+    pub(super) fn broadcast_ui_updated(&mut self) {
+        let _ = self
+            .update_tx
+            .send(update_signal::AppUpdate::UiUpdated {
+                revision: self.ui.revision,
+            });
+    }
+
+    pub(super) fn broadcast_permission_request(
+        &mut self,
+        tool_call_id: &str,
+        request: workspace_model::PermissionInputRequest,
+    ) {
+        let _ = self
+            .update_tx
+            .send(update_signal::AppUpdate::PermissionRequested {
+                tool_call_id: tool_call_id.to_string(),
+                request,
+            });
     }
 
     pub(super) fn runtime_now(&self) -> Instant {

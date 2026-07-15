@@ -1,12 +1,32 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use hyper::header::CONTENT_TYPE;
 use super::{
     COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL, COMMANDCODE_UPSTREAM_MESSAGES_URL,
     DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL, KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
     KIMI_UPSTREAM_MESSAGES_URL, MIMO_UPSTREAM_CHAT_COMPLETIONS_URL, MIMO_UPSTREAM_MESSAGES_URL,
     PROVIDER_MODEL_ID_PREFIX, TIMIAI_CHAT_COMPLETIONS_URL, TIMIAI_MESSAGES_URL,
 };
+
+/// Anthropic Messages API requires this header on every request; without it
+/// the upstream returns `400 invalid_params: The required header
+/// 'anthropic-version' is missing`.
+pub(super) const ANTHROPIC_VERSION_HEADER: (&str, &str) = ("anthropic-version", "2023-06-01");
+
+/// Build the shared base request for an Anthropic Messages upstream
+/// (`/v1/messages`) call: content type, a stable user agent, and the
+/// mandatory `anthropic-version` header. Callers then attach auth and body.
+pub(super) fn anthropic_messages_base_request(
+    client: &reqwest::Client,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(url)
+        .header(CONTENT_TYPE, "application/json")
+        .header("User-Agent", "claude-code/0.2.0")
+        .header(ANTHROPIC_VERSION_HEADER.0, ANTHROPIC_VERSION_HEADER.1)
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct ProviderEncodedModel {

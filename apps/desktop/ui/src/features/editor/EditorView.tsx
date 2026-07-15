@@ -16,9 +16,11 @@ import { registerLspProviders } from "./lsp-providers";
 import { initTextMate, registerTextMateLanguage } from "./textmate-engine";
 import { languageForPath } from "./languages";
 import {
+  getModelBaseVersion,
   getModelValue,
   getOrCreateModel,
   isModelDirty,
+  replaceCleanModelContent,
   setModelContent,
   updateModelBase,
   updateModelBaseVersion,
@@ -37,6 +39,8 @@ interface Props {
   lineNumber?: number;
   searchQuery?: string;
   navToken?: number;
+  /** Bump to force a disk reload for the current path (e.g. agent file writes). */
+  reloadToken?: number;
   appTheme: AppTheme;
   toolbarMode?: "default" | "breadcrumbs";
   workspaceName?: string;
@@ -57,6 +61,7 @@ export function EditorView({
   lineNumber,
   searchQuery,
   navToken,
+  reloadToken = 0,
   appTheme,
   toolbarMode = "default",
   workspaceName,
@@ -147,40 +152,77 @@ export function EditorView({
   }, []);
 
   useEffect(() => {
-    if (prevPathRef.current && editorRef.current && !editorDisposedRef.current) {
-      saveViewState(prevPathRef.current, editorRef.current);
+    const previousPath = prevPathRef.current;
+    if (previousPath && editorRef.current && !editorDisposedRef.current) {
+      saveViewState(previousPath, editorRef.current);
     }
     prevPathRef.current = path;
     const requestSeq = openRequestSeqRef.current + 1;
     openRequestSeqRef.current = requestSeq;
     let cancelled = false;
+    const isSamePathReload = previousPath === path && reloadToken > 0;
 
-    setSnapshot(null);
-    setContent("");
-    setDirty(false);
-    setError(null);
-    setConflict(null);
-    setLspStatus(null);
-    setSourceMode(false);
+    // Avoid writing "" into a kept Monaco model while loading — that would mark a
+    // clean cached model dirty and block applying the latest disk content.
+    const cachedContent = getModelValue(path);
+    const cachedDirty = isModelDirty(path);
+    if (!isSamePathReload) {
+      setSnapshot(null);
+      setContent(cachedContent ?? "");
+      setDirty(cachedDirty);
+      setError(null);
+      setConflict(null);
+      setLspStatus(null);
+      setSourceMode(false);
+    } else {
+      setError(null);
+    }
+
     editorOpenFile(path)
       .then((nextSnapshot) => {
         if (cancelled || requestSeq !== openRequestSeqRef.current) return;
         const isNextTextFile = (nextSnapshot.kind ?? "text") === "text";
-        const cachedContent = isNextTextFile ? getModelValue(path) : null;
+        const modelContent = isNextTextFile ? getModelValue(path) : null;
         const hasDirtyModel = isNextTextFile && isModelDirty(path);
-        const nextContent = hasDirtyModel && cachedContent !== null ? cachedContent : nextSnapshot.content;
+        const cachedVersion = isNextTextFile ? getModelBaseVersion(path) : undefined;
+        const diskChanged =
+          !cachedVersion ||
+          cachedVersion.content_hash !== nextSnapshot.version.content_hash ||
+          cachedVersion.size !== nextSnapshot.version.size ||
+          cachedVersion.modified_ms !== nextSnapshot.version.modified_ms;
+
+        // Preserve real unsaved local edits; otherwise always take the disk snapshot.
+        const nextContent =
+          hasDirtyModel && modelContent !== null ? modelContent : nextSnapshot.content;
+
         setSnapshot(nextSnapshot);
         setContent(nextContent);
-        if (isNextTextFile && monacoRef.current) {
-          const model = getOrCreateModel(monacoRef.current, path, nextContent);
-          safeSetEditorModel(model);
-        }
-        if (isNextTextFile && !hasDirtyModel) {
-          updateModelBase(path, nextSnapshot.content);
-        }
+
         if (isNextTextFile) {
-          updateModelBaseVersion(path, nextSnapshot.version);
+          if (hasDirtyModel) {
+            if (monacoRef.current) {
+              const model = getOrCreateModel(monacoRef.current, path, nextContent);
+              safeSetEditorModel(model);
+            }
+            updateModelBaseVersion(path, nextSnapshot.version);
+            if (diskChanged) {
+              setConflict("磁盘内容已变化（本地有未保存修改）");
+            }
+          } else {
+            replaceCleanModelContent(path, nextSnapshot.content, nextSnapshot.version);
+            if (monacoRef.current) {
+              const model = getOrCreateModel(monacoRef.current, path, nextSnapshot.content);
+              updateModelBase(path, nextSnapshot.content);
+              updateModelBaseVersion(path, nextSnapshot.version);
+              safeSetEditorModel(model);
+            } else {
+              updateModelBase(path, nextSnapshot.content);
+              updateModelBaseVersion(path, nextSnapshot.version);
+            }
+            setConflict(null);
+          }
         }
+
         setDirty(hasDirtyModel);
         onDirtyChangeRef.current?.(path, hasDirtyModel);
       })
@@ -192,7 +234,7 @@ export function EditorView({
     return () => {
       cancelled = true;
     };
-  }, [path, safeSetEditorModel]);
+  }, [path, reloadToken, safeSetEditorModel]);
 
   useEffect(() => {
     if (!activeSnapshot || !isSourceMode) return;

@@ -1,7 +1,10 @@
 use crate::codebuddy_proxy::CodebuddyProxyManager;
 use crate::lsp::LspService;
 use crate::open_workspaces::{OpenWorkspaceRecord, OpenWorkspaceState};
-use app_core::{Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path};
+use crate::remote_control_manager::RemoteControlManager;
+use app_core::{
+    AppUpdate, Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path,
+};
 use session_store::SessionStore;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,7 @@ pub struct AppState {
     lsp_service: LspService,
     terminal_service: TerminalService,
     codebuddy_proxy: Arc<CodebuddyProxyManager>,
+    remote_control: Arc<RemoteControlManager>,
 }
 
 #[derive(Default)]
@@ -50,16 +54,26 @@ impl AppState {
         let lsp_service =
             app_core::startup_perf::measure("state/new_lsp_service", "", LspService::new);
         let terminal_service = TerminalService::new();
+        let remote_control = Arc::new(RemoteControlManager::new(
+            app_core::AppPaths::resolve().unwrap_or_else(|_| app_core::AppPaths::from_root(
+                std::env::current_dir().unwrap_or_default().join(".kodex"),
+            )),
+        ));
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
             lsp_service,
             terminal_service,
             codebuddy_proxy: Arc::new(CodebuddyProxyManager::new()),
+            remote_control,
         }
     }
 
     pub fn codebuddy_proxy(&self) -> Arc<CodebuddyProxyManager> {
         self.codebuddy_proxy.clone()
+    }
+
+    pub fn remote_control(&self) -> Arc<RemoteControlManager> {
+        self.remote_control.clone()
     }
 
     pub fn set_terminal_event_sink(&self, sink: TerminalEventSink) {
@@ -523,6 +537,31 @@ impl AppState {
             _ => return Err("No connected workspace open".into()),
         };
         Ok(app.lightweight_ui_update(cursor))
+    }
+
+    /// Subscribe to update signals from the active workspace's `Application`.
+    /// Returns `Ok(None)` when no connected workspace is active. The returned
+    /// receiver is detached from the registry mutex and continues to work
+    /// after the lock is released. Callers should re-subscribe when the
+    /// active workspace changes (see `active_workspace_key`).
+    pub fn subscribe_active_updates(
+        &self,
+    ) -> Result<Option<tokio::sync::broadcast::Receiver<AppUpdate>>, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let active_key = guard.active_workspace.clone().ok_or("No workspace open")?;
+        let app = match guard.workspaces.get(&active_key) {
+            Some(WorkspaceEntry::Connected(app)) => app,
+            _ => return Ok(None),
+        };
+        Ok(Some(app.subscribe_updates()))
+    }
+
+    /// The registry key of the active workspace, or `None` when no workspace
+    /// is active. Used by the snapshot bridge to detect workspace switches
+    /// and re-subscribe to the new `Application`'s update signals.
+    pub fn active_workspace_key(&self) -> Result<Option<String>, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        Ok(guard.active_workspace.clone())
     }
 
     pub fn with_app<F, R>(&self, f: F) -> Result<R, String>
