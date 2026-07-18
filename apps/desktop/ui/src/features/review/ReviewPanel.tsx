@@ -254,7 +254,7 @@ interface Props {
   openTabs?: ReviewPanelOpenTab[];
   onActiveTabChange?: Dispatch<SetStateAction<ReviewPanelActiveTab>>;
   onOpenTabsChange?: Dispatch<SetStateAction<ReviewPanelOpenTab[]>>;
-  focusRequest?: { changeSetId: string; token: number } | null;
+  focusRequest?: { changeSetId: string; token: number; path?: string } | null;
   preferredChangeSet?: ReviewPreferredChangeSet | null;
   onPreferredChangeSetChange?: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
 }
@@ -314,7 +314,7 @@ export function ReviewPanel({
   const resetKeyRef = useRef(`${snapshot.session.id}:${snapshot.workspace.root}`);
   const panelRef = useRef<HTMLDivElement>(null);
   const focusRequestKey = focusRequest
-    ? `${focusRequest.changeSetId}:${focusRequest.token}`
+    ? `${focusRequest.changeSetId}:${focusRequest.token}:${focusRequest.path ?? ""}`
     : null;
   const handledFocusRequestKeyRef = useRef<string | null>(focusRequestKey);
   const activeBaseTab = activeTab.kind === "base" ? activeTab.tab : null;
@@ -647,6 +647,8 @@ export function ReviewPanel({
           activePreferredChangeSet={activePreferredChangeSet}
           onActivePreferredChangeSetChange={setActivePreferredChangeSet}
           messageOrder={messageOrder}
+          focusPath={focusRequest?.path ?? null}
+          focusToken={focusRequest?.token ?? null}
         />
       </div>
 
@@ -1048,6 +1050,8 @@ function ReviewChangesView({
   activePreferredChangeSet,
   onActivePreferredChangeSetChange,
   messageOrder,
+  focusPath = null,
+  focusToken = null,
 }: {
   changeSetState: {
     summaries: ChangeSetSummary[];
@@ -1059,6 +1063,8 @@ function ReviewChangesView({
   activePreferredChangeSet: ReviewPreferredChangeSet | null;
   onActivePreferredChangeSetChange: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
   messageOrder: Map<string, number>;
+  focusPath?: string | null;
+  focusToken?: number | null;
 }) {
   const [scope, setScope] = useState<ReviewScope>("last");
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
@@ -1139,9 +1145,13 @@ function ReviewChangesView({
   );
   const autoExpandedPaths = useMemo(() => {
     const paths = new Set<string>();
+    if (focusPath) {
+      paths.add(focusPath);
+    }
     let openedFiles = 0;
     let openedLines = 0;
     for (const change of sorted) {
+      if (paths.has(change.path)) continue;
       if (openedFiles >= REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LIMIT) break;
       const changedLines = change.added_lines + change.removed_lines;
       if (changedLines > REVIEW_INLINE_DIFF_AUTO_OPEN_FILE_LINE_LIMIT) continue;
@@ -1151,7 +1161,7 @@ function ReviewChangesView({
       openedLines += changedLines;
     }
     return paths;
-  }, [sorted]);
+  }, [focusPath, sorted]);
 
   return (
     <div className="review-session-changes">
@@ -1213,6 +1223,11 @@ function ReviewChangesView({
               changeSetId={activeChangeSetId ?? change.change_set_id}
               appTheme={appTheme}
               initialCollapsed={!autoExpandedPaths.has(change.path)}
+              focusToken={
+                focusPath && sameReviewPath(focusPath, change.path)
+                  ? focusToken
+                  : null
+              }
             />
           ))}
         </div>
@@ -1303,15 +1318,18 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
   changeSetId,
   appTheme,
   initialCollapsed,
+  focusToken = null,
 }: {
   change: FileChangeSummary;
   changeSetId: string;
   appTheme: AppTheme;
   initialCollapsed: boolean;
+  focusToken?: number | null;
 }) {
   const [hydratedChange, setHydratedChange] = useState<FileChangeRecord | null>(null);
   const [hydrationFailed, setHydrationFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(initialCollapsed);
+  const cardRef = useRef<HTMLElement | null>(null);
   const displayChange = hydratedChange ?? change;
   const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
   const diffPreview = useMemo(
@@ -1341,6 +1359,18 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
     setHydratedChange(null);
     setHydrationFailed(false);
   }, [change.path, change.updated_at, changeSetId, initialCollapsed]);
+
+  useEffect(() => {
+    if (focusToken == null) return;
+    setCollapsed(false);
+    const frame = window.requestAnimationFrame(() => {
+      cardRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusToken]);
 
   useEffect(() => {
     if (collapsed) return;
@@ -1377,7 +1407,13 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
   ]);
 
   return (
-    <article className={`review-change-card ${collapsed ? "is-collapsed" : ""}`}>
+    <article
+      ref={cardRef}
+      className={`review-change-card ${collapsed ? "is-collapsed" : ""} ${
+        focusToken != null ? "is-focused" : ""
+      }`}
+      data-review-path={change.path}
+    >
       <button
         type="button"
         className="review-change-header"
@@ -1480,6 +1516,12 @@ function compareReviewFiles(a: FileChangeSummary, b: FileChangeSummary) {
   const updatedDelta = timestampValue(b.updated_at) - timestampValue(a.updated_at);
   if (updatedDelta !== 0) return updatedDelta;
   return a.path.localeCompare(b.path);
+}
+
+function sameReviewPath(left: string, right: string) {
+  const normalize = (value: string) =>
+    value.replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
+  return normalize(left) === normalize(right);
 }
 
 function activeTurnOwnerKey(

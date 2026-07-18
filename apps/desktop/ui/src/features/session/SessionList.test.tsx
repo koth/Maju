@@ -397,8 +397,8 @@ describe("SessionList agent picker", () => {
       />,
     );
 
-    const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/);
-    expect(screen.getByText("远程")).toBeInTheDocument();
+const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/);
+    expect(screen.getByLabelText("远程")).toBeInTheDocument();
 
     fireEvent.click(workspaceButton);
     expect(workspaceSetActive).not.toHaveBeenCalled();

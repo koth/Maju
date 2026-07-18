@@ -131,6 +131,22 @@ function ToolCallCardImpl({
     presentation.presentationKind !== "command" && category === "exploring"
       ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
       : null;
+  const shellPresentation =
+    presentation.presentationKind === "command" && category !== "editing"
+      ? presentation
+      : category === "exploring"
+        ? deriveExplorationShellPresentation(
+            tool,
+            presentation,
+            explorationResult,
+            cmdDetail,
+            errorLine,
+            logEntries.entries,
+            detailLines.lines,
+            outputLines.lines,
+            rawOutputLines.lines,
+          )
+        : null;
   const needsPermission =
     tool.status === "Running" &&
     tool.permission_options.length > 0 &&
@@ -151,19 +167,23 @@ function ToolCallCardImpl({
     }
   };
 
+// Editing cards with a real diff should expand to the patch only.
+  // Extra path/output/log noise makes the review view hard to scan.
+  const showEditingDiffOnly = category === "editing" && diffPreviews.length > 0;
+
   // Does this card have expandable content?
-  const hasDetail =
-    !!errorLine ||
-    !!cmdDetail ||
-    detailLines.lines.length > 0 ||
-    logEntries.entries.length > 0 ||
-    outputLines.lines.length > 0 ||
-    rawOutputLines.lines.length > 0 ||
-    presentation.command != null ||
-    presentation.primaryOutput != null ||
-    presentation.rawDetails.length > 0 ||
-    diffPreviews.length > 0 ||
-    trackedDiffPaths.length > 0;
+  const hasDetail = showEditingDiffOnly
+    ? true
+    : !!errorLine ||
+      !!cmdDetail ||
+      detailLines.lines.length > 0 ||
+      logEntries.entries.length > 0 ||
+      outputLines.lines.length > 0 ||
+      rawOutputLines.lines.length > 0 ||
+      presentation.command != null ||
+      presentation.primaryOutput != null ||
+      presentation.rawDetails.length > 0 ||
+      trackedDiffPaths.length > 0;
 
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>
@@ -226,141 +246,141 @@ function ToolCallCardImpl({
         </div>
       )}
 
-      {/* Expandable detail — only visible when expanded */}
+{/* Expandable detail — only visible when expanded */}
       {expanded && (
         <>
-          {presentation.presentationKind === "command" && category !== "editing" && (
-            <ShellToolPanel
-              presentation={presentation}
-              rawDetailsOpen={rawDetailsOpen}
-              onRawDetailsToggle={() => setRawDetailsOpen((value) => !value)}
-              onStopTool={canStopTool ? handleStopTool : undefined}
-              stopRequested={stopRequested}
-            />
-          )}
-
-          {explorationResult && (
-            <ExplorationResultPanel result={explorationResult} />
-          )}
-
-          {/* Command detail (actual command or file path) */}
-          {(presentation.presentationKind !== "command" || category === "editing") && !explorationResult && cmdDetail && (
-            <div className="tc-output-block">
-              <div className="tc-output-line">
-                <span className="tc-output-prefix">└ </span>
-                <span className="tc-cmd-detail">{cmdDetail}</span>
-              </div>
-            </div>
-          )}
-
-          {presentation.presentationKind !== "command" && !explorationResult && detailLines.lines.length > 0 && (
-            <div className="tc-output-block">
-              {detailLines.lines.map((line, i) => (
-                <div key={i} className="tc-output-line">
-                  <span className="tc-output-prefix">
-                    {i === 0 ? "└ " : "  "}
-                  </span>
-                  {line}
-                </div>
-              ))}
-              {detailLines.omitted > 0 && (
-                <div className="tc-output-line tc-output-ellipsis">
-                  <span className="tc-output-prefix">  </span>… +
-                  {detailLines.omitted} 行
-                </div>
-              )}
-            </div>
-          )}
-
-          {presentation.presentationKind !== "command" && !explorationResult && logEntries.entries.length > 0 && (
-            <div className="tc-output-block">
-              {logEntries.entries.map((entry, i) => (
-                <div key={`${entry.title}-${i}`} className="tc-output-line tc-log-line">
-                  <span className="tc-output-prefix">
-                    {i === 0 ? "└ " : "  "}
-                  </span>
-                  <span className="tc-log-title">{entry.title}</span>
-                  <span className="tc-log-body">{entry.body}</span>
-                </div>
-              ))}
-              {logEntries.omitted > 0 && (
-                <div className="tc-output-line tc-output-ellipsis">
-                  <span className="tc-output-prefix">  </span>… +
-                  {logEntries.omitted} 条更新
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Error line */}
-          {presentation.presentationKind !== "command" && errorLine && (
-            <div className="tc-output-block">
-              <div className="tc-output-line tc-output-error">
-                <span className="tc-output-prefix">└ </span>
-                {errorLine}
-              </div>
-            </div>
-          )}
-
-          {/* Output lines (max 5, only for terminal/command tools) */}
-          {presentation.presentationKind !== "command" && !explorationResult && !errorLine && outputLines.lines.length > 0 && (
-            <div className="tc-output-block">
-              {outputLines.lines.map((line, i) => (
-                <div key={i} className="tc-output-line">
-                  <span className="tc-output-prefix">
-                    {i === 0 ? "└ " : "  "}
-                  </span>
-                  {line}
-                </div>
-              ))}
-              {outputLines.omitted > 0 && (
-                <div className="tc-output-line tc-output-ellipsis">
-                  <span className="tc-output-prefix">  </span>… +
-                  {outputLines.omitted} 行
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Raw output for non-terminal tools (Read, Search, etc.) */}
-          {presentation.presentationKind !== "command" && !explorationResult && !errorLine && outputLines.lines.length === 0 && rawOutputLines.lines.length > 0 && (
-            <div className="tc-output-block">
-              {rawOutputLines.lines.map((line, i) => (
-                <div key={i} className="tc-output-line">
-                  <span className="tc-output-prefix">
-                    {i === 0 ? "└ " : "  "}
-                  </span>
-                  {line}
-                </div>
-              ))}
-              {rawOutputLines.omitted > 0 && (
-                <div className="tc-output-line tc-output-ellipsis">
-                  <span className="tc-output-prefix">  </span>… +
-                  {rawOutputLines.omitted} 行
-                </div>
-              )}
-            </div>
-          )}
-
-          {diffPreviews.length > 0 && (
+          {showEditingDiffOnly ? (
             <div className="tc-diff-list">
               {diffPreviews.map((preview) => (
                 <ToolDiffPreviewCard key={preview.path} preview={preview} />
               ))}
             </div>
-          )}
+          ) : (
+            <>
+              {shellPresentation && (
+                <ShellToolPanel
+                  presentation={shellPresentation}
+                  rawDetailsOpen={rawDetailsOpen}
+                  onRawDetailsToggle={() => setRawDetailsOpen((value) => !value)}
+                  onStopTool={canStopTool ? handleStopTool : undefined}
+                  stopRequested={stopRequested}
+                />
+              )}
 
-          {diffPreviews.length === 0 && trackedDiffPaths.length > 0 && (
-            <div className="tc-output-block">
-              {trackedDiffPaths.map((p, i) => (
-                <div key={i} className="tc-output-line">
-                  <span className="tc-output-prefix">
-                    {i === 0 ? "└ " : "  "}
-                  </span>
-                  <span className="tc-file-path">{p}</span>
+              {/* Command detail (actual command or file path) */}
+              {!shellPresentation &&
+                (presentation.presentationKind !== "command" || category === "editing") &&
+                cmdDetail && (
+                <div className="tc-output-block">
+                  <div className="tc-output-line">
+                    <span className="tc-output-prefix">└ </span>
+                    <span className="tc-cmd-detail">{cmdDetail}</span>
+                  </div>
                 </div>
-              ))}
-            </div>
+              )}
+
+              {!shellPresentation && presentation.presentationKind !== "command" && detailLines.lines.length > 0 && (
+                <div className="tc-output-block">
+                  {detailLines.lines.map((line, i) => (
+                    <div key={i} className="tc-output-line">
+                      <span className="tc-output-prefix">
+                        {i === 0 ? "└ " : "  "}
+                      </span>
+                      {line}
+                    </div>
+                  ))}
+                  {detailLines.omitted > 0 && (
+                    <div className="tc-output-line tc-output-ellipsis">
+                      <span className="tc-output-prefix">  </span>… +
+                      {detailLines.omitted} 行
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!shellPresentation && presentation.presentationKind !== "command" && logEntries.entries.length > 0 && (
+                <div className="tc-output-block">
+                  {logEntries.entries.map((entry, i) => (
+                    <div key={`${entry.title}-${i}`} className="tc-output-line tc-log-line">
+                      <span className="tc-output-prefix">
+                        {i === 0 ? "└ " : "  "}
+                      </span>
+                      <span className="tc-log-title">{entry.title}</span>
+                      <span className="tc-log-body">{entry.body}</span>
+                    </div>
+                  ))}
+                  {logEntries.omitted > 0 && (
+                    <div className="tc-output-line tc-output-ellipsis">
+                      <span className="tc-output-prefix">  </span>… +
+                      {logEntries.omitted} 条更新
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Error line */}
+              {!shellPresentation && presentation.presentationKind !== "command" && errorLine && (
+                <div className="tc-output-block">
+                  <div className="tc-output-line tc-output-error">
+                    <span className="tc-output-prefix">└ </span>
+                    {errorLine}
+                  </div>
+                </div>
+              )}
+
+              {/* Output lines (max 5, only for terminal/command tools) */}
+              {!shellPresentation && presentation.presentationKind !== "command" && !errorLine && outputLines.lines.length > 0 && (
+                <div className="tc-output-block">
+                  {outputLines.lines.map((line, i) => (
+                    <div key={i} className="tc-output-line">
+                      <span className="tc-output-prefix">
+                        {i === 0 ? "└ " : "  "}
+                      </span>
+                      {line}
+                    </div>
+                  ))}
+                  {outputLines.omitted > 0 && (
+                    <div className="tc-output-line tc-output-ellipsis">
+                      <span className="tc-output-prefix">  </span>… +
+                      {outputLines.omitted} 行
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Raw output for non-terminal tools (Read, Search, etc.) */}
+              {!shellPresentation && presentation.presentationKind !== "command" && !errorLine && outputLines.lines.length === 0 && rawOutputLines.lines.length > 0 && (
+                <div className="tc-output-block">
+                  {rawOutputLines.lines.map((line, i) => (
+                    <div key={i} className="tc-output-line">
+                      <span className="tc-output-prefix">
+                        {i === 0 ? "└ " : "  "}
+                      </span>
+                      {line}
+                    </div>
+                  ))}
+                  {rawOutputLines.omitted > 0 && (
+                    <div className="tc-output-line tc-output-ellipsis">
+                      <span className="tc-output-prefix">  </span>… +
+                      {rawOutputLines.omitted} 行
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!shellPresentation && diffPreviews.length === 0 && trackedDiffPaths.length > 0 && (
+                <div className="tc-output-block">
+                  {trackedDiffPaths.map((p, i) => (
+                    <div key={i} className="tc-output-line">
+                      <span className="tc-output-prefix">
+                        {i === 0 ? "└ " : "  "}
+                      </span>
+                      <span className="tc-file-path">{p}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -403,12 +423,6 @@ interface ShellToolPanelProps {
   stopRequested?: boolean;
 }
 
-interface ExplorationResult {
-  root: string | null;
-  items: string[];
-  omitted: number;
-}
-
 function ShellToolPanel({
   presentation,
   rawDetailsOpen,
@@ -419,45 +433,51 @@ function ShellToolPanel({
   const hasRawDetails = presentation.rawDetails.length > 0;
   return (
     <div className="tc-shell-panel">
-      <div className="tc-shell-label">{presentation.toolLabel}</div>
-      {presentation.command && (
-        <pre className="tc-shell-command">
-          <span className="tc-shell-prompt">$ </span>
-          {presentation.command}
-        </pre>
-      )}
-      {presentation.primaryOutput && (
-        <pre className="tc-shell-output">{presentation.primaryOutput}</pre>
-      )}
-      {!presentation.primaryOutput && !presentation.command && (
-        <div className="tc-shell-empty">没有可显示的输出</div>
-      )}
-      <div className="tc-shell-footer">
-        {hasRawDetails && (
-          <button
-            className="tc-raw-toggle"
-            type="button"
-            onClick={onRawDetailsToggle}
-            aria-expanded={rawDetailsOpen}
-          >
-            原始详情
-          </button>
-        )}
-        {onStopTool && (
-          <button
-            className="tc-stop-turn-btn tc-shell-stop-btn"
-            type="button"
-            onClick={onStopTool}
-            disabled={stopRequested}
-          >
-            {stopRequested ? "停止中" : "停止工具"}
-          </button>
-        )}
-        <span className={`tc-shell-status tc-shell-status-${presentation.footerStatus.tone}`}>
-          {presentation.footerStatus.tone === "success" ? "✓ " : ""}
-          {presentation.footerStatus.label}
-        </span>
+      <div className="tc-shell-header">
+        <div className="tc-shell-label">{presentation.toolLabel}</div>
+        <div className="tc-shell-header-actions">
+          {hasRawDetails && (
+            <button
+              className="tc-raw-toggle"
+              type="button"
+              onClick={onRawDetailsToggle}
+              aria-expanded={rawDetailsOpen}
+            >
+              原始详情
+            </button>
+          )}
+          {onStopTool && (
+            <button
+              className="tc-stop-turn-btn tc-shell-stop-btn"
+              type="button"
+              onClick={onStopTool}
+              disabled={stopRequested}
+            >
+              {stopRequested ? "停止中" : "停止工具"}
+            </button>
+          )}
+          <span className={`tc-shell-status tc-shell-status-${presentation.footerStatus.tone}`}>
+            {presentation.footerStatus.tone === "success" ? "✓ " : ""}
+            {presentation.footerStatus.label}
+          </span>
+        </div>
       </div>
+
+      <div className="tc-shell-body">
+        {presentation.command && (
+          <pre className="tc-shell-command">
+            <span className="tc-shell-prompt">$ </span>
+            {presentation.command}
+          </pre>
+        )}
+        {presentation.primaryOutput && (
+          <pre className="tc-shell-output">{presentation.primaryOutput}</pre>
+        )}
+        {!presentation.primaryOutput && !presentation.command && (
+          <div className="tc-shell-empty">没有可显示的输出</div>
+        )}
+      </div>
+
       {hasRawDetails && rawDetailsOpen && (
         <div className="tc-raw-details">
           {presentation.rawDetails.map((detail) => (
@@ -493,25 +513,60 @@ function ToolDiffPreviewCard({ preview }: { preview: ToolDiffPreview }) {
   );
 }
 
-function ExplorationResultPanel({ result }: { result: ExplorationResult }) {
-  return (
-    <div className="tc-explore-panel">
-      <div className="tc-explore-label">探索结果</div>
-      {result.root && <div className="tc-explore-root">{result.root}</div>}
-      {result.items.length > 0 && (
-        <div className="tc-explore-list">
-          {result.items.map((item) => (
-            <div className="tc-explore-item" key={item}>
-              {item}
-            </div>
-          ))}
-        </div>
-      )}
-      {result.omitted > 0 && (
-        <div className="tc-explore-more">另有 {result.omitted} 项</div>
-      )}
-    </div>
-  );
+function deriveExplorationShellPresentation(
+  tool: ToolInvocation,
+  presentation: ToolPresentation,
+  result: {
+    root: string | null;
+    items: string[];
+    omitted: number;
+  } | null,
+  cmdDetail: string | null,
+  errorLine: string | null,
+  logEntries: Array<{ title: string; body: string }>,
+  detailLines: string[],
+  outputLines: string[],
+  rawOutputLines: string[],
+): ToolPresentation {
+  const command =
+    presentation.command ??
+    cmdDetail ??
+    result?.root ??
+    extractHeaderTitle(tool, []) ??
+    tool.summary ??
+    null;
+
+  const logLines = logEntries
+    .map((entry) => {
+      const title = entry.title.trim();
+      const body = entry.body.trim();
+      if (!title && !body) return null;
+      if (!title) return body;
+      if (!body) return title;
+      return `${title} ${body}`;
+    })
+    .filter((line): line is string => !!line);
+
+  const outputParts = [
+    result && result.items.length > 0
+      ? result.items.join("\n")
+      : uniqueStrings([
+          ...detailLines,
+          ...logLines,
+          ...outputLines,
+          ...rawOutputLines,
+        ]).join("\n"),
+    result && result.omitted > 0 ? `… +${result.omitted} 项` : null,
+    errorLine,
+  ].filter((part): part is string => !!part && part.trim().length > 0);
+
+  return {
+    ...presentation,
+    presentationKind: "command",
+    toolLabel: "Explore",
+    command,
+    primaryOutput: outputParts.length > 0 ? outputParts.join("\n\n") : presentation.primaryOutput,
+  };
 }
 
 export const ToolCallCard = memo(ToolCallCardImpl, areToolCardPropsEqual);

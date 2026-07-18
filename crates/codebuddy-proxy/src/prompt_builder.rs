@@ -297,7 +297,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 ///
 /// Tool results are emitted as plain text:
 /// ```text
-/// 下面是工具调用结果，收到请继续
+/// Tool result:
 /// ID: <tool_call_id>
 /// <result body>
 /// ```
@@ -306,8 +306,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 /// block handling in the CLI; the model correlates a result to its `tool_use`
 /// via the `ID:` line. The result payload is just text after the header line,
 /// so a 40KB diff or a literal marker inside it cannot corrupt the `ID:`
-/// pairing.
-const TOOL_RESULT_CONTINUE_HINT: &str = "下面是工具调用结果，收到请继续";
+/// pairing. The leading `Tool result:` line only disambiguates a tool
+/// output from a genuine user follow-up; agentic continuation is left to
+/// the system prompt so no per-turn nudge is needed.
+const TOOL_RESULT_HINT: &str = "Tool result:";
 pub fn build_incremental_tail(messages: &[OaiMessage]) -> Value {
     let convo: Vec<&OaiMessage> = messages.iter().filter(|m| m.role != "system").collect();
     let last_assistant_idx = convo.iter().rposition(|m| m.role == "assistant");
@@ -347,7 +349,7 @@ pub fn build_incremental_tail(messages: &[OaiMessage]) -> Value {
                     // total budget up-front so a second result cannot squeeze in
                     // after a near-full first body.
                     let id = m.tool_call_id.clone().unwrap_or_default();
-                    let header = format!("{TOOL_RESULT_CONTINUE_HINT}\nID: {id}\n");
+                    let header = format!("{TOOL_RESULT_HINT}\nID: {id}\n");
                     let header_chars = header.chars().count();
                     let sep = if parts.is_empty() { 0 } else { 2 }; // "\n\n" between parts
                     let remaining_budget = MAX_REFLOW_TOTAL_CHARS
@@ -571,7 +573,7 @@ mod tests {
         assert_eq!(
             out,
             Value::String(format!(
-                "{TOOL_RESULT_CONTINUE_HINT}\nID: call_1\nsunny, 20C\n\nthanks"
+                "{TOOL_RESULT_HINT}\nID: call_1\nsunny, 20C\n\nthanks"
             ))
         );
     }
@@ -581,7 +583,9 @@ mod tests {
         let out = build_incremental_tail(&msgs);
         assert_eq!(
             out,
-            Value::String(format!("{TOOL_RESULT_CONTINUE_HINT}\nID: call_1\nresult"))
+            Value::String(format!(
+                "{TOOL_RESULT_HINT}\nID: call_1\nresult"
+            ))
         );
     }
     #[test]
@@ -647,7 +651,7 @@ mod tests {
         let out = build_incremental_tail(&msgs);
         let s = out.as_str().expect("string");
         assert!(
-            s.starts_with(&format!("{TOOL_RESULT_CONTINUE_HINT}\nID: call_1\n")),
+            s.starts_with(&format!("{TOOL_RESULT_HINT}\nID: call_1\n")),
             "continue hint + header preserved: {s}"
         );
         assert!(s.contains("truncated"), "body truncated");

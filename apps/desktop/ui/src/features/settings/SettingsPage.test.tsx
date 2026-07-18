@@ -1013,9 +1013,8 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.change(screen.getByLabelText("搜索已归档聊天"), {
       target: { value: "" },
     });
-    fireEvent.change(screen.getByLabelText("归档项目筛选"), {
-      target: { value: "/Users/kothchen/code/Kodex" },
-    });
+    fireEvent.click(screen.getByLabelText("归档项目筛选"));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "Kodex" }));
     expect(screen.getByText("Fix codex-acp bundle error")).toBeInTheDocument();
     expect(screen.queryByText("开发 bluedot 应用")).not.toBeInTheDocument();
 
@@ -1034,15 +1033,42 @@ describe("SettingsPage LSP settings", () => {
       await screen.findByText("已恢复 Fix codex-acp bundle error"),
     ).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("归档项目筛选"), {
-      target: { value: "all" },
-    });
+    fireEvent.click(screen.getByLabelText("归档项目筛选"));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "全部项目" }));
     fireEvent.click(
       screen.getByRole("button", { name: "删除对话 开发 bluedot 应用" }),
     );
     await waitFor(() =>
       expect(sessionDeleteArchived).toHaveBeenCalledWith("archived-2"),
     );
+  });
+
+  it("paginates archived sessions when there are more than one page", async () => {
+    vi.mocked(sessionListArchived).mockResolvedValue(
+      Array.from({ length: 15 }, (_, index) =>
+        archivedSession({
+          id: `archived-${index + 1}`,
+          title: `归档会话 ${index + 1}`,
+          workspace_root: `/Users/kothchen/code/Project-${Math.floor(index / 5) + 1}`,
+        }),
+      ),
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已归档" }));
+
+    expect(await screen.findByText("归档会话 1")).toBeInTheDocument();
+    expect(screen.getByText("归档会话 12")).toBeInTheDocument();
+    expect(screen.queryByText("归档会话 13")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("归档分页")).toHaveTextContent("第 1-12 项，共 15 项");
+
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(await screen.findByText("归档会话 13")).toBeInTheDocument();
+    expect(screen.getByText("归档会话 15")).toBeInTheDocument();
+    expect(screen.queryByText("归档会话 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("归档分页")).toHaveTextContent("第 13-15 项，共 15 项");
   });
 
   it("deletes all archived sessions after confirmation", async () => {
@@ -1852,9 +1878,9 @@ describe("SettingsPage LSP settings", () => {
     // ModelEntrySelect is a custom button+listbox; open the trigger and
     // click the desired option.
     fireEvent.click(multimodal);
-    fireEvent.click(screen.getByRole("option", { name: "支持图像" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "支持图像" }));
     fireEvent.click(reasoning);
-    fireEvent.click(screen.getByRole("option", { name: "Medium" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "Medium" }));
 
     fireEvent.click(screen.getByRole("button", { name: "保存模型列表" }));
 
@@ -2155,6 +2181,7 @@ describe("SettingsPage LSP settings", () => {
     await waitFor(() =>
       expect(settingsSaveCustomProvider).toHaveBeenCalledWith(
         {
+          providerId: null,
           label: "Lab Provider",
           endpoint: "https://api.lab.test/v1/chat/completions",
           protocol: "responses",
@@ -2275,6 +2302,7 @@ describe("SettingsPage LSP settings", () => {
     await waitFor(() =>
       expect(settingsSaveCustomProvider).toHaveBeenCalledWith(
         {
+          providerId: "custom",
           label: "Lab Provider",
           endpoint: "https://api.edited.test/v1/responses",
           protocol: "responses",
@@ -2326,7 +2354,7 @@ describe("SettingsPage LSP settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "移除 Lab Provider" }));
 
     await waitFor(() =>
-      expect(settingsRemoveCustomProvider).toHaveBeenCalledWith(null),
+      expect(settingsRemoveCustomProvider).toHaveBeenCalledWith("custom", null),
     );
     await screen.findByText("自定义 provider 已移除，后续新建会话生效");
     expect(screen.getByLabelText("byok_provider_profile")).toHaveTextContent(
@@ -2416,7 +2444,7 @@ describe("SettingsPage LSP settings", () => {
     expect(usageGetSummary).toHaveBeenCalledWith(
       expect.objectContaining({
         group_by: "model",
-        all_workspaces: false,
+        all_workspaces: true,
         include_archived: false,
       }),
     );
@@ -2429,7 +2457,7 @@ describe("SettingsPage LSP settings", () => {
     expect(screen.queryByText(/USD|\$/)).not.toBeInTheDocument();
     const dashboard = screen.getByLabelText("用量仪表盘");
     expect(dashboard).toBeInTheDocument();
-    expect(within(dashboard).getByText("USAGE controlleris")).toBeInTheDocument();
+    expect(within(dashboard).getByText("USAGE OVERVIEW")).toBeInTheDocument();
     expect(within(dashboard).getByText("PROMPT")).toBeInTheDocument();
     expect(within(dashboard).getByText("COMPLETION")).toBeInTheDocument();
     expect(within(dashboard).getByText("AVG TOKEN")).toBeInTheDocument();
@@ -2516,7 +2544,7 @@ describe("SettingsPage LSP settings", () => {
     await openSettingsPane("用量");
 
     const dashboard = await screen.findByLabelText("用量仪表盘");
-    expect(within(dashboard).getByText("USAGE controlleris")).toBeInTheDocument();
+    expect(within(dashboard).getByText("USAGE OVERVIEW")).toBeInTheDocument();
     expect(within(dashboard).getByText("REQUESTS")).toBeInTheDocument();
     expect(within(dashboard).getByText("LATENCY")).toBeInTheDocument();
 
@@ -2543,7 +2571,7 @@ describe("SettingsPage LSP settings", () => {
     expect(within(dashboard).queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("requests usage summaries by agent, date range, workspace scope, and archived toggle", async () => {
+  it("requests usage summaries by agent, date range, and archived toggle", async () => {
     vi.mocked(usageGetSummary).mockResolvedValue([]);
 
     render(<SettingsPage onBack={vi.fn()} />);
@@ -2567,15 +2595,6 @@ describe("SettingsPage LSP settings", () => {
           group_by: "agent",
           from: expect.any(String),
           to: expect.any(String),
-        }),
-      ),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "全部工作区" }));
-    await waitFor(() =>
-      expect(usageGetSummary).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          all_workspaces: true,
         }),
       ),
     );

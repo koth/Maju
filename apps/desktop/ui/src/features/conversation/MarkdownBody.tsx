@@ -159,6 +159,32 @@ function MarkdownBody({ content }: Props) {
 export default memo(MarkdownBody);
 
 function CopyCodeButton({ text }: { text: string }) {
+  return (
+    <CopyTextButton
+      text={text}
+      label="复制代码"
+      copiedLabel="已复制代码"
+      className="md-code-copy"
+      copiedClassName="md-code-copy-copied"
+    />
+  );
+}
+
+export interface CopyTextButtonProps {
+  text: string;
+  label: string;
+  copiedLabel: string;
+  className: string;
+  copiedClassName?: string;
+}
+
+export function CopyTextButton({
+  text,
+  label,
+  copiedLabel,
+  className,
+  copiedClassName,
+}: CopyTextButtonProps) {
   const [copied, setCopied] = useState(false);
   const resetTimerRef = useRef<number | null>(null);
 
@@ -182,12 +208,18 @@ function CopyCodeButton({ text }: { text: string }) {
     }, 1600);
   }, [text]);
 
+  const resolvedClassName = copied
+    ? copiedClassName
+      ? `${className} ${copiedClassName}`
+      : className
+    : className;
+
   return (
     <button
       type="button"
-      className={copied ? "md-code-copy md-code-copy-copied" : "md-code-copy"}
-      aria-label={copied ? "已复制代码" : "复制代码"}
-      title={copied ? "已复制" : "复制代码"}
+      className={resolvedClassName}
+      aria-label={copied ? copiedLabel : label}
+      title={copied ? "已复制" : label}
       onClick={handleCopy}
     >
       {copied ? (
@@ -264,7 +296,7 @@ function isMarkdownImageElement(child: ReactNode) {
   return child.props.className === "md-image" || child.type === "img" || Boolean(child.props.src);
 }
 
-function repairCompactMarkdown(content: string) {
+export function repairCompactMarkdown(content: string) {
   const lines = repairCompactCodeFences(normalizeMarkdownInput(content)).split(/\r?\n/);
   let inFence = false;
   const repaired: string[] = [];

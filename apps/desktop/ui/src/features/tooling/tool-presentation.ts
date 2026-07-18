@@ -358,8 +358,23 @@ function stringValue(value: unknown): string | null {
 function normalizeOutput(output: string | null | undefined): string | null {
   if (!output) return null;
   const decoded = decodeEscapedLineBreaks(output);
-  const normalized = stripAnsi(decoded).replace(/\r\n/g, "\n").trim();
+  const normalized = stripMarkdownFences(
+    stripAnsi(decoded).replace(/\r\n/g, "\n"),
+  ).trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+function stripMarkdownFences(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("```")) return text;
+
+  const fenced = trimmed.match(/^```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n```$/);
+  if (fenced) return fenced[1].replace(/\s+$/g, "");
+
+  return trimmed
+    .replace(/^```[a-zA-Z0-9_-]*\r?\n?/, "")
+    .replace(/\r?\n```\s*$/, "")
+    .replace(/\s+$/g, "");
 }
 
 function decodeEscapedLineBreaks(text: string): string {

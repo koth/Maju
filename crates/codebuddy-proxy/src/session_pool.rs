@@ -247,11 +247,32 @@ pub fn tool_signature_of(tools: &Option<Vec<crate::openai_types::OaiTool>>) -> S
 /// rollout directory: canonicalize (so symlinks like `/tmp`→`/private/tmp`
 /// match), drop the leading separator, then replace every remaining separator
 /// with `-`. e.g. `/Users/kothchen/code/Kodex` → `Users-kothchen-code-Kodex`.
+///
+/// On Windows, `std::fs::canonicalize` returns a *verbatim* path prefixed
+/// with `\\?\` (e.g. `\\?\C:\Users\...`). Both the verbatim prefix and the
+/// drive-letter colon are invalid in directory names, so they are stripped
+/// before slugifying — otherwise `fs::create_dir_all` under `projects/<slug>`
+/// fails with `ERROR_INVALID_NAME` (code 123).
 fn project_dir_slug(cwd: &Path) -> String {
     let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let s = resolved.to_string_lossy();
-    let s = s.strip_prefix(std::path::MAIN_SEPARATOR).unwrap_or(&s);
-    s.replace(std::path::MAIN_SEPARATOR, "-")
+    let s = resolved.to_string_lossy().into_owned();
+    let stripped: &str = if cfg!(target_os = "windows") {
+        // Drop the `\\?\` verbatim prefix that canonicalize adds on Windows.
+        let base = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        let bytes = base.as_bytes();
+        // Strip the drive-letter prefix such as `C:\` or `C:/`.
+        if base.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+            &base[3..]
+        } else {
+            base
+        }
+    } else {
+        &s
+    };
+    let stripped = stripped
+        .strip_prefix(std::path::MAIN_SEPARATOR)
+        .unwrap_or(stripped);
+    stripped.replace(std::path::MAIN_SEPARATOR, "-")
 }
 
 /// On-disk rollout path the CLI writes for a session: `<home>/projects/<slug>/<id>.jsonl`.
@@ -319,6 +340,10 @@ mod rollout_tests {
         let slug = project_dir_slug(&cwd);
         assert!(!slug.contains(std::path::MAIN_SEPARATOR), "slug={slug}");
         assert!(!slug.starts_with(std::path::MAIN_SEPARATOR));
+        // On Windows the slug must not contain a drive-letter colon — it is
+        // invalid in directory names and breaks `fs::create_dir_all` under
+        // `projects/<slug>`.
+        assert!(!slug.contains(':'), "slug={slug}");
     }
 
     #[test]

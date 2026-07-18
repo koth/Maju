@@ -1071,12 +1071,13 @@ impl SessionStore {
     }
 
     /// Count token-reporting usage events (`TurnDelta` + `SessionTotal`) in
-    /// the request's date range. Unlike [`query_usage_summary`], this does NOT
-    /// merge carry-over baseline events, so the count reflects only in-range
-    /// requests. Used by the settings "24H REQ" card, which needs an accurate
-    /// rolling-24h request count undiluted by pre-range `SessionTotal`
-    /// baselines (those would otherwise be folded in by
-    /// [`merge_baseline_events`] and counted by [`update_usage_summary_row`]).
+    /// the request's date range. Each CodeBuddy round emits one `SessionTotal`
+    /// plus one `TurnDelta`, and the CodeBuddy backend makes ~2 model API
+    /// calls per round (verified: backend Δrequests ≈ 2 × our rounds). Counting
+    /// both scopes therefore tracks the backend's request count, whereas
+    /// counting only `SessionTotal` under-counts by ~2×. Unlike
+    /// [`query_usage_summary`], this does NOT merge carry-over baseline
+    /// events, so the count reflects only in-range requests.
     pub fn query_usage_request_count(
         &self,
         request: UsageSummaryRequest,
@@ -2917,8 +2918,11 @@ fn update_usage_summary_row(
     };
 
     row.event_count += 1;
-    // P5: only TurnDelta / SessionTotal represent an actual token-reporting
-    // request; ContextSnapshot is occupancy-only telemetry.
+    // P5: request_count counts both `TurnDelta` and `SessionTotal`. A
+    // CodeBuddy round emits one of each, and the backend makes ~2 model API
+    // calls per round, so counting both tracks the backend's request count
+    // (counting only `SessionTotal` under-counts by ~2×). ContextSnapshot is
+    // occupancy-only telemetry and is excluded.
     if matches!(
         event.scope,
         UsageEventScope::TurnDelta | UsageEventScope::SessionTotal

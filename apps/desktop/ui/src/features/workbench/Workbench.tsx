@@ -315,6 +315,7 @@ export function Workbench() {
   const [reviewFocusRequest, setReviewFocusRequest] = useState<{
     changeSetId: string;
     token: number;
+    path?: string;
   } | null>(null);
   const autoReviewSignatureRef = useRef<string | null>(null);
   const reviewFocusSeqRef = useRef(0);
@@ -684,7 +685,21 @@ export function Workbench() {
     setRightPanelCollapsed(false);
     reviewFocusSeqRef.current += 1;
     const token = reviewFocusSeqRef.current;
-    setReviewFocusRequest({ changeSetId, token });
+    setReviewFocusRequest({ changeSetId, token, path: undefined });
+    setReviewPreferredChangeSet({
+      id: changeSetId,
+      token,
+      consumedSignature: null,
+    });
+    setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
+  }, [setRightPanelCollapsed]);
+
+  const handleReviewFileSelect = useCallback((path: string, changeSetId: string) => {
+    setRightPanelCollapsed(false);
+    setReviewPanelExpanded(false);
+    reviewFocusSeqRef.current += 1;
+    const token = reviewFocusSeqRef.current;
+    setReviewFocusRequest({ changeSetId, token, path });
     setReviewPreferredChangeSet({
       id: changeSetId,
       token,
@@ -1250,9 +1265,7 @@ export function Workbench() {
                       snapshot={snapshot}
                       onPermissionSelect={handlePermissionSelect}
                       turnChangeSetsByMessageId={timelineTurnChangeSets}
-                      onReviewFileSelect={(path, changeSetId) =>
-                        handleOpenDiffTab(path, "change-set", undefined, changeSetId)
-                      }
+                      onReviewFileSelect={handleReviewFileSelect}
                       onReviewChangeSetSelect={handleReviewChangeSetSelect}
                       hiddenPermissionRequestIds={hiddenPermissionRequestIds}
                       onRetryUserMessage={handleRetryUserMessage}

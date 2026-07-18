@@ -735,6 +735,96 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".streaming-cursor")).toBeTruthy();
   });
 
+  it("copies a completed assistant message as markdown", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "结论：已完成。\n\n```ts\nconst x = 1;\n```",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".streaming-cursor")).toBeNull();
+    const copyButton = within(container).getByRole("button", { name: "复制为 Markdown" });
+
+    fireEvent.click(copyButton);
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledTimes(1);
+    });
+    expect(writeText.mock.calls[0][0]).toContain("结论：已完成。");
+    expect(writeText.mock.calls[0][0]).toContain("const x = 1;");
+    expect(within(container).getByRole("button", { name: "已复制" })).toBeInTheDocument();
+
+    Reflect.deleteProperty(navigator, "clipboard");
+  });
+
+  it("does not show the copy button while an assistant message is streaming", () => {
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body: "still going" }],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(within(container).queryByRole("button", { name: "复制为 Markdown" })).toBeNull();
+  });
+
+  it("only shows the copy button on the final assistant message, not earlier ones", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "earlier conclusion" },
+        { id: "msg-2", role: "Assistant", body: "final conclusion" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    const copyButtons = within(container).queryAllByRole("button", {
+      name: "复制为 Markdown",
+    });
+    expect(copyButtons).toHaveLength(1);
+    const assistantRows = container.querySelectorAll(".msg-assistant");
+    expect(assistantRows[1]?.contains(copyButtons[0])).toBe(true);
+    expect(assistantRows[0]?.contains(copyButtons[0])).toBe(false);
+  });
+
   it("does not let stale snapshot bodies overwrite newer streaming deltas", () => {
     replaceStreamingMessageBody("stream-store-heading", "\n\n##xxxx\n\n#### yy");
 

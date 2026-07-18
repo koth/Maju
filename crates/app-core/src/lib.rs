@@ -1762,19 +1762,47 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
     }
 
     fn mock_agent_command() -> String {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let cargo = cargo.replace('\\', "/");
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("app-core should live under crates/app-core")
-            .join("Cargo.toml");
-        let manifest = manifest.display().to_string().replace('\\', "/");
-        format!(
-            "{} run --manifest-path {} -p mock-acp-agent --quiet --",
-            shell_words::quote(&cargo),
-            shell_words::quote(&manifest)
-        )
+        static BINARY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let path = BINARY.get_or_init(|| {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|path| path.parent())
+                .expect("app-core should live under crates/app-core")
+                .join("Cargo.toml");
+            let status = std::process::Command::new(&cargo)
+                .arg("build")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .arg("-p")
+                .arg("mock-acp-agent")
+                .arg("--quiet")
+                .status()
+                .expect("failed to invoke cargo build for mock-acp-agent");
+            assert!(status.success(), "cargo build -p mock-acp-agent failed");
+            let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(|path| path.parent())
+                    .expect("workspace root")
+                    .join("target")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let exe = if cfg!(windows) {
+                "mock-acp-agent.exe"
+            } else {
+                "mock-acp-agent"
+            };
+            let binary = std::path::Path::new(&target_dir).join("debug").join(exe);
+            assert!(
+                binary.exists(),
+                "mock-acp-agent binary not found at {}",
+                binary.display()
+            );
+            binary.to_string_lossy().into_owned()
+        });
+        shell_words::quote(path).to_string()
     }
 
     fn wait_for_control(app: &mut Application, category: SessionConfigCategory) {

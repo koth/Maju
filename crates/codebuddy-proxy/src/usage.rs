@@ -48,13 +48,37 @@ impl CliUsage {
 
     /// Map a per-turn delta into the OpenAI usage shape that
     /// `codex_api_proxy::normalized_chat_usage` already understands.
+    ///
+    /// **Billing convention normalization.** The CodeBuddy CLI reports
+    /// `input_tokens` in OpenAI convention: it is the full prompt billed
+    /// this turn and *already subsumes* `cache_read_input_tokens` + a
+    /// cache-write chunk (for glm-5.2-ioa, `input_tokens ==
+    /// cache_read_input_tokens + cache_creation_input_tokens` exactly). The
+    /// CodeBuddy backend, however, bills in Anthropic convention: cache reads
+    /// are counted *additively* on top of the reported input. Forwarding only
+    /// `input` therefore under-counts the backend's billed input by the
+    /// cache-read portion (~2× for cache-heavy agentic turns).
+    ///
+    /// Reconciled against a real glm-5.2-ioa session (36 turns):
+    ///   our Σ input_delta = 1,168,561
+    ///   our Σ cache_read_delta = 1,132,992
+    ///   input + cache_read = 2,301,553  vs  backend Δ input = 2,308,053 (0.3%)
+    /// So the billable input the backend tracks = `input + cache_read`.
+    ///
+    /// `cache_read_input_tokens` / `prompt_tokens_details.cached_tokens`
+    /// stay as the honest cache-hit count (display-only breakdown); only the
+    /// billed `prompt_tokens` / `total_tokens` are adjusted to the backend's
+    /// convention. `total_tokens = billable_input + output`.
     pub fn to_openai_usage(&self) -> OaiUsage {
         let cache_read = nonzero(self.cache_read_input_tokens);
         let cache_write = nonzero(self.cache_creation_input_tokens);
+        let billable_input = self
+            .input_tokens
+            .saturating_add(self.cache_read_input_tokens);
         OaiUsage {
-            prompt_tokens: self.input_tokens,
+            prompt_tokens: billable_input,
             completion_tokens: self.output_tokens,
-            total_tokens: self.input_tokens.saturating_add(self.output_tokens),
+            total_tokens: billable_input.saturating_add(self.output_tokens),
             prompt_tokens_details: cache_read.map(|cached_tokens| OaiPromptTokensDetails {
                 cached_tokens,
             }),
@@ -84,16 +108,66 @@ fn nonzero(v: u64) -> Option<u64> {
 /// Returns `None` when the message carries no usage object at all.
 pub fn extract_cli_usage(usage: Option<&Value>) -> Option<CliUsage> {
     let usage = usage?;
-    Some(CliUsage {
-        input_tokens: usage_u64(usage, "input_tokens"),
-        output_tokens: usage_u64(usage, "output_tokens"),
-        cache_read_input_tokens: usage_u64(usage, "cache_read_input_tokens"),
-        cache_creation_input_tokens: usage_u64(usage, "cache_creation_input_tokens"),
-    })
+    // Prefer Claude/Anthropic-format fields (`input_tokens`/
+    // `output_tokens`) and fall back to OpenAI-format names
+    // (`prompt_tokens`/`completion_tokens`) when absent. Some model
+    // backends surfaced through the CodeBuddy CLI (e.g. glm-5.2-ioa)
+    // report usage in OpenAI shape; without the fallback, extraction
+    // returns all-zeros and the turn is recorded as 0 tokens.
+    let extracted = CliUsage {
+        input_tokens: usage_u64_preferred(usage, "input_tokens", "prompt_tokens"),
+        output_tokens: usage_u64_preferred(usage, "output_tokens", "completion_tokens"),
+        cache_read_input_tokens: usage_u64_fallbacks(usage, &[
+            "cache_read_input_tokens",
+            "cached_input_tokens",
+            "cache_read_tokens",
+            "cached_tokens",
+        ]),
+        cache_creation_input_tokens: usage_u64_fallbacks(usage, &[
+            "cache_creation_input_tokens",
+            "cache_write_tokens",
+        ]),
+    };
+    // A usage object whose recognized fields all parse to 0 carries no
+    // information (e.g. an early `message_delta` frame before any tokens
+    // were generated, or a shape we don't map). Treat it as absent so it
+    // cannot become a `Some(zero)` that masks the cumulative-delta fallback
+    // in `resolve_reported_usage` — that was the root cause of `finish=stop`
+    // turns reporting 0 tokens while the CLI's cumulative had advanced.
+    if extracted.input_tokens == 0
+        && extracted.output_tokens == 0
+        && extracted.cache_read_input_tokens == 0
+        && extracted.cache_creation_input_tokens == 0
+    {
+        return None;
+    }
+    Some(extracted)
 }
 
 fn usage_u64(usage: &Value, key: &str) -> u64 {
     usage.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// Read a u64 preferring `primary`; fall back to `secondary` only when
+/// `primary` is absent (not present in the object at all). A present-but-zero
+/// `primary` is still authoritative so a real Claude-format usage object with
+/// `input_tokens: 0` is not masked by an OpenAI `prompt_tokens` field.
+fn usage_u64_preferred(usage: &Value, primary: &str, secondary: &str) -> u64 {
+    if usage.get(primary).is_some() {
+        return usage_u64(usage, primary);
+    }
+    usage_u64(usage, secondary)
+}
+
+/// Try each candidate field in order, returning the first present value
+/// (present-but-zero is authoritative). Falls back to 0 when none exist.
+fn usage_u64_fallbacks(usage: &Value, candidates: &[&str]) -> u64 {
+    for key in candidates {
+        if usage.get(*key).is_some() {
+            return usage_u64(usage, key);
+        }
+    }
+    0
 }
 
 /// Given the previous session baseline and the latest CLI cumulative reading,
@@ -116,14 +190,24 @@ pub fn resolve_turn_usage(
 
 /// Build the OpenAI usage reported to codex/ACP.
 ///
-/// - Billing/turn accounting prefers the **last model-call** usage when the CLI
-///   exposes it on `assistant` / stream events (per-request shape).
-/// - Falls back to the session-cumulative delta from `result.usage`.
+/// - Billing/turn accounting uses the **session-cumulative delta** from
+///   `result.usage` (the net per-turn consumption: cumulative counters
+///   advanced since the previous turn). codex sums each turn's
+///   `prompt_tokens` into its `total_token_usage`, so reporting the
+///   per-request `last_model_call` (whose `input_tokens` is the **full
+///   context size** of the last model call) would inflate the session total
+///   by the entire context every turn — e.g. 5 turns × 50k context reported
+///   as 250k instead of the ~55k real cumulative.
+/// - Falls back to `last_model_call` only when the CLI emitted no cumulative
+///   `result.usage` this turn but did surface a per-call usage (so we still
+///   report something rather than zero).
 /// - Always advances the cumulative baseline from `result.usage` when present
 ///   so subsequent deltas stay correct.
 ///
-/// Returning huge cumulative deltas as `prompt_tokens` makes codex treat them
-/// as live context occupancy and can trip compaction; prefer last-call.
+/// The earlier "report the full context to stop codex from auto-compacting"
+/// concern is moot: the CodeBuddy provider advertises a ~1B context window
+/// (see `app_core::settings::model_context_window_for_provider`), so codex
+/// never compacts CodeBuddy sessions regardless of the reported `used` value.
 pub fn resolve_reported_usage(
     prev: Option<CliUsage>,
     cumulative: Option<CliUsage>,
@@ -134,10 +218,16 @@ pub fn resolve_reported_usage(
         Some(curr) => curr.turn_delta(prev.as_ref()),
         None => CliUsage::default(),
     };
-    let reported = if let Some(call) = last_model_call {
+    // Report the real per-turn net consumption. codex sums this into the
+    // session cumulative, so delta-based reporting keeps totals / daily /
+    // per-model breakdown honest. `last_model_call` (full context size) is
+    // only a fallback when the CLI gave no cumulative reading this turn.
+    let reported = if cumulative.is_some() {
+        delta_usage
+    } else if let Some(call) = last_model_call {
         call.to_openai_usage()
     } else {
-        delta_usage
+        OaiUsage::zero()
     };
     (reported, next_baseline, delta)
 }
@@ -186,9 +276,65 @@ mod tests {
         );
     }
 
+    /// glm-5.2-ioa and other OpenAI-shape backends surface usage with
+    /// `prompt_tokens`/`completion_tokens` instead of Claude's
+    /// `input_tokens`/`output_tokens`. The extractor must fall back so the
+    /// turn is recorded with real numbers instead of zeros.
+    #[test]
+    fn extract_cli_usage_falls_back_to_openai_field_names() {
+        let u = json!({
+            "prompt_tokens": 5000,
+            "completion_tokens": 800,
+            "cached_tokens": 3000,
+        });
+        assert_eq!(
+            extract_cli_usage(Some(&u)),
+            Some(CliUsage {
+                input_tokens: 5000,
+                output_tokens: 800,
+                cache_read_input_tokens: 3000,
+                cache_creation_input_tokens: 0,
+            })
+        );
+    }
+
+    /// When the usage object carries both Claude and OpenAI field names, the
+    /// Claude-format `input_tokens` wins (a present-but-zero value is
+    /// authoritative) so a genuine zero is not masked by a non-zero
+    /// `prompt_tokens` from a different accounting axis.
+    #[test]
+    fn extract_cli_usage_prefers_claude_fields_when_both_present() {
+        let u = json!({
+            "input_tokens": 0,
+            "prompt_tokens": 999,
+            "output_tokens": 42,
+            "completion_tokens": 1,
+        });
+        assert_eq!(
+            extract_cli_usage(Some(&u)),
+            Some(CliUsage {
+                input_tokens: 0,
+                output_tokens: 42,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        );
+    }
+
     #[test]
     fn extract_cli_usage_none_when_absent() {
         assert_eq!(extract_cli_usage(None), None);
+    }
+
+    /// A usage object whose recognized fields are all zero carries no
+    /// information and must be treated as absent, so it cannot become a
+    /// `Some(zero)` that masks the cumulative-delta fallback. Regression
+    /// for `finish=stop` turns reporting 0 tokens while the CLI's
+    /// cumulative had advanced.
+    #[test]
+    fn extract_cli_usage_none_when_all_fields_zero() {
+        let u = json!({"input_tokens": 0, "output_tokens": 0});
+        assert_eq!(extract_cli_usage(Some(&u)), None);
     }
 
     #[test]
@@ -296,15 +442,18 @@ mod tests {
             cache_creation_input_tokens: 1_000,
         };
         let oai = delta.to_openai_usage();
-        assert_eq!(oai.prompt_tokens, 150_000);
+        // Billable input follows the CodeBuddy backend convention
+        // (cache_read additive): input + cache_read.
+        assert_eq!(oai.prompt_tokens, 150_000 + 80_000);
         assert_eq!(oai.completion_tokens, 200);
-        assert_eq!(oai.total_tokens, 150_200);
+        assert_eq!(oai.total_tokens, 150_000 + 80_000 + 200);
         assert_eq!(
             oai.prompt_tokens_details,
             Some(OaiPromptTokensDetails {
                 cached_tokens: 80_000
             })
         );
+        // Honest cache-hit count is preserved as a display-only field.
         assert_eq!(oai.cache_read_input_tokens, Some(80_000));
         assert_eq!(oai.cache_creation_input_tokens, Some(1_000));
     }
@@ -338,9 +487,10 @@ mod tests {
             cache_creation_input_tokens: 5,
         };
         let (oai, next) = resolve_turn_usage(Some(prev), Some(curr));
-        assert_eq!(oai.prompt_tokens, 150);
+        // delta input = 150, delta cache_read = 40 → billable input = 190.
+        assert_eq!(oai.prompt_tokens, 190);
         assert_eq!(oai.completion_tokens, 20);
-        assert_eq!(oai.total_tokens, 170);
+        assert_eq!(oai.total_tokens, 210);
         assert_eq!(oai.cache_read_input_tokens, Some(40));
         assert_eq!(oai.cache_creation_input_tokens, Some(5));
         assert_eq!(next, Some(curr));
@@ -359,8 +509,17 @@ mod tests {
         assert_eq!(next, Some(prev));
     }
 
+    /// With a cumulative `result.usage` reading, the reported usage must be the
+    /// per-turn **delta** (net new tokens), not the `last_model_call`'s full
+    /// context size. codex sums each turn's `prompt_tokens` into the session
+    /// total, so reporting the full context would inflate the total by the
+    /// entire context every turn. Here the delta's input is the cache-write
+    /// jump (~629k) — that is the real consumption this turn and must be what
+    /// surfaces in Settings → 用量. `prompt_tokens` follows the backend's
+    /// `input + cache_read` billing convention (cache_read is 0 here, so the
+    /// billable input equals the delta input).
     #[test]
-    fn reported_usage_prefers_last_model_call_over_cumulative_delta() {
+    fn reported_usage_uses_cumulative_delta_when_present() {
         let prev = CliUsage {
             input_tokens: 300_000,
             output_tokens: 1_000,
@@ -373,8 +532,6 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 629_096,
         };
-        // Pathological cumulative delta (~629k) must not become prompt_tokens
-        // when the last model call reported a sane per-request size.
         let last_call = CliUsage {
             input_tokens: 39_217,
             output_tokens: 519,
@@ -383,30 +540,53 @@ mod tests {
         };
         let (reported, next, delta) =
             resolve_reported_usage(Some(prev), Some(cumulative), Some(last_call));
-        assert_eq!(reported.prompt_tokens, 39_217);
-        assert_eq!(reported.completion_tokens, 519);
+        assert_eq!(reported.prompt_tokens, 629_096);
+        assert_eq!(reported.completion_tokens, 1_839);
+        assert_eq!(reported.cache_creation_input_tokens, Some(629_096));
         assert_eq!(delta.input_tokens, 629_096);
         assert_eq!(next, Some(cumulative));
     }
 
+    /// When the CLI emitted no cumulative `result.usage` this turn, fall back to
+    /// the per-call usage so we still report something rather than zero.
     #[test]
-    fn reported_usage_falls_back_to_delta_without_last_call() {
+    fn reported_usage_falls_back_to_last_model_call_without_cumulative() {
         let prev = CliUsage {
             input_tokens: 100,
             output_tokens: 10,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         };
-        let cumulative = CliUsage {
-            input_tokens: 250,
-            output_tokens: 30,
-            cache_read_input_tokens: 40,
-            cache_creation_input_tokens: 5,
+        let last_call = CliUsage {
+            input_tokens: 39_217,
+            output_tokens: 519,
+            cache_read_input_tokens: 37_888,
+            cache_creation_input_tokens: 1_329,
         };
-        let (reported, next, delta) = resolve_reported_usage(Some(prev), Some(cumulative), None);
-        assert_eq!(reported.prompt_tokens, 150);
-        assert_eq!(reported.completion_tokens, 20);
-        assert_eq!(delta.input_tokens, 150);
-        assert_eq!(next, Some(cumulative));
+        let (reported, next, delta) =
+            resolve_reported_usage(Some(prev), None, Some(last_call));
+        // Fallback path also applies the input + cache_read billing
+        // convention: 39_217 + 37_888 = 77_105.
+        assert_eq!(reported.prompt_tokens, 77_105);
+        assert_eq!(reported.completion_tokens, 519);
+        // No cumulative → delta stays zero and the baseline is unchanged.
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(next, Some(prev));
+    }
+
+    /// With neither a cumulative reading nor a per-call usage, report zero and
+    /// keep the prior baseline.
+    #[test]
+    fn reported_usage_zero_when_neither_present() {
+        let prev = CliUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
+        let (reported, next, delta) = resolve_reported_usage(Some(prev), None, None);
+        assert_eq!(reported, OaiUsage::zero());
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(next, Some(prev));
     }
 }

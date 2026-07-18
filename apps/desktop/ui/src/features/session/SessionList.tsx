@@ -729,7 +729,7 @@ function WorkspaceSection({
   const remoteWorkspace = item.workspace.location?.kind === "remote_linux" ? item.workspace.location : null;
   const workspaceActionRoot = remoteWorkspace ? remoteWorkspaceKey(remoteWorkspace) : workspaceRoot;
   const remoteAgent = remoteAgentForWorkspace(remoteWorkspace);
-  const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
+const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
   const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
   const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
 
@@ -765,7 +765,11 @@ function WorkspaceSection({
           <span className="sl-workspace-copy">
             <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
           </span>
-          <span className="sl-workspace-state">{workspaceStateLabel}</span>
+          <span
+            className="sl-workspace-state"
+            title={workspaceStateLabel}
+            aria-label={workspaceStateLabel}
+          />
         </div>
         <button
           className="sl-workspace-edit"

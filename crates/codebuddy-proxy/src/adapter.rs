@@ -178,14 +178,21 @@ pub async fn run_non_streaming(
                     settle_cli_before_interrupt().await;
                 }
                 let _ = session.interrupt().await;
-                if let Some(u) = drain_turn_tail(session).await {
+                if let Some(u) = drain_turn_tail(session, &mut last_model_call).await {
                     cumulative_usage = Some(u);
                 }
                 finish_reason = "tool_calls".to_string();
                 break;
             }
         } else if ty == "result" {
-            if let Some(u) = extract_cli_usage(msg.result_usage()) {
+            let raw_usage = msg.result_usage();
+            append_codebuddy_proxy_log(&format!(
+                "result raw usage={}",
+                raw_usage
+                    .map(|v| serde_json::to_string(v).unwrap_or_default())
+                    .unwrap_or_else(|| "null".to_string()),
+            ));
+            if let Some(u) = extract_cli_usage(raw_usage) {
                 cumulative_usage = Some(u);
             }
             break;
@@ -391,13 +398,20 @@ pub async fn run_streaming(
                     settle_cli_before_interrupt().await;
                 }
                 let _ = session.interrupt().await;
-                if let Some(u) = drain_turn_tail(session).await {
+                if let Some(u) = drain_turn_tail(session, &mut last_model_call).await {
                     cumulative_usage = Some(u);
                 }
                 break;
             }
         } else if ty == "result" {
-            if let Some(u) = extract_cli_usage(msg.result_usage()) {
+            let raw_usage = msg.result_usage();
+            append_codebuddy_proxy_log(&format!(
+                "result raw usage={}",
+                raw_usage
+                    .map(|v| serde_json::to_string(v).unwrap_or_default())
+                    .unwrap_or_else(|| "null".to_string()),
+            ));
+            if let Some(u) = extract_cli_usage(raw_usage) {
                 cumulative_usage = Some(u);
             }
             break;
@@ -567,28 +581,72 @@ fn take_capture_for(captures: &mut Vec<(String, String)>, name: &str) -> Option<
     Some(captures.remove(idx).1)
 }
 
-/// Pull `input_tokens`/`output_tokens` from a `result` message's `usage`
-/// object. The CLI reports per-turn token usage there. Returns
-/// `(prompt_tokens, completion_tokens)` or `None` when the message carries no
-/// usage object.
 /// After `interrupt()` on a tool_use, drain the session's message channel
 /// through the turn-end `result` so the pooled session is clean for the next
 /// request. The CLI emits a `result` when the interrupted turn ends; if it is
 /// left in the channel, the next `stream()` would receive it and end that turn
 /// prematurely (finish=stop with no output). Bounded by a timeout in case the
-/// CLI doesn't emit a result. Returns the turn's token usage
-/// extracted from the consumed `result` message, so the caller can report the
-/// per-turn delta in the OpenAI response — otherwise the interrupted tool_use
-/// turn would report zero usage.
-async fn drain_turn_tail(session: &Session) -> Option<CliUsage> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+/// CLI doesn't emit a result.
+///
+/// While draining, any late-arriving `assistant` or `stream_event` messages
+/// are consumed; their per-call usage (if present) is captured into
+/// `last_model_call` so it is never lost even when the `result` message never
+/// arrives (timeout) or carries no usage. Without this, the turn would report
+/// zero usage when `last_model_call` was never set in the main loop AND
+/// `drain_turn_tail` times out — the under-counting gap for agentic-first
+/// models like glm-5.2-ioa that emit tool_use before reporting usage.
+async fn drain_turn_tail(
+    session: &Session,
+    last_model_call: &mut Option<CliUsage>,
+) -> Option<CliUsage> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let next = match tokio::time::timeout_at(deadline, session.stream()).await {
             Ok(Ok(Some(msg))) => msg,
             _ => return None,
         };
-        if next.msg_type() == "result" {
-            return extract_cli_usage(next.result_usage());
+        match next.msg_type() {
+            "result" => {
+                let raw_usage = next.result_usage();
+                // Diagnostic: log the CLI's raw `result.usage` JSON so the
+                // per-turn source numbers can be reconciled against the
+                // CodeBuddy backend totals (which are aggregate, not
+                // per-session). Without this we cannot tell whether the
+                // CLI-reported `input_tokens` / `cache_read_*` are already
+                // half of the backend's real consumption at the source.
+                append_codebuddy_proxy_log(&format!(
+                    "result raw usage={}",
+                    raw_usage
+                        .map(|v| serde_json::to_string(v).unwrap_or_default())
+                        .unwrap_or_else(|| "null".to_string()),
+                ));
+                let cumulative = extract_cli_usage(raw_usage);
+                // Also capture per-call usage from the result message itself
+                // as a last-resort fallback when the CLI reports it there
+                // but not in any earlier assistant/stream_event message.
+                if cumulative.is_some() && last_model_call.is_none() {
+                    *last_model_call = cumulative;
+                }
+                return cumulative;
+            }
+            "assistant" => {
+                if let Some(u) = extract_cli_usage(next.usage()) {
+                    *last_model_call = Some(u);
+                }
+            }
+            "stream_event" => {
+                if let Some(ev) = next.event() {
+                    if let Some(u) = extract_cli_usage(ev.get("usage")) {
+                        *last_model_call = Some(u);
+                    }
+                    if let Some(u) =
+                        extract_cli_usage(ev.get("message").and_then(|m| m.get("usage")))
+                    {
+                        *last_model_call = Some(u);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -642,6 +700,16 @@ async fn finalize_turn_usage(
         reported.cache_read_input_tokens.unwrap_or(0),
         reported.cache_creation_input_tokens.unwrap_or(0),
     ));
+    if reported.total_tokens == 0 {
+        append_codebuddy_proxy_log(&format!(
+            "{mode} zero_usage_warning model={model} finish={finish_reason} \
+             had_cumulative={} had_last_call={} baseline_prompt={} baseline_completion={}",
+            current.is_some(),
+            last_model_call.is_some(),
+            cum.input_tokens,
+            cum.output_tokens,
+        ));
+    }
     reported
 }
 

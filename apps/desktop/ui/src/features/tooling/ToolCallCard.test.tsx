@@ -869,8 +869,9 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
 
     fireEvent.click(container.querySelector(".tc-header-line")!);
 
-    expect(container.querySelector(".tc-explore-panel")).toBeTruthy();
-    expect(container.querySelector(".tc-explore-root")?.textContent).toBe(
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
+    expect(container.querySelector(".tc-shell-label")?.textContent).toBe("Explore");
+    expect(container.querySelector(".tc-shell-command")?.textContent).toContain(
       "d:/work/InfiniteCanvasOL",
     );
     expect(container.textContent).toContain(
@@ -879,7 +880,7 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.textContent).not.toContain('["d:\\\\work');
   });
 
-  it("shows diff stats for tracker-confirmed changes", () => {
+it("shows diff stats for tracker-confirmed changes", () => {
     const tool = makeTool({
       status: "Succeeded",
       kind: "edit",
@@ -908,6 +909,45 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     const removed = container.querySelector(".tc-diff-removed");
     expect(added).toBeTruthy();
     expect(removed).toBeTruthy();
+  });
+
+  it("expands editing cards to the diff only", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "edit",
+      name: "Edit",
+      summary: "Edited file",
+      detail_text: "extra detail that should stay hidden",
+      raw_output: "Successfully updated file",
+      diff_paths: ["D:/work/kodex/crates/session-store/src/session_store/tests.rs"],
+      diff_previews: [
+        {
+          path: "D:/work/kodex/crates/session-store/src/session_store/tests.rs",
+          hunks: [
+            {
+              heading: "@@ -1,1 +1,1 @@",
+              lines: [
+                { kind: "Removed", content: "old" },
+                { kind: "Added", content: "new" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-diff-preview")).toBeTruthy();
+    expect(container.querySelector(".tc-cmd-detail")).toBeNull();
+    expect(container.querySelector(".tc-file-path")).toBeNull();
+    expect(container.querySelector(".tc-output-block")).toBeNull();
+    expect(container.querySelector(".tc-shell-panel")).toBeNull();
+    expect(container.textContent).not.toContain("extra detail that should stay hidden");
+    expect(container.textContent).not.toContain("Successfully updated file");
   });
 
   it("shows zero removed count for added-only tracker-confirmed changes", () => {
@@ -1174,6 +1214,32 @@ describe("ToolCallCard tracker-confirmed diffs", () => {
     expect(container.textContent).toContain("Shell");
     expect(container.textContent).toContain("$ Get-ChildItem -Path .");
     expect(container.textContent).toContain("Name");
+    expect(container.textContent).toContain("成功");
+  });
+
+  it("renders explore tools as a shell-style panel when expanded", () => {
+    const tool = makeTool({
+      status: "Succeeded",
+      kind: "read",
+      name: "Read",
+      summary: "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+      raw_input: JSON.stringify({
+        file_path: "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+      }),
+      raw_output: "export function ToolCallCard() {}",
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    fireEvent.click(container.querySelector(".tc-header-line")!);
+
+    expect(container.querySelector(".tc-shell-panel")).toBeTruthy();
+    expect(container.querySelector(".tc-shell-label")?.textContent).toBe("Explore");
+    expect(container.querySelector(".tc-shell-command")?.textContent).toContain(
+      "apps/desktop/ui/src/features/tooling/ToolCallCard.tsx",
+    );
+    expect(container.textContent).toContain("export function ToolCallCard() {}");
     expect(container.textContent).toContain("成功");
   });
 

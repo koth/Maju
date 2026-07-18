@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveRestore,
-  ChevronDown,
   Folder,
   ListFilter,
   Search,
@@ -99,7 +98,6 @@ export type SettingsPane =
   | "codebuddy";
 type SettingsScope = "local" | "remote";
 type UsageDateRange = "today" | "7d" | "30d" | "all";
-type UsageWorkspaceScope = "current" | "all";
 type UpdateStatus =
   | "idle"
   | "checking"
@@ -609,6 +607,7 @@ export function SettingsPage({
     "all" | "with_messages"
   >("all");
   const [archivedWorkspaceFilter, setArchivedWorkspaceFilter] = useState("all");
+  const [archivedPage, setArchivedPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [archivedLoading, setArchivedLoading] = useState(false);
   const [busyAgent, setBusyAgent] = useState<AgentCliId | null>(null);
@@ -697,10 +696,8 @@ export function SettingsPage({
     useState<AppUpdateProgress | null>(null);
   const [usageGroupBy, setUsageGroupBy] =
     useState<UsageSummaryGroupBy>("model");
-  const [usageDateRange, setUsageDateRange] = useState<UsageDateRange>("all");
-  const [usageWorkspaceScope, setUsageWorkspaceScope] =
-    useState<UsageWorkspaceScope>("current");
-  const [usageIncludeArchived, setUsageIncludeArchived] = useState(false);
+  const [usageDateRange, setUsageDateRange] = useState<UsageDateRange>("today");
+  const [usageIncludeArchived, setUsageIncludeArchived] = useState(true);
   const [usageRows, setUsageRows] = useState<UsageSummaryRow[]>([]);
   const [usageDailyBuckets, setUsageDailyBuckets] = useState<
     UsageDailyBucket[]
@@ -793,7 +790,7 @@ export function SettingsPage({
       const range = usageDateRangeBounds(usageDateRange);
       const summaryRequest = {
         group_by: usageGroupBy,
-        all_workspaces: usageWorkspaceScope === "all",
+        all_workspaces: true,
         include_archived: usageIncludeArchived,
         from: range.from,
         to: range.to,
@@ -804,16 +801,31 @@ export function SettingsPage({
       // workspace / archived toggles so it matches the rest of the dashboard.
       const now = new Date();
       const requests24hRequest = {
-        all_workspaces: usageWorkspaceScope === "all",
+        all_workspaces: true,
         include_archived: usageIncludeArchived,
         from: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
         to: now.toISOString(),
+      };
+      // The "每日趋势" chart always renders 30 local-day bars (and its copy
+      // reads "近 30 天"), so the daily series must fetch a fixed 30-day
+      // window regardless of the today/7d/30d/all summary filter. Reusing
+      // `summaryRequest` here made the chart collapse to a single bucket when
+      // the summary filter was set to "today".
+      const dailyStart = new Date(now);
+      dailyStart.setHours(0, 0, 0, 0);
+      dailyStart.setDate(dailyStart.getDate() - 29);
+      const dailySeriesRequest = {
+        all_workspaces: true,
+        include_archived: usageIncludeArchived,
+        from: dailyStart.toISOString(),
+        to: now.toISOString(),
+        utc_offset_minutes: now.getTimezoneOffset(),
       };
       // P2: fetch the model summary and the daily series in parallel so the
       // "每日用量" chart renders real per-day buckets instead of placeholders.
       const [rows, dailyBuckets, requests24h] = await Promise.all([
         usageGetSummary(summaryRequest),
-        usageGetDailySeries(summaryRequest),
+        usageGetDailySeries(dailySeriesRequest),
         usageGetRequestCount(requests24hRequest),
       ]);
       setUsageRows(rows);
@@ -824,7 +836,7 @@ export function SettingsPage({
     } finally {
       setUsageLoading(false);
     }
-  }, [usageDateRange, usageGroupBy, usageIncludeArchived, usageWorkspaceScope]);
+  }, [usageDateRange, usageGroupBy, usageIncludeArchived]);
 
   useEffect(() => {
     load();
@@ -2525,13 +2537,15 @@ export function SettingsPage({
     if (!snapshot) return null;
     if (editingRemoteSettings) {
       return (
-        <section className="settings-section">
-          <h2 className="settings-section-title">Web 工具</h2>
-          <p className="settings-section-desc">
-            给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。
-          </p>
-          <div className="settings-warning">
-            远程会话暂不支持注入本地 Web 工具。
+        <section className="settings-section settings-capability-section">
+          <div className="settings-general-card">
+            <h2 className="settings-section-title">Web 工具</h2>
+            <p className="settings-section-desc">
+              给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。
+            </p>
+            <div className="settings-warning">
+              远程会话暂不支持注入本地 Web 工具。
+            </div>
           </div>
         </section>
       );
@@ -2539,12 +2553,14 @@ export function SettingsPage({
     const webTools = snapshot.web_tools;
     const providerMeta = webToolProviderMeta(webTools.provider);
     return (
-      <section className="settings-section">
-        <h2 className="settings-section-title">Web 工具</h2>
-        <p className="settings-section-desc">
-          给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。
-        </p>
-        <div className="settings-provider-config">
+      <section className="settings-section settings-capability-section">
+        <div className="settings-general-card settings-capability-intro">
+          <h2 className="settings-section-title">Web 工具</h2>
+          <p className="settings-section-desc">
+            给 Codex 和 Claude 本机会话提供搜索与网页抓取能力。
+          </p>
+        </div>
+        <div className="settings-provider-config settings-capability-card">
           <div className="settings-provider-config-head">
             <div>
               <span>{providerMeta.label}</span>
@@ -2635,13 +2651,15 @@ export function SettingsPage({
     if (!snapshot) return null;
     if (editingRemoteSettings) {
       return (
-        <section className="settings-section">
-          <h2 className="settings-section-title">图像能力</h2>
-          <p className="settings-section-desc">
-            识图、生图、改图的降级 MCP 工具。
-          </p>
-          <div className="settings-warning">
-            远程会话暂不支持注入本地图像 MCP 工具。
+        <section className="settings-section settings-capability-section">
+          <div className="settings-general-card">
+            <h2 className="settings-section-title">图像能力</h2>
+            <p className="settings-section-desc">
+              识图、生图、改图的降级 MCP 工具。
+            </p>
+            <div className="settings-warning">
+              远程会话暂不支持注入本地图像 MCP 工具。
+            </div>
           </div>
         </section>
       );
@@ -2655,13 +2673,15 @@ export function SettingsPage({
       byokProfileId,
     ).filter((profile) => profile.configured);
     return (
-      <section className="settings-section">
-        <h2 className="settings-section-title">图像能力</h2>
-        <p className="settings-section-desc">
-          当底层模型缺少识图 / 生图 / 改图能力时，自动注入本地
-          kodex-image MCP 工具降级补齐。
-        </p>
-        <div className="settings-provider-config">
+      <section className="settings-section settings-capability-section">
+        <div className="settings-general-card settings-capability-intro">
+          <h2 className="settings-section-title">图像能力</h2>
+          <p className="settings-section-desc">
+            当底层模型缺少识图 / 生图 / 改图能力时，自动注入本地
+            kodex-image MCP 工具降级补齐。
+          </p>
+        </div>
+        <div className="settings-provider-config settings-capability-card">
           <div className="settings-provider-config-head">
             <div>
               <span>识图（view_image）</span>
@@ -2736,12 +2756,12 @@ export function SettingsPage({
             <button
               type="button"
               className="settings-btn"
-            disabled={
-              busyImage ||
-              !imageViewDraftProvider ||
-              !imageViewDraftModel ||
-              !imageViewDirty
-            }
+              disabled={
+                busyImage ||
+                !imageViewDraftProvider ||
+                !imageViewDraftModel ||
+                !imageViewDirty
+              }
               onClick={handleSaveImageView}
             >
               {busyImage ? "保存中..." : "保存识图配置"}
@@ -2749,7 +2769,7 @@ export function SettingsPage({
           </div>
         </div>
 
-        <div className="settings-provider-config" style={{ marginTop: 16 }}>
+        <div className="settings-provider-config settings-capability-card">
           <div className="settings-provider-config-head">
             <div>
               <span>生图 / 改图（generate_image / edit_image）</span>
@@ -2901,7 +2921,13 @@ export function SettingsPage({
         session.workspace_root.toLowerCase().includes(normalizedSearch);
       return matchesWorkspace && matchesChatFilter && matchesSearch;
     });
-    const groups = groupArchivedSessionsByWorkspace(visibleSessions);
+    const pageSize = 12;
+    const totalPages = Math.max(1, Math.ceil(visibleSessions.length / pageSize));
+    const currentPage = Math.min(archivedPage, totalPages);
+    const pageStart = (currentPage - 1) * pageSize;
+    const pagedSessions = visibleSessions.slice(pageStart, pageStart + pageSize);
+    const groups = groupArchivedSessionsByWorkspace(pagedSessions);
+    const pageEnd = Math.min(pageStart + pagedSessions.length, visibleSessions.length);
 
     return (
       <section className="settings-section settings-archive-section">
@@ -2932,14 +2958,20 @@ export function SettingsPage({
                 value={archivedSearch}
                 placeholder="搜索已归档聊天"
                 onChange={(event) =>
-                  setArchivedSearch(event.currentTarget.value)
+                  {
+                    setArchivedSearch(event.currentTarget.value);
+                    setArchivedPage(1);
+                  }
                 }
               />
               {archivedSearch && (
                 <button
                   type="button"
                   aria-label="清空归档搜索"
-                  onClick={() => setArchivedSearch("")}
+                  onClick={() => {
+                    setArchivedSearch("");
+                    setArchivedPage(1);
+                  }}
                 >
                   <X aria-hidden="true" size={14} />
                 </button>
@@ -2947,37 +2979,36 @@ export function SettingsPage({
             </label>
             <label className="settings-archive-select">
               <ListFilter aria-hidden="true" size={16} />
-              <select
+              <ModelEntrySelect<"all" | "with_messages">
                 aria-label="归档聊天范围"
                 value={archivedChatFilter}
-                onChange={(event) =>
-                  setArchivedChatFilter(
-                    event.currentTarget.value as "all" | "with_messages",
-                  )
-                }
-              >
-                <option value="all">全部聊天</option>
-                <option value="with_messages">有消息</option>
-              </select>
-              <ChevronDown aria-hidden="true" size={15} />
+                options={[
+                  { value: "all", label: "全部聊天" },
+                  { value: "with_messages", label: "有消息" },
+                ]}
+                onChange={(value) => {
+                  setArchivedChatFilter(value);
+                  setArchivedPage(1);
+                }}
+              />
             </label>
             <label className="settings-archive-select">
               <Folder aria-hidden="true" size={16} />
-              <select
+              <ModelEntrySelect
                 aria-label="归档项目筛选"
                 value={archivedWorkspaceFilter}
-                onChange={(event) =>
-                  setArchivedWorkspaceFilter(event.currentTarget.value)
-                }
-              >
-                <option value="all">All projects</option>
-                {workspaceOptions.map((workspace) => (
-                  <option key={workspace.root} value={workspace.root}>
-                    {workspace.name}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown aria-hidden="true" size={15} />
+                options={[
+                  { value: "all", label: "全部项目" },
+                  ...workspaceOptions.map((workspace) => ({
+                    value: workspace.root,
+                    label: workspace.name,
+                  })),
+                ]}
+                onChange={(value) => {
+                  setArchivedWorkspaceFilter(value);
+                  setArchivedPage(1);
+                }}
+              />
             </label>
           </div>
 
@@ -3021,68 +3052,105 @@ export function SettingsPage({
             )}
 
           {groups.length > 0 && (
-            <div className="settings-archive-list">
-              {groups.map((group) => (
-                <section key={group.root} className="settings-archive-group">
-                  <div className="settings-archive-group-head">
-                    <span className="settings-archive-group-title">
-                      <Folder aria-hidden="true" size={16} />
-                      {group.name}
+            <>
+              <div className="settings-archive-list">
+                {groups.map((group) => (
+                  <section key={group.root} className="settings-archive-group">
+                    <div className="settings-archive-group-head">
+                      <span className="settings-archive-group-title">
+                        <Folder aria-hidden="true" size={16} />
+                        {group.name}
+                      </span>
+                      <span>{group.sessions.length} 个聊天</span>
+                    </div>
+                    <div className="settings-archive-rows">
+                      {group.sessions.map((session) => {
+                        const busy = busyArchivedSession === session.id;
+                        return (
+                          <article
+                            key={session.id}
+                            className="settings-archive-row"
+                          >
+                            <div className="settings-archive-row-copy">
+                              <div className="settings-archive-row-title">
+                                {session.title}
+                              </div>
+                              <div className="settings-archive-row-meta">
+                                {formatArchiveDate(session.archived_at)}
+                                {session.message_count > 0
+                                  ? ` · ${session.message_count} 条消息`
+                                  : ""}
+                              </div>
+                            </div>
+                            <div className="settings-archive-row-actions">
+                              <button
+                                type="button"
+                                className="settings-icon-btn"
+                                disabled={busy}
+                                title="恢复对话"
+                                aria-label={`恢复对话 ${session.title}`}
+                                onClick={() =>
+                                  handleRestoreArchivedSession(session)
+                                }
+                              >
+                                <ArchiveRestore aria-hidden="true" size={16} />
+                              </button>
+                              <button
+                                type="button"
+                                className="settings-icon-btn is-danger"
+                                disabled={busy}
+                                title="删除对话"
+                                aria-label={`删除对话 ${session.title}`}
+                                onClick={() =>
+                                  handleDeleteArchivedSession(session)
+                                }
+                              >
+                                <Trash2 aria-hidden="true" size={16} />
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              {visibleSessions.length > pageSize && (
+                <div
+                  className="settings-archive-pagination"
+                  role="navigation"
+                  aria-label="归档分页"
+                >
+                  <span className="settings-archive-pagination-summary">
+                    第 {pageStart + 1}-{pageEnd} 项，共 {visibleSessions.length} 项
+                  </span>
+                  <div className="settings-archive-pagination-actions">
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={currentPage <= 1}
+                      onClick={() => setArchivedPage((page) => Math.max(1, page - 1))}
+                    >
+                      上一页
+                    </button>
+                    <span className="settings-archive-pagination-page">
+                      {currentPage} / {totalPages}
                     </span>
-                    <span>{group.sessions.length} 个聊天</span>
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={currentPage >= totalPages}
+                      onClick={() =>
+                        setArchivedPage((page) => Math.min(totalPages, page + 1))
+                      }
+                    >
+                      下一页
+                    </button>
                   </div>
-                  <div className="settings-archive-rows">
-                    {group.sessions.map((session) => {
-                      const busy = busyArchivedSession === session.id;
-                      return (
-                        <article
-                          key={session.id}
-                          className="settings-archive-row"
-                        >
-                          <div className="settings-archive-row-copy">
-                            <div className="settings-archive-row-title">
-                              {session.title}
-                            </div>
-                            <div className="settings-archive-row-meta">
-                              {formatArchiveDate(session.archived_at)}
-                              {session.message_count > 0
-                                ? ` · ${session.message_count} 条消息`
-                                : ""}
-                            </div>
-                          </div>
-                          <div className="settings-archive-row-actions">
-                            <button
-                              type="button"
-                              className="settings-icon-btn"
-                              disabled={busy}
-                              title="恢复对话"
-                              aria-label={`恢复对话 ${session.title}`}
-                              onClick={() =>
-                                handleRestoreArchivedSession(session)
-                              }
-                            >
-                              <ArchiveRestore aria-hidden="true" size={16} />
-                            </button>
-                            <button
-                              type="button"
-                              className="settings-icon-btn is-danger"
-                              disabled={busy}
-                              title="删除对话"
-                              aria-label={`删除对话 ${session.title}`}
-                              onClick={() =>
-                                handleDeleteArchivedSession(session)
-                              }
-                            >
-                              <Trash2 aria-hidden="true" size={16} />
-                            </button>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))}
-            </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </section>
@@ -3134,17 +3202,72 @@ export function SettingsPage({
 
     return (
       <section className="settings-section settings-usage-section">
-        <div className="settings-section-head">
-          <div>
-            <h2 className="settings-section-title">用量</h2>
-            <p className="settings-section-desc">
-              查看当前工作区可上报智能体（Codex、Claude）汇总的 token 用量，不包含计价。
-              CodeBuddy 等不可上报详细用量的第三方智能体不纳入此面板，但会话中的实时上下文占用仍可在工作区环境信息中查看。
-            </p>
+        <div
+          className="settings-usage-toolbar-strip"
+          role="toolbar"
+          aria-label="用量筛选"
+        >
+          <div className="settings-usage-toolbar-cluster">
+            <div
+              className="settings-usage-toolbar settings-usage-segmented"
+              role="radiogroup"
+              aria-label="用量分组"
+            >
+              {(
+                [
+                  "model",
+                  "agent",
+                  "workspace",
+                  "session",
+                ] as UsageSummaryGroupBy[]
+              ).map((group) => (
+                <button
+                  key={group}
+                  type="button"
+                  className={`settings-usage-chip ${usageGroupBy === group ? "is-selected" : ""}`}
+                  aria-pressed={usageGroupBy === group}
+                  onClick={() => setUsageGroupBy(group)}
+                >
+                  {usageGroupLabel(group)}
+                </button>
+              ))}
+            </div>
+
+            <div
+              className="settings-usage-toolbar settings-usage-segmented"
+              role="radiogroup"
+              aria-label="用量时间范围"
+            >
+              {(["today", "7d", "30d", "all"] as UsageDateRange[]).map(
+                (range) => (
+                  <button
+                    key={range}
+                    type="button"
+                    className={`settings-usage-chip ${usageDateRange === range ? "is-selected" : ""}`}
+                    aria-pressed={usageDateRange === range}
+                    onClick={() => setUsageDateRange(range)}
+                  >
+                    {usageDateRangeLabel(range)}
+                  </button>
+                ),
+              )}
+            </div>
+
+            <label className="settings-usage-checkbox">
+              <input
+                type="checkbox"
+                checked={usageIncludeArchived}
+                onChange={(event) =>
+                  setUsageIncludeArchived(event.currentTarget.checked)
+                }
+              />
+              包含已归档
+            </label>
           </div>
+
           <button
             type="button"
-            className="settings-btn"
+            className="settings-btn settings-usage-refresh"
             disabled={usageLoading}
             onClick={loadUsageSummary}
           >
@@ -3157,23 +3280,26 @@ export function SettingsPage({
           aria-label="用量仪表盘"
         >
           <header className="settings-usage-dashboard-header">
-            <div className="settings-usage-dashboard-kicker">USAGE controlleris</div>
-            <div className="settings-usage-headline">
-              {totalTokens > 0 ? `${headlineText} tokens` : "— tokens"}
-            </div>
-            <div className="settings-usage-substats">
-              <span>
-                <strong>{totalRequests.toLocaleString("en-US")}</strong> requests
-              </span>
-              <span className="settings-usage-substats-dot" aria-hidden="true">·</span>
-              <span>
-                <strong>{totalSessions.toLocaleString("en-US")}</strong> sessions
-              </span>
-              <span className="settings-usage-substats-dot" aria-hidden="true">·</span>
-              <span>
-                <strong>{distinctAgents.toLocaleString("en-US")}</strong>{" "}
-                {distinctAgents === 1 ? "agent" : "agents"}
-              </span>
+            <div className="settings-usage-dashboard-copy">
+              <div className="settings-usage-dashboard-kicker">USAGE OVERVIEW</div>
+              <div className="settings-usage-headline">
+                {totalTokens > 0 ? `${headlineText}` : "—"}
+                <span className="settings-usage-headline-unit">tokens</span>
+              </div>
+              <div className="settings-usage-substats">
+                <span className="settings-usage-pill">
+                  <strong>{totalRequests.toLocaleString("en-US")}</strong>
+                  请求
+                </span>
+                <span className="settings-usage-pill">
+                  <strong>{totalSessions.toLocaleString("en-US")}</strong>
+                  会话
+                </span>
+                <span className="settings-usage-pill">
+                  <strong>{distinctAgents.toLocaleString("en-US")}</strong>
+                  智能体
+                </span>
+              </div>
             </div>
           </header>
 
@@ -3186,14 +3312,14 @@ export function SettingsPage({
               <div className="settings-usage-stat-card-value">
                 {formatUsageTokens(totalPrompt)}
               </div>
-              <div className="settings-usage-stat-card-sub">input tokens</div>
+              <div className="settings-usage-stat-card-sub">输入 tokens</div>
             </article>
             <article className="settings-usage-stat-card">
               <div className="settings-usage-stat-card-kicker">COMPLETION</div>
               <div className="settings-usage-stat-card-value">
                 {formatUsageTokens(totalCompletion)}
               </div>
-              <div className="settings-usage-stat-card-sub">output tokens</div>
+              <div className="settings-usage-stat-card-sub">输出 tokens</div>
             </article>
             <article className="settings-usage-stat-card">
               <div className="settings-usage-stat-card-kicker">24H REQ</div>
@@ -3207,7 +3333,7 @@ export function SettingsPage({
                   : usageRequests24h.toLocaleString("en-US")}
               </div>
               <div className="settings-usage-stat-card-sub">
-                {usageRequests24h == null ? "尚无请求" : "过去 24 小时请求数"}
+                {usageRequests24h == null ? "尚无请求" : "近 24 小时请求"}
               </div>
             </article>
             <article className="settings-usage-stat-card">
@@ -3217,7 +3343,7 @@ export function SettingsPage({
               </div>
               <div className="settings-usage-stat-card-sub">
                 {totalRequests > 0
-                  ? `${totalRequests.toLocaleString("en-US")} in · 1 out`
+                  ? `每次请求 · ${totalRequests.toLocaleString("en-US")} 次`
                   : "尚无请求"}
               </div>
             </article>
@@ -3229,7 +3355,7 @@ export function SettingsPage({
           >
             <div className="settings-usage-daily-chart-head">
               <div>
-                <div className="settings-usage-daily-chart-title">DAILY USAGE</div>
+                <div className="settings-usage-daily-chart-title">每日趋势</div>
                 <div className="settings-usage-daily-chart-hint">
                   {usageDailyBuckets.length > 0
                     ? "近 30 天每日 token 用量（本地时间）"
@@ -3241,208 +3367,137 @@ export function SettingsPage({
           </div>
 
           {showChartAndTable && (
-            <table className="settings-usage-model-table" aria-label="模型性能">
-              <thead>
-                <tr>
-                  <th scope="col">MODEL</th>
-                  <th scope="col">REQUESTS</th>
-                  <th scope="col">TOKENS</th>
-                  <th scope="col">LATENCY</th>
-                  <th scope="col">TTFT</th>
-                  <th scope="col">SPEED</th>
-                </tr>
-              </thead>
-              <tbody>
-                {usageRows.map((row) => {
-                  const rowKey = `${usageGroupBy}:${row.label}:${row.model ?? ""}:${row.agent_cli ?? ""}:${row.workspace_root ?? ""}:${row.session_id ?? ""}`;
-                  const breakdown = usageBreakdownParts(row.tokens);
-                  const rowTotal = usageTokenTotal(row.tokens);
-                  const requestsFraction =
-                    maxRequestsInRows > 0
-                      ? Math.min(1, row.request_count / maxRequestsInRows)
-                      : 0;
-                  const tokensFraction =
-                    maxTokensInRows > 0
-                      ? Math.min(1, rowTotal / maxTokensInRows)
-                      : 0;
-                  return (
-                    <tr key={rowKey} className="settings-usage-model-row">
-                      <th scope="row" className="settings-usage-model-cell-name">
-                        <div className="settings-usage-model-name">{row.label}</div>
-                        <div className="settings-usage-model-meta">
-                          {usageRowMeta(row)}
-                        </div>
-                        {breakdown.length > 0 && (
-                          <div
-                            className="settings-usage-breakdown"
-                            aria-label="token 分项"
-                          >
-                            {breakdown.map((item) => (
-                              <span key={item.label}>
-                                {item.label} {formatUsageTokens(item.value)}
-                              </span>
-                            ))}
+            <div className="settings-usage-table-panel">
+              <div className="settings-usage-table-head">
+                <div className="settings-usage-table-title">分组明细</div>
+                <div className="settings-usage-table-hint">
+                  按当前筛选维度查看请求量、tokens 与性能指标
+                </div>
+              </div>
+              <table className="settings-usage-model-table" aria-label="模型性能">
+                <thead>
+                  <tr>
+                    <th scope="col">MODEL</th>
+                    <th scope="col">REQUESTS</th>
+                    <th scope="col">TOKENS</th>
+                    <th scope="col">LATENCY</th>
+                    <th scope="col">TTFT</th>
+                    <th scope="col">SPEED</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usageRows.map((row) => {
+                    const rowKey = `${usageGroupBy}:${row.label}:${row.model ?? ""}:${row.agent_cli ?? ""}:${row.workspace_root ?? ""}:${row.session_id ?? ""}`;
+                    const breakdown = usageBreakdownParts(row.tokens);
+                    const rowTotal = usageTokenTotal(row.tokens);
+                    const requestsFraction =
+                      maxRequestsInRows > 0
+                        ? Math.min(1, row.request_count / maxRequestsInRows)
+                        : 0;
+                    const tokensFraction =
+                      maxTokensInRows > 0
+                        ? Math.min(1, rowTotal / maxTokensInRows)
+                        : 0;
+                    return (
+                      <tr key={rowKey} className="settings-usage-model-row">
+                        <th scope="row" className="settings-usage-model-cell-name">
+                          <div className="settings-usage-model-name">{row.label}</div>
+                          <div className="settings-usage-model-meta">
+                            {usageRowMeta(row)}
                           </div>
-                        )}
-                        {row.context_peak_tokens != null &&
-                          row.context_peak_tokens > 0 && (
-                            <div className="settings-usage-model-peak">
-                              峰值 {formatUsageTokens(row.context_peak_tokens)}
+                          {breakdown.length > 0 && (
+                            <div
+                              className="settings-usage-breakdown"
+                              aria-label="token 分项"
+                            >
+                              {breakdown.map((item) => (
+                                <span key={item.label}>
+                                  {item.label} {formatUsageTokens(item.value)}
+                                </span>
+                              ))}
                             </div>
                           )}
-                      </th>
-                      <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value">
-                          {formatUsageCount(row.request_count)}
-                        </div>
-                        <div
-                          className="settings-usage-row-bar"
-                          aria-hidden="true"
-                        >
-                          <span
-                            className="settings-usage-row-bar-fill is-accent"
-                            style={{ width: `${requestsFraction * 100}%` }}
-                          />
-                        </div>
-                      </td>
-                      <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value">
-                          {formatUsageTokens(rowTotal)}
-                        </div>
-                        <div
-                          className="settings-usage-row-bar"
-                          aria-hidden="true"
-                        >
-                          <span
-                            className="settings-usage-row-bar-fill is-accent"
-                            style={{ width: `${tokensFraction * 100}%` }}
-                          />
-                        </div>
-                      </td>
-                      <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value">
-                          {row.avg_latency_ms != null
-                            ? formatUsageLatency(row.avg_latency_ms)
-                            : "—"}
-                        </div>
-                        <div className="settings-usage-model-cell-hint">
-                          {row.avg_latency_ms != null ? "平均延迟" : "后端未上报"}
-                        </div>
-                      </td>
-                      <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value">
-                          {row.avg_ttft_ms != null
-                            ? formatUsageLatency(row.avg_ttft_ms)
-                            : "—"}
-                        </div>
-                        <div className="settings-usage-model-cell-hint">
-                          {row.avg_ttft_ms != null ? "平均首 token" : "后端未上报"}
-                        </div>
-                      </td>
-                      <td className="settings-usage-model-cell">
-                        <div className="settings-usage-model-cell-value">
-                          {row.avg_tokens_per_second != null
-                            ? formatUsageSpeed(row.avg_tokens_per_second)
-                            : "—"}
-                        </div>
-                        <div className="settings-usage-model-cell-hint">
-                          {row.avg_tokens_per_second != null ? "平均速度" : "后端未上报"}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                          {row.context_peak_tokens != null &&
+                            row.context_peak_tokens > 0 && (
+                              <div className="settings-usage-model-peak">
+                                峰值 {formatUsageTokens(row.context_peak_tokens)}
+                              </div>
+                            )}
+                        </th>
+                        <td className="settings-usage-model-cell">
+                          <div className="settings-usage-model-cell-value">
+                            {formatUsageCount(row.request_count)}
+                          </div>
+                          <div
+                            className="settings-usage-row-bar"
+                            aria-hidden="true"
+                          >
+                            <span
+                              className="settings-usage-row-bar-fill is-accent"
+                              style={{ width: `${requestsFraction * 100}%` }}
+                            />
+                          </div>
+                        </td>
+                        <td className="settings-usage-model-cell">
+                          <div className="settings-usage-model-cell-value">
+                            {formatUsageTokens(rowTotal)}
+                          </div>
+                          <div
+                            className="settings-usage-row-bar"
+                            aria-hidden="true"
+                          >
+                            <span
+                              className="settings-usage-row-bar-fill is-accent"
+                              style={{ width: `${tokensFraction * 100}%` }}
+                            />
+                          </div>
+                        </td>
+                        <td className="settings-usage-model-cell">
+                          <div className="settings-usage-model-cell-value">
+                            {row.avg_latency_ms != null
+                              ? formatUsageLatency(row.avg_latency_ms)
+                              : "—"}
+                          </div>
+                          <div className="settings-usage-model-cell-hint">
+                            {row.avg_latency_ms != null ? "平均延迟" : "后端未上报"}
+                          </div>
+                        </td>
+                        <td className="settings-usage-model-cell">
+                          <div className="settings-usage-model-cell-value">
+                            {row.avg_ttft_ms != null
+                              ? formatUsageLatency(row.avg_ttft_ms)
+                              : "—"}
+                          </div>
+                          <div className="settings-usage-model-cell-hint">
+                            {row.avg_ttft_ms != null ? "平均首 token" : "后端未上报"}
+                          </div>
+                        </td>
+                        <td className="settings-usage-model-cell">
+                          <div className="settings-usage-model-cell-value">
+                            {row.avg_tokens_per_second != null
+                              ? formatUsageSpeed(row.avg_tokens_per_second)
+                              : "—"}
+                          </div>
+                          <div className="settings-usage-model-cell-hint">
+                            {row.avg_tokens_per_second != null ? "平均速度" : "后端未上报"}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {usageError && <div className="settings-error">{usageError}</div>}
+          {usageLoading && <div className="settings-status">正在加载用量...</div>}
+          {!usageLoading && usageRows.length === 0 && (
+            <div className="settings-empty-panel settings-usage-empty">
+              暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。
+            </div>
           )}
         </div>
-
-        <div
-          className="settings-usage-toolbar-strip"
-          role="toolbar"
-          aria-label="用量筛选"
-        >
-          <div
-            className="settings-usage-toolbar"
-            role="radiogroup"
-            aria-label="用量分组"
-          >
-            {(
-              [
-                "model",
-                "agent",
-                "workspace",
-                "session",
-              ] as UsageSummaryGroupBy[]
-            ).map((group) => (
-              <button
-                key={group}
-                type="button"
-                className={`settings-btn ${usageGroupBy === group ? "is-selected" : ""}`}
-                aria-pressed={usageGroupBy === group}
-                onClick={() => setUsageGroupBy(group)}
-              >
-                {usageGroupLabel(group)}
-              </button>
-            ))}
-          </div>
-
-          <div
-            className="settings-usage-toolbar"
-            role="radiogroup"
-            aria-label="用量时间范围"
-          >
-            {(["today", "7d", "30d", "all"] as UsageDateRange[]).map(
-              (range) => (
-                <button
-                  key={range}
-                  type="button"
-                  className={`settings-btn ${usageDateRange === range ? "is-selected" : ""}`}
-                  aria-pressed={usageDateRange === range}
-                  onClick={() => setUsageDateRange(range)}
-                >
-                  {usageDateRangeLabel(range)}
-                </button>
-              ),
-            )}
-          </div>
-
-          <div
-            className="settings-usage-toolbar"
-            role="group"
-            aria-label="用量范围"
-          >
-            {(["current", "all"] as UsageWorkspaceScope[]).map((scope) => (
-              <button
-                key={scope}
-                type="button"
-                className={`settings-btn ${usageWorkspaceScope === scope ? "is-selected" : ""}`}
-                aria-pressed={usageWorkspaceScope === scope}
-                onClick={() => setUsageWorkspaceScope(scope)}
-              >
-                {usageWorkspaceScopeLabel(scope)}
-              </button>
-            ))}
-            <label className="settings-usage-checkbox">
-              <input
-                type="checkbox"
-                checked={usageIncludeArchived}
-                onChange={(event) =>
-                  setUsageIncludeArchived(event.currentTarget.checked)
-                }
-              />
-              包含已归档
-            </label>
-          </div>
-        </div>
-
-        {usageError && <div className="settings-error">{usageError}</div>}
-        {usageLoading && <div className="settings-status">正在加载用量...</div>}
-        {!usageLoading && usageRows.length === 0 && (
-          <div className="settings-empty-panel">
-            暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。
-          </div>
-        )}
       </section>
     );
   };
@@ -3460,22 +3515,24 @@ export function SettingsPage({
         )
       : null;
     return (
-      <section className="settings-section">
-        <div className="settings-section-head">
-          <div>
-            <h2 className="settings-section-title">远程机器</h2>
-            <p className="settings-section-desc">
-              保存常用 Linux 开发机，默认验证用户目录；从 Workbench
-              连接机器后再打开项目。
-            </p>
+      <section className="settings-section settings-remote-section">
+        <div className="settings-general-card settings-remote-intro">
+          <div className="settings-section-head">
+            <div>
+              <h2 className="settings-section-title">远程机器</h2>
+              <p className="settings-section-desc">
+                保存常用 Linux 开发机，默认验证用户目录；从 Workbench
+                连接机器后再打开项目。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="settings-btn is-install"
+              onClick={startNewRemoteProfile}
+            >
+              添加远程机器
+            </button>
           </div>
-          <button
-            type="button"
-            className="settings-btn is-install"
-            onClick={startNewRemoteProfile}
-          >
-            添加远程机器
-          </button>
         </div>
         {remoteContext && (
           <div className="settings-remote-context-card">
@@ -4103,7 +4160,8 @@ export function SettingsPage({
 
         {activePane === "general" && (
           <>
-            <section className="settings-section">
+            <section className="settings-section settings-general-section">
+              <div className="settings-general-card">
               <h2 className="settings-section-title">主题</h2>
               <p className="settings-section-desc">选择深色或浅色界面。</p>
               <div className="settings-theme-grid">
@@ -4140,9 +4198,11 @@ export function SettingsPage({
                   );
                 })}
               </div>
+              </div>
             </section>
 
-            <section className="settings-section">
+            <section className="settings-section settings-general-section">
+              <div className="settings-general-card">
               <h2 className="settings-section-title">应用更新</h2>
               <p className="settings-section-desc">
                 检查 GitHub Release 上的 Kodex 桌面更新。
@@ -4209,9 +4269,11 @@ export function SettingsPage({
                     aria-label="更新下载进度"
                   />
                 )}
+              </div>
             </section>
 
-            <section className="settings-section">
+            <section className="settings-section settings-general-section">
+              <div className="settings-general-card">
               <h2 className="settings-section-title">智能体</h2>
               <p className="settings-section-desc">
                 {editingRemoteSettings && remoteContext
@@ -4314,7 +4376,6 @@ export function SettingsPage({
 
                     {activeAgentTab === "codex-acp" && (
                       <>
-                                   "default"
                         <div className="settings-provider-config">
                           <div className="settings-provider-config-head">
                             <div>
@@ -4366,6 +4427,7 @@ export function SettingsPage({
                   重新检测已安装的 CLI
                 </button>
               </div>
+              </div>
             </section>
           </>
         )}
@@ -4381,11 +4443,13 @@ export function SettingsPage({
         {activePane === "usage" && renderUsagePane()}
 
         {activePane === "lsp" && (
-          <section className="settings-section">
-            <h2 className="settings-section-title">LSP 语言服务</h2>
-            <p className="settings-section-desc">
-              管理编辑器诊断、悬浮提示和补全使用的 language server。
-            </p>
+          <section className="settings-section settings-lsp-section">
+            <div className="settings-general-card settings-lsp-intro">
+              <h2 className="settings-section-title">LSP 语言服务</h2>
+              <p className="settings-section-desc">
+                管理编辑器诊断、悬浮提示和补全使用的 language server。
+              </p>
+            </div>
             {lspError && <div className="settings-error">{lspError}</div>}
             <div className="settings-lsp-list">
               {lspSnapshot?.servers.map((server) => {
@@ -4597,10 +4661,6 @@ function usageDateRangeLabel(range: UsageDateRange): string {
   if (range === "7d") return "7 天";
   if (range === "30d") return "30 天";
   return "全部";
-}
-
-function usageWorkspaceScopeLabel(scope: UsageWorkspaceScope): string {
-  return scope === "all" ? "全部工作区" : "当前工作区";
 }
 
 function usageDateRangeBounds(range: UsageDateRange): {
@@ -4971,7 +5031,7 @@ function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "image")
     return "配置识图、生图、改图的降级 MCP 工具：识图复用对话模型，生/改图独立配置协议与模型。";
   if (pane === "usage")
-    return "按模型、智能体、工作区或会话汇总可上报智能体（Codex、Claude）的 token 用量；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。";
+    return "汇总可上报智能体（Codex、Claude）的 token 用量与性能指标。CodeBuddy 等第三方智能体不纳入统计。";
   if (pane === "lsp")
     return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   if (pane === "codebuddy")

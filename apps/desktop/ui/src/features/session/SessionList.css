@@ -289,30 +289,6 @@
   gap: 5px;
 }
 
-.sl-workspace-state {
-  flex-shrink: 0;
-  padding: 3px 7px;
-  border: 1px solid rgba(143, 202, 255, 0.18);
-  border-radius: 6px;
-  background: rgba(143, 202, 255, 0.08);
-  color: var(--sidebar-accent-hover);
-  font-size: 10px;
-  font-weight: 550;
-  white-space: nowrap;
-}
-
-.is-dormant .sl-workspace-state {
-  border-color: rgba(215, 225, 223, 0.1);
-  background: rgba(215, 225, 223, 0.035);
-  color: var(--text-soft);
-}
-
-.is-dormant.is-remote .sl-workspace-state {
-  border-color: rgba(215, 225, 223, 0.13);
-  background: rgba(215, 225, 223, 0.045);
-  color: rgba(215, 225, 223, 0.7);
-}
-
 .is-dormant.is-remote .sl-workspace-edit {
   cursor: not-allowed;
   opacity: 0.38;
@@ -1119,38 +1095,23 @@
 
 .sl-workspace-state {
   display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 560;
-  letter-spacing: 0;
-  white-space: nowrap;
-}
-
-.sl-workspace-state::before {
   width: 6px;
   height: 6px;
   flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
   background: rgba(215, 225, 223, 0.24);
-  content: "";
 }
 
 .is-connected .sl-workspace-state {
-  color: color-mix(in srgb, var(--sidebar-accent-hover) 74%, var(--text-muted));
-}
-
-.is-connected .sl-workspace-state::before {
   background: var(--sidebar-accent-hover);
 }
 
 .is-dormant.is-remote .sl-workspace-state {
-  color: var(--text-soft);
+  background: rgba(215, 225, 223, 0.24);
 }
 
 .sl-workspace-edit,

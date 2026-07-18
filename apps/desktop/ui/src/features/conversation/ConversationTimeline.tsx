@@ -6,7 +6,7 @@ import type { FileChangeSummary, MessageRole } from "../../types";
 import type { UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
 import { ToolCallCard } from "../tooling/ToolCallCard";
-import MarkdownBody from "./MarkdownBody";
+import MarkdownBody, { CopyTextButton, repairCompactMarkdown } from "./MarkdownBody";
 import {
   ensureStreamingMessageBody,
   subscribeStreamingMessage,
@@ -47,6 +47,7 @@ interface MessageRowProps {
   streaming: boolean;
   isSteer?: boolean;
   retryable?: boolean;
+  copyable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
 }
 
@@ -283,6 +284,7 @@ const MessageRow = memo(function MessageRow({
   streaming,
   isSteer = false,
   retryable = false,
+  copyable = false,
   onRetry,
 }: MessageRowProps) {
   const [editing, setEditing] = useState(false);
@@ -426,6 +428,17 @@ const MessageRow = memo(function MessageRow({
           )}
           {streaming && <span className="streaming-cursor" />}
         </div>
+        {copyable && !streaming && (
+          <div className="msg-assistant-actions">
+            <CopyTextButton
+              text={repairCompactMarkdown(body)}
+              label="复制为 Markdown"
+              copiedLabel="已复制"
+              className="msg-copy-btn"
+              copiedClassName="msg-copy-btn-copied"
+            />
+          </div>
+        )}
       </div>
     );
   }
@@ -1070,6 +1083,7 @@ export function ConversationTimeline({
               streaming={isStreaming}
               isSteer={msg.is_steer}
               retryable={retryableMessages.has(msg.id)}
+              copyable={isLastMessage(i)}
               onRetry={onRetryUserMessage}
             />
           )}

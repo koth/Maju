@@ -1457,6 +1457,8 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
     assert_eq!(buckets[0].by_model.len(), 1);
     assert_eq!(buckets[0].by_model[0].tokens.total_tokens, Some(200));
     assert_eq!(buckets[0].by_model[0].event_count, 2);
+    // request_count counts both SessionTotal + TurnDelta (the backend makes
+    // ~2 API calls per round, so counting both tracks the backend request count).
     assert_eq!(buckets[0].by_model[0].request_count, 2);
 
     // Day B: lone TurnDelta(300) accumulates.
@@ -1464,6 +1466,7 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
     assert_eq!(buckets[1].by_model.len(), 1);
     assert_eq!(buckets[1].by_model[0].tokens.total_tokens, Some(300));
     assert_eq!(buckets[1].by_model[0].event_count, 1);
+    // Day B has only a TurnDelta (no SessionTotal), so request_count = 1.
     assert_eq!(buckets[1].by_model[0].request_count, 1);
 }
 
@@ -1748,7 +1751,8 @@ fn usage_summary_request_count_excludes_context_snapshot_events() {
     assert_eq!(rows[0].event_count, 5, "event_count must count all rows");
     assert_eq!(
         rows[0].request_count, 2,
-        "request_count must exclude ContextSnapshot occupancy-only reports"
+        "request_count counts both SessionTotal + TurnDelta (2 token-reporting \
+         events), excluding ContextSnapshot"
     );
 }
 
@@ -2175,6 +2179,145 @@ fn usage_summary_today_prefers_turn_deltas_after_model_switch() {
     assert_eq!(rows[1].tokens.output_tokens, Some(20));
 }
 
+/// Regression (user report): model A used earlier today was visible in the
+/// "今天" per-model table; after opening a NEW session and using model B,
+/// model A disappeared from the table. Opening a second session must NOT
+/// remove the first session/model's row, because each session's baseline and
+/// in-range TurnDeltas are computed independently per (session, model).
+#[test]
+fn usage_summary_today_keeps_prior_session_model_after_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    // Session 1, model A: started yesterday, used today morning.
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+    // Yesterday baseline: SessionTotal(1000) + TurnDelta(1000), stamped A.
+    for (scope, ts) in [
+        (UsageEventScope::SessionTotal, "1752134400"),
+        (UsageEventScope::TurnDelta, "1752134400"),
+    ] {
+        store
+            .append_usage_event(
+                "s1",
+                &UsageEvent {
+                    scope,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(ts.into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(1_000),
+                        input_tokens: Some(800),
+                        output_tokens: Some(200),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // Today: SessionTotal(1500) + TurnDelta(500), stamped A.
+    for (scope, total, ts) in [
+        (UsageEventScope::SessionTotal, 1_500, "1752220800"),
+        (UsageEventScope::TurnDelta, 500, "1752220800"),
+    ] {
+        store
+            .append_usage_event(
+                "s1",
+                &UsageEvent {
+                    scope,
+                    model: Some("gpt-5.1".into()),
+                    provider: Some("openai".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(ts.into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(total),
+                        input_tokens: Some(total - 100),
+                        output_tokens: Some(100),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    // First check (only session 1 exists): model A must be visible today.
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()),
+            to: Some("1752307200".into()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1, "session 1 model A visible: {rows:?}");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-5.1"));
+    assert_eq!(rows[0].tokens.total_tokens, Some(500));
+
+    // Now open a NEW session 2 with model B, used today afternoon.
+    store.create_session("s2", "claude-sonnet").unwrap();
+    store.update_session_agent_cli("s2", "codex-acp").unwrap();
+    for (scope, total, ts) in [
+        (UsageEventScope::SessionTotal, 80, "1752231600"),
+        (UsageEventScope::TurnDelta, 80, "1752231600"),
+    ] {
+        store
+            .append_usage_event(
+                "s2",
+                &UsageEvent {
+                    scope,
+                    model: Some("claude-sonnet".into()),
+                    provider: Some("anthropic".into()),
+                    agent_cli: Some("codex-acp".into()),
+                    timestamp: Some(ts.into()),
+                    tokens: UsageTokenBreakdown {
+                        total_tokens: Some(total),
+                        input_tokens: Some(60),
+                        output_tokens: Some(20),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Re-check today: BOTH models must still be present.
+    let mut rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()),
+            to: Some("1752307200".into()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+    rows.sort_by(|a, b| a.model.cmp(&b.model));
+    assert_eq!(
+        rows.len(),
+        2,
+        "both sessions' models must remain visible after opening session 2: {rows:?}"
+    );
+    assert_eq!(rows[0].model.as_deref(), Some("claude-sonnet"));
+    assert_eq!(rows[0].tokens.total_tokens, Some(80));
+    assert_eq!(rows[1].model.as_deref(), Some("gpt-5.1"));
+    assert_eq!(
+        rows[1].tokens.total_tokens,
+        Some(500),
+        "model A's today total must be unchanged after session 2 was added"
+    );
+}
+
 /// `query_usage_request_count` must count only in-range token-reporting
 /// events (`TurnDelta` + `SessionTotal`), excluding both the pre-range
 /// `SessionTotal` baseline (which `query_usage_summary` merges in via
@@ -2254,8 +2397,8 @@ fn query_usage_request_count_excludes_baseline_and_context_snapshots() {
         .unwrap();
     assert_eq!(
         count, 3,
-        "must count only in-range token-reporting events (2 TurnDelta + 1 SessionTotal), \
-         excluding the pre-range baseline and the ContextSnapshot"
+        "must count all in-range token-reporting events (2 TurnDelta + 1 \
+         SessionTotal), excluding the pre-range baseline and ContextSnapshot"
     );
 }
 
@@ -2395,7 +2538,7 @@ fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
     assert_eq!(rows[0].session_count, 2, "two sessions expected");
     assert_eq!(
         rows[0].request_count, 4,
-        "2 SessionTotal + 2 TurnDelta = 4 token-reporting events"
+        "request_count counts both SessionTotal + TurnDelta (2 rounds × 2)"
     );
     assert_eq!(rows[0].event_count, 4, "all 4 rows counted");
 }

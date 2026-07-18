@@ -67,6 +67,46 @@ fn converts_responses_request_to_chat_payload() {
     assert_eq!(chat["tool_choice"], "auto");
 }
 
+/// Streaming chat-completions requests must carry `stream_options.include_usage`
+/// so OpenAI-compatible upstreams (grok/xAI, deepseek, kimi, ...) emit a usage
+/// chunk in the stream. Without it the converter surfaces zero tokens and no
+/// generation speed in Settings → 用量.
+#[test]
+fn streaming_chat_payload_requests_usage_in_stream() {
+    let payload = json!({
+        "model": "grok-code",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }]
+        }],
+        "stream": true
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    assert_eq!(chat["stream"], true);
+    assert_eq!(chat["stream_options"]["include_usage"], true);
+}
+
+/// Non-streaming requests must NOT add `stream_options` (the field is only
+/// meaningful for streaming responses and could confuse some upstreams).
+#[test]
+fn non_streaming_chat_payload_omits_stream_options() {
+    let payload = json!({
+        "model": "grok-code",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "hi" }]
+        }],
+        "stream": false
+    });
+
+    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    assert_eq!(chat["stream"], false);
+    assert!(chat.get("stream_options").is_none());
+}
+
 #[test]
 fn converts_responses_namespace_tools_to_chat_function_tools() {
     let payload = json!({

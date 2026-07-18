@@ -169,6 +169,19 @@ describe("deriveToolPresentation", () => {
     expect(presentation.primaryOutput).toBe("Name\n----\nloop.py");
   });
 
+  it("strips markdown code fences from shell output", () => {
+    const presentation = deriveToolPresentation(
+      makeTool({
+        terminal_output: {
+          exit_code: 0,
+          output: "```sh\npackages/foo.ts: const value = 1\n```",
+        },
+      }),
+    );
+
+    expect(presentation.primaryOutput).toBe("packages/foo.ts: const value = 1");
+  });
+
   it("reports failed command status with exit code", () => {
     const presentation = deriveToolPresentation(
       makeTool({

@@ -1770,11 +1770,20 @@ fn responses_payload_to_chat_payload(
         ));
     }
 
+    let stream = payload.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut chat = json!({
         "model": payload.get("model").cloned().unwrap_or_else(|| Value::String("glm-5.1".to_string())),
         "messages": messages,
-        "stream": payload.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        "stream": stream,
     });
+    // Request a usage chunk in the stream so OpenAI-compatible providers that
+    // only emit `usage` when explicitly asked (grok/xAI, deepseek, kimi, ...)
+    // still report token counts. Without `stream_options.include_usage`, a
+    // streaming chat-completions response carries no usage, so the converter
+    // surfaces zero tokens and no generation speed in Settings → 用量.
+    if stream {
+        chat["stream_options"] = json!({ "include_usage": true });
+    }
 
     let model = payload
         .get("model")
