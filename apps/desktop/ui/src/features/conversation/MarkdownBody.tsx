@@ -52,7 +52,7 @@ function MarkdownBody({ content }: Props) {
                   PreTag="div"
                   customStyle={{
                     margin: 0,
-                    padding: "12px",
+                    padding: "12px 12px 12px 0",
                     borderRadius: "0 0 10px 10px",
                     fontSize: "13px",
                     lineHeight: "1.5",

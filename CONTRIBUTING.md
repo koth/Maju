@@ -1,6 +1,6 @@
-# Contributing to Kodex
+# Contributing to Maju
 
-感谢你对 Kodex 的兴趣。这份指南帮助你在正确的方向上贡献代码。
+感谢你对 Maju 的兴趣。这份指南帮助你在正确的方向上贡献代码。
 
 ## 开发环境
 
@@ -116,7 +116,7 @@ ui: fix composer auto-focus on session switch
 
 ## 许可证
 
-Kodex 采用 MIT 许可证。提交代码即表示你同意在 MIT 许可证下授权你的贡献。
+Maju 采用 MIT 许可证。提交代码即表示你同意在 MIT 许可证下授权你的贡献。
 
 ## 提问与讨论
 

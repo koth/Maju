@@ -2382,7 +2382,7 @@ mod tests {
         ));
         assert!(agent_command_is_codex("codex"));
         assert!(!agent_command_is_codex("codebuddy"));
-        assert!(!agent_command_is_codex("kodex-desktop"));
+        assert!(!agent_command_is_codex("maju-desktop"));
     }
 
     #[test]

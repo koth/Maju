@@ -1,6 +1,6 @@
-# Kodex Relay Server
+# Maju Relay Server
 
-公网 WebSocket relay 服务，用于在 Kodex 桌面端（PC）和手机伴侣 app 之间路由端到端加密的控制帧。
+公网 WebSocket relay 服务，用于在 Maju 桌面端（PC）和手机伴侣 app 之间路由端到端加密的控制帧。
 
 - **语言/运行时**：Rust（tokio async）
 - **传输**：WebSocket（生产 `wss://`）

@@ -1,18 +1,20 @@
-# Kodex
+# Maju
 
-Kodex 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，用 React + Monaco 提供编辑体验，把智能体对话、代码编辑、Git 审阅和终端放在同一个工作台里。
+> 码具：码农的工具
 
-它适合需要“边聊边改、边看 diff 边落地”的工程场景：智能体负责生成和执行方案，Kodex 负责把上下文、文件、变更和权限边界稳稳托住。
+Maju 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，用 React + Monaco 提供编辑体验，把智能体对话、代码编辑、Git 审阅和终端放在同一个工作台里。
+
+它适合需要“边聊边改、边看 diff 边落地”的工程场景：智能体负责生成和执行方案，Maju 负责把上下文、文件、变更和权限边界稳稳托住。
 
 ## 截图
 
 | 工作台总览                                                                          |
 | ----------------------------------------------------------------------------------- |
-| <img src="docs/screenshots/kodex-workbench.png" alt="Kodex 工作台总览" width="720"> |
+| <img src="docs/screenshots/kodex-workbench.png" alt="Maju 工作台总览" width="720"> |
 
 | 首次设置                                                                                   |
 | ------------------------------------------------------------------------------------------ |
-| <img src="docs/screenshots/kodex-first-run-settings.png" alt="Kodex 首次设置" width="720"> |
+| <img src="docs/screenshots/kodex-first-run-settings.png" alt="Maju 首次设置" width="720"> |
 
 ## 亮点
 
@@ -24,7 +26,7 @@ Kodex 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，
 
 ## 初次使用
 
-1. 启动 Kodex 后，先进入设置页选择默认智能体。
+1. 启动 Maju 后，先进入设置页选择默认智能体。
 2. 如果有自己的模型 Key，选择 **BYOK** 模式，从 **CommandCode**、**DeepSeek**、**Kimi Code**、**Xiaomi Token Plan** 等模型来源中选择一个，填入对应的 API Key。
 3. 如果本机已经安装 CodeBuddy CLI，也可以选择 CodeBuddy 作为 ACP 后端。
 4. 打开一个代码目录作为 workspace，在底部输入需求；智能体执行后的文件改动会出现在右侧 Review/Git 区域。
@@ -39,7 +41,7 @@ Kodex 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，
 
 ## 架构概览
 
-Kodex 保持 protocol、state、services、presentation 的边界清晰：
+Maju 保持 protocol、state、services、presentation 的边界清晰：
 
 ```text
 workspace-model  ← pure shared DTOs
@@ -48,7 +50,7 @@ git-service / session-store / acp-core
   ↑
 app-core         ← orchestration and reducer state
   ↑
-kodex-desktop    ← Tauri command bridge + React UI
+maju-desktop    ← Tauri command bridge + React UI
 ```
 
 ## 项目结构
@@ -61,7 +63,7 @@ crates/
   acp-core/        ACP transport, session lifecycle, event mapping, permissions
   app-core/        Application orchestration, reducer-based state, session flow
   git-service/     Git repository inspection and staging via git2
-  session-store/   SQLite session persistence under the Kodex data directory
+  session-store/   SQLite session persistence under the Maju data directory
   terminal-service/ Integrated PTY terminal service
   workspace-model/ Shared DTOs consumed by backend and frontend bindings
 tools/
@@ -119,14 +121,14 @@ This command runs the Tauri production pipeline:
 4. Generates platform-specific installers under `target/release/bundle/`
 5. Leaves the directly launchable binary under `target/release/`
 
-Do **not** use `cargo build -p kodex-desktop --release` to produce a clickable desktop app. A plain Cargo build does not run the Tauri production pipeline and can leave the app trying to load the development `devUrl` instead of embedded assets.
+Do **not** use `cargo build -p maju-desktop --release` to produce a clickable desktop app. A plain Cargo build does not run the Tauri production pipeline and can leave the app trying to load the development `devUrl` instead of embedded assets.
 
 If a release executable opens with a `localhost` connection error, rebuild with the Tauri packaging command above. A later plain Cargo build can overwrite the packaged executable with a non-packaged binary.
 
 Common outputs:
 
-- Windows executable: `target/release/kodex-desktop.exe`
-- Windows NSIS installer: `target/release/bundle/nsis/Kodex_0.1.0_x64-setup.exe`
+- Windows executable: `target/release/maju-desktop.exe`
+- Windows NSIS installer: `target/release/bundle/nsis/Maju_0.1.0_x64-setup.exe`
 - macOS app/bundle output: `target/release/bundle/macos/` and `target/release/bundle/dmg/`
 - Linux package output: `target/release/bundle/deb/` and/or `target/release/bundle/rpm/`
 
@@ -138,14 +140,14 @@ Common outputs:
 
 Bundle configuration lives in `apps/desktop/src-tauri/tauri.conf.json`:
 
-- **productName**: `Kodex`
+- **productName**: `Maju`
 - **identifier**: `com.kodex.editor`
 - **bundle.targets**: `"all"` (generates all supported formats for the current platform)
 - **icons**: `apps/desktop/src-tauri/icons/` (`.ico`, `.icns`, `.png` variants)
 
 ## 自动更新与发布
 
-Kodex uses the Tauri v2 updater and GitHub Releases. The desktop app checks:
+Maju uses the Tauri v2 updater and GitHub Releases. The desktop app checks:
 
 ```text
 https://github.com/koth/Kodex/releases/latest/download/latest.json
@@ -179,7 +181,7 @@ The `.github/workflows/release.yml` workflow builds Windows x64, macOS Intel, an
 
 ## 运行时数据
 
-Packaged and development builds store Kodex-owned data under `~/.kodex/` (overridable via `KODEX_DATA_ROOT`):
+Packaged and development builds store Maju-owned data under `~/.kodex/` (overridable via `KODEX_DATA_ROOT`):
 
 ```text
 ~/.kodex/
@@ -190,11 +192,11 @@ Packaged and development builds store Kodex-owned data under `~/.kodex/` (overri
   attachments/
 ```
 
-Workspace source files, git operations, and file edits remain scoped to the selected workspace. Kodex does not create workspace-local `.kodex` application data for new workspaces. Existing `{workspace}/.kodex/sessions.db` files are imported into `~/.kodex/sessions/sessions.db` without deleting the original file.
+Workspace source files, git operations, and file edits remain scoped to the selected workspace. Maju does not create workspace-local `.kodex` application data for new workspaces. Existing `{workspace}/.kodex/sessions.db` files are imported into `~/.kodex/sessions/sessions.db` without deleting the original file.
 
 ## ACP 后端
 
-Kodex 默认使用 Claude Agent ACP（`claude-agent-acp`）作为 ACP 后端，也可在设置中选择 Codex ACP（`codex-acp`）或 CodeBuddy（`codebuddy`）。
+Maju 默认使用 Claude Agent ACP（`claude-agent-acp`）作为 ACP 后端，也可在设置中选择 Codex ACP（`codex-acp`）或 CodeBuddy（`codebuddy`）。
 
 CodeBuddy 对应的启动命令为 `codebuddy --acp`；在 Windows 上，该命令会被解析为 `codebuddy.cmd --acp` 以正确启动子进程。
 

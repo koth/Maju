@@ -1714,9 +1714,19 @@ fn provider_profile_configured(paths: &AppPaths, definition: &ProviderProfileDef
         return custom_provider_configured(paths, definition.family, definition.id, &entry);
     }
     if definition.id == BYOK_PROVIDER_ID {
-        return BYOK_SOURCE_PROVIDER_IDS
-            .iter()
-            .any(|provider| byok_source_secret(paths, definition.family, provider).is_some());
+        // BYOK is "configured" when at least one source provider (built-in or
+        // custom) has both a saved credential and a catalog model. This mirrors
+        // `configured_codex_byok_models` / `configured_claude_byok_models`, which
+        // the backend readiness gate (`codex_agent_configured_for_settings` /
+        // `claude_agent_configured_for_settings`) uses. The earlier form only
+        // iterated the built-in `BYOK_SOURCE_PROVIDER_IDS` and skipped custom
+        // providers, so a session that configured *only* a custom provider showed
+        // BYOK as unconfigured on the welcome screen even though the backend
+        // readiness gate already returned true.
+        return match definition.family {
+            AgentProviderFamily::Codex => !configured_codex_byok_models(paths).is_empty(),
+            AgentProviderFamily::Claude => !configured_claude_byok_models(paths).is_empty(),
+        };
     }
     if definition.id == CODEBUDDY_PROVIDER_ID {
         return codebuddy_configured(paths);
@@ -2742,6 +2752,9 @@ fn model_provider_map_env_from_entries(
                 "provider": provider,
                 "provider_label": provider_label_for_paths(paths, provider),
             });
+            if let Some(effort) = model_entry.reasoning_effort {
+                entry["reasoning_effort"] = json!(effort.as_codex_str());
+            }
             // CodeBuddy routes through a self-hosted proxy
             // (`http://127.0.0.1:{port}/v1/chat/completions`) whose port+api_key
             // live in the dedicated `provider-models.json["codebuddy"]` catalog

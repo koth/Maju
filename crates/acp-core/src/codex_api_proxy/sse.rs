@@ -654,7 +654,7 @@ fn normalize_responses_usage_fields(value: &mut Value) {
     let Some(usage) = value.get_mut("usage") else {
         return;
     };
-    let input = usage
+    let reported_input = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_i64)
@@ -667,9 +667,16 @@ fn normalize_responses_usage_fields(value: &mut Value) {
     let total = usage
         .get("total_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or(input + output);
+        .unwrap_or(reported_input + output);
     let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
     let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
+    // `input_tokens`/`prompt_tokens` here already includes the cache-hit
+    // prefix; surface the uncached portion so the two fields stay disjoint.
+    let input = if reported_input > 0 && cached_tokens > 0 {
+        reported_input.saturating_sub(cached_tokens)
+    } else {
+        reported_input
+    };
 
     let Some(usage) = usage.as_object_mut() else {
         return;

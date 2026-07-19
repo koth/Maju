@@ -12,8 +12,8 @@ export function AppRail({
   return (
     <aside className="app-rail" aria-label="应用导航">
       <div className="app-rail-top">
-        <div className="app-rail-brand" title="Kodex">
-          <span>K</span>
+        <div className="app-rail-brand" title="Maju">
+          <span>M</span>
         </div>
         <nav className="app-rail-nav" aria-label="主要功能导航">
           <button

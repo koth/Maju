@@ -2775,3 +2775,65 @@ fn lsp_settings_reject_unknown_languages() {
 
     assert!(error.to_string().contains("Unsupported language server"));
 }
+
+/// Regression: a session that configured *only* a custom BYOK provider
+/// (no built-in source provider key) must still report the BYOK profile as
+/// `configured`. Before the fix, `provider_profile_configured` only iterated
+/// the built-in `BYOK_SOURCE_PROVIDER_IDS` and skipped custom providers, so
+/// the welcome screen gated the user even though
+/// `codex_agent_configured_for_settings` already returned true.
+#[test]
+fn byok_profile_configured_when_only_custom_provider_has_credential() {
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+    std::fs::create_dir_all(paths.config_dir()).unwrap();
+
+    // provider-models.json: a single custom provider with base_url + protocol
+    // + one model slug. No built-in source provider has a credential.
+    let catalog = serde_json::json!({
+        "version": 2,
+        "providers": {
+            "custom_quest": {
+                "models": [{ "slug": "glm-5.2" }],
+                "model_list_url": null,
+                "custom": true,
+                "label": "Quest",
+                "base_url": "https://tencent.quest/v1/chat/completions",
+                "protocol": "chat_completions",
+                "port": null
+            }
+        },
+        "hidden_providers": []
+    });
+    std::fs::write(
+        paths.config_dir().join("provider-models.json"),
+        serde_json::to_string_pretty(&catalog).unwrap(),
+    )
+    .unwrap();
+
+    // provider-secrets.json: only the custom provider's key is present.
+    let mut secrets = std::collections::BTreeMap::new();
+    secrets.insert(
+        "shared:custom_quest".to_string(),
+        "sk-test-custom-quest-key".to_string(),
+    );
+    std::fs::write(
+        paths.config_dir().join("provider-secrets.json"),
+        serde_json::to_string_pretty(&secrets).unwrap(),
+    )
+    .unwrap();
+
+    let byok_def = profile_definitions(AgentProviderFamily::Codex)
+        .iter()
+        .find(|d| d.id == BYOK_PROVIDER_ID)
+        .expect("BYOK provider profile definition exists");
+    assert!(
+        provider_profile_configured(&paths, byok_def),
+        "BYOK profile must be configured when a custom provider has a credential + model"
+    );
+    assert_eq!(
+        configured_codex_byok_models(&paths),
+        vec!["glm-5.2".to_string()],
+        "configured_codex_byok_models must include the custom provider's model"
+    );
+}

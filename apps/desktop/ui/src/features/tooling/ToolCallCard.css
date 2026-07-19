@@ -7,8 +7,6 @@
   border-radius: 12px;
   background: var(--app-bg);
   font-family: var(--font-chat);
-  content-visibility: auto;
-  contain-intrinsic-size: 40px;
 }
 
 .tc-nested {
@@ -21,14 +19,12 @@
 .tc-line-wrap {
   display: flex;
   align-items: baseline;
-  gap: 8px;
   width: 100%;
 }
 
 .tc-header-line {
   display: flex;
   align-items: baseline;
-  gap: 6px;
   line-height: 1.72;
   flex: 1 1 auto;
   min-width: 0;
@@ -89,6 +85,13 @@
 .tc-bullet {
   font-weight: 600;
   flex-shrink: 0;
+  /* Pin the bullet into the same fixed column as the message prefix
+     (24px + 7px padding) so header text starts exactly where assistant
+     body text starts. */
+  width: 24px;
+  padding-right: 7px;
+  text-align: left;
+  user-select: none;
 }
 
 .tc-bullet-active {
@@ -133,6 +136,7 @@
   color: var(--tc-strong);
   white-space: nowrap;
   word-break: keep-all;
+  margin-right: 6px;
 }
 
 .tc-cmd {
@@ -196,7 +200,7 @@
 
 /* ── Shell panel for expanded command tools ── */
 .tc-shell-panel {
-  margin: 8px 0 8px 18px;
+  margin: 8px 0 8px var(--msg-text-column, 31px);
   overflow: hidden;
   max-width: min(100%, 760px);
   border: 1px solid color-mix(in srgb, var(--border-subtle) 78%, transparent);
@@ -379,8 +383,12 @@
 }
 
 /* ── Output block (└ indented, dim) ── */
+/* content-visibility lives here (not on .tc) because contain:size on the card
+   would clip position:sticky table headers inside diff views. */
 .tc-output-block {
   padding-left: 12px;
+  content-visibility: auto;
+  contain-intrinsic-size: 40px;
 }
 
 .tc-output-line {
@@ -436,7 +444,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 8px 0 6px 18px;
+  margin: 8px 0 6px var(--msg-text-column, 31px);
 }
 
 .tc-diff-preview {
@@ -486,7 +494,7 @@
 }
 
 .tc-permission-panel {
-  margin: 6px 0 4px 18px;
+  margin: 6px 0 4px var(--msg-text-column, 31px);
   padding: 9px;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-**Kodex** — ACP-powered coding editor: Rust backend, Tauri v2 shell, Monaco surface. Strict separation: protocol ↔ state ↔ services ↔ presentation.
+**Maju** — ACP-powered coding editor: Rust backend, Tauri v2 shell, Monaco surface. Strict separation: protocol ↔ state ↔ services ↔ presentation.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ git-service / session-store / acp-core
   ↑
 app-core         ← orchestrates all
   ↑
-kodex-desktop    ← tauri v2 shell
+maju-desktop    ← tauri v2 shell
 ```
 
 Hard rules:

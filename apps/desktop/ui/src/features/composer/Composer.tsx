@@ -571,7 +571,7 @@ export function Composer({
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             disabled={!textInputEnabled}
-            placeholder={sessionConfigPending ? "正在加载模型列表..." : turnActive ? (sessionSteerEnabled ? "补充约束，继续引导当前轮次" : "当前智能体暂不支持追加指令") : "交给 Kodex 一个明确目标"}
+            placeholder={sessionConfigPending ? "正在加载模型列表..." : turnActive ? (sessionSteerEnabled ? "补充约束，继续引导当前轮次" : "当前智能体暂不支持追加指令") : "交给 Maju 一个明确目标"}
             rows={compact ? 1 : 2}
           />
         </div>

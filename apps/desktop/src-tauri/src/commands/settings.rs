@@ -1361,7 +1361,7 @@ fn manual_instruction(agent: AgentCliId) -> Option<String> {
                 .to_string(),
         ),
         AgentCliId::CodexAcp => Some(
-            "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Kodex 只检测并启动这个目录下的二进制。使用前请在此页面配置 BYOK API key。"
+            "点击下载会优先把安装包内置的 Codex 安装到 `~/.kodex/bin`，未内置时再在线下载；Maju 只检测并启动这个目录下的二进制。使用前请在此页面配置 BYOK API key。"
                 .to_string(),
         ),
         AgentCliId::ClaudeAgentAcp => Some(

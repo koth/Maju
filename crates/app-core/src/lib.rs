@@ -61,12 +61,25 @@ pub fn build_dormant_remote_workspace_ui(
     ui.repository.branch = "未连接".into();
     ui.repository.head = "双击项目目录后连接".into();
     ui.session.title = "远程工作区未连接".into();
-    if let Some(message) = ui.messages.first_mut() {
-        message.body = format!(
+    let created_at = ui
+        .messages
+        .first()
+        .map(|message| message.created_at.clone())
+        .unwrap_or_default();
+    let notice = workspace_model::ChatMessage {
+        id: uuid::Uuid::new_v4(),
+        role: workspace_model::MessageRole::Assistant,
+        body: format!(
             "{} 尚未连接。双击左侧项目目录后，将重新连接远程机器并启动远程 ACP。",
             ui.workspace.name
-        );
-    }
+        ),
+        created_at,
+        ..Default::default()
+    };
+    let notice_id = notice.id;
+    ui.timeline
+        .insert(0, workspace_model::TimelineItem::Message(notice_id));
+    ui.messages.insert(0, notice);
     ui.tools.clear();
     ui.timeline.retain(|item| match item {
         workspace_model::TimelineItem::Tool(_) => false,

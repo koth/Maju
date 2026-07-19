@@ -1457,9 +1457,11 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
     assert_eq!(buckets[0].by_model.len(), 1);
     assert_eq!(buckets[0].by_model[0].tokens.total_tokens, Some(200));
     assert_eq!(buckets[0].by_model[0].event_count, 2);
-    // request_count counts both SessionTotal + TurnDelta (the backend makes
-    // ~2 API calls per round, so counting both tracks the backend request count).
-    assert_eq!(buckets[0].by_model[0].request_count, 2);
+    // request_count counts one per real model-API request. The ACP mapping
+    // splits a single usage meta into SessionTotal + TurnDelta for the SAME
+    // request, so only the TurnDelta (the per-request increment) is counted:
+    // Day A has 1 SessionTotal + 1 TurnDelta -> request_count = 1.
+    assert_eq!(buckets[0].by_model[0].request_count, 1);
 
     // Day B: lone TurnDelta(300) accumulates.
     assert_eq!(buckets[1].tokens.total_tokens, Some(300));
@@ -1675,11 +1677,16 @@ fn usage_summary_timing_averages_use_per_field_counts() {
     assert_eq!(row.avg_tokens_per_second, Some(55.0));
 }
 
-/// P5: `request_count` must count only token-reporting events
-/// (TurnDelta + SessionTotal), while `event_count` counts every row
-/// including ContextSnapshot occupancy-only reports. With
-/// 1×SessionTotal + 1×TurnDelta + 3×ContextSnapshot we expect
-/// event_count=5 and request_count=2.
+/// P5: `request_count` counts one per real model-API request. The ACP
+/// mapping layer splits a single `kodex.ai/usage` meta into a
+/// `SessionTotal` event plus a `TurnDelta` event describing the SAME
+/// request, so counting both double-counts (verified against platform
+/// billing: exactly 2× the billed request count). Only the `TurnDelta`
+/// scope — the per-request increment — is counted; `SessionTotal` is the
+/// cumulative overwrite of the same request and is excluded, as is
+/// `ContextSnapshot` occupancy-only telemetry. With 1×SessionTotal +
+/// 1×TurnDelta + 3×ContextSnapshot we therefore expect event_count=5 and
+/// request_count=1.
 #[test]
 fn usage_summary_request_count_excludes_context_snapshot_events() {
     let dir = tempfile::tempdir().unwrap();
@@ -1750,9 +1757,10 @@ fn usage_summary_request_count_excludes_context_snapshot_events() {
     assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
     assert_eq!(rows[0].event_count, 5, "event_count must count all rows");
     assert_eq!(
-        rows[0].request_count, 2,
-        "request_count counts both SessionTotal + TurnDelta (2 token-reporting \
-         events), excluding ContextSnapshot"
+        rows[0].request_count, 1,
+        "request_count counts one per real request (only the TurnDelta; the \
+         SessionTotal describes the same request and is excluded), excluding \
+         ContextSnapshot"
     );
 }
 
@@ -1899,8 +1907,9 @@ fn usage_summary_today_range_reports_incremental_not_cumulative() {
     );
     assert_eq!(rows[0].session_count, 1);
     assert_eq!(
-        rows[0].request_count, 1,
-        "baseline SessionTotal must not inflate request_count"
+        rows[0].request_count, 0,
+        "baseline SessionTotal must not inflate request_count (only TurnDelta is a \
+         request; a lone SessionTotal baseline is not a request)"
     );
     assert_eq!(
         rows[0].event_count, 1,
@@ -1990,8 +1999,9 @@ fn usage_summary_today_range_excludes_baseline_only_models() {
     assert_eq!(rows[0].model.as_deref(), Some("model-b-today"));
     assert_eq!(rows[0].tokens.total_tokens, Some(250));
     assert_eq!(
-        rows[0].request_count, 1,
-        "only the in-range SessionTotal should count as a request"
+        rows[0].request_count, 0,
+        "only TurnDelta is a request; a lone in-range SessionTotal is the \
+         cumulative overwrite, not a separate request"
     );
     assert_eq!(rows[0].event_count, 1);
     assert_eq!(rows[0].session_count, 1);
@@ -2318,10 +2328,12 @@ fn usage_summary_today_keeps_prior_session_model_after_new_session() {
     );
 }
 
-/// `query_usage_request_count` must count only in-range token-reporting
-/// events (`TurnDelta` + `SessionTotal`), excluding both the pre-range
-/// `SessionTotal` baseline (which `query_usage_summary` merges in via
-/// `merge_baseline_events` and would otherwise inflate the count) and
+/// `query_usage_request_count` counts one per real model-API request in
+/// range — i.e. only `TurnDelta` events (the per-request increment). It
+/// excludes the pre-range `SessionTotal` baseline (which
+/// `query_usage_summary` merges in via `merge_baseline_events` and would
+/// otherwise inflate the count), the in-range `SessionTotal` (cumulative
+/// overwrite of the same request, not a separate request), and
 /// `ContextSnapshot` occupancy-only telemetry.
 #[test]
 fn query_usage_request_count_excludes_baseline_and_context_snapshots() {
@@ -2396,9 +2408,9 @@ fn query_usage_request_count_excludes_baseline_and_context_snapshots() {
         })
         .unwrap();
     assert_eq!(
-        count, 3,
-        "must count all in-range token-reporting events (2 TurnDelta + 1 \
-         SessionTotal), excluding the pre-range baseline and ContextSnapshot"
+        count, 2,
+        "must count only in-range TurnDelta events (2 TurnDelta; the SessionTotal \
+         describes the same request and the ContextSnapshot is telemetry)"
     );
 }
 
@@ -2537,8 +2549,9 @@ fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
     );
     assert_eq!(rows[0].session_count, 2, "two sessions expected");
     assert_eq!(
-        rows[0].request_count, 4,
-        "request_count counts both SessionTotal + TurnDelta (2 rounds × 2)"
+        rows[0].request_count, 2,
+        "request_count counts one per real request (only TurnDelta; 2 sessions \
+         x 1 TurnDelta each = 2)"
     );
     assert_eq!(rows[0].event_count, 4, "all 4 rows counted");
 }

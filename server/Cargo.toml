@@ -1,9 +1,9 @@
 [package]
-name = "kodex-relay-server"
+name = "maju-relay-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kodex public relay service: WebSocket routing of E2E-encrypted frames between desktop and mobile."
+description = "Maju public relay service: WebSocket routing of E2E-encrypted frames between desktop and mobile."
 publish = false
 
 [dependencies]

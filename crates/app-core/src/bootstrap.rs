@@ -37,16 +37,6 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         changed_files: Vec::new(),
     };
 
-    let welcome_message = ChatMessage {
-        id: uuid::Uuid::new_v4(),
-        role: MessageRole::Assistant,
-        body: format!(
-            "已在 {} 中就绪。描述您想要处理的变更、问题或任务。",
-            descriptor.name
-        ),
-        created_at: created_at.clone(),
-        ..Default::default()
-    };
     let system_message = ChatMessage {
         id: uuid::Uuid::new_v4(),
         role: MessageRole::System,
@@ -73,11 +63,8 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         image_capabilities: Default::default(),
         available_commands: Vec::new(),
         agent_plan: Vec::new(),
-        messages: vec![welcome_message.clone(), system_message.clone()],
-        timeline: vec![
-            TimelineItem::Message(welcome_message.id),
-            TimelineItem::Message(system_message.id),
-        ],
+        messages: vec![system_message.clone()],
+        timeline: vec![TimelineItem::Message(system_message.id)],
         tools: vec![ToolInvocation {
             id: uuid::Uuid::new_v4(),
             call_id: "workspace.scan".into(),

@@ -251,18 +251,30 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
     <div className="welcome">
       <div className={titlebarClassName} data-tauri-drag-region>
         <WindowControls />
+        <button
+          type="button"
+          className="welcome-settings-btn"
+          onClick={() => onOpenSettings()}
+          title="设置"
+          aria-label="打开设置"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.04.04a2 2 0 1 1-2.83 2.83l-.04-.04A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6V20a2 2 0 1 1-4 0v-.06a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.04.04a2 2 0 1 1-2.83-2.83l.04-.04A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1H4a2 2 0 1 1 0-4h.06a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.04-.04a2 2 0 1 1 2.83-2.83l.04.04A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6V4a2 2 0 1 1 4 0v.06a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.04-.04a2 2 0 1 1 2.83 2.83l-.04.04A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 .6 1H20a2 2 0 1 1 0 4h-.06a1.7 1.7 0 0 0-.54 1Z" />
+          </svg>
+        </button>
       </div>
       <div className="welcome-content">
         <div className="welcome-brand">
           <pre className="welcome-ascii">
-{` ██╗  ██╗ ██████╗ ██████╗ ███████╗██╗  ██╗
- ██║ ██╔╝██╔═══██╗██╔══██╗██╔════╝╚██╗██╔╝
- █████╔╝ ██║   ██║██║  ██║█████╗   ╚███╔╝ 
- ██╔═██╗ ██║   ██║██║  ██║██╔══╝   ██╔██╗ 
- ██║  ██╗╚██████╔╝██████╔╝███████╗██╔╝ ██╗
- ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝`}
+{`███ ███  ████   ██████  ██  ██ 
+███████ ██  ██     ██   ██  ██ 
+██ █ ██ ██████     ██   ██  ██ 
+██   ██ ██  ██  █  ██   ██  ██ 
+██   ██ ██  ██   █████   █████ 
+                               `}
           </pre>
-          <p className="welcome-subtitle">智能体代码编辑器</p>
+          <p className="welcome-subtitle">码具——码农的趁手好工具</p>
         </div>
 
         {showByokOnboarding && (

@@ -27,7 +27,7 @@ function MainStack() {
         contentStyle: { backgroundColor: colors.bg },
       }}
     >
-      <Stack.Screen name="Sessions" options={{ title: "Kodex" }}>
+      <Stack.Screen name="Sessions" options={{ title: "Maju" }}>
         {({ navigation }) => (
           <SessionListScreen
             onOpenSession={(sessionId, title) => navigation.navigate("Conversation", { sessionId, title })}

@@ -849,9 +849,13 @@ fn routes_anthropic_messages_to_chat_completions_for_non_anthropic_models() {
         "deepseek",
         "deepseek-v4-pro"
     ));
-    assert!(!should_bridge_anthropic_messages_to_chat_completions(
+    assert!(should_bridge_anthropic_messages_to_chat_completions(
         "kimi_code",
         "kimi-for-coding"
+    ));
+    assert!(!should_bridge_anthropic_messages_to_chat_completions(
+        "kimi_code",
+        "claude-sonnet-4-6"
     ));
     assert!(should_bridge_anthropic_messages_to_chat_completions(
         "xiaomi_mimo",
@@ -907,7 +911,7 @@ fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
         }
     ]);
 
-    let (map, provider_configs, duplicate_count) =
+    let (map, provider_configs, model_reasoning_efforts, duplicate_count) =
         parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(
@@ -915,6 +919,7 @@ fn model_provider_map_parser_keeps_first_provider_for_duplicate_models() {
         Some("timiai")
     );
     assert!(provider_configs.is_empty());
+    assert!(model_reasoning_efforts.is_empty());
     assert_eq!(duplicate_count, 1);
 }
 
@@ -934,7 +939,7 @@ fn model_provider_map_parser_preserves_custom_provider_identity() {
         }
     ]);
 
-    let (map, provider_configs, duplicate_count) =
+    let (map, provider_configs, model_reasoning_efforts, duplicate_count) =
         parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(
@@ -951,6 +956,7 @@ fn model_provider_map_parser_preserves_custom_provider_identity() {
     );
     assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
     assert!(provider_configs.get("timiai").is_none());
+    assert!(model_reasoning_efforts.is_empty());
     assert_eq!(duplicate_count, 0);
 }
 
@@ -965,7 +971,7 @@ fn model_provider_map_parser_reads_custom_provider_config() {
         }
     ]);
 
-    let (map, provider_configs, duplicate_count) =
+    let (map, provider_configs, model_reasoning_efforts, duplicate_count) =
         parse_model_provider_map(&value.to_string()).unwrap();
 
     assert_eq!(map.get("my-model").map(String::as_str), Some("custom"));
@@ -977,7 +983,122 @@ fn model_provider_map_parser_reads_custom_provider_config() {
         "https://api.example.com/v1/chat/completions"
     );
     assert_eq!(config.protocol, ProxyProviderProtocol::ChatCompletions);
+    assert!(model_reasoning_efforts.is_empty());
     assert_eq!(duplicate_count, 0);
+}
+
+#[test]
+fn model_provider_map_parser_reads_reasoning_effort() {
+    let value = json!([
+        {
+            "model": "kimi-for-coding",
+            "display_name": "Kimi for Coding",
+            "provider": "kimi_code",
+            "reasoning_effort": "medium"
+        },
+        {
+            "model": "kimi-no-think",
+            "display_name": "Kimi no think",
+            "provider": "kimi_code",
+            "reasoning_effort": "none"
+        },
+        {
+            "model": "kimi-default",
+            "display_name": "Kimi default",
+            "provider": "kimi_code"
+        }
+    ]);
+
+    let (map, _provider_configs, model_reasoning_efforts, duplicate_count) =
+        parse_model_provider_map(&value.to_string()).unwrap();
+
+    assert_eq!(
+        map.get("kimi-for-coding").map(String::as_str),
+        Some("kimi_code")
+    );
+    assert_eq!(
+        model_reasoning_efforts
+            .get("kimi-for-coding")
+            .map(String::as_str),
+        Some("medium")
+    );
+    // `none` is still parsed and stored verbatim; the injector decides to drop it.
+    assert_eq!(
+        model_reasoning_efforts
+            .get("kimi-no-think")
+            .map(String::as_str),
+        Some("none")
+    );
+    // Entries without reasoning_effort simply carry no effort.
+    assert!(model_reasoning_efforts.get("kimi-default").is_none());
+    assert_eq!(duplicate_count, 0);
+}
+
+#[test]
+fn injects_output_config_for_kimi_code_when_effort_configured() {
+    let value = json!([
+        {
+            "model": "kimi-for-coding",
+            "display_name": "Kimi for Coding",
+            "provider": "kimi_code",
+            "reasoning_effort": "medium"
+        }
+    ]);
+    configure_codex_api_proxy_model_provider_map(&value.to_string());
+
+    let payload = json!({
+        "model": "kimi-for-coding",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "stream": false
+    });
+    let normalized = normalize_chat_payload_for_provider(payload, "kimi_code", "test-session");
+
+    assert_eq!(
+        normalized.get("output_config"),
+        Some(&json!({ "effort": "medium" }))
+    );
+
+    // Non-kimi providers must not receive output_config.
+    let other = json!({
+        "model": "kimi-for-coding",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "stream": false
+    });
+    let other_normalized = normalize_chat_payload_for_provider(other, "deepseek", "test-session");
+    assert!(other_normalized.get("output_config").is_none());
+
+    clear_codex_api_proxy_model_provider_map();
+}
+
+#[test]
+fn omits_output_config_when_effort_is_none_or_unset_for_kimi_code() {
+    let value = json!([
+        {
+            "model": "kimi-no-think",
+            "provider": "kimi_code",
+            "reasoning_effort": "none"
+        },
+        {
+            "model": "kimi-default",
+            "provider": "kimi_code"
+        }
+    ]);
+    configure_codex_api_proxy_model_provider_map(&value.to_string());
+
+    for model in ["kimi-no-think", "kimi-default"] {
+        let payload = json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": false
+        });
+        let normalized = normalize_chat_payload_for_provider(payload, "kimi_code", "test-session");
+        assert!(
+            normalized.get("output_config").is_none(),
+            "{model} should not receive output_config"
+        );
+    }
+
+    clear_codex_api_proxy_model_provider_map();
 }
 
 #[test]
@@ -1212,7 +1333,10 @@ fn normalizes_timiai_responses_sse_usage_cache_fields() {
     sanitized.extend(sanitizer.finish());
     let text = String::from_utf8(sanitized).unwrap();
 
-    assert!(text.contains("\"input_tokens\":120"));
+    // prompt_tokens (120) includes the cache-hit prefix (80); the surfaced
+    // input_tokens is the uncached portion so it does not double-count the
+    // cached tokens rendered alongside it.
+    assert!(text.contains("\"input_tokens\":40"));
     assert!(text.contains("\"output_tokens\":10"));
     assert!(text.contains("\"total_tokens\":130"));
     assert!(text.contains("\"input_tokens_details\":{\"cached_tokens\":80}"));
@@ -1245,7 +1369,8 @@ fn converts_chat_usage_prompt_cache_hit_tokens_to_cached_input_tokens() {
 
     let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
-    assert_eq!(response["usage"]["input_tokens"], 120);
+    // 120 total prompt tokens − 96 cache-hit = 24 uncached input tokens.
+    assert_eq!(response["usage"]["input_tokens"], 24);
     assert_eq!(
         response["usage"]["input_tokens_details"]["cached_tokens"],
         96
@@ -1282,6 +1407,7 @@ fn timiai_session_id_is_reused_from_proxy_config() {
         session_ids,
         model_providers: BTreeMap::new(),
         provider_configs: BTreeMap::new(),
+        model_reasoning_efforts: BTreeMap::new(),
         project_name: None,
     };
 
@@ -1422,7 +1548,8 @@ fn converts_chat_response_to_responses_response() {
     assert_eq!(response["output"][1]["type"], "function_call");
     assert_eq!(response["output"][1]["call_id"], "call_1");
     assert_eq!(response["output"][1]["name"], "list_files");
-    assert_eq!(response["usage"]["input_tokens"], 12);
+    // 12 total prompt tokens − 8 cache-hit = 4 uncached input tokens.
+    assert_eq!(response["usage"]["input_tokens"], 4);
     assert_eq!(
         response["usage"]["input_tokens_details"]["cached_tokens"],
         8

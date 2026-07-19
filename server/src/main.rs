@@ -1,4 +1,4 @@
-use kodex_relay_server::{
+use maju_relay_server::{
     config::Config, db::Db, errors::Result, health, state::AppState, subscription, transport,
 };
 
@@ -6,7 +6,7 @@ use kodex_relay_server::{
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     let config = Config::from_env();
-    tracing::info!(?config, "starting kodex-relay-server");
+    tracing::info!(?config, "starting maju-relay-server");
     let db = Db::open(&config.db_path)?;
     let health_addr = config.health_addr;
     let state = AppState::new(config, db);

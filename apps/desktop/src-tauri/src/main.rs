@@ -33,7 +33,7 @@ fn main() {
         return;
     }
 
-    app_core::startup_perf::start_run("kodex-desktop");
+    app_core::startup_perf::start_run("maju-desktop");
     app_core::startup_perf::mark("desktop/main_enter", "");
     install_panic_logger();
     let snapshot_bridge_running = Arc::new(AtomicBool::new(true));
@@ -195,7 +195,7 @@ fn main() {
             commands::remote_control::remote_control_status,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Kodex")
+        .expect("error while building Maju")
         .run({
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app, event| {

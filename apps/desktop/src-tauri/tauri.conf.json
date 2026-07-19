@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Kodex",
+  "productName": "Maju",
   "version": "0.1.5",
   "identifier": "com.kodex.editor",
   "build": {
@@ -18,7 +18,7 @@
   "app": {
     "windows": [
       {
-        "title": "Kodex",
+        "title": "Maju",
         "width": 1440,
         "height": 900,
         "minWidth": 800,
@@ -53,7 +53,7 @@
       },
     "windows": {
       "nsis": {
-        "installerHooks": "nsis/kodex-hooks.nsh"
+        "installerHooks": "nsis/maju-hooks.nsh"
       }
     }
   },

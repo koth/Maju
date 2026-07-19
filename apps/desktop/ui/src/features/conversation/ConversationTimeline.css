@@ -436,10 +436,16 @@
 }
 
 .msg-assistant {
-  padding: 6px 10px 6px 0;
-  margin: 0 0 8px;
+  padding: 3px 10px 3px 0;
+  margin: 0 0 6px;
   border-radius: 12px;
   background: var(--app-bg);
+}
+
+/* Tool rows already carry their own bullet; drop the redundant message
+   bullet so text aligns on a single column (like Codex CLI). */
+.msg-assistant:has(+ .tc) .msg-prefix-assistant {
+  visibility: hidden;
 }
 
 .msg-user + .msg-assistant {
@@ -498,7 +504,7 @@
 }
 
 .msg-system {
-  padding: 2px 0 2px 20px;
+  padding: 2px 0 2px var(--msg-text-column);
 }
 
 .msg-context-compaction {
@@ -600,6 +606,14 @@
 }
 
 /* ── Prefix characters (Codex style) ── */
+/* Shared text-column width: the prefix column (24px) + its right padding (7px).
+   Markdown lists inside assistant content indent by this amount so the first
+   text line aligns with the tool-call text column, which starts right after
+   the header bullet. */
+:root {
+  --msg-text-column: 31px;
+}
+
 .msg-prefix {
   flex-shrink: 0;
   font-family: var(--font-chat);
@@ -700,7 +714,7 @@
 
 /* ── Markdown styles ── */
 .md-paragraph {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
 }
 
 .md-image-paragraph {
@@ -727,6 +741,7 @@
 .msg-content-user .md-list {
   margin-top: 2px;
   margin-bottom: 4px;
+  padding-left: 20px;
 }
 
 .msg-content-user .md-code-block,
@@ -754,8 +769,8 @@
 }
 
 .md-list {
-  margin: 4px 0 12px 22px;
-  padding: 0;
+  margin: 2px 0 8px;
+  padding-left: var(--msg-text-column);
 }
 
 .md-list-ordered {
@@ -763,8 +778,12 @@
 }
 
 .md-list-item {
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   padding-left: 2px;
+}
+
+.md-list-item::marker {
+  color: var(--text-soft);
 }
 
 .md-bold {
@@ -807,13 +826,13 @@
 
 .md-inline-code {
   font-family: var(--font-mono);
-  font-size: 0.88em;
-  font-weight: 540;
+  font-size: 0.86em;
+  font-weight: 450;
   background: var(--md-code-bg, var(--surface-bg));
   color: var(--md-code-text, var(--text-muted));
-  padding: 1px 6px;
+  padding: 0.5px 5px;
   border: 1px solid var(--md-code-border, transparent);
-  border-radius: 6px;
+  border-radius: 5px;
 }
 
 .md-code-block {
@@ -824,13 +843,17 @@
   overflow: hidden;
 }
 
+.msg-content-assistant pre {
+  margin: 0;
+}
+
 .md-code-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   background: color-mix(in srgb, var(--surface-bg) 55%, var(--app-bg));
-  padding: 6px 8px 6px 12px;
+  padding: 6px 8px 6px 0;
   border-bottom: 1px solid var(--md-code-border, var(--border));
 }
 
@@ -976,7 +999,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 0 4px 22px;
+  padding: 4px 0 4px var(--msg-text-column);
   font-size: 12.5px;
   font-weight: 400;
   color: var(--accent);

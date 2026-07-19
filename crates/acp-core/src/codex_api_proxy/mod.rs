@@ -107,6 +107,13 @@ struct CodexApiProxyConfig {
     session_ids: BTreeMap<String, String>,
     model_providers: BTreeMap<String, String>,
     provider_configs: BTreeMap<String, ProxyProviderConfig>,
+    /// Per-model reasoning effort authored in the BYOK model catalog
+    /// (`reasoning_effort`). The local Codex API proxy translates this into
+    /// the upstream-specific reasoning parameter (e.g. kimi_code's
+    /// `output_config.effort`) for providers whose upstream expects a
+    /// chat/completions-style reasoning field. Keyed by the normalized model
+    /// slug used in `model_providers`.
+    model_reasoning_efforts: BTreeMap<String, String>,
     /// Project name forwarded to codebuddy-proxy as `X-Project-Name` so the
     /// proxy can identify which project a request belongs to. Derived from
     /// the workspace root's final path component at bootstrap. The CLI's
@@ -220,6 +227,7 @@ pub fn set_codex_api_proxy_project_name(root: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
             }))
         })
@@ -239,6 +247,7 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
             }))
         })
@@ -281,14 +290,14 @@ pub fn ensure_codex_api_proxy(provider: &str, api_key: &str) -> String {
 }
 
 pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
-    let (model_providers, provider_configs, duplicate_count) = match parse_model_provider_map(value)
-    {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
-            return;
-        }
-    };
+    let (model_providers, provider_configs, model_reasoning_efforts, duplicate_count) =
+        match parse_model_provider_map(value) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
+                return;
+            }
+        };
 
     let config = CODEX_API_PROXY_CONFIG
         .get_or_init(|| {
@@ -299,6 +308,7 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
             }))
         })
@@ -307,6 +317,7 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
     if let Ok(mut current) = config.write() {
         current.model_providers = model_providers;
         current.provider_configs = provider_configs;
+        current.model_reasoning_efforts = model_reasoning_efforts;
     }
     append_codex_api_proxy_log(&format!(
         "model_provider_map_configured entries={count} duplicates={duplicate_count}"
@@ -323,6 +334,7 @@ pub fn clear_codex_api_proxy_model_provider_map() {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
             }))
         })
@@ -330,6 +342,7 @@ pub fn clear_codex_api_proxy_model_provider_map() {
     if let Ok(mut current) = config.write() {
         current.model_providers.clear();
         current.provider_configs.clear();
+        current.model_reasoning_efforts.clear();
     }
     append_codex_api_proxy_log("model_provider_map_cleared");
 }
@@ -359,6 +372,7 @@ pub fn register_codex_api_proxy_provider_key(provider: &str, api_key: &str) {
                 session_ids: BTreeMap::new(),
                 model_providers: BTreeMap::new(),
                 provider_configs: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
             }))
         })
@@ -381,6 +395,7 @@ fn parse_model_provider_map(
 ) -> anyhow::Result<(
     BTreeMap<String, String>,
     BTreeMap<String, ProxyProviderConfig>,
+    BTreeMap<String, String>,
     usize,
 )> {
     let parsed: Value = serde_json::from_str(value)?;
@@ -390,19 +405,20 @@ fn parse_model_provider_map(
     let mut duplicate_count = 0usize;
     let mut model_providers = BTreeMap::new();
     let mut provider_configs = BTreeMap::new();
-    for entry in entries {
-        let provider = entry
+    let mut model_reasoning_efforts = BTreeMap::new();
+    for entry_value in entries {
+        let provider = entry_value
             .get("provider")
             .and_then(Value::as_str)
             .map(normalize_proxy_provider)
             .unwrap_or_else(|| "timiai".to_string());
         if let (Some(base_url), Some(protocol)) = (
-            entry
+            entry_value
                 .get("base_url")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
-            entry
+            entry_value
                 .get("protocol")
                 .and_then(Value::as_str)
                 .and_then(parse_proxy_provider_protocol),
@@ -419,15 +435,24 @@ fn parse_model_provider_map(
         // routing key. The bare `display_name` (e.g. "glm-5.2") is intentionally
         // NOT indexed: two different providers can share the same model name,
         // and indexing it would let one provider's entry shadow another's.
-        if let Some(model) = entry
+        if let Some(model) = entry_value
             .get("model")
             .and_then(Value::as_str)
             .map(normalized_model_key)
             .filter(|model| !model.is_empty())
         {
-            match model_providers.entry(model) {
-                Entry::Vacant(entry) => {
-                    entry.insert(provider.clone());
+            let effort = entry_value
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase());
+            match model_providers.entry(model.clone()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(provider.clone());
+                    if let Some(effort) = effort {
+                        model_reasoning_efforts.insert(model, effort);
+                    }
                 }
                 Entry::Occupied(_) => {
                     duplicate_count += 1;
@@ -435,7 +460,7 @@ fn parse_model_provider_map(
             }
         }
     }
-    Ok((model_providers, provider_configs, duplicate_count))
+    Ok((model_providers, provider_configs, model_reasoning_efforts, duplicate_count))
 }
 
 fn parse_proxy_provider_protocol(protocol: &str) -> Option<ProxyProviderProtocol> {
@@ -608,6 +633,7 @@ async fn proxy_codex_api_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            model_reasoning_efforts: BTreeMap::new(),
             project_name: None,
         });
     // Project name forwarded to codebuddy-proxy as `X-Project-Name`. This is
@@ -997,6 +1023,7 @@ async fn proxy_native_codex_responses_compact_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            model_reasoning_efforts: BTreeMap::new(),
             project_name: None,
         });
     let provider = explicit_provider
@@ -1062,6 +1089,7 @@ async fn proxy_anthropic_messages_request(
             session_ids: BTreeMap::new(),
             model_providers: BTreeMap::new(),
             provider_configs: BTreeMap::new(),
+            model_reasoning_efforts: BTreeMap::new(),
             project_name: None,
         });
     let payload: Value = serde_json::from_slice(&body)?;
@@ -1823,6 +1851,7 @@ fn normalize_chat_payload_for_provider(
     session_id: &str,
 ) -> Value {
     payload = normalize_chat_completion_model(payload, provider);
+    payload = inject_kimi_output_config(payload, provider);
     if !chat_payload_needs_deepseek_reasoning_compat(&payload, provider) {
         return payload;
     }
@@ -1898,6 +1927,43 @@ fn chat_payload_needs_deepseek_reasoning_compat(payload: &Value, provider: &str)
                 .get("model")
                 .and_then(Value::as_str)
                 .is_some_and(|model| normalized_model_key(model).contains("deepseek")))
+}
+
+/// Inject the KimiCode upstream reasoning parameter. KimiCode's chat
+/// completions upstream honors an Anthropic-style `output_config.effort`
+/// field (mirroring the Anthropic Python SDK's
+/// `output_config={"effort": "medium"}`). The effort comes from the BYOK
+/// model catalog's per-model `reasoning_effort`, forwarded into the proxy
+/// via the model provider map. Only models that author an effort carry it;
+/// the `none` sentinel means "no reasoning effort" and is not sent.
+fn inject_kimi_output_config(mut payload: Value, provider: &str) -> Value {
+    if normalize_proxy_provider(provider) != "kimi_code" {
+        return payload;
+    }
+    let Some(model) = payload.get("model").and_then(Value::as_str).map(normalized_model_key) else {
+        return payload;
+    };
+    let Some(effort) = lookup_model_reasoning_effort(&model) else {
+        return payload;
+    };
+    if effort == "none" {
+        return payload;
+    }
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("output_config".to_string(), json!({ "effort": effort }));
+    }
+    payload
+}
+
+/// Resolve the per-model reasoning effort registered via the model provider
+/// map. Reads the process-global proxy config so it reflects the latest
+/// `configure_codex_api_proxy_model_provider_map`/`clear_…` call. Returns the
+/// raw Codex-style label (`none`/`minimal`/`low`/`medium`/`high`).
+fn lookup_model_reasoning_effort(model: &str) -> Option<String> {
+    let key = normalized_model_key(model);
+    let config = CODEX_API_PROXY_CONFIG.get()?;
+    let guard = config.read().ok()?;
+    guard.model_reasoning_efforts.get(&key).cloned()
 }
 
 fn normalize_chat_completion_model(mut payload: Value, provider: &str) -> Value {
@@ -3796,7 +3862,7 @@ fn anthropic_stop_reason_to_responses_status(stop_reason: Option<&str>) -> (&'st
 
 fn normalized_chat_usage(value: Option<&Value>) -> Value {
     let usage = value.unwrap_or(&Value::Null);
-    let input = usage
+    let reported_input = usage
         .get("prompt_tokens")
         .or_else(|| usage.get("input_tokens"))
         .and_then(Value::as_i64)
@@ -3809,9 +3875,21 @@ fn normalized_chat_usage(value: Option<&Value>) -> Value {
     let total = usage
         .get("total_tokens")
         .and_then(Value::as_i64)
-        .unwrap_or(input + output);
+        .unwrap_or(reported_input + output);
     let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
     let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
+    // Upstream `prompt_tokens` (OpenAI chat-completions convention) is the
+    // **total** prompt size and already includes any cache-hit prefix —
+    // `prompt_tokens_details.cached_tokens` is the subset served from cache.
+    // Forwarding the raw total as `input_tokens` while ALSO surfacing
+    // `cached_tokens` double-counts the cached prefix (the UI renders them
+    // side by side: 输入 X / 缓存读 Y). Report `input_tokens` as the
+    // uncached portion so the two fields are disjoint.
+    let input = if reported_input > 0 && cached_tokens > 0 {
+        reported_input.saturating_sub(cached_tokens)
+    } else {
+        reported_input
+    };
     json!({
         "input_tokens": input,
         "input_tokens_details": {

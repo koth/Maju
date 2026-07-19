@@ -1070,30 +1070,28 @@ impl SessionStore {
         ))
     }
 
-    /// Count token-reporting usage events (`TurnDelta` + `SessionTotal`) in
-    /// the request's date range. Each CodeBuddy round emits one `SessionTotal`
-    /// plus one `TurnDelta`, and the CodeBuddy backend makes ~2 model API
-    /// calls per round (verified: backend Δrequests ≈ 2 × our rounds). Counting
-    /// both scopes therefore tracks the backend's request count, whereas
-    /// counting only `SessionTotal` under-counts by ~2×. Unlike
-    /// [`query_usage_summary`], this does NOT merge carry-over baseline
-    /// events, so the count reflects only in-range requests.
-    pub fn query_usage_request_count(
-        &self,
-        request: UsageSummaryRequest,
-    ) -> Result<u64> {
-        let events = self.load_usage_events_for_summary(&request)?;
-        let count = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.scope,
-                    UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
-                )
-            })
-            .count() as u64;
-        Ok(count)
-    }
+    /// Count real model-API requests in the request's date range. codex-acp
+    /// emits a single `kodex.ai/usage` meta per model call; the ACP mapping
+    /// layer splits that meta into a `SessionTotal` event plus a `TurnDelta`
+    /// event describing the *same* request, so counting both double-counts
+    /// every request (verified against platform billing: exactly 2× the
+    /// billed request count). The `TurnDelta` scope is the per-request
+    /// increment, so one `TurnDelta` event == one billed request;
+    /// `SessionTotal` is the cumulative overwrite of the same request and
+    /// is excluded, as is `ContextSnapshot` occupancy-only telemetry.
+    /// Unlike [`query_usage_summary`], this does NOT merge carry-over
+    /// baseline events, so the count reflects only in-range requests.
+   pub fn query_usage_request_count(
+       &self,
+       request: UsageSummaryRequest,
+   ) -> Result<u64> {
+       let events = self.load_usage_events_for_summary(&request)?;
+       let count = events
+           .iter()
+            .filter(|event| matches!(event.scope, UsageEventScope::TurnDelta))
+           .count() as u64;
+       Ok(count)
+   }
 
     fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
         let mut stmt = self.conn.prepare(
@@ -2918,15 +2916,16 @@ fn update_usage_summary_row(
     };
 
     row.event_count += 1;
-    // P5: request_count counts both `TurnDelta` and `SessionTotal`. A
-    // CodeBuddy round emits one of each, and the backend makes ~2 model API
-    // calls per round, so counting both tracks the backend's request count
-    // (counting only `SessionTotal` under-counts by ~2×). ContextSnapshot is
-    // occupancy-only telemetry and is excluded.
-    if matches!(
-        event.scope,
-        UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
-    ) {
+    // `request_count` counts one per real model-API request. codex-acp emits
+    // a single `kodex.ai/usage` meta per model call; the ACP mapping layer
+    // splits that meta into a `SessionTotal` event plus a `TurnDelta` event
+    // describing the *same* request, so counting both double-counts every
+    // request (verified against platform billing: exactly 2× the billed
+    // request count). The `TurnDelta` scope is the per-request increment
+    // (one `TurnDelta` == one billed request); `SessionTotal` is the
+    // cumulative overwrite of the same request and is excluded, as is
+    // `ContextSnapshot` occupancy-only telemetry.
+    if matches!(event.scope, UsageEventScope::TurnDelta) {
         row.request_count += 1;
     }
     // `latest_at` is stored as canonical ISO-8601 UTC (via `instant_to_iso_utc`)

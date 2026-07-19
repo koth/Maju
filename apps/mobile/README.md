@@ -1,6 +1,6 @@
-# Kodex Mobile Companion
+# Maju Mobile Companion
 
-A React Native (Expo) + TypeScript phone app that pairs with a running Kodex
+A React Native (Expo) + TypeScript phone app that pairs with a running Maju
 desktop (PC) over a relay and remotely controls it: scan-to-pair, end-to-end
 encrypted session control, tool-call/timeline rendering, and remote permission
 approval. See the requirements at

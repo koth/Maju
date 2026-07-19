@@ -3162,10 +3162,12 @@ export function SettingsPage({
       (sum, row) => sum + usageTokenTotal(row.tokens),
       0,
     );
-    // P5: request_count counts only token-reporting events (TurnDelta +
-    // SessionTotal), excluding ContextSnapshot occupancy-only reports, so the
-    // per-request average and "requests" figures are not diluted by context
-    // telemetry.
+    // P5: request_count counts one per real model-API request — only the
+    // TurnDelta scope (the per-request increment). The ACP mapping layer
+    // splits a single usage meta into SessionTotal + TurnDelta for the SAME
+    // request, so counting both would double-count every request; only
+    // TurnDelta is counted, so the per-request average and "requests" figures
+    // match platform billing and are not diluted by context telemetry.
     const totalRequests = usageRows.reduce(
       (sum, row) => sum + row.request_count,
       0,

@@ -1548,12 +1548,17 @@ fn update_usage_model_summary(ui: &mut UiSnapshot, usage: &UsageEvent) {
     };
 
     summary.event_count += 1;
-    // P5: only TurnDelta / SessionTotal represent an actual token-reporting
-    // request; ContextSnapshot is occupancy-only telemetry.
-    if matches!(
-        usage.scope,
-        UsageEventScope::TurnDelta | UsageEventScope::SessionTotal
-    ) {
+    // `request_count` counts one per real model-API request. codex-acp
+    // emits a single `kodex.ai/usage` meta per model call, which the ACP
+    // mapping layer splits into a `SessionTotal` event plus a `TurnDelta`
+    // event describing the *same* request. Counting both therefore
+    // double-counts every request (verified against platform billing:
+    // exactly 2× the billed request count). The `TurnDelta` scope is the
+    // per-request increment, so one `TurnDelta` event == one billed
+    // request. `SessionTotal` is the cumulative overwrite of the same
+    // request and is excluded; `ContextSnapshot` is occupancy-only
+    // telemetry and is also excluded.
+    if matches!(usage.scope, UsageEventScope::TurnDelta) {
         summary.request_count += 1;
     }
     summary.latest_at = usage
@@ -2455,9 +2460,14 @@ mod tests {
 
     #[test]
     fn usage_by_model_request_count_excludes_context_snapshot_events() {
-        // P5: request_count counts only TurnDelta + SessionTotal (token-
-        // reporting) events; event_count counts all rows including
-        // ContextSnapshot occupancy-only reports.
+        // P5: request_count counts one per real model-API request. The ACP
+        // mapping layer splits a single `kodex.ai/usage` meta into a
+        // `SessionTotal` event plus a `TurnDelta` event describing the SAME
+        // request, so counting both double-counts (verified against platform
+        // billing: exactly 2× the billed request count). Only the `TurnDelta`
+        // scope — the per-request increment — is counted; `SessionTotal` is
+        // the cumulative overwrite of the same request and is excluded, as is
+        // `ContextSnapshot` occupancy-only telemetry.
         let mut ui = empty_ui();
         let model = Some("gpt-5.1".to_string());
         let provider = Some("openai".to_string());
@@ -2519,8 +2529,10 @@ mod tests {
             .expect("gpt-5.1 model row must exist");
         assert_eq!(row.event_count, 5, "event_count must count all rows");
         assert_eq!(
-            row.request_count, 2,
-            "request_count must exclude ContextSnapshot occupancy-only reports"
+            row.request_count, 1,
+            "request_count counts one per real request (only the TurnDelta; the \
+             SessionTotal describes the same request and is excluded), excluding \
+             ContextSnapshot"
         );
     }
 

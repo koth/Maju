@@ -47,7 +47,7 @@ export function PairingScreen() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ padding: spacing.md }}>
-      <Text style={styles.title}>Pair with Kodex PC</Text>
+      <Text style={styles.title}>Pair with Maju PC</Text>
       <Text style={styles.subtitle}>
         Scan the QR code shown on the PC, or paste the pairing payload below.
         Pairing uses end-to-end encryption (X25519 + ChaCha20-Poly1305).

@@ -52,4 +52,4 @@
 - [x] 7.2 Run targeted `kodex-claude` tests for usage update metadata.
 - [x] 7.3 Run UI unit tests for workbench and settings usage components.
 - [x] 7.4 Run `npm run build` in `apps/desktop/ui`.
-- [x] 7.5 Run `cargo check -p kodex-desktop` after Rust integration changes.
+- [x] 7.5 Run `cargo check -p maju-desktop` after Rust integration changes.

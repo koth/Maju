@@ -1091,11 +1091,11 @@ mod tests {
 
     #[test]
     fn remote_terminal_shell_command_quotes_workspace_root() {
-        let command = remote_terminal_shell_command("/srv/Kodex Project's").unwrap();
+        let command = remote_terminal_shell_command("/srv/Maju Project's").unwrap();
 
         assert!(command.starts_with(&format!(
             "cd {} || exit $?",
-            shell_quote("/srv/Kodex Project's")
+            shell_quote("/srv/Maju Project's")
         )));
         assert!(command.contains("exec \"$SHELL\" -l"));
         assert!(command.contains("exec /bin/sh -l"));
@@ -1142,7 +1142,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(first.workspace_root, remote.key());
-        assert_eq!(first.cwd, "/srv/Kodex Project");
+        assert_eq!(first.cwd, "/srv/Maju Project");
         assert_eq!(first.shell, "ssh alice@devbox");
 
         let second = service
@@ -1240,7 +1240,7 @@ mod tests {
             profile_id: None,
             ssh_target: "alice@devbox".into(),
             ssh_port: Some(2222),
-            remote_path: "/srv/Kodex Project".into(),
+            remote_path: "/srv/Maju Project".into(),
             ssh_password: None,
             agent_cli: None,
             agent_command: None,

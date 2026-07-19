@@ -2,8 +2,8 @@ import type { ExpoConfig, ConfigContext } from "expo/config";
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
-  name: "Kodex",
-  slug: "kodex-mobile",
+  name: "Maju",
+  slug: "maju-mobile",
   version: "0.1.0",
   orientation: "portrait",
   icon: "./assets/icon.png",
