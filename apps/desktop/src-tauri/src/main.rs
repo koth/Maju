@@ -133,6 +133,8 @@ fn main() {
             commands::fs::fs_rename,
             commands::fs::fs_delete_file,
             commands::fs::fs_reveal,
+            commands::fs::fs_path_exists,
+            commands::fs::fs_mention_suggest,
             commands::search::fs_search,
             commands::settings::settings_get_agent_snapshot,
             commands::settings::settings_detect_agents,

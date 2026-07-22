@@ -427,6 +427,14 @@ export async function fsReveal(path: string, select = false): Promise<void> {
   return invoke("fs_reveal", { path, select });
 }
 
+export async function fsPathExists(paths: string[]): Promise<boolean[]> {
+  return invoke<boolean[]>("fs_path_exists", { paths });
+}
+
+export async function fsMentionSuggest(query: string): Promise<FileEntry[]> {
+  return invoke<FileEntry[]>("fs_mention_suggest", { query });
+}
+
 export async function sessionReconnect(): Promise<void> {
   return invoke("session_reconnect");
 }

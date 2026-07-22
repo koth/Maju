@@ -27,6 +27,7 @@ import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet
 import { DiffTab } from "../editor/DiffTab";
 import { EditorView } from "../editor/EditorView";
 import { isModelDirty } from "../editor/monaco-model-registry";
+import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
 import { WelcomeLauncher } from "./WelcomeLauncher";
 import { SessionList, type ArchivedSessionNotice } from "../session/SessionList";
 import { TabBar } from "./TabBar";
@@ -140,12 +141,12 @@ export function agentPlanProgressSignature(entries: AgentPlanEntry[]) {
 
 function usageTokenTotal(tokens: NonNullable<UiSnapshot["usage"]>["current_turn"] | undefined) {
   if (!tokens) return 0;
-  // cache_read is a subset of input; adding it would double-count. Keep
-  // cache_read/cache_write as display-only breakdown, not in the total.
+  // cache_read is a subset of input and reasoning is a subset of output;
+  // adding either would double-count. Keep them as display-only breakdown,
+  // not in the total.
   return tokens.total_tokens ?? (
     (tokens.input_tokens ?? 0) +
-    (tokens.output_tokens ?? 0) +
-    (tokens.reasoning_tokens ?? 0)
+    (tokens.output_tokens ?? 0)
   );
 }
 
@@ -709,10 +710,14 @@ export function Workbench() {
   }, [setRightPanelCollapsed]);
 
   const handleSearchFileOpen = useCallback((filePath: string, lineNumber?: number, searchQuery?: string) => {
+    // Chat file links resolve to absolute paths; the editor + file tree speak
+    // workspace-relative paths (absolute ones trip the backend traversal
+    // check and break tree expansion).
+    const relativePath = stripWorkspaceRootPrefix(filePath, snapshot?.workspace.root);
     searchOpenSeqRef.current += 1;
     const tab: ReviewPanelOpenTab = {
       kind: "file",
-      path: filePath,
+      path: relativePath,
       lineNumber,
       searchQuery,
       navToken: searchOpenSeqRef.current,
@@ -720,14 +725,14 @@ export function Workbench() {
     setRightPanelCollapsed(false);
     setReviewPanelExpanded(false);
     setReviewPanelOpenTabs((current) => {
-      const tabId = `file:${filePath}`;
+      const tabId = `file:${relativePath}`;
       if (current.some((openTab) => reviewOpenTabKey(openTab) === tabId)) {
         return current.map((openTab) => (reviewOpenTabKey(openTab) === tabId ? tab : openTab));
       }
       return [...current, tab];
     });
     setReviewPanelActiveTab(tab);
-  }, [setRightPanelCollapsed]);
+  }, [setRightPanelCollapsed, snapshot?.workspace.root]);
 
   const autoReviewTarget = useMemo(
     () => latestReviewableTurnChangeSet(timelineTurnChangeSets, liveTurnChangeSet),
@@ -1271,6 +1276,7 @@ export function Workbench() {
                       onRetryUserMessage={handleRetryUserMessage}
                       onCancelTurn={handleCancelTurn}
                       onStopTool={handleStopTool}
+                      onFilePathClick={handleSearchFileOpen}
                     />
                   </>
                 ) : (

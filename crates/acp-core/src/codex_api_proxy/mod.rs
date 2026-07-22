@@ -3830,7 +3830,7 @@ fn anthropic_response_to_responses_response(anthropic: Value) -> Value {
     if !text.is_empty() {
         output.push(response_message_item_with_reasoning(&text, None));
     }
-    let usage = normalized_chat_usage(anthropic.get("usage"));
+    let usage = normalized_anthropic_usage(anthropic.get("usage"));
     let (status, incomplete_details) = anthropic_stop_reason_to_responses_status(
         anthropic.get("stop_reason").and_then(Value::as_str),
     );
@@ -3878,20 +3878,64 @@ fn normalized_chat_usage(value: Option<&Value>) -> Value {
         .unwrap_or(reported_input + output);
     let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
     let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
-    // Upstream `prompt_tokens` (OpenAI chat-completions convention) is the
-    // **total** prompt size and already includes any cache-hit prefix —
-    // `prompt_tokens_details.cached_tokens` is the subset served from cache.
-    // Forwarding the raw total as `input_tokens` while ALSO surfacing
-    // `cached_tokens` double-counts the cached prefix (the UI renders them
-    // side by side: 输入 X / 缓存读 Y). Report `input_tokens` as the
-    // uncached portion so the two fields are disjoint.
-    let input = if reported_input > 0 && cached_tokens > 0 {
-        reported_input.saturating_sub(cached_tokens)
-    } else {
-        reported_input
-    };
+    // Forward the upstream input total as-is. The cache-inclusiveness of
+    // `input_tokens`/`prompt_tokens` is upstream-dependent and ambiguous:
+    // true Anthropic Messages reports `input_tokens` as the NON-cached
+    // subset (cache in `cache_read_input_tokens`/`cache_creation_input_tokens`),
+    // while CodeBuddy/GLM-style proxies report it ALREADY cache-inclusive
+    // (the cached subset also lives in `cache_read_input_tokens`). We cannot
+    // tell the two apart here, so we keep `input_tokens` as the reported total
+    // and treat the cache fields as display-only breakdown — matching the
+    // invariant used everywhere else (mapping.rs, reducer, UI): input is
+    // cache-inclusive, cache_* are subsets. Folding the cache fields into
+    // `input_tokens` would double-count for cache-inclusive upstreams
+    // (verified: the env-info context gauge read ~2x real for CodeBuddy-served
+    // Anthropic-messages models). See usage.rs `to_openai_usage`.
     json!({
-        "input_tokens": input,
+        "input_tokens": reported_input,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens
+        },
+        "output_tokens": output,
+        "output_tokens_details": {
+            "reasoning_tokens": reasoning_tokens
+        },
+        "total_tokens": total
+    })
+}
+
+/// Normalize usage for the **native Anthropic Messages** path only (streaming
+/// `AnthropicSseToResponsesConverter` + non-streaming
+/// `anthropic_response_to_responses_response`). True Anthropic Messages
+/// reports `input_tokens` as the NON-cached subset, with the cached prefix
+/// in `cache_read_input_tokens` / `cache_creation_input_tokens`; codex's
+/// `input_tokens` is cache-inclusive, so fold the cache axes into `input`.
+/// This is deliberately separate from `normalized_chat_usage` (used by the
+/// chat-completions / codebuddy path, whose `prompt_tokens` is already
+/// cache-inclusive) so folding cache here can never double-count the
+/// codebuddy chat path.
+fn normalized_anthropic_usage(value: Option<&Value>) -> Value {
+    let usage = value.unwrap_or(&Value::Null);
+    let base_input = usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let cache_read = usage_i64_field(usage, "cache_read_input_tokens").unwrap_or(0);
+    let cache_creation = usage_i64_field(usage, "cache_creation_input_tokens").unwrap_or(0);
+    let input_tokens = base_input + cache_read + cache_creation;
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(input_tokens + output);
+    let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
+    let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
+    json!({
+        "input_tokens": input_tokens,
         "input_tokens_details": {
             "cached_tokens": cached_tokens
         },

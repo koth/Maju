@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import type { AvailableCommand, SessionConfigControl, UiSnapshot, UserPromptContent } from "../../types";
 import { editorGetContent, sessionCancel, sessionSendPrompt, sessionReconnect, sessionSetConfigControl } from "../../lib/tauri";
 import { composerDraftKey, useComposerDraft, type ComposerAttachmentDraft } from "./composer-draft-store";
+import { MentionMenu } from "./MentionMenu";
+import { useMention, type MentionKind } from "./use-mention";
 import "./Composer.css";
 
 export interface ComposerReferenceRequest {
@@ -141,6 +143,51 @@ export function Composer({
     [activeImagePreviewId, attachments],
   );
 
+  const handleMentionSelect = useCallback(
+    async (path: string, kind: MentionKind) => {
+      if (turnActive) {
+        setControlError("当前轮次运行中暂不支持添加引用");
+        return;
+      }
+      if (!fileInputEnabled) {
+        setControlError("当前智能体不支持文件引用");
+        return;
+      }
+      try {
+        const request: ComposerReferenceRequest = {
+          id: `mention-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          path,
+        };
+        const attachment = await attachmentFromReference(
+          request,
+          snapshot.workspace.root,
+          imageInputEnabled,
+        );
+        if (kind === "Directory") {
+          const normalized = path.replace(/\\/g, "/").replace(/^[\\/]+/, "");
+          attachment.displayName = `${normalized}/`;
+        }
+        setAttachments((current) => {
+          if (attachment.uri && current.some((item) => item.uri === attachment.uri)) {
+            return current;
+          }
+          return [...current, attachment];
+        });
+        setControlError(null);
+      } catch (error) {
+        setControlError(String(error));
+      }
+    },
+    [fileInputEnabled, imageInputEnabled, snapshot.workspace.root, turnActive],
+  );
+
+  const mention = useMention({
+    textareaRef,
+    enabled: !turnActive && fileInputEnabled,
+    onSelect: handleMentionSelect,
+    setInput,
+  });
+
   const availableCommands = snapshot.available_commands ?? [];
   const filteredCommands = useMemo(() => {
     if (!slashMenuOpen || availableCommands.length === 0) return [];
@@ -278,6 +325,7 @@ export function Composer({
     }
     setActiveImagePreviewId(null);
     setSlashMenuOpen(false);
+    mention.close();
     setOptimisticTurnActive(true);
     try {
       await sessionSendPrompt(prompt);
@@ -290,6 +338,7 @@ export function Composer({
 
   const handleInputChange = useCallback((value: string) => {
     setInput(value);
+    mention.syncFromValue(value);
     if (value.startsWith("/") && availableCommands.length > 0 && !turnActive) {
       const afterSlash = value.slice(1).split(/\s/)[0];
       if (!value.includes(" ")) {
@@ -302,14 +351,15 @@ export function Composer({
       setSlashMenuOpen(false);
       setSlashFilter("");
     }
-  }, [availableCommands, turnActive]);
+  }, [availableCommands, turnActive, mention]);
 
   const handleSlashCommandSelect = useCallback((command: AvailableCommand) => {
     setInput(`/${command.name} `);
     setSlashMenuOpen(false);
     setSlashFilter("");
+    mention.close();
     textareaRef.current?.focus();
-  }, []);
+  }, [mention]);
 
   const handleAttachmentFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0 || !activeAttachmentInputEnabled) return;
@@ -445,6 +495,7 @@ export function Composer({
     // IME composition in progress (e.g. picking a Chinese candidate): let the
     // Enter confirm the candidate instead of sending the message.
     const isComposing = e.nativeEvent.isComposing || e.keyCode === 229;
+    if (mention.handleKeyDown(e)) return;
     if (slashMenuOpen && filteredCommands.length > 0) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -495,10 +546,10 @@ export function Composer({
         <div className="composer-input-wrap">
           {slashMenuOpen && filteredCommands.length > 0 && (
             <div className="composer-slash-menu" role="listbox" aria-label="斜杠命令">
-              {filteredCommands.map((cmd) => (
+              {filteredCommands.map((cmd, index) => (
                 <button
                   key={cmd.name}
-                  className="composer-slash-option"
+                  className={`composer-slash-option${index === 0 ? " is-active" : ""}`}
                   type="button"
                   role="option"
                   onMouseDown={(e) => {
@@ -511,6 +562,19 @@ export function Composer({
                 </button>
               ))}
             </div>
+          )}
+          {mention.open && (
+            <MentionMenu
+              items={mention.items}
+              activeIndex={mention.activeIndex}
+              loading={mention.loading}
+              query={mention.query}
+              dirPart={mention.dirPart}
+              prefix={mention.prefix}
+              anchor={mention.anchor}
+              onConfirm={mention.confirm}
+              onHover={mention.setActiveIndex}
+            />
           )}
           {attachments.length > 0 && (
             <div className="composer-attachment-strip" aria-label="已附加的文件">
@@ -576,92 +640,95 @@ export function Composer({
           />
         </div>
         <div className="composer-control-rail">
-          <input
-            ref={attachmentInputRef}
-            className="composer-attachment-input"
-            type="file"
-            multiple
-            onChange={(event) => handleAttachmentFiles(event.currentTarget.files)}
-          />
-          <button
-            className="composer-attachment-btn"
-            type="button"
-            disabled={!controlsEnabled || !activeAttachmentInputEnabled || pendingControlId !== null}
-            onClick={() => attachmentInputRef.current?.click()}
-            title={attachmentButtonTitle}
-            aria-label="附加图片或文件"
-          >
-            <PaperclipIcon />
-          </button>
-          {modeControl && (
-            <SessionControlSelect
-              control={modeControl}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === modeControl.id}
-              open={openControlId === modeControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? modeControl.id : null)}
-              onChange={handleControlChange}
+          <div className="composer-rail-group composer-rail-left">
+            <input
+              ref={attachmentInputRef}
+              className="composer-attachment-input"
+              type="file"
+              multiple
+              onChange={(event) => handleAttachmentFiles(event.currentTarget.files)}
             />
-          )}
-          {extraControls.map((control) => (
-            <SessionControlSelect
-              key={control.id}
-              control={control}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === control.id}
-              open={openControlId === control.id}
-              onOpenChange={(open) => setOpenControlId(open ? control.id : null)}
-              onChange={handleControlChange}
-            />
-          ))}
-          <span className="composer-rail-spacer" />
-          {modelProviderControl && (
-            <SessionControlSelect
-              control={modelProviderControl}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === modelProviderControl.id}
-              open={openControlId === modelProviderControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? modelProviderControl.id : null)}
-              onChange={handleModelProviderChange}
-            />
-          )}
-          {sessionConfigPending ? (
-            <span className="composer-static-control is-loading" data-control-id="model" role="status" aria-live="polite" aria-label="模型加载中">
-              <span className="composer-loading-spinner" aria-hidden="true" />
-              模型加载中
-            </span>
-          ) : visibleModelControl ? (
-            <SessionControlSelect
-              control={visibleModelControl}
-              disabled={!controlsEnabled || pendingControlId !== null}
-              pending={pendingControlId === visibleModelControl.id}
-              open={openControlId === visibleModelControl.id}
-              onOpenChange={(open) => setOpenControlId(open ? visibleModelControl.id : null)}
-              onChange={handleControlChange}
-            />
-          ) : (
-            <span className="composer-static-control" data-control-id="model">
-              {displayModelValue(snapshot.session.model)}
-            </span>
-          )}
-
-          <span className="composer-session-state">
-            <span className="composer-session-state-dot" />
-            {snapshot.session.status}
-          </span>
-          <button
-            className={[
-              "composer-send-btn",
-              canSend ? "composer-send-btn-active" : "",
-              primaryActionIsStop ? "composer-stop-btn" : "",
-            ].filter(Boolean).join(" ")}
-            disabled={!primaryActionEnabled}
-            onClick={handlePrimaryAction}
-            title={primaryActionTitle}
-            aria-label={primaryActionTitle}
-          >
-            {primaryActionIsStop ? <span className="composer-stop-icon" /> : <SendIcon />}
-          </button>
+            <button
+              className="composer-attachment-btn"
+              type="button"
+              disabled={!controlsEnabled || !activeAttachmentInputEnabled || pendingControlId !== null}
+              onClick={() => attachmentInputRef.current?.click()}
+              title={attachmentButtonTitle}
+              aria-label="附加图片或文件"
+            >
+              <PaperclipIcon />
+            </button>
+            {modeControl && (
+              <SessionControlSelect
+                control={modeControl}
+                disabled={!controlsEnabled || pendingControlId !== null}
+                pending={pendingControlId === modeControl.id}
+                open={openControlId === modeControl.id}
+                onOpenChange={(open) => setOpenControlId(open ? modeControl.id : null)}
+                onChange={handleControlChange}
+              />
+            )}
+            {extraControls.map((control) => (
+              <SessionControlSelect
+                key={control.id}
+                control={control}
+                disabled={!controlsEnabled || pendingControlId !== null}
+                pending={pendingControlId === control.id}
+                open={openControlId === control.id}
+                onOpenChange={(open) => setOpenControlId(open ? control.id : null)}
+                onChange={handleControlChange}
+              />
+            ))}
+          </div>
+          <div className="composer-rail-group composer-rail-right">
+            {modelProviderControl && (
+              <SessionControlSelect
+                control={modelProviderControl}
+                disabled={!controlsEnabled || pendingControlId !== null}
+                pending={pendingControlId === modelProviderControl.id}
+                open={openControlId === modelProviderControl.id}
+                onOpenChange={(open) => setOpenControlId(open ? modelProviderControl.id : null)}
+                onChange={handleModelProviderChange}
+                icon={<SparkleGlyph />}
+              />
+            )}
+            {sessionConfigPending ? (
+              <span className="composer-static-control is-loading" data-control-id="model" role="status" aria-live="polite" aria-label="模型加载中">
+                <span className="composer-loading-spinner" aria-hidden="true" />
+                模型加载中
+              </span>
+            ) : visibleModelControl ? (
+              <SessionControlSelect
+                control={visibleModelControl}
+                disabled={!controlsEnabled || pendingControlId !== null}
+                pending={pendingControlId === visibleModelControl.id}
+                open={openControlId === visibleModelControl.id}
+                onOpenChange={(open) => setOpenControlId(open ? visibleModelControl.id : null)}
+                onChange={handleControlChange}
+                icon={<CubeGlyph />}
+              />
+            ) : (
+              <span className="composer-static-control" data-control-id="model">
+                <span className="composer-control-icon-slot" aria-hidden="true">
+                  <CubeGlyph />
+                </span>
+                {displayModelValue(snapshot.session.model)}
+              </span>
+            )}
+            <button
+              className={[
+                "composer-send-btn",
+                canSend ? "composer-send-btn-active" : "",
+                primaryActionIsStop ? "composer-stop-btn" : "",
+              ].filter(Boolean).join(" ")}
+              disabled={!primaryActionEnabled}
+              onClick={handlePrimaryAction}
+              title={primaryActionTitle}
+              aria-label={primaryActionTitle}
+            >
+              {primaryActionIsStop ? <span className="composer-stop-icon" /> : <SendIcon />}
+            </button>
+          </div>
         </div>
         {controlError && (
           <div className="composer-error">{controlError}</div>
@@ -1318,6 +1385,7 @@ function SessionControlSelect({
   open,
   onOpenChange,
   onChange,
+  icon,
 }: {
   control: SessionConfigControl;
   disabled: boolean;
@@ -1325,6 +1393,7 @@ function SessionControlSelect({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onChange: (control: SessionConfigControl, valueId: string) => void;
+  icon?: React.ReactNode;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const choices = useMemo(() => dedupeControlChoices(control.choices), [control.choices]);
@@ -1365,6 +1434,7 @@ function SessionControlSelect({
       ref={rootRef}
       className={`composer-control-select ${open ? "is-open" : ""}`}
       data-control-id={control.id}
+      data-control-category={control.category}
       onBlur={(event) => {
         const nextFocus = event.relatedTarget;
         if (!(nextFocus instanceof Node) || !event.currentTarget.contains(nextFocus)) {
@@ -1380,6 +1450,7 @@ function SessionControlSelect({
         aria-expanded={open}
         onClick={() => onOpenChange(!open)}
       >
+        {icon && <span className="composer-control-icon-slot" aria-hidden="true">{icon}</span>}
         {label && <span className="composer-control-label">{label}</span>}
         <span className="composer-control-value">{pending ? "更新中" : selectedLabel}</span>
         <span className="composer-control-chevron">
@@ -1417,8 +1488,11 @@ function SessionControlSelect({
 function SendIcon() {
   return (
     <svg className="composer-send-icon" viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M8 13V3" />
-      <path d="M4.25 6.75 8 3l3.75 3.75" />
+      <path
+        fill="currentColor"
+        stroke="none"
+        d="M14.7 1.3a.9.9 0 0 0-.94-.22L1.87 6.2a.9.9 0 0 0 .06 1.7l4.55 1.52 1.52 4.55a.9.9 0 0 0 1.7.06l5.12-11.9a.9.9 0 0 0-.12-.83Zm-7.4 7.13L3.2 7.02l9.2-3.7-5.1 5.1Zm1.65 4.37-1.4-4.1 5.1-5.1-3.7 9.2Z"
+      />
     </svg>
   );
 }
@@ -1439,6 +1513,24 @@ function ChevronDownIcon() {
   );
 }
 
+function SparkleGlyph() {
+  return (
+    <svg className="composer-control-icon composer-control-glyph" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 1.5l1.55 4.05L13.6 7.1 9.55 8.55 8 12.6 6.45 8.55 2.4 7.1l4.05-1.55z" />
+    </svg>
+  );
+}
+
+function CubeGlyph() {
+  return (
+    <svg className="composer-control-icon composer-control-glyph" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 1.5 13.5 4.25v7.5L8 14.5 2.5 11.75v-7.5z" />
+      <path d="M8 1.5 2.5 4.25 8 7l5.5-2.75z" />
+      <path d="M8 7v7.5" />
+    </svg>
+  );
+}
+
 function dedupeControlChoices(controlChoices: SessionConfigControl["choices"]) {
   const seen = new Set<string>();
   return controlChoices.filter((choice) => {
@@ -1452,7 +1544,8 @@ function dedupeControlChoices(controlChoices: SessionConfigControl["choices"]) {
 }
 
 function displayControlLabel(control: SessionConfigControl) {
-  if (control.category === "Model" || control.category === "Mode") return null;
+  if (control.category === "Mode") return null;
+  if (control.category === "Model") return "Model";
   return control.label;
 }
 

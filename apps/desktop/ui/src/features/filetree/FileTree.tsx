@@ -248,10 +248,16 @@ export function FileTree({
 
   const activeParentDirs = useMemo(() => {
     if (!activePath) return [];
-    const parts = activePath.replace(/\\/g, "/").split("/").filter(Boolean);
+    // `activePath` may be an absolute path (from a chat file link / search
+    // result) while the tree lists workspace-relative entries. Strip the
+    // workspace root so expansion refreshes relative directories instead of
+    // asking the backend to list an absolute path (which fails its
+    // traversal check with "Path traversal not allowed").
+    const relative = stripWorkspaceRootPrefix(activePath, workspaceRoot);
+    const parts = relative.replace(/\\/g, "/").split("/").filter(Boolean);
     parts.pop();
     return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
-  }, [activePath]);
+  }, [activePath, workspaceRoot]);
 
   useEffect(() => {
     if (activeParentDirs.length === 0) return;
@@ -538,6 +544,19 @@ function parentDirectory(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   parts.pop();
   return parts.join("/");
+}
+
+/** Turn an absolute path under the workspace into a workspace-relative one.
+ *  Returns the input unchanged when it is already relative or lives outside
+ *  the root (the backend will reject it with a clear error either way). */
+export function stripWorkspaceRootPrefix(path: string, workspaceRoot?: string) {
+  if (!workspaceRoot) return path;
+  const normalizedPath = path.replace(/\\/g, "/");
+  const normalizedRoot = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath.toLowerCase().startsWith(`${normalizedRoot.toLowerCase()}/`)) {
+    return normalizedPath.slice(normalizedRoot.length + 1);
+  }
+  return path;
 }
 
 function treeNodeMatches(entry: FileEntry, childrenCache: Map<string, FileEntry[]>, filterText: string): boolean {

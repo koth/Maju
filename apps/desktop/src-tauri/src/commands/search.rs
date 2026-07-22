@@ -5,7 +5,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tauri::State;
 use workspace_model::{
-    SearchFileResult, SearchFileSuggestion, SearchMatch, SearchNotice, SearchResult,
+    FileEntry, FileEntryKind, SearchFileResult, SearchFileSuggestion, SearchMatch, SearchNotice,
+    SearchResult,
 };
 
 #[cfg(windows)]
@@ -267,6 +268,76 @@ fn collect_file_suggestions(root: &Path, query: &str) -> Vec<SearchFileSuggestio
         .collect()
 }
 
+const MAX_MENTION_SUGGESTIONS: usize = 30;
+
+/// Project-wide suggestions for the composer `@` mention menu. Unlike
+/// `collect_file_suggestions` this also surfaces matching directories so
+/// users can reference a whole folder, not just files.
+pub(crate) fn collect_mention_suggestions(root: &Path, query: &str) -> Vec<FileEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranked: Vec<(u8, usize, String, FileEntry)> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let is_dir = file_type.is_dir();
+            if is_dir {
+                if should_skip_dir(&file_name) {
+                    continue;
+                }
+            } else if !file_type.is_file() || should_skip_file(&file_name) {
+                continue;
+            }
+
+            let Some(relative) = relative_workspace_path(root, &entry.path()) else {
+                continue;
+            };
+            let kind = if is_dir {
+                FileEntryKind::Directory
+            } else {
+                FileEntryKind::File
+            };
+
+            // Always recurse into non-skipped directories so deeper files can
+            // match even when the directory name itself does not.
+            if is_dir {
+                stack.push(entry.path());
+            }
+
+            let Some(score) = suggestion_score(&relative, &file_name, &query) else {
+                continue;
+            };
+            ranked.push((
+                score,
+                relative.len(),
+                relative.to_lowercase(),
+                FileEntry {
+                    name: file_name,
+                    kind,
+                    path: relative,
+                },
+            ));
+        }
+    }
+
+    ranked.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    ranked
+        .into_iter()
+        .take(MAX_MENTION_SUGGESTIONS)
+        .map(|(_, _, _, entry)| entry)
+        .collect()
+}
+
 fn relative_workspace_path(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     Some(relative.to_string_lossy().replace('\\', "/"))
@@ -327,6 +398,29 @@ mod tests {
                 .iter()
                 .any(|item| item.path == "target/SearchResults.tsx")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mention_suggestions_include_directories() {
+        let root = temp_root("mention_suggestions");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("src").join("Composer.tsx"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+
+        let suggestions = collect_mention_suggestions(&root, "src");
+
+        // The matching directory itself is surfaced, not just its files.
+        assert!(suggestions
+            .iter()
+            .any(|item| item.kind == FileEntryKind::Directory && item.path == "src"));
+        // A file whose path contains the query is also surfaced.
+        assert!(suggestions
+            .iter()
+            .any(|item| item.kind == FileEntryKind::File && item.path == "src/Composer.tsx"));
+        // Skipped directories are never suggested.
+        assert!(!suggestions.iter().any(|item| item.path.starts_with("target")));
         let _ = fs::remove_dir_all(root);
     }
 

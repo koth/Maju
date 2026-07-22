@@ -1,6 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, FileCode } from "lucide-react";
 import {
   Children,
   isValidElement,
@@ -14,21 +14,105 @@ import {
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight, vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { getAppliedAppTheme } from "../../theme";
+import { fsPathExists } from "../../lib/tauri";
 
 interface Props {
   content: string;
+  /** Absolute workspace root used to resolve relative file paths in messages. */
+  workspaceRoot?: string;
+  /** Called when the user clicks an inline-code file path (`crates/foo.rs:75`). */
+  onFilePathClick?: (filePath: string, lineNumber?: number) => void;
 }
 
-function MarkdownBody({ content }: Props) {
+/** Cross-message cache of `fs_path_exists` results so the same file link is
+ *  not re-probed for every assistant message that mentions it. */
+const filePathExistenceCache = new Map<string, boolean>();
+
+/** Test hook: clear the module-level existence cache between cases. */
+export function clearFilePathLinkCacheForTests() {
+  filePathExistenceCache.clear();
+}
+
+function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
   const appTheme = useCurrentAppTheme();
   const codeTheme = appTheme === "light" ? oneLight : vscDarkPlus;
   const displayContent = repairCompactMarkdown(content);
+  // Inline-code spans that look like file paths are only rendered as links
+  // once the backend confirmed they exist (incomplete paths like
+  // `codex_api_proxy/mod.rs:3880` stay plain code).
+  const [verifiedPaths, setVerifiedPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const pendingCandidates = new Map<string, ResolvedFilePath>();
+  // Bump on every probe resolution so the effect re-runs against the freshly
+  // populated cache even when nothing was newly verified.
+  const [probeRound, setProbeRound] = useState(0);
+
+  useEffect(() => {
+    if (!onFilePathClick) return;
+    const candidates = [...pendingCandidates.entries()].filter(
+      ([key]) =>
+        !verifiedPaths.has(key) && filePathExistenceCache.get(key) === undefined,
+    );
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    const uniquePaths = [...new Set(candidates.map(([, resolved]) => resolved.path))];
+    fsPathExists(uniquePaths)
+      .then((results) => {
+        if (cancelled) return;
+        const existsByPath = new Map(
+          uniquePaths.map((path, index) => [path, results[index] === true]),
+        );
+        const newlyVerified: string[] = [];
+        for (const [key, resolved] of candidates) {
+          const exists = existsByPath.get(resolved.path) === true;
+          filePathExistenceCache.set(key, exists);
+          if (exists) newlyVerified.push(key);
+        }
+        if (newlyVerified.length > 0) {
+          setVerifiedPaths((prev) => {
+            const next = new Set(prev);
+            for (const key of newlyVerified) next.add(key);
+            return next;
+          });
+        }
+        setProbeRound((round) => round + 1);
+      })
+      .catch(() => {
+        // Probing failed (e.g. workspace reconnecting): leave spans as plain
+        // code; a later render can retry.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayContent, workspaceRoot, onFilePathClick, verifiedPaths, probeRound]);
+
+  const handleInlineCodeClick = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (!onFilePathClick) return;
+      const codeEl = (event.target as HTMLElement).closest("code.md-file-path");
+      const raw = codeEl?.getAttribute("data-file-path");
+      if (!raw) return;
+      const [path, line] = raw.split("#");
+      const lineNumber = line && Number(line) > 0 ? Number(line) : undefined;
+      const resolved = { path, lineNumber };
+      if (resolved) {
+        onFilePathClick(resolved.path, resolved.lineNumber);
+      }
+    },
+    [onFilePathClick, workspaceRoot],
+  );
 
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkPreserveLineBreaks]}
-      urlTransform={safeMarkdownUrl}
-      components={{
+    // Clickable inline-code file paths are delegated from this wrapper so a
+    // streaming re-render does not need per-node handlers.
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
+    <div className="md-body" onClick={handleInlineCodeClick}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkPreserveLineBreaks]}
+        urlTransform={safeMarkdownUrl}
+        components={{
         br() {
           return <br className="md-line-break" />;
         },
@@ -67,8 +151,32 @@ function MarkdownBody({ content }: Props) {
             );
           }
 
+          const resolved =
+            onFilePathClick != null
+              ? resolveClickableFilePath(codeString, workspaceRoot)
+              : null;
+          let clickable = false;
+          if (resolved) {
+            const cacheKey = `${resolved.path}#${resolved.lineNumber ?? 0}`;
+            pendingCandidates.set(cacheKey, resolved);
+            clickable =
+              verifiedPaths.has(cacheKey) ||
+              filePathExistenceCache.get(cacheKey) === true;
+          }
           return (
-            <code className="md-inline-code" {...props}>
+            <code
+              className={clickable ? "md-inline-code md-file-path" : "md-inline-code"}
+              data-file-path={
+                clickable && resolved
+                  ? `${resolved.path}#${resolved.lineNumber ?? 0}`
+                  : undefined
+              }
+              title={clickable ? `${resolved?.path ?? ""} — 点击打开` : undefined}
+              {...props}
+            >
+              {clickable && (
+                <FileCode size={12} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
+              )}
               {children}
             </code>
           );
@@ -149,11 +257,87 @@ function MarkdownBody({ content }: Props) {
         td({ children }) {
           return <td className="md-td">{children}</td>;
         },
-      }}
-    >
-      {displayContent}
-    </ReactMarkdown>
+        }}
+      >
+        {displayContent}
+      </ReactMarkdown>
+    </div>
   );
+}
+
+interface ResolvedFilePath {
+  path: string;
+  lineNumber?: number;
+}
+
+/**
+ * Detect inline-code spans that look like a workspace file reference such as
+ * `crates/codebuddy-proxy/src/usage.rs:75` or `apps/desktop/ui/src/main.tsx`
+ * and resolve them to an absolute path. Returns null for anything that is
+ * clearly not a file path (identifiers, commands, urls, prose).
+ */
+export function resolveClickableFilePath(
+  raw: string,
+  workspaceRoot?: string,
+): ResolvedFilePath | null {
+  let candidate = raw.trim();
+  if (candidate.length < 4 || candidate.length > 512) return null;
+  if (/\s/.test(candidate)) return null;
+  // Strip diff prefixes so `a/src/foo.rs:10` / `b/src/foo.rs` also resolve.
+  candidate = candidate.replace(/^[ab]\//, "");
+
+  // A Windows drive prefix (`D:\...`) makes the path absolute; the `:line`
+  // split must not eat the drive colon.
+  const isWindowsAbs = /^[A-Za-z]:[\\/]/.test(candidate);
+  // Split an optional trailing :line[:column] reference.
+  let lineNumber: number | undefined;
+  const lineMatch = candidate.match(/^(.*?):(\d+)(?::\d+)?$/);
+  if (lineMatch) {
+    // Only treat the trailing segment as a line reference when what remains
+    // is still a plausible path (never strip the drive letter colon).
+    const remainder = lineMatch[1];
+    if (!isWindowsAbs || remainder.length > 2) {
+      candidate = remainder;
+      lineNumber = Number.parseInt(lineMatch[2], 10);
+    }
+  }
+  if (lineNumber !== undefined && (!Number.isFinite(lineNumber) || lineNumber <= 0)) {
+    return null;
+  }
+
+  const isPosixAbs = candidate.startsWith("/");
+  const isRelative = candidate.includes("/") || candidate.includes("\\");
+  if (!isWindowsAbs && !isPosixAbs && !isRelative) {
+    return null;
+  }
+  // Must carry a file extension so bare directories / URLs do not match.
+  const lastSegment = candidate.replace(/\\/g, "/").split("/").pop() ?? "";
+  if (!/^[^./]+\.[^./]{1,10}$/.test(lastSegment)) {
+    return null;
+  }
+  if (/^https?:\/\//i.test(candidate)) {
+    return null;
+  }
+
+  if (isWindowsAbs || isPosixAbs) {
+    return { path: normalizeFilePathSeparators(candidate), lineNumber };
+  }
+  if (!workspaceRoot) {
+    return null;
+  }
+  const root = normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "");
+  const separator = root.includes("\\") ? "\\" : "/";
+  const relative = candidate.replace(/[\\/]+/g, separator);
+  return { path: `${root}${separator}${relative}`, lineNumber };
+}
+
+/** Collapse mixed `\` / `/` separators to the platform-dominant one so the
+ *  resolved path compares cleanly against the canonical workspace root in
+ *  the backend's traversal check. */
+function normalizeFilePathSeparators(value: string) {
+  const backslashes = (value.match(/\\/g) ?? []).length;
+  const slashes = (value.match(/\//g) ?? []).length;
+  return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
 }
 
 export default memo(MarkdownBody);

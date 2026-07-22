@@ -670,18 +670,14 @@ fn normalize_responses_usage_fields(value: &mut Value) {
         .unwrap_or(reported_input + output);
     let cached_tokens = usage_cached_input_tokens(usage).unwrap_or(0);
     let reasoning_tokens = usage_reasoning_output_tokens(usage).unwrap_or(0);
-    // `input_tokens`/`prompt_tokens` here already includes the cache-hit
-    // prefix; surface the uncached portion so the two fields stay disjoint.
-    let input = if reported_input > 0 && cached_tokens > 0 {
-        reported_input.saturating_sub(cached_tokens)
-    } else {
-        reported_input
-    };
 
     let Some(usage) = usage.as_object_mut() else {
         return;
     };
-    usage.insert("input_tokens".to_string(), json!(input));
+    // `input_tokens`/`prompt_tokens` here already includes the cache-hit
+    // prefix, matching codex's cache-inclusive `TokenUsage.input_tokens`;
+    // keep it as-is (see `normalized_chat_usage`).
+    usage.insert("input_tokens".to_string(), json!(reported_input));
     usage.insert("output_tokens".to_string(), json!(output));
     usage.insert("total_tokens".to_string(), json!(total));
     upsert_usage_detail_i64(
@@ -1078,6 +1074,24 @@ fn sse_event_name_line(event: &str) -> Option<&str> {
 // Anthropic SSE → Responses SSE (streaming)
 // ---------------------------------------------------------------------------
 
+/// Merge a `message_start.message.usage` baseline with a later
+/// `message_delta.usage`. True Anthropic streams put `input_tokens` and the
+/// cache fields in `message_start` and only `output_tokens` in
+/// `message_delta`; proxies that repeat the full usage in `message_delta`
+/// must win. Field-level merge: the delta overrides the baseline for any
+/// present, non-null key; keys only in the baseline are preserved.
+fn merge_anthropic_usage(start: &Value, delta: &Value) -> Value {
+    let mut merged = start.clone();
+    if let (Some(merged_obj), Some(delta_obj)) = (merged.as_object_mut(), delta.as_object()) {
+        for (key, value) in delta_obj {
+            if !value.is_null() {
+                merged_obj.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    merged
+}
+
 #[derive(Debug, Default)]
 struct AnthropicToResponsesState {
     response_id: String,
@@ -1094,6 +1108,11 @@ struct AnthropicToResponsesState {
     tool_call_order: Vec<usize>,
     stop_reason: Option<String>,
     usage: Value,
+    /// Raw `message_start.message.usage` baseline. True Anthropic streams put
+    /// `input_tokens` / cache fields here and only `output_tokens` in the
+    /// later `message_delta`; without preserving it the input would be lost
+    /// (the gauge would read 0). Merged field-by-field with `message_delta`.
+    start_usage: Option<Value>,
     /// content_block_index of a finalized tool_use block (after content_block_stop).
     finalized_tool_blocks: BTreeSet<usize>,
     /// Session id this stream belongs to, used to partition the
@@ -1194,6 +1213,15 @@ fn process_anthropic_to_responses_event(
                 .and_then(Value::as_str)
             {
                 state.model = model.to_string();
+            }
+            // Anthropic streams carry `input_tokens` and the cache fields in
+            // `message_start.message.usage`; `message_delta.usage` only adds
+            // the final `output_tokens`. Capture the baseline here so the
+            // later delta merges onto it instead of replacing it (which would
+            // drop input and zero the context-occupancy gauge).
+            if let Some(usage) = value.get("message").and_then(|m| m.get("usage")) {
+                state.start_usage = Some(usage.clone());
+                state.usage = normalized_anthropic_usage(Some(usage));
             }
         }
         "content_block_start" => {
@@ -1475,7 +1503,15 @@ fn process_anthropic_to_responses_event(
                 state.stop_reason = Some(stop_reason.to_string());
             }
             if let Some(usage) = value.get("usage") {
-                state.usage = normalized_chat_usage(Some(usage));
+                // Merge onto the `message_start` baseline (field-level; the
+                // delta wins for present non-null keys) so true-Anthropic
+                // streams keep their `message_start` input/cache while proxies
+                // that repeat the full usage in `message_delta` still override.
+                let merged = match &state.start_usage {
+                    Some(start) => merge_anthropic_usage(start, usage),
+                    None => usage.clone(),
+                };
+                state.usage = normalized_anthropic_usage(Some(&merged));
             }
         }
         "message_stop" => {

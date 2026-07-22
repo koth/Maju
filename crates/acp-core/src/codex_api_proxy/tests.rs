@@ -1333,10 +1333,9 @@ fn normalizes_timiai_responses_sse_usage_cache_fields() {
     sanitized.extend(sanitizer.finish());
     let text = String::from_utf8(sanitized).unwrap();
 
-    // prompt_tokens (120) includes the cache-hit prefix (80); the surfaced
-    // input_tokens is the uncached portion so it does not double-count the
-    // cached tokens rendered alongside it.
-    assert!(text.contains("\"input_tokens\":40"));
+    // prompt_tokens (120) already includes the cache-hit prefix (80) and is
+    // forwarded as-is, matching codex's cache-inclusive input_tokens.
+    assert!(text.contains("\"input_tokens\":120"));
     assert!(text.contains("\"output_tokens\":10"));
     assert!(text.contains("\"total_tokens\":130"));
     assert!(text.contains("\"input_tokens_details\":{\"cached_tokens\":80}"));
@@ -1369,8 +1368,8 @@ fn converts_chat_usage_prompt_cache_hit_tokens_to_cached_input_tokens() {
 
     let response = chat_response_to_responses_response(chat, "test-session").unwrap();
 
-    // 120 total prompt tokens − 96 cache-hit = 24 uncached input tokens.
-    assert_eq!(response["usage"]["input_tokens"], 24);
+    // 120 total prompt tokens already include the 96 cache-hit tokens.
+    assert_eq!(response["usage"]["input_tokens"], 120);
     assert_eq!(
         response["usage"]["input_tokens_details"]["cached_tokens"],
         96
@@ -1548,8 +1547,8 @@ fn converts_chat_response_to_responses_response() {
     assert_eq!(response["output"][1]["type"], "function_call");
     assert_eq!(response["output"][1]["call_id"], "call_1");
     assert_eq!(response["output"][1]["name"], "list_files");
-    // 12 total prompt tokens − 8 cache-hit = 4 uncached input tokens.
-    assert_eq!(response["usage"]["input_tokens"], 4);
+    // 12 total prompt tokens already include the 8 cache-hit tokens.
+    assert_eq!(response["usage"]["input_tokens"], 12);
     assert_eq!(
         response["usage"]["input_tokens_details"]["cached_tokens"],
         8
@@ -2512,6 +2511,66 @@ fn converts_anthropic_stream_text_to_responses_stream() {
     assert!(text.contains("\"status\":\"completed\""));
     assert!(text.contains("\"input_tokens\":10"));
     assert!(text.contains("data: [DONE]"));
+}
+
+/// True Anthropic streams put `input_tokens` (and cache fields) in
+/// `message_start.message.usage` and only the final `output_tokens` in
+/// `message_delta.usage`. The converter must surface the `message_start`
+/// input — otherwise the context-occupancy gauge reads 0 for models served
+/// through the Anthropic messages streaming endpoint — while taking
+/// `output_tokens` from `message_delta`.
+#[test]
+fn anthropic_stream_surfaces_message_start_input_usage() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2095,\"cache_read_input_tokens\":20939,\"cache_creation_input_tokens\":0,\"output_tokens\":1}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":503}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    let normalized = anthropic_sse_to_responses_sse(body.as_bytes());
+    let text = String::from_utf8(normalized).unwrap();
+
+    // input_tokens lives only in message_start; it must surface — folded with
+    // the cache prefix (true Anthropic reports input as non-cached) — instead
+    // of being dropped (the old bug zeroed the gauge). 2095 + 20939 = 23034.
+    assert!(text.contains("\"input_tokens\":23034"));
+    assert!(text.contains("\"cached_tokens\":20939"));
+    // output_tokens comes from message_delta (final), overriding the
+    // message_start placeholder of 1.
+    assert!(text.contains("\"output_tokens\":503"));
+}
+
+/// Non-streaming Anthropic Messages response: `input_tokens` is the
+/// non-cached subset; the cache prefix must be folded in so the
+/// cache-inclusive context occupancy is correct (mirrors the streaming path).
+#[test]
+fn anthropic_response_folds_cache_into_input_tokens() {
+    let anthropic = json!({
+        "id": "msg_1",
+        "model": "claude-test",
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "hi" }],
+        "usage": {
+            "input_tokens": 2095,
+            "cache_read_input_tokens": 20939,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 503
+        }
+    });
+    let response = anthropic_response_to_responses_response(anthropic);
+    assert_eq!(response["usage"]["input_tokens"], 23034);
+    assert_eq!(response["usage"]["input_tokens_details"]["cached_tokens"], 20939);
+    assert_eq!(response["usage"]["output_tokens"], 503);
+    assert_eq!(response["usage"]["total_tokens"], 23537);
 }
 
 #[test]

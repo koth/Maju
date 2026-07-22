@@ -316,12 +316,12 @@ export function AgentPlanEnvironment({
 }
 
 function totalUsageTokens(tokens: SessionUsageSnapshot["session_total"]) {
-  // cache_read is a subset of input; adding it would double-count. Keep
-  // cache_read/cache_write as display-only breakdown, not in the total.
+  // cache_read is a subset of input and reasoning is a subset of output;
+  // adding either would double-count. Keep them as display-only breakdown,
+  // not in the total.
   return tokens.total_tokens ?? (
     (tokens.input_tokens ?? 0) +
-    (tokens.output_tokens ?? 0) +
-    (tokens.reasoning_tokens ?? 0)
+    (tokens.output_tokens ?? 0)
   );
 }
 

@@ -666,10 +666,12 @@
   --md-text: color-mix(in srgb, var(--text-muted) 76%, var(--text-soft));
   --md-strong: color-mix(in srgb, var(--text-strong) 58%, var(--text-muted));
   --md-soft: color-mix(in srgb, var(--text-soft) 92%, var(--text-muted));
-  --md-code-text: color-mix(in srgb, var(--text-strong) 64%, var(--text-muted));
-  --md-code-bg: color-mix(in srgb, var(--surface-alt-bg) 32%, transparent);
+  /* Inline code pops against the dark surface with the theme accent so
+     identifiers / paths stay scannable inside prose. */
+  --md-code-text: color-mix(in srgb, var(--accent-hover) 78%, var(--text-strong));
+  --md-code-bg: color-mix(in srgb, var(--accent) 9%, transparent);
   --md-code-block-bg: color-mix(in srgb, var(--app-bg) 88%, var(--surface-bg));
-  --md-code-border: color-mix(in srgb, var(--border-subtle) 56%, transparent);
+  --md-code-border: color-mix(in srgb, var(--accent) 20%, transparent);
   --md-table-border: color-mix(in srgb, var(--border-subtle) 48%, transparent);
   padding-top: 1px;
   background: var(--app-bg);
@@ -833,6 +835,37 @@
   padding: 0.5px 5px;
   border: 1px solid var(--md-code-border, transparent);
   border-radius: 5px;
+}
+
+.md-file-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--md-file-path, var(--accent-hover));
+  background: color-mix(in srgb, var(--md-file-path, var(--accent)) 12%, transparent);
+  border-color: color-mix(in srgb, var(--md-file-path, var(--accent)) 32%, transparent);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.md-file-path-icon {
+  flex: none;
+  opacity: 0.9;
+  margin-right: 1px;
+}
+
+.md-file-path:hover {
+  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--md-file-path, var(--accent)) 20%, transparent);
+  border-color: color-mix(in srgb, var(--md-file-path, var(--accent)) 55%, transparent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+:root[data-theme="light"] .md-file-path {
+  /* Darken the accent so the link stays legible on the light code chip. */
+  --md-file-path: color-mix(in srgb, var(--accent) 62%, #16302b);
 }
 
 .md-code-block {

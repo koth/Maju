@@ -75,9 +75,15 @@ export function SessionList({
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
+  const [comingSoonFeature, setComingSoonFeature] = useState<string | null>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const refreshInFlightRef = useRef(false);
+
+  const setComingSoon = useCallback((feature: string) => {
+    setComingSoonFeature(feature);
+    window.setTimeout(() => setComingSoonFeature(null), 1800);
+  }, []);
 
   const refresh = useCallback(() => {
     if (refreshInFlightRef.current) return;
@@ -403,32 +409,71 @@ export function SessionList({
 
   return (
     <div className="session-list">
+      <div className="sl-hero">
+        <button
+          className="sl-hero-new"
+          type="button"
+          onClick={() => handleOpenAgentPicker(activeWorkspaceRoot, null, false)}
+          title="新建对话"
+          aria-label="新建对话"
+        >
+          <span className="sl-hero-new-icon" aria-hidden="true">
+            <PlusIcon />
+          </span>
+          <span className="sl-hero-new-label">新建对话</span>
+          <kbd className="sl-hero-new-kbd">⌘K</kbd>
+        </button>
+      </div>
+
+      <div className="sl-quick-nav">
+        <button
+          className="sl-quick-nav-item"
+          type="button"
+          onClick={() => setComingSoon("自动化")}
+          title="自动化(即将上线)"
+        >
+          <AutomationIcon />
+          <span>自动化</span>
+        </button>
+        <button
+          className="sl-quick-nav-item"
+          type="button"
+          onClick={() => setComingSoon("技能库")}
+          title="技能库(即将上线)"
+        >
+          <SkillIcon />
+          <span>技能库</span>
+        </button>
+      </div>
+
       <div className="sl-header">
         <span className="sl-kicker">项目</span>
-        <div className="sl-new-workspace" ref={workspaceMenuRef}>
-          <button
-            className={`sl-new-btn ${workspaceMenuOpen ? "is-open" : ""}`}
-            type="button"
-            onClick={() => setWorkspaceMenuOpen((open) => !open)}
-            title="新建工作区"
-            aria-label="新建工作区"
-            aria-haspopup="menu"
-            aria-expanded={workspaceMenuOpen}
-          >
-            <PlusIcon />
-          </button>
-          {workspaceMenuOpen && (
-            <div className="sl-new-menu" role="menu" aria-label="新建工作区选项">
-              <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleCreateLocalWorkspace}>
-                <span>打开本地文件夹</span>
-                <small>从这台机器选择目录</small>
-              </button>
-              <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleOpenRemoteWorkspace}>
-                <span>打开远程目录</span>
-                <small>使用已保存的 Linux 机器</small>
-              </button>
-            </div>
-          )}
+        <div className="sl-header-actions">
+          <div className="sl-new-workspace" ref={workspaceMenuRef}>
+            <button
+              className={`sl-new-btn ${workspaceMenuOpen ? "is-open" : ""}`}
+              type="button"
+              onClick={() => setWorkspaceMenuOpen((open) => !open)}
+              title="新建项目"
+              aria-label="新建项目"
+              aria-haspopup="menu"
+              aria-expanded={workspaceMenuOpen}
+            >
+              <PlusIcon />
+            </button>
+            {workspaceMenuOpen && (
+              <div className="sl-new-menu" role="menu" aria-label="新建项目选项">
+                <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleCreateLocalWorkspace}>
+                  <span>打开本地文件夹</span>
+                  <small>从这台机器选择目录</small>
+                </button>
+                <button type="button" role="menuitem" className="sl-new-menu-item" onClick={handleOpenRemoteWorkspace}>
+                  <span>打开远程目录</span>
+                  <small>使用已保存的 Linux 机器</small>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -470,6 +515,12 @@ export function SessionList({
           <span>设置</span>
         </button>
       </div>
+
+      {comingSoonFeature && (
+        <div className="sl-coming-soon" role="status">
+          {comingSoonFeature}功能即将上线
+        </div>
+      )}
 
       {pendingSwitch && createPortal(
         <div className="sl-agent-modal-backdrop" role="presentation" onClick={closeSwitchConfirm}>
@@ -779,7 +830,7 @@ const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected
           aria-label={`在 ${item.workspace.name} 中新建会话`}
           disabled={isDormantRemoteWorkspace}
         >
-          <EditIcon />
+          <PlusIcon />
         </button>
         <button
           className="sl-workspace-archive"
@@ -1034,15 +1085,23 @@ function FolderIcon({ open }: { open: boolean }) {
   );
 }
 
-function EditIcon() {
+function AutomationIcon() {
   return (
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M11.9 4.2 15.8 8 8.1 15.7l-4.2.7.7-4.2 7.3-8Z" />
-      <path d="m11.1 5 3.9 3.9" />
+      <circle cx="10" cy="10" r="7.2" />
+      <path d="M10 5.8v4.2l2.8 1.7" />
     </svg>
   );
 }
 
+function SkillIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 2.8 16.6 6.2v7.6L10 17.2 3.4 13.8V6.2Z" />
+      <path d="M10 6.4v7.2M3.8 6.6l6.2 3 6.2-3" />
+    </svg>
+  );
+}
 function ArchiveIcon() {
   return (
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">

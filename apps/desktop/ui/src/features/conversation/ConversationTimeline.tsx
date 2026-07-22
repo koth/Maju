@@ -13,6 +13,11 @@ import {
 } from "./streaming-message-store";
 import "./ConversationTimeline.css";
 
+/** Workspace root for resolving relative file paths inside markdown messages.
+ *  Set once per timeline render; module-level so the memoized streaming
+ *  component can read it without prop drilling through the stream store. */
+let visibleWorkspaceRoot: string | undefined;
+
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
 
@@ -31,6 +36,7 @@ interface Props {
   onRetryUserMessage?: (messageId: string, text: string) => Promise<void> | void;
   onCancelTurn?: () => Promise<void> | void;
   onStopTool?: (toolCallId: string) => Promise<void> | void;
+  onFilePathClick?: (filePath: string, lineNumber?: number) => void;
 }
 
 export interface TimelineTurnChangeSet {
@@ -49,11 +55,13 @@ interface MessageRowProps {
   retryable?: boolean;
   copyable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
+  onFilePathClick?: (filePath: string, lineNumber?: number) => void;
 }
 
 interface StreamingMarkdownProps {
   id: string;
   body: string;
+  onFilePathClick?: (filePath: string, lineNumber?: number) => void;
 }
 
 interface UserMessageImage {
@@ -97,7 +105,7 @@ function contextCompactionState(body: string): ContextCompactionState | null {
   return null;
 }
 
-const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: StreamingMarkdownProps) {
+const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick }: StreamingMarkdownProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
 
@@ -133,7 +141,7 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body }: Streamin
 
   return (
     <div ref={hostRef} className="msg-streaming-markdown">
-      <MarkdownBody content={content} />
+      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} />
     </div>
   );
 });
@@ -286,6 +294,7 @@ const MessageRow = memo(function MessageRow({
   retryable = false,
   copyable = false,
   onRetry,
+  onFilePathClick,
 }: MessageRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(body);
@@ -422,9 +431,13 @@ const MessageRow = memo(function MessageRow({
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant">
           {streaming ? (
-            <StreamingMarkdown id={id} body={body} />
+            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} />
           ) : (
-            <MarkdownBody content={body} />
+            <MarkdownBody
+              content={body}
+              workspaceRoot={visibleWorkspaceRoot}
+              onFilePathClick={onFilePathClick}
+            />
           )}
           {streaming && <span className="streaming-cursor" />}
         </div>
@@ -741,7 +754,9 @@ export function ConversationTimeline({
   onRetryUserMessage,
   onCancelTurn,
   onStopTool,
+  onFilePathClick,
 }: Props) {
+  visibleWorkspaceRoot = snapshot.workspace.root;
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
@@ -1085,6 +1100,7 @@ export function ConversationTimeline({
               retryable={retryableMessages.has(msg.id)}
               copyable={isLastMessage(i)}
               onRetry={onRetryUserMessage}
+              onFilePathClick={onFilePathClick}
             />
           )}
           {changesForMessage && changesForMessage.files.length > 0 && (

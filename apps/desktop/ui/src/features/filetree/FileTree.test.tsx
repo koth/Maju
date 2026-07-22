@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { fsDeleteFile, fsListDir } from "../../lib/tauri";
 import type { FileEntry } from "../../types";
-import { FileTree } from "./FileTree";
+import { FileTree, stripWorkspaceRootPrefix } from "./FileTree";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
@@ -117,5 +117,39 @@ describe("FileTree", () => {
 
     expect(screen.getByText("src")).toBeTruthy();
     expect(screen.queryByText("notes.md")).toBeNull();
+  });
+
+  it("expands parent dirs of an absolute activePath relative to the workspace", async () => {
+    vi.mocked(fsListDir).mockImplementation(async (path: string) =>
+      path === "" ? rootEntries : [],
+    );
+    render(
+      <FileTree
+        workspaceRoot="D:\\work\\kodex"
+        onFileOpen={vi.fn()}
+        variant="inline"
+        activePath="D:\\work\\kodex\\src\\main.rs"
+      />,
+    );
+
+    await waitFor(() => expect(fsListDir).toHaveBeenCalledWith("src"));
+    const called = vi.mocked(fsListDir).mock.calls.map(([p]) => p);
+    expect(called).not.toContain("D:/work/kodex/src");
+    expect(called).not.toContain("D:\\work\\kodex\\src");
+  });
+});
+
+describe("stripWorkspaceRootPrefix", () => {
+  it("strips the workspace root from absolute paths (either separator)", () => {
+    expect(stripWorkspaceRootPrefix("D:\\work\\kodex\\crates\\x.rs", "D:\\work\\kodex")).toBe(
+      "crates/x.rs",
+    );
+    expect(stripWorkspaceRootPrefix("/home/u/repo/src/a.ts", "/home/u/repo")).toBe("src/a.ts");
+  });
+
+  it("leaves relative and out-of-workspace paths unchanged", () => {
+    expect(stripWorkspaceRootPrefix("crates/x.rs", "D:\\work\\kodex")).toBe("crates/x.rs");
+    expect(stripWorkspaceRootPrefix("C:\\other\\x.rs", "D:\\work\\kodex")).toBe("C:\\other\\x.rs");
+    expect(stripWorkspaceRootPrefix("crates/x.rs")).toBe("crates/x.rs");
   });
 });

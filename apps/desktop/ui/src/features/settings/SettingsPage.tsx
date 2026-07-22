@@ -3493,7 +3493,12 @@ export function SettingsPage({
           )}
 
           {usageError && <div className="settings-error">{usageError}</div>}
-          {usageLoading && <div className="settings-status">正在加载用量...</div>}
+          {usageLoading && (
+            <div className="settings-usage-loading">
+              <span className="settings-usage-loading-spinner" aria-hidden />
+              <span>正在加载用量...</span>
+            </div>
+          )}
           {!usageLoading && usageRows.length === 0 && (
             <div className="settings-empty-panel settings-usage-empty">
               暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。
@@ -4680,13 +4685,11 @@ function usageDateRangeBounds(range: UsageDateRange): {
 
 function usageTokenTotal(tokens: UsageSummaryRow["tokens"]): number {
   // cache_read is a subset of input (cache hits are billed as discounted
-  // input); adding it would double-count. cache_write is null for codex-acp.
-  // Keep cache_read/cache_write as display-only breakdown, not in the total.
+  // input) and reasoning is a subset of output; adding either would
+  // double-count. Keep cache/reasoning as display-only breakdown, not in
+  // the total.
   return (
-    tokens.total_tokens ??
-    (tokens.input_tokens ?? 0) +
-      (tokens.output_tokens ?? 0) +
-      (tokens.reasoning_tokens ?? 0)
+    tokens.total_tokens ?? (tokens.input_tokens ?? 0) + (tokens.output_tokens ?? 0)
   );
 }
 

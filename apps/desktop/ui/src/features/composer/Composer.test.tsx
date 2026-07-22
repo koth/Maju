@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Composer } from "./Composer";
 import { resetAllComposerDrafts } from "./composer-draft-store";
-import { editorGetContent, sessionCancel, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
+import { editorGetContent, fsMentionSuggest, sessionCancel, sessionSendPrompt, sessionSetConfigControl } from "../../lib/tauri";
 import type { UiSnapshot } from "../../types";
 
 vi.mock("../../lib/tauri", () => ({
@@ -11,6 +11,7 @@ vi.mock("../../lib/tauri", () => ({
   sessionReconnect: vi.fn(),
   sessionSendPrompt: vi.fn(),
   sessionSetConfigControl: vi.fn(),
+  fsMentionSuggest: vi.fn(),
 }));
 
 function makeSnapshot(overrides: Partial<UiSnapshot> = {}): UiSnapshot {
@@ -136,7 +137,7 @@ describe("Composer", () => {
     expect(within(composer as HTMLElement).getByRole("textbox")).toBeInTheDocument();
     expect(within(composer as HTMLElement).getByRole("button", { name: "Build" })).toBeInTheDocument();
     expect(within(composer as HTMLElement).getByRole("button", { name: /Provider.*DeepSeek/ })).toBeInTheDocument();
-    expect(within(composer as HTMLElement).getByRole("button", { name: /^deepseek-v4-pro/ })).toBeInTheDocument();
+    expect(within(composer as HTMLElement).getByRole("button", { name: /Model.*deepseek-v4-pro/ })).toBeInTheDocument();
     expect(within(composer as HTMLElement).getByRole("button", { name: "发送提示" })).toBeInTheDocument();
   });
 
@@ -332,7 +333,7 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: "附加图片或文件" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Build" })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Provider.*DeepSeek/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^deepseek-v4-pro/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Model.*deepseek-v4-pro/ })).toBeDisabled();
   });
 
   it("splits BYOK model choices by provider in the composer controls", async () => {
@@ -406,7 +407,7 @@ describe("Composer", () => {
 
     expect(screen.getByRole("button", { name: /Provider.*CommandCode/ })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^gpt-5\.4/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Model.*gpt-5\.4/ }));
     fireEvent.click(await screen.findByRole("option", { name: "gpt-5.4" }));
 
     await waitFor(() =>
@@ -554,7 +555,7 @@ describe("Composer", () => {
     render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Model.*kimi-for-coding/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Provider.*CommandCode/ })).toBeNull();
   });
 
@@ -588,7 +589,7 @@ describe("Composer", () => {
     render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Model.*kimi-for-coding/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Provider.*CommandCode/ })).toBeNull();
   });
 
@@ -622,7 +623,7 @@ describe("Composer", () => {
     render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /Provider.*Kimi Code/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^kimi-for-coding/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Model.*kimi-for-coding/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Provider.*byok/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /Provider.*Kimi Code/ }));
@@ -664,10 +665,10 @@ describe("Composer", () => {
     render(<Composer snapshot={snapshot} onStateChange={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: /Provider.*CommandCode/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^gpt-5\.5/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Model.*gpt-5\.5/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /kodex-provider\/commandcode/ })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /^gpt-5\.5/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Model.*gpt-5\.5/ }));
     expect(await screen.findByRole("option", { name: "gpt-5.5" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: /kodex-provider\/commandcode/ })).toBeNull();
     fireEvent.keyDown(document, { key: "Escape" });
@@ -682,5 +683,44 @@ describe("Composer", () => {
         null,
       ),
     );
+  });
+
+  it("inserts a file reference from the @ mention menu", async () => {
+    vi.mocked(fsMentionSuggest).mockResolvedValue([
+      {
+        name: "Composer.tsx",
+        kind: "File",
+        path: "apps/desktop/ui/src/features/composer/Composer.tsx",
+      },
+    ]);
+    render(<Composer snapshot={makeSnapshot()} onStateChange={vi.fn()} />);
+
+    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    // jsdom leaves the caret at the start after a value assignment; move it
+    // to the end and re-dispatch so the mention scanner observes the caret.
+    fireEvent.change(textbox, { target: { value: "@comp" } });
+    textbox.setSelectionRange(5, 5);
+    fireEvent.change(textbox);
+
+    const option = await screen.findByRole("option", { name: /Composer\.tsx/ });
+    fireEvent.mouseDown(option);
+
+    // The `@query` text is removed and a reference chip appears.
+    await waitFor(() => expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(""));
+    expect(
+      await screen.findByText("@apps/desktop/ui/src/features/composer/Composer.tsx"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "发送提示" }));
+    await waitFor(() => {
+      expect(sessionSendPrompt).toHaveBeenCalledWith([
+        {
+          type: "workspace_file",
+          path: "apps/desktop/ui/src/features/composer/Composer.tsx",
+          start_line: null,
+          end_line: null,
+        },
+      ]);
+    });
   });
 });

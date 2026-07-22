@@ -3130,15 +3130,12 @@ fn sub_optional_u64(value: Option<u64>, sub: Option<u64>) -> Option<u64> {
 
 fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {
     // `cache_read_tokens` is a subset of `input_tokens` (cache hits are billed
-    // as discounted input), and `cache_write_tokens` is null for codex-acp.
-    // Adding either to the fallback would double-count the same input tokens.
-    // `cache_read_tokens` / `cache_write_tokens` remain as display-only
-    // breakdown fields; the authoritative `total_tokens` is preferred when
-    // present, otherwise fall back to input + output + reasoning.
+    // as discounted input) and `reasoning_tokens` is a subset of
+    // `output_tokens`, so the fallback total is input + output. The cache /
+    // reasoning fields remain display-only breakdown chips; the authoritative
+    // `total_tokens` is preferred when present.
     tokens.total_tokens.unwrap_or_else(|| {
-        tokens.input_tokens.unwrap_or(0)
-            + tokens.output_tokens.unwrap_or(0)
-            + tokens.reasoning_tokens.unwrap_or(0)
+        tokens.input_tokens.unwrap_or(0) + tokens.output_tokens.unwrap_or(0)
     })
 }
 

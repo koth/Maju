@@ -388,17 +388,15 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
             "reasoningOutputTokens",
         ],
     );
+    // Fallback when the agent did not report an authoritative total:
+    // `input_tokens` already includes cache hits (`cache_read_tokens` is the
+    // cached subset of the prompt) and `output_tokens` already includes
+    // reasoning tokens, so the total is simply input + output. Including the
+    // cache/reasoning breakdown fields would double-count them.
     let total_tokens =
         usage_u64_field(meta, &["total_tokens", "totalTokens", "total"]).or_else(|| {
-            let parts = [
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-                reasoning_tokens,
-            ];
-            if parts.iter().any(Option::is_some) {
-                Some(parts.into_iter().flatten().sum())
+            if input_tokens.is_some() || output_tokens.is_some() {
+                Some(input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0))
             } else {
                 None
             }

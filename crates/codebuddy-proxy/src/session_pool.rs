@@ -14,6 +14,11 @@ pub struct PoolEntry {
     pub last_used: Mutex<Instant>,
     pub tool_signature: String,
     pub closed: std::sync::atomic::AtomicBool,
+    /// True when this pooled CLI was created cold (new session, LRU eviction,
+    /// context reset, or tool-signature change) and must be reseeded with
+    /// recent context on its first turn. False when the CLI was resumed from
+    /// a persisted rollout (`--resume`) — it already holds the full
+    /// conversation, so the first turn uses the incremental tail, not a seed.
     pub is_new: std::sync::atomic::AtomicBool,
     /// Context generation for this pooled CLI process. Bumped on compact /
     /// explicit reset so a subsequent request with a newer epoch forces a
@@ -140,7 +145,16 @@ impl SessionPool {
         // above intentionally bypass this — a reset means "fresh context".
         if let Some(home) = &self.codebuddy_home {
             if let Some(cwd) = opts.cwd.as_ref() {
-                if rollout_exists(home, cwd, session_id) {
+                let path = rollout_path(home, cwd, session_id);
+                let exists = path.is_file();
+                append_codebuddy_proxy_log(&format!(
+                    "pool rollout_probe session_id={session_id} home={} cwd={} slug={} path={} exists={exists}",
+                    home.display(),
+                    cwd.display(),
+                    project_dir_slug(cwd),
+                    path.display(),
+                ));
+                if exists {
                     append_codebuddy_proxy_log(&format!(
                         "pool resume_from_rollout session_id={session_id} cwd={}",
                         cwd.display(),
@@ -148,7 +162,15 @@ impl SessionPool {
                     opts.resume = Some(session_id.to_string());
                     opts.session_id = None;
                 }
+            } else {
+                append_codebuddy_proxy_log(&format!(
+                    "pool rollout_probe_skipped session_id={session_id} reason=no_cwd",
+                ));
             }
+        } else {
+            append_codebuddy_proxy_log(&format!(
+                "pool rollout_probe_skipped session_id={session_id} reason=no_codebuddy_home",
+            ));
         }
         self.create(session_id, opts, tool_sig, pending, initial_epoch)
             .await
@@ -191,15 +213,22 @@ impl SessionPool {
         // the sender side via `opts.tool_call_ack`.
         let (ack_tx, ack_rx) = mpsc::unbounded_channel::<()>();
         opts.tool_call_ack = Some(ack_tx);
+        // A rollout resume (`--resume`) leaves the CLI warm: it already holds
+        // the full conversation, so the first turn must NOT send the seed
+        // prompt. Only genuinely cold creates (new session, LRU eviction,
+        // context reset, tool-signature change) start with is_new=true and
+        // reseed recent context.
+        let resumed_from_rollout = opts.resume.is_some();
         let session = Session::new(opts)?;
         session.connect().await?;
         append_codebuddy_proxy_log(&format!(
-            "pool create session_id={session_id} epoch={context_epoch} tool_sig={}",
+            "pool create session_id={session_id} epoch={context_epoch} tool_sig={} is_new={}",
             if tool_sig.is_empty() {
                 "<none>"
             } else {
                 tool_sig
             },
+            !resumed_from_rollout,
         ));
         let entry = Arc::new(PoolEntry {
             session: Arc::new(session),
@@ -207,7 +236,7 @@ impl SessionPool {
             last_used: Mutex::new(Instant::now()),
             tool_signature: tool_sig.to_string(),
             closed: std::sync::atomic::AtomicBool::new(false),
-            is_new: std::sync::atomic::AtomicBool::new(true),
+            is_new: std::sync::atomic::AtomicBool::new(!resumed_from_rollout),
             context_epoch: std::sync::atomic::AtomicU64::new(context_epoch),
             pending,
             ack_rx: Mutex::new(ack_rx),
@@ -256,22 +285,28 @@ pub fn tool_signature_of(tools: &Option<Vec<crate::openai_types::OaiTool>>) -> S
 fn project_dir_slug(cwd: &Path) -> String {
     let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let s = resolved.to_string_lossy().into_owned();
-    let stripped: &str = if cfg!(target_os = "windows") {
-        // Drop the `\\?\` verbatim prefix that canonicalize adds on Windows.
-        let base = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        let bytes = base.as_bytes();
-        // Strip the drive-letter prefix such as `C:\` or `C:/`.
-        if base.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
-            &base[3..]
-        } else {
-            base
+    // Drop the `\\?\` verbatim prefix that canonicalize adds on Windows.
+    let s = s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s);
+    #[cfg(target_os = "windows")]
+    {
+        let bytes = s.as_bytes();
+        // Match the CodeBuddy CLI's on-disk slug layout exactly:
+        // `C:\Users\me\proj` -> `c-Users-me-proj`. The drive letter is kept
+        // (lowercased) as the first segment, the colon is dropped, and every
+        // separator becomes `-`. Previously the whole `C:\` prefix was
+        // stripped, producing `Users-me-proj`, which never matched the
+        // CLI-written `c-Users-me-proj` — so `rollout_exists` could never find
+        // a prior session's rollout after a restart, forcing a cold `--session-id`
+        // (and the seed prompt) every time.
+        if s.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+            let drive = (bytes[0] as char).to_ascii_lowercase();
+            let rest = s[3..].strip_prefix(['\\', '/']).unwrap_or(&s[3..]);
+            return format!("{drive}-{}", rest.replace(['\\', '/'], "-"));
         }
-    } else {
-        &s
-    };
-    let stripped = stripped
+    }
+    let stripped = s
         .strip_prefix(std::path::MAIN_SEPARATOR)
-        .unwrap_or(stripped);
+        .unwrap_or(&s);
     stripped.replace(std::path::MAIN_SEPARATOR, "-")
 }
 
@@ -369,5 +404,19 @@ mod rollout_tests {
         }
         let slug = project_dir_slug(Path::new("/tmp"));
         assert!(slug.starts_with("private-tmp"), "slug={slug}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn slug_keeps_lowercase_drive_letter_as_first_segment() {
+        // A path that does not exist on disk: canonicalize fails and the
+        // function falls back to the raw input, so the slug is deterministic.
+        // This mirrors the CodeBuddy CLI's on-disk layout (`c-Users-...`),
+        // which `rollout_exists` must match byte-for-byte after a restart.
+        let slug = project_dir_slug(std::path::Path::new(
+            r"C:\Users\me\.kodex\codebuddy",
+        ));
+        assert_eq!(slug, "c-Users-me-.kodex-codebuddy");
+        assert!(!slug.contains(':'), "slug={slug}");
     }
 }

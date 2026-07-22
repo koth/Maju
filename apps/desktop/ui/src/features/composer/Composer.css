@@ -14,13 +14,19 @@
 .composer-inner {
   position: relative;
   overflow: visible;
-  padding: 16px 18px 12px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 52%, transparent);
+  padding: 14px 18px 14px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 46%, transparent);
   border-radius: 24px;
-  background: color-mix(in srgb, var(--text-strong) 8%, var(--surface-bg));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--text-strong) 7%, var(--surface-bg)) 0%,
+      color-mix(in srgb, var(--text-strong) 5%, var(--surface-bg)) 100%
+    );
   box-shadow:
-    0 14px 42px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+    0 18px 48px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 6%, transparent);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .composer.is-compact .composer-inner {
@@ -43,10 +49,11 @@
 }
 
 .composer-inner:focus-within {
-  border-color: var(--border-focus);
+  border-color: color-mix(in srgb, var(--border-focus) 78%, transparent);
   box-shadow:
-    0 16px 44px rgba(0, 0, 0, 0.26),
-    0 0 0 1px color-mix(in srgb, var(--border-focus) 32%, transparent);
+    0 20px 52px rgba(0, 0, 0, 0.32),
+    0 0 0 3px color-mix(in srgb, var(--border-focus) 18%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
 }
 
 .composer-plan-slot {
@@ -1149,10 +1156,11 @@
 }
 
 .composer-inner.is-turn-active {
-  border-color: color-mix(in srgb, var(--danger) 46%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border-strong));
   box-shadow:
-    0 16px 44px rgba(0, 0, 0, 0.26),
-    0 0 0 1px color-mix(in srgb, var(--danger) 24%, transparent);
+    0 18px 48px rgba(0, 0, 0, 0.3),
+    0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 6%, transparent);
 }
 
 .composer-input-wrap {
@@ -1183,49 +1191,61 @@
 /* Slash command menu */
 .composer-slash-menu {
   position: absolute;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 10px);
   left: 0;
   right: 0;
   z-index: 30;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  max-height: 220px;
+  gap: 1px;
+  max-height: 340px;
   overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-bg) 90%, var(--app-bg));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-bg) 94%, var(--app-bg));
   box-shadow: var(--shadow-shell);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 28%, transparent) transparent;
+  scrollbar-gutter: stable;
 }
+
+.composer-slash-menu::-webkit-scrollbar {
+  width: 6px;
+}
+.composer-slash-menu::-webkit-scrollbar-track { background: transparent; }
+.composer-slash-menu::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+  border-radius: 999px;
+}
+.composer-slash-menu::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 44%, transparent);
+}
+.composer-slash-menu::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 
 .composer-slash-option {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 36px;
-  padding: 8px 12px;
+  min-height: 38px;
+  padding: 6px 10px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font: inherit;
   text-align: left;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast);
 }
 
-.composer-slash-option:first-child {
-  background: var(--interactive-hover);
-  border-color: var(--border-subtle);
-  color: var(--text-strong);
-}
-
+.composer-slash-option.is-active,
 .composer-slash-option:hover,
 .composer-slash-option:focus {
-  background: var(--interactive-hover);
-  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--accent-hover) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent-hover) 30%, transparent);
   color: var(--text-strong);
 }
 
@@ -1233,7 +1253,7 @@
   flex-shrink: 0;
   color: var(--accent-hover);
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .composer-slash-desc {
@@ -1470,13 +1490,31 @@
   position: relative;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  min-height: 40px;
+  min-height: 44px;
   margin-top: 2px;
   padding: 0;
   border-top: 0;
   color: var(--text-soft);
   font-size: var(--font-size-shell-meta);
+}
+
+.composer-rail-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-rail-left {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.composer-rail-right {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .composer.is-compact .composer-control-rail {
@@ -1530,13 +1568,22 @@
 
 .composer-attachment-btn {
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
   padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 48%, transparent);
+  border-radius: 13px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--text-strong) 6%, transparent) 0%,
+      color-mix(in srgb, var(--text-strong) 3%, transparent) 100%
+    );
   color: var(--text-soft);
   cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .composer.is-compact .composer-attachment-btn {
@@ -1556,8 +1603,8 @@
 .composer-utility-btn:hover,
 .composer-attachment-btn:hover:not(:disabled),
 .composer-control-select:hover {
-  background: color-mix(in srgb, var(--text-strong) 7%, transparent);
-  border-color: color-mix(in srgb, var(--border-strong) 44%, transparent);
+  background: color-mix(in srgb, var(--text-strong) 9%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 58%, transparent);
   color: var(--accent-hover);
 }
 
@@ -1673,9 +1720,9 @@
 .composer-control-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   min-height: 36px;
-  max-width: 240px;
+  max-width: 260px;
   border: 0;
   border-radius: 12px;
   background: transparent;
@@ -1683,6 +1730,66 @@
   cursor: pointer;
   font: inherit;
   padding: 0 8px 0 10px;
+}
+
+.composer-control-select[data-control-category="Mode"] .composer-control-trigger {
+  border: 1px solid color-mix(in srgb, var(--border-strong) 48%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--text-strong) 6%, transparent) 0%,
+      color-mix(in srgb, var(--text-strong) 3%, transparent) 100%
+    );
+  border-radius: 13px;
+  padding: 0 10px 0 12px;
+  min-height: 40px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 7%, transparent);
+}
+
+.composer-control-select[data-control-category="Mode"]:hover .composer-control-trigger,
+.composer-control-select[data-control-category="Mode"].is-open .composer-control-trigger {
+  background: color-mix(in srgb, var(--text-strong) 10%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 62%, transparent);
+}
+
+/* Default value inside Mode trigger is a touch larger to read as a pill label. */
+.composer-control-select[data-control-category="Mode"] .composer-control-value {
+  font-size: 14px;
+  font-weight: 650;
+  max-width: 160px;
+}
+
+.composer-control-icon-slot {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 32%, transparent);
+  background: color-mix(in srgb, var(--text-strong) 4%, transparent);
+  color: var(--text-soft);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-strong) 5%, transparent);
+  transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.composer-control-icon-slot .composer-control-glyph {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+}
+
+.composer-control-select:hover .composer-control-icon-slot,
+.composer-control-select.is-open .composer-control-icon-slot {
+  color: var(--text-strong);
+  border-color: color-mix(in srgb, var(--border-strong) 50%, transparent);
+  background: color-mix(in srgb, var(--text-strong) 7%, transparent);
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-icon-slot,
+.composer-control-select[data-control-id$=":provider"] .composer-control-icon-slot {
+  color: var(--text-strong);
 }
 
 .composer.is-compact .composer-control-trigger {
@@ -1711,6 +1818,54 @@
   font-weight: 700;
   letter-spacing: 0;
   text-transform: none;
+}
+
+/* Provider / Model: stack label above value to mirror the design. */
+.composer-control-select[data-control-id="model"] .composer-control-trigger,
+.composer-control-select[data-control-id$=":provider"] .composer-control-trigger {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 8px;
+  padding: 4px 10px;
+  min-height: 40px;
+  border-radius: 12px;
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-label,
+.composer-control-select[data-control-id$=":provider"] .composer-control-label {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-soft);
+  justify-self: start;
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-value,
+.composer-control-select[data-control-id$=":provider"] .composer-control-value {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.1;
+  max-width: 140px;
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-icon-slot,
+.composer-control-select[data-control-id$=":provider"] .composer-control-icon-slot {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 24px;
+  height: 24px;
+}
+
+.composer-control-select[data-control-id="model"] .composer-control-chevron,
+.composer-control-select[data-control-id$=":provider"] .composer-control-chevron {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  justify-self: end;
 }
 
 .composer-control-value {
@@ -1753,38 +1908,71 @@
 
 .composer-control-menu {
   position: absolute;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 10px);
   left: 0;
-  z-index: 20;
+  z-index: 50;
   display: flex;
   width: max-content;
   min-width: 100%;
-  max-width: 300px;
+  max-width: 320px;
   max-height: min(280px, calc(100vh - 160px));
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   overscroll-behavior: contain;
   overflow-y: auto;
-  padding: 6px;
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-bg) 92%, var(--app-bg));
-  box-shadow: var(--shadow-shell);
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 64%, transparent);
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface-bg) 94%, var(--app-bg)) 0%,
+      color-mix(in srgb, var(--surface-bg) 88%, var(--app-bg)) 100%
+    );
+  box-shadow:
+    0 16px 44px rgba(0, 0, 0, 0.34),
+    0 4px 12px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 6%, transparent);
   scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 28%, transparent) transparent;
+  scrollbar-gutter: stable;
+}
+
+.composer-control-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.composer-control-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-control-menu::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+  border-radius: 999px;
+}
+
+.composer-control-menu::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 44%, transparent);
+}
+
+.composer-control-menu::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .composer-control-option {
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font: inherit;
-  padding: 0 10px;
+  padding: 0 12px;
   text-align: left;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
@@ -1797,28 +1985,27 @@
 }
 
 .composer-control-option:hover {
-  background: var(--interactive-hover);
-  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--text-strong) 8%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 36%, transparent);
   color: var(--text-strong);
 }
 
 .composer-control-option.is-selected {
-  background: var(--interactive-selected);
-  border-color: var(--interactive-selected-border);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
   color: var(--text-strong);
+  font-weight: 620;
 }
 
-.composer-static-control[data-control-id="model"],
-.composer-control-select[data-control-id="model"] .composer-control-trigger .composer-control-value,
-.composer-control-select[data-control-id$=":provider"] .composer-control-trigger .composer-control-value {
-  font-size: 11.5px;
-  font-weight: 610;
-}
-
-.composer-control-select[data-control-id="model"] .composer-control-trigger .composer-control-label,
-.composer-control-select[data-control-id$=":provider"] .composer-control-trigger .composer-control-label {
-  font-size: 10px;
-  font-weight: 700;
+/* Static control mirrors the model trigger layout (icon + label + value). */
+.composer-static-control[data-control-id="model"] {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 8px;
+  padding: 4px 10px;
+  min-height: 40px;
+  border-radius: 12px;
 }
 
 .composer.is-compact .composer-static-control[data-control-id="model"],
@@ -1827,47 +2014,7 @@
   font-size: 11px;
 }
 
-.composer-rail-spacer {
-  flex: 1;
-}
-
-.composer.is-compact .composer-rail-spacer {
-  display: none;
-}
-
-.composer-session-state {
-  display: none;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  min-height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-bg) 38%, transparent);
-  color: var(--text-soft);
-  font-size: var(--font-size-shell-label);
-  font-weight: 600;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-.composer.is-compact .composer-session-state {
-  order: 8;
-}
-
-.composer-session-state-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--accent-hover);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-hover) 16%, transparent);
-}
-
-.composer-inner.is-turn-active .composer-session-state-dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
-}
+/* session-state badge is hidden in the wide layout per design. */
 
 .composer-error {
   padding: 7px 10px 2px;
@@ -1884,16 +2031,25 @@
 .composer-send-btn {
   position: static;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--text-strong) 72%, transparent);
-  background: color-mix(in srgb, var(--text-strong) 92%, white 8%);
-  color: #101214;
+  border: 1px solid color-mix(in srgb, var(--text-strong) 24%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--text-strong) 22%, transparent) 0%,
+      color-mix(in srgb, var(--text-strong) 16%, transparent) 100%
+    );
+  color: color-mix(in srgb, var(--text-strong) 88%, white 4%);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--text-strong) 7%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 color-mix(in srgb, var(--text-strong) 16%, transparent);
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast), box-shadow var(--transition-fast);
 }
 
@@ -1918,17 +2074,26 @@
 }
 
 .composer-send-btn-active {
-  background: color-mix(in srgb, var(--text-strong) 96%, white 4%);
-  border-color: color-mix(in srgb, var(--text-strong) 82%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      #ffffff 0%,
+      color-mix(in srgb, var(--text-strong) 92%, white 4%) 100%
+    );
+  border-color: color-mix(in srgb, var(--text-strong) 84%, transparent);
   color: #0b0d0f;
   box-shadow:
-    0 10px 22px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+    0 0 0 5px color-mix(in srgb, var(--text-strong) 12%, transparent),
+    0 12px 26px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 .composer-send-btn-active:hover:not(:disabled) {
   transform: translateY(-1px);
-  background: #ffffff;
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--text-strong) 16%, transparent),
+    0 14px 30px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .composer-stop-btn {
@@ -1936,7 +2101,7 @@
   border-color: color-mix(in srgb, var(--danger) 82%, white 18%);
   color: white;
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--danger) 22%, transparent),
+    0 0 0 5px color-mix(in srgb, var(--danger) 18%, transparent),
     0 10px 24px color-mix(in srgb, var(--danger) 28%, transparent);
   opacity: 1;
 }
@@ -1954,7 +2119,7 @@
 
 .composer-send-btn:disabled {
   cursor: not-allowed;
-  opacity: 0.58;
+  opacity: 0.72;
 }
 
 .composer-stop-btn:disabled {
@@ -2091,8 +2256,14 @@
 :root[data-theme="light"] .composer-utility-menu,
 :root[data-theme="light"] .composer-control-menu {
   border-color: rgba(32, 33, 36, 0.14);
-  background: #ffffff;
-  box-shadow: 0 14px 38px rgba(32, 33, 36, 0.12);
+  background: color-mix(in srgb, var(--surface-bg) 92%, #fff);
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme="light"] .composer-slash-option.is-active,
+:root[data-theme="light"] .composer-slash-option:hover,
+:root[data-theme="light"] .composer-slash-option:focus {
+  background: color-mix(in srgb, var(--accent-hover) 12%, #fff);
 }
 
 :root[data-theme="light"] .composer-attachment-chip {

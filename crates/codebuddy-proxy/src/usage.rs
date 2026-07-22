@@ -49,36 +49,28 @@ impl CliUsage {
     /// Map a per-turn delta into the OpenAI usage shape that
     /// `codex_api_proxy::normalized_chat_usage` already understands.
     ///
-    /// **Billing convention normalization.** The CodeBuddy CLI reports
-    /// `input_tokens` in OpenAI convention: it is the full prompt billed
-    /// this turn and *already subsumes* `cache_read_input_tokens` + a
-    /// cache-write chunk (for glm-5.2-ioa, `input_tokens ==
-    /// cache_read_input_tokens + cache_creation_input_tokens` exactly). The
-    /// CodeBuddy backend, however, bills in Anthropic convention: cache reads
-    /// are counted *additively* on top of the reported input. Forwarding only
-    /// `input` therefore under-counts the backend's billed input by the
-    /// cache-read portion (~2× for cache-heavy agentic turns).
-    ///
-    /// Reconciled against a real glm-5.2-ioa session (36 turns):
-    ///   our Σ input_delta = 1,168,561
-    ///   our Σ cache_read_delta = 1,132,992
-    ///   input + cache_read = 2,301,553  vs  backend Δ input = 2,308,053 (0.3%)
-    /// So the billable input the backend tracks = `input + cache_read`.
+    /// **OpenAI convention: `prompt_tokens` is the full prompt size and
+    /// already subsumes the cached prefix.** The CodeBuddy CLI reports
+    /// `input_tokens` the same way (for glm-5.2-ioa, `input_tokens ==
+    /// cache_read_input_tokens + cache_creation_input_tokens` exactly), so
+    /// the delta passes through unchanged. An earlier revision added
+    /// `cache_read` on top of `prompt_tokens` to mirror the CodeBuddy
+    /// backend's *billing* convention (cache reads billed additively), but
+    /// the downstream `normalized_chat_usage` treats `prompt_tokens` as
+    /// cache-inclusive and subtracts `cached_tokens` again — the adjustment
+    /// cancelled itself out for `input_tokens` while inflating
+    /// `total_tokens`, double-counting the cached prefix there.
     ///
     /// `cache_read_input_tokens` / `prompt_tokens_details.cached_tokens`
-    /// stay as the honest cache-hit count (display-only breakdown); only the
-    /// billed `prompt_tokens` / `total_tokens` are adjusted to the backend's
-    /// convention. `total_tokens = billable_input + output`.
+    /// stay as the honest cache-hit count (display-only breakdown);
+    /// `total_tokens = input + output`.
     pub fn to_openai_usage(&self) -> OaiUsage {
         let cache_read = nonzero(self.cache_read_input_tokens);
         let cache_write = nonzero(self.cache_creation_input_tokens);
-        let billable_input = self
-            .input_tokens
-            .saturating_add(self.cache_read_input_tokens);
         OaiUsage {
-            prompt_tokens: billable_input,
+            prompt_tokens: self.input_tokens,
             completion_tokens: self.output_tokens,
-            total_tokens: billable_input.saturating_add(self.output_tokens),
+            total_tokens: self.input_tokens.saturating_add(self.output_tokens),
             prompt_tokens_details: cache_read.map(|cached_tokens| OaiPromptTokensDetails {
                 cached_tokens,
             }),
@@ -442,11 +434,12 @@ mod tests {
             cache_creation_input_tokens: 1_000,
         };
         let oai = delta.to_openai_usage();
-        // Billable input follows the CodeBuddy backend convention
-        // (cache_read additive): input + cache_read.
-        assert_eq!(oai.prompt_tokens, 150_000 + 80_000);
+        // OpenAI convention: prompt_tokens is the full cache-inclusive
+        // prompt size; the cache fields stay display-only and must not be
+        // added on top (that would double-count the cached prefix).
+        assert_eq!(oai.prompt_tokens, 150_000);
         assert_eq!(oai.completion_tokens, 200);
-        assert_eq!(oai.total_tokens, 150_000 + 80_000 + 200);
+        assert_eq!(oai.total_tokens, 150_000 + 200);
         assert_eq!(
             oai.prompt_tokens_details,
             Some(OaiPromptTokensDetails {
@@ -487,10 +480,11 @@ mod tests {
             cache_creation_input_tokens: 5,
         };
         let (oai, next) = resolve_turn_usage(Some(prev), Some(curr));
-        // delta input = 150, delta cache_read = 40 → billable input = 190.
-        assert_eq!(oai.prompt_tokens, 190);
+        // delta input = 150 (already cache-inclusive); delta cache_read = 40
+        // stays a display-only breakdown field.
+        assert_eq!(oai.prompt_tokens, 150);
         assert_eq!(oai.completion_tokens, 20);
-        assert_eq!(oai.total_tokens, 210);
+        assert_eq!(oai.total_tokens, 170);
         assert_eq!(oai.cache_read_input_tokens, Some(40));
         assert_eq!(oai.cache_creation_input_tokens, Some(5));
         assert_eq!(next, Some(curr));
@@ -515,9 +509,8 @@ mod tests {
     /// total, so reporting the full context would inflate the total by the
     /// entire context every turn. Here the delta's input is the cache-write
     /// jump (~629k) — that is the real consumption this turn and must be what
-    /// surfaces in Settings → 用量. `prompt_tokens` follows the backend's
-    /// `input + cache_read` billing convention (cache_read is 0 here, so the
-    /// billable input equals the delta input).
+    /// surfaces in Settings → 用量. `prompt_tokens` follows the OpenAI
+    /// cache-inclusive convention, so it equals the delta input as-is.
     #[test]
     fn reported_usage_uses_cumulative_delta_when_present() {
         let prev = CliUsage {
@@ -565,9 +558,10 @@ mod tests {
         };
         let (reported, next, delta) =
             resolve_reported_usage(Some(prev), None, Some(last_call));
-        // Fallback path also applies the input + cache_read billing
-        // convention: 39_217 + 37_888 = 77_105.
-        assert_eq!(reported.prompt_tokens, 77_105);
+        // Fallback path passes the per-call usage through unchanged:
+        // prompt_tokens is already cache-inclusive (39_217 covers the
+        // 37_888 cache-read prefix).
+        assert_eq!(reported.prompt_tokens, 39_217);
         assert_eq!(reported.completion_tokens, 519);
         // No cumulative → delta stays zero and the baseline is unchanged.
         assert_eq!(delta.input_tokens, 0);

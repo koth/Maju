@@ -627,7 +627,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建工作区" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建项目" }));
     fireEvent.click(screen.getByRole("menuitem", { name: /打开远程目录/ }));
 
     const dialog = await screen.findByRole("dialog", { name: "打开远程目录" });
