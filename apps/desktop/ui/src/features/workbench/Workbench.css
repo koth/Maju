@@ -316,7 +316,6 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   padding-left: 78px;
 }
 
-.global-chrome-identity,
 .global-chrome-left,
 .global-chrome-actions {
   display: flex;
@@ -329,32 +328,12 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   -webkit-app-region: no-drag;
 }
 
-.global-chrome-identity {
-  gap: 8px;
-  color: var(--text-muted);
-  font-size: var(--font-size-shell-meta);
-  -webkit-app-region: drag;
-}
-
 .global-chrome-dot {
   width: 8px;
   height: 8px;
   border-radius: 999px;
   background: var(--accent);
   box-shadow: none;
-}
-
-.global-chrome-name {
-  color: var(--text-strong);
-  font-weight: 600;
-}
-
-.global-chrome-root {
-  max-width: 52vw;
-  overflow: hidden;
-  color: var(--text-soft);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .global-chrome-actions {
@@ -1391,10 +1370,6 @@ body.is-resizing-left-sidebar {
   .thread-sidebar-shell,
   .sidebar-resizer,
   .right-panel {
-    display: none;
-  }
-
-  .global-chrome-root {
     display: none;
   }
 

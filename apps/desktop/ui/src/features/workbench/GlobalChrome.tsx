@@ -20,7 +20,7 @@ interface Props {
 }
 
 export function GlobalChrome({
-  workspace,
+  workspace: _workspace,
   remoteWorkspace,
   sidebarCollapsed,
   refreshing,
@@ -154,11 +154,6 @@ export function GlobalChrome({
         >
           <LeftSidebarIcon />
         </button>
-        <div className="global-chrome-identity" data-tauri-drag-region>
-          <span className="global-chrome-dot" />
-          <span className="global-chrome-name">{workspace.name}</span>
-          <span className="global-chrome-root">{workspace.root}</span>
-        </div>
       </div>
       <div className="global-chrome-actions">
         <button

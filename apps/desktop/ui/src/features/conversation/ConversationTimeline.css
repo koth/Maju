@@ -436,8 +436,8 @@
 }
 
 .msg-assistant {
-  padding: 3px 10px 3px 0;
-  margin: 0 0 6px;
+  padding: 4px 10px 4px 0;
+  margin: 0 0 8px;
   border-radius: 12px;
   background: var(--app-bg);
 }
@@ -618,7 +618,7 @@
   flex-shrink: 0;
   font-family: var(--font-chat);
   font-size: 15px;
-  line-height: 1.72;
+  line-height: 1.68;
   width: 24px;
   text-align: right;
   padding-right: 7px;
@@ -644,7 +644,7 @@
   min-width: 0;
   font-family: var(--font-chat);
   font-size: 15px;
-  line-height: 1.72;
+  line-height: 1.68;
   color: var(--text-muted);
 }
 
@@ -687,7 +687,7 @@
 .msg-fallback {
   font-family: var(--font-chat);
   font-size: 15px;
-  line-height: 1.72;
+  line-height: 1.68;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-muted);
@@ -716,7 +716,7 @@
 
 /* ── Markdown styles ── */
 .md-paragraph {
-  margin: 0 0 6px;
+  margin: 0 0 12px;
 }
 
 .md-image-paragraph {
@@ -758,7 +758,11 @@
   font-size: 1em;
   font-weight: 580;
   color: var(--md-strong, var(--text-strong));
-  margin: 8px 0 4px;
+  margin: 22px 0 10px;
+}
+
+.md-heading:first-child {
+  margin-top: 2px;
 }
 
 .md-h1,
@@ -771,7 +775,7 @@
 }
 
 .md-list {
-  margin: 2px 0 8px;
+  margin: 4px 0 12px;
   padding-left: var(--msg-text-column);
 }
 
@@ -780,8 +784,12 @@
 }
 
 .md-list-item {
-  margin-bottom: 3px;
+  margin-bottom: 7px;
   padding-left: 2px;
+}
+
+.md-list-item:last-child {
+  margin-bottom: 0;
 }
 
 .md-list-item::marker {
