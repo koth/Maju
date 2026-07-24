@@ -4,7 +4,8 @@ import { MultiFileDiff } from "@pierre/diffs/react";
 import type { FileContents } from "@pierre/diffs/react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, DiffQuality, AppTheme } from "../../types";
-import { fsListDir, gitStage, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { fsListDir, gitStage, gitUnstage, gitCommit, gitGenerateCommitMessage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
+import { onCommitProgress } from "../../lib/events";
 import { DiffTab } from "../editor/DiffTab";
 import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
 import { FileTree } from "../filetree/FileTree";
@@ -46,11 +47,24 @@ interface TreeNode {
   file?: ChangedFile;
 }
 
+type ReviewFileMenuAction = "track" | "stage" | "unstage";
+
+type ReviewGroupMenuAction = "stage-all" | "commit";
+
+interface ReviewGroupContextMenuState {
+  action: ReviewGroupMenuAction;
+  x: number;
+  y: number;
+}
+
 interface ReviewFileContextMenuState {
   path: string;
   x: number;
   y: number;
   trackable?: boolean;
+  action?: ReviewFileMenuAction;
+  reject?: boolean;
+  isDir?: boolean;
 }
 
 const MAX_REVIEW_FILES = 300;
@@ -164,7 +178,12 @@ function buildFileTree(files: ChangedFile[]): TreeNode[] {
   const root = new Map<string, DirEntry>();
 
   for (const file of files) {
-    const segments = file.path.replace(/\\/g, "/").split("/");
+    const normalizedPath = file.path.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalizedPath) continue;
+    // A trailing slash marks a directory entry (git reports untracked dirs
+    // that way); those become directory nodes, not file leaves.
+    const isDirectoryEntry = /\/$/.test(file.path.replace(/\\/g, "/"));
+    const segments = normalizedPath.split("/");
     let currentMap = root;
 
     for (let i = 0; i < segments.length; i++) {
@@ -173,6 +192,21 @@ function buildFileTree(files: ChangedFile[]): TreeNode[] {
       const nodePath = segments.slice(0, i + 1).join("/");
 
       if (isLeaf) {
+        if (isDirectoryEntry) {
+          if (!currentMap.has(seg)) {
+            currentMap.set(seg, {
+              node: {
+                name: seg,
+                path: nodePath,
+                kind: "directory",
+                children: [],
+                stats: { added: 0, removed: 0 },
+              },
+              children: new Map(),
+            });
+          }
+          continue;
+        }
         currentMap.set(seg, {
           node: {
             name: seg,
@@ -681,34 +715,11 @@ export function ReviewPanel({
               )}
             </div>
 
-            <div className="review-filter">
-              <input
-                type="text"
-                className="review-filter-input"
-                placeholder="过滤文件..."
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-              />
-            </div>
-
-            <FileGroup
-              title="未暂存"
-              files={grouped.Unstaged}
-              changeSetId="git-worktree:unstaged"
-              onFileSelect={handleGitFileOpen}
-              onAddComposerReference={onAddComposerReference}
-              composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
-            />
-            <FileGroup
-              title="已暂存"
-              files={grouped.Staged}
-              changeSetId="git-worktree:staged"
-              onFileSelect={handleGitFileOpen}
-              onAddComposerReference={onAddComposerReference}
-              composerReferenceEnabled={snapshot.prompt_capabilities?.embedded_context === true}
-            />
-            <UntrackedTree
-              files={grouped.Untracked}
+            <GitChangesTree
+              grouped={grouped}
+              filter={filter}
+              onFilterChange={setFilter}
+              activePath={activeFilePath ?? ""}
               onFileSelect={handleGitFileOpen}
               onRefresh={onRefresh}
               onAddComposerReference={onAddComposerReference}
@@ -868,11 +879,41 @@ function GitChangesTree({
 }) {
   const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
   const [contextMenuError, setContextMenuError] = useState<string | null>(null);
+  const [pendingActionPath, setPendingActionPath] = useState<string | null>(null);
+  const [groupMenu, setGroupMenu] = useState<ReviewGroupContextMenuState | null>(null);
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [commitDialogOpen, setCommitDialogOpen] = useState(false);
   const canSendToContext = composerReferenceEnabled && Boolean(onAddComposerReference);
+
+  // Expand a context-menu path to the files the panel actually displays.
+  // A directory resolves to the status-listed files under it (never a raw
+  // recursive add), a file resolves to itself. `sections` scopes which
+  // groups are eligible — stage/track only look at Unstaged + Untracked,
+  // unstage only looks at Staged.
+  const expandToVisibleFiles = useCallback(
+    (path: string, sections: ChangeSection[]): string[] => {
+      const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+      const prefix = `${normalized}/`;
+      const matches = new Set<string>();
+      for (const section of sections) {
+        for (const file of grouped[section]) {
+          const filePath = file.path.replace(/\\/g, "/");
+          if (filePath === normalized || filePath.startsWith(prefix)) {
+            matches.add(filePath);
+          }
+        }
+      }
+      return [...matches];
+    },
+    [grouped],
+  );
 
   useEffect(() => {
     if (!contextMenu) return;
-    const close = () => setContextMenu(null);
+    const close = () => {
+      if (pendingActionPath != null) return;
+      setContextMenu(null);
+    };
     window.addEventListener("click", close);
     window.addEventListener("keydown", close);
     window.addEventListener("blur", close);
@@ -881,19 +922,38 @@ function GitChangesTree({
       window.removeEventListener("keydown", close);
       window.removeEventListener("blur", close);
     };
-  }, [contextMenu]);
+  }, [contextMenu, pendingActionPath]);
 
-  const handleFileContextMenu = useCallback((path: string, x: number, y: number, trackable = false) => {
-    if (!canSendToContext && !trackable) return;
-    const width = 190;
-    const height = canSendToContext && trackable ? 88 : 50;
-    setContextMenu({
-      path,
-      x: Math.min(x, window.innerWidth - width - 8),
-      y: Math.min(y, window.innerHeight - height - 8),
-      trackable,
-    });
-  }, [canSendToContext]);
+  const handleFileContextMenu = useCallback(
+    (
+      path: string,
+      x: number,
+      y: number,
+      trackable = false,
+      action?: ReviewFileMenuAction,
+      reject = false,
+      isDir = false,
+    ) => {
+      if (!canSendToContext && !trackable && !action && !reject) return;
+      const width = 190;
+      const items =
+        (canSendToContext ? 1 : 0) +
+        (trackable ? 1 : 0) +
+        (action ? 1 : 0) +
+        (reject ? 1 : 0);
+      const height = items * 40 + 10;
+      setContextMenu({
+        path,
+        x: Math.min(x, window.innerWidth - width - 8),
+        y: Math.min(y, window.innerHeight - height - 8),
+        trackable,
+        action,
+        reject,
+        isDir,
+      });
+    },
+    [canSendToContext],
+  );
 
   const handleSendToContext = useCallback((path: string) => {
     if (!canSendToContext || !onAddComposerReference) return;
@@ -903,12 +963,88 @@ function GitChangesTree({
 
   const handleTrackFile = useCallback(
     async (path: string) => {
+      const targets = expandToVisibleFiles(path, ["Untracked"]);
+      if (targets.length === 0) {
+        setContextMenu(null);
+        return;
+      }
+      const accepted = await confirm(
+        targets.length === 1
+          ? `是否跟踪文件 ${targets[0]}？`
+          : `是否跟踪 ${path} 下的 ${targets.length} 个文件？`,
+      );
+      if (!accepted) {
+        setContextMenu(null);
+        return;
+      }
+
+      setPendingActionPath(path);
+      try {
+        await gitStage(targets);
+        await onRefresh();
+        setContextMenuError(null);
+      } catch (e) {
+        setContextMenuError(String(e));
+      } finally {
+        setPendingActionPath(null);
+        setContextMenu(null);
+      }
+    },
+    [expandToVisibleFiles, onRefresh],
+  );
+
+  const handleStageFile = useCallback(
+    async (path: string) => {
+      const targets = expandToVisibleFiles(path, ["Unstaged", "Untracked"]);
+      if (targets.length === 0) {
+        setContextMenu(null);
+        return;
+      }
+      setPendingActionPath(path);
+      try {
+        await gitStage(targets);
+        await onRefresh();
+        setContextMenuError(null);
+      } catch (e) {
+        setContextMenuError(String(e));
+      } finally {
+        setPendingActionPath(null);
+        setContextMenu(null);
+      }
+    },
+    [expandToVisibleFiles, onRefresh],
+  );
+
+  const handleUnstageFile = useCallback(
+    async (path: string) => {
+      const targets = expandToVisibleFiles(path, ["Staged"]);
+      if (targets.length === 0) {
+        setContextMenu(null);
+        return;
+      }
+      setPendingActionPath(path);
+      try {
+        await gitUnstage(targets);
+        await onRefresh();
+        setContextMenuError(null);
+      } catch (e) {
+        setContextMenuError(String(e));
+      } finally {
+        setPendingActionPath(null);
+        setContextMenu(null);
+      }
+    },
+    [expandToVisibleFiles, onRefresh],
+  );
+
+  const handleRejectFile = useCallback(
+    async (path: string) => {
       setContextMenu(null);
-      const accepted = await confirm(`是否跟踪文件 ${path}？`);
+      const accepted = await confirm(`撤销 ${path} 的工作区改动？`);
       if (!accepted) return;
 
       try {
-        await gitStage([path]);
+        await reviewRejectPatch(path);
         await onRefresh();
         setContextMenuError(null);
       } catch (e) {
@@ -917,6 +1053,53 @@ function GitChangesTree({
     },
     [onRefresh],
   );
+
+  const openGroupMenu = useCallback(
+    (action: ReviewGroupMenuAction, x: number, y: number) => {
+      setGroupMenu({
+        action,
+        x: Math.min(x, window.innerWidth - 200),
+        y: Math.min(y, window.innerHeight - 60),
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!groupMenu) return;
+    const close = () => {
+      if (groupBusy) return;
+      setGroupMenu(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [groupMenu, groupBusy]);
+
+  const handleStageAll = useCallback(async () => {
+    if (groupBusy) return;
+    setGroupBusy(true);
+    try {
+      await gitStage(grouped.Unstaged.map((f) => f.path));
+      await onRefresh();
+      setContextMenuError(null);
+      setGroupMenu(null);
+    } catch (e) {
+      setContextMenuError(String(e));
+    } finally {
+      setGroupBusy(false);
+    }
+  }, [groupBusy, grouped.Unstaged, onRefresh]);
+
+  const handleOpenCommitDialog = useCallback(() => {
+    setGroupMenu(null);
+    setCommitDialogOpen(true);
+  }, []);
 
   return (
     <div className="review-git-filetree">
@@ -938,7 +1121,10 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
-          onFileContextMenu={handleFileContextMenu}
+          onHeaderContextMenu={(x, y) => openGroupMenu("stage-all", x, y)}
+          onFileContextMenu={(path, x, y, isDir) =>
+            handleFileContextMenu(path, x, y, false, "stage", !isDir)
+          }
         />
         <FileGroup
           title="已暂存"
@@ -947,7 +1133,8 @@ function GitChangesTree({
           onFileSelect={onFileSelect}
           activePath={activePath}
           compact
-          onFileContextMenu={handleFileContextMenu}
+          onHeaderContextMenu={(x, y) => openGroupMenu("commit", x, y)}
+          onFileContextMenu={(path, x, y) => handleFileContextMenu(path, x, y, false, "unstage")}
         />
         <UntrackedTree
           files={grouped.Untracked}
@@ -957,17 +1144,66 @@ function GitChangesTree({
           compact
           onAddComposerReference={onAddComposerReference}
           composerReferenceEnabled={composerReferenceEnabled}
-          onFileContextMenu={handleFileContextMenu}
+          onFileContextMenu={(path, x, y, trackable, isDir) =>
+            handleFileContextMenu(path, x, y, trackable, undefined, !isDir, isDir)
+          }
         />
       </div>
       {contextMenu && (
         <ReviewFileContextMenu
           menu={contextMenu}
           canSendToContext={canSendToContext}
+          pendingPath={pendingActionPath}
+          trackCount={
+            contextMenu.isDir
+              ? expandToVisibleFiles(contextMenu.path, ["Untracked"]).length
+              : undefined
+          }
           onSendToContext={handleSendToContext}
           onTrackFile={handleTrackFile}
+          onStageFile={handleStageFile}
+          onUnstageFile={handleUnstageFile}
+          onRejectFile={handleRejectFile}
         />
       )}
+      {groupMenu && (
+        <div
+          className="review-file-context-menu"
+          style={{ left: groupMenu.x, top: groupMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {groupMenu.action === "stage-all" && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={groupBusy}
+              onClick={handleStageAll}
+            >
+              {groupBusy && <span className="review-menu-spinner" aria-hidden="true" />}
+              一键暂存全部 ({grouped.Unstaged.length})
+            </button>
+          )}
+          {groupMenu.action === "commit" && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={groupBusy}
+              onClick={handleOpenCommitDialog}
+            >
+              提交 ({grouped.Staged.length})
+            </button>
+          )}
+        </div>
+      )}
+      {commitDialogOpen && (
+        <CommitDialog
+          stagedCount={grouped.Staged.length}
+          onClose={() => setCommitDialogOpen(false)}
+          onCommitted={onRefresh}
+        />
+      )}
+      <CommitBar onRefresh={onRefresh} />
     </div>
   );
 }
@@ -975,14 +1211,32 @@ function GitChangesTree({
 function ReviewFileContextMenu({
   menu,
   canSendToContext,
+  pendingPath,
+  trackCount,
   onSendToContext,
   onTrackFile,
+  onStageFile,
+  onUnstageFile,
+  onRejectFile,
 }: {
   menu: ReviewFileContextMenuState;
   canSendToContext: boolean;
+  pendingPath?: string | null;
+  trackCount?: number;
   onSendToContext: (path: string) => void;
   onTrackFile: (path: string) => void;
+  onStageFile?: (path: string) => void;
+  onUnstageFile?: (path: string) => void;
+  onRejectFile?: (path: string) => void;
 }) {
+  const busy = pendingPath != null;
+  const isDirTrack = menu.trackable && menu.isDir;
+  const trackLabel =
+    isDirTrack && trackCount != null && trackCount > 1
+      ? `跟踪全部 (${trackCount})`
+      : isDirTrack
+        ? "跟踪全部"
+        : "跟踪文件";
   return (
     <div
       className="review-file-context-menu"
@@ -995,6 +1249,7 @@ function ReviewFileContextMenu({
           type="button"
           role="menuitem"
           title="发送到上下文"
+          disabled={busy}
           onClick={() => onSendToContext(menu.path)}
         >
           发送到上下文
@@ -1004,11 +1259,238 @@ function ReviewFileContextMenu({
         <button
           type="button"
           role="menuitem"
+          disabled={busy}
           onClick={() => onTrackFile(menu.path)}
         >
-          跟踪文件
+          {busy && <span className="review-menu-spinner" aria-hidden="true" />}
+          {trackLabel}
         </button>
       )}
+      {menu.action === "stage" && onStageFile && (
+        <button
+          type="button"
+          role="menuitem"
+          disabled={busy}
+          onClick={() => onStageFile(menu.path)}
+        >
+          {busy && <span className="review-menu-spinner" aria-hidden="true" />}
+          暂存
+        </button>
+      )}
+      {menu.action === "unstage" && onUnstageFile && (
+        <button
+          type="button"
+          role="menuitem"
+          disabled={busy}
+          onClick={() => onUnstageFile(menu.path)}
+        >
+          {busy && <span className="review-menu-spinner" aria-hidden="true" />}
+          取消暂存
+        </button>
+      )}
+      {menu.reject && onRejectFile && (
+        <button
+          type="button"
+          role="menuitem"
+          disabled={busy}
+          onClick={() => onRejectFile(menu.path)}
+        >
+          撤销改动
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CommitBar({ onRefresh }: { onRefresh: () => void | Promise<void> }) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleCommit = useCallback(async () => {
+    const trimmed = message.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await gitCommit(trimmed);
+      setMessage("");
+      await onRefresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [message, busy, onRefresh]);
+
+  return (
+    <div className="review-commit-bar">
+      <input
+        type="text"
+        className="review-commit-message-input"
+        placeholder="提交信息..."
+        value={message}
+        onChange={(event) => setMessage(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            handleCommit();
+          }
+        }}
+        disabled={busy}
+      />
+      <button
+        type="button"
+        className="review-commit-button"
+        onClick={handleCommit}
+        disabled={busy || !message.trim()}
+      >
+        {busy ? "提交中..." : "提交"}
+      </button>
+      {error && <div className="review-tree-error">{error}</div>}
+    </div>
+  );
+}
+
+function CommitDialog({
+  stagedCount,
+  onClose,
+  onCommitted,
+}: {
+  stagedCount: number;
+  onClose: () => void;
+  onCommitted: () => void | Promise<void>;
+}) {
+  const [message, setMessage] = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const busy = committing || generating;
+
+  useEffect(() => {
+    if (!generating) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    onCommitProgress((message) => setProgress(message)).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [generating]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [busy, onClose]);
+
+  const handleGenerate = useCallback(async () => {
+    if (busy) return;
+    setGenerating(true);
+    setProgress("正在启动 AI 会话…");
+    setError(null);
+    try {
+      const draft = await gitGenerateCommitMessage();
+      setMessage(draft);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGenerating(false);
+      setProgress(null);
+    }
+  }, [busy]);
+
+  const handleCommit = useCallback(async () => {
+    const trimmed = message.trim();
+    if (!trimmed || busy) return;
+    setCommitting(true);
+    setError(null);
+    try {
+      await gitCommit(trimmed);
+      await onCommitted();
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCommitting(false);
+    }
+  }, [message, busy, onCommitted, onClose]);
+
+  return (
+    <div
+      className="review-commit-dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <div className="review-commit-dialog" role="dialog" aria-modal="true" aria-label="提交已暂存变更">
+        <div className="review-commit-dialog-title">提交 {stagedCount} 个已暂存文件</div>
+        <div className="review-commit-dialog-input-row">
+          <input
+            type="text"
+            className="review-commit-message-input"
+            placeholder="提交信息..."
+            value={message}
+            autoFocus
+            onChange={(event) => setMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                handleCommit();
+              }
+            }}
+            disabled={busy}
+          />
+          <button
+            type="button"
+            className="review-commit-ai-button"
+            title="用当前模型生成提交信息"
+            onClick={handleGenerate}
+            disabled={busy}
+          >
+            {generating ? (
+              <span className="review-menu-spinner" aria-hidden="true" />
+            ) : (
+              "AI 生成"
+            )}
+          </button>
+        </div>
+        {generating && progress && (
+          <div className="review-commit-progress" role="status" aria-live="polite">
+            <span className="review-menu-spinner" aria-hidden="true" />
+            <span>{progress}</span>
+          </div>
+        )}
+        {error && <div className="review-tree-error">{error}</div>}
+        <div className="review-commit-dialog-actions">
+          <button
+            type="button"
+            className="review-commit-dialog-cancel"
+            onClick={onClose}
+            disabled={busy}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="review-commit-button"
+            onClick={handleCommit}
+            disabled={busy || !message.trim()}
+          >
+            {committing ? "提交中..." : "提交"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2034,6 +2516,7 @@ function FileGroup({
   onAddComposerReference,
   composerReferenceEnabled = false,
   onFileContextMenu,
+  onHeaderContextMenu,
   activePath,
   compact = false,
 }: {
@@ -2043,7 +2526,8 @@ function FileGroup({
   onFileSelect: (path: string, changeSetId: string) => void;
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled?: boolean;
-  onFileContextMenu?: (path: string, x: number, y: number) => void;
+  onFileContextMenu?: (path: string, x: number, y: number, isDir?: boolean) => void;
+  onHeaderContextMenu?: (x: number, y: number) => void;
   activePath?: string;
   compact?: boolean;
 }) {
@@ -2091,20 +2575,23 @@ function FileGroup({
     };
   }, [contextMenu]);
 
-  const handleLocalFileContextMenu = useCallback((path: string, x: number, y: number) => {
-    if (onFileContextMenu) {
-      onFileContextMenu(path, x, y);
-      return;
-    }
-    if (!canSendToContext) return;
-    const width = 190;
-    const height = 50;
-    setContextMenu({
-      path,
-      x: Math.min(x, window.innerWidth - width - 8),
-      y: Math.min(y, window.innerHeight - height - 8),
-    });
-  }, [canSendToContext, onFileContextMenu]);
+  const handleLocalFileContextMenu = useCallback(
+    (path: string, x: number, y: number, isDir = false) => {
+      if (onFileContextMenu) {
+        onFileContextMenu(path, x, y, isDir);
+        return;
+      }
+      if (!canSendToContext) return;
+      const width = 190;
+      const height = 50;
+      setContextMenu({
+        path,
+        x: Math.min(x, window.innerWidth - width - 8),
+        y: Math.min(y, window.innerHeight - height - 8),
+      });
+    },
+    [canSendToContext, onFileContextMenu],
+  );
 
   const handleSendToContext = useCallback((path: string) => {
     if (!canSendToContext || !onAddComposerReference) return;
@@ -2119,6 +2606,12 @@ function FileGroup({
       <div
         className="review-group-header"
         onClick={() => setCollapsed(!collapsed)}
+        onContextMenu={(event) => {
+          if (!onHeaderContextMenu) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onHeaderContextMenu(event.clientX, event.clientY);
+        }}
       >
         <span className="review-group-arrow">
           {collapsed ? "\u25b6" : "\u25bc"}
@@ -2174,7 +2667,7 @@ function DiffTreeNode({
   expandedDirs: Set<string>;
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
-  onFileContextMenu?: (path: string, x: number, y: number) => void;
+  onFileContextMenu?: (path: string, x: number, y: number, isDir?: boolean) => void;
   changeSetId: string;
   activePath?: string;
   compact: boolean;
@@ -2190,6 +2683,12 @@ function DiffTreeNode({
           className="review-diff-row review-diff-dir"
           style={{ paddingLeft: indent }}
           onClick={() => onToggleDir(node.path)}
+          onContextMenu={(event) => {
+            if (!onFileContextMenu) return;
+            event.preventDefault();
+            event.stopPropagation();
+            onFileContextMenu(node.path, event.clientX, event.clientY, true);
+          }}
         >
           <span className="review-tree-arrow">
             {isExpanded ? "\u25bc" : "\u25b6"}
@@ -2259,43 +2758,93 @@ function UntrackedTree({
   onRefresh: () => void | Promise<void>;
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled?: boolean;
-  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean) => void;
+  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean, isDir?: boolean) => void;
   activePath?: string;
   compact?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [childrenCache, setChildrenCache] = useState<Map<string, FileEntry[]>>(new Map());
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  // Lazily-loaded children for untracked directories that git reports as a
+  // bare directory (trailing slash, no listed files). A `null` value marks a
+  // leaf directory the user expanded but whose entries are not loaded yet.
+  const [leafChildren, setLeafChildren] = useState<Map<string, TreeNode[] | null>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ReviewFileContextMenuState | null>(null);
   const canSendToContext = composerReferenceEnabled && Boolean(onAddComposerReference);
 
-  const rootEntries = useMemo(() => files.map(changedFileToEntry), [files]);
+  const rootNodes = useMemo(() => buildFileTree(files), [files]);
+
+  const resolveChildren = useCallback(
+    (node: TreeNode): TreeNode[] =>
+      node.children.length > 0 ? node.children : leafChildren.get(node.path) ?? [],
+    [leafChildren],
+  );
+
+  // Listed directories (with children) expand by default; leaf untracked
+  // directories expand only after the user toggles them.
+  const expandedDirs = useMemo(() => {
+    const all = new Set<string>();
+    const walk = (nodes: TreeNode[]) => {
+      for (const node of nodes) {
+        if (node.kind === "directory" && node.children.length > 0) {
+          all.add(node.path);
+          walk(node.children);
+        }
+      }
+    };
+    walk(rootNodes);
+    for (const path of collapsedDirs) {
+      all.delete(path);
+    }
+    for (const path of leafChildren.keys()) {
+      all.add(path);
+    }
+    return all;
+  }, [rootNodes, collapsedDirs, leafChildren]);
 
   const handleToggleDir = useCallback(
     async (dirPath: string) => {
-      if (expandedDirs.has(dirPath)) {
-        setExpandedDirs((prev) => {
+      const node = findTreeNode(rootNodes, dirPath);
+      const hasListedChildren = (node?.children.length ?? 0) > 0;
+
+      if (hasListedChildren) {
+        setCollapsedDirs((prev) => {
           const next = new Set(prev);
-          next.delete(dirPath);
+          if (expandedDirs.has(dirPath)) {
+            next.add(dirPath);
+          } else {
+            next.delete(dirPath);
+          }
           return next;
         });
         return;
       }
 
-      if (!childrenCache.has(dirPath)) {
-        try {
-          const children = await fsListDir(dirPath);
-          setChildrenCache((prev) => new Map(prev).set(dirPath, children));
-        } catch (e) {
-          setError(String(e));
-          return;
-        }
+      // Leaf untracked directory: toggle expansion, lazily loading entries
+      // the first time it is expanded.
+      if (leafChildren.has(dirPath)) {
+        setLeafChildren((prev) => {
+          const next = new Map(prev);
+          next.delete(dirPath);
+          return next;
+        });
+        return;
       }
-
-      setExpandedDirs((prev) => new Set(prev).add(dirPath));
+      setLeafChildren((prev) => new Map(prev).set(dirPath, null));
+      try {
+        const entries = await fsListDir(dirPath);
+        const nodes = entries.map(fileEntryToTreeNode);
+        setLeafChildren((prev) => new Map(prev).set(dirPath, nodes));
+      } catch (e) {
+        setLeafChildren((prev) => {
+          const next = new Map(prev);
+          next.delete(dirPath);
+          return next;
+        });
+        setError(String(e));
+      }
     },
-    [childrenCache, expandedDirs],
+    [expandedDirs, rootNodes, leafChildren],
   );
 
   const handleTrackFile = useCallback(
@@ -2327,21 +2876,24 @@ function UntrackedTree({
     };
   }, [contextMenu]);
 
-  const handleLocalFileContextMenu = useCallback((path: string, x: number, y: number, trackable = false) => {
-    if (onFileContextMenu) {
-      onFileContextMenu(path, x, y, trackable);
-      return;
-    }
-    if (!canSendToContext && !trackable) return;
-    const width = 190;
-    const height = canSendToContext && trackable ? 88 : 50;
-    setContextMenu({
-      path,
-      x: Math.min(x, window.innerWidth - width - 8),
-      y: Math.min(y, window.innerHeight - height - 8),
-      trackable,
-    });
-  }, [canSendToContext, onFileContextMenu]);
+  const handleLocalFileContextMenu = useCallback(
+    (path: string, x: number, y: number, trackable = false, isDir = false) => {
+      if (onFileContextMenu) {
+        onFileContextMenu(path, x, y, trackable, isDir);
+        return;
+      }
+      if (!canSendToContext && !trackable) return;
+      const width = 190;
+      const height = canSendToContext && trackable ? 88 : 50;
+      setContextMenu({
+        path,
+        x: Math.min(x, window.innerWidth - width - 8),
+        y: Math.min(y, window.innerHeight - height - 8),
+        trackable,
+      });
+    },
+    [canSendToContext, onFileContextMenu],
+  );
 
   const handleSendToContext = useCallback((path: string) => {
     if (!canSendToContext || !onAddComposerReference) return;
@@ -2368,13 +2920,13 @@ function UntrackedTree({
       {!collapsed && (
         <div className="review-untracked-tree">
           {error && <div className="review-tree-error">{error}</div>}
-          {rootEntries.map((entry) => (
+          {rootNodes.map((node) => (
             <UntrackedTreeNode
-              key={entry.path}
-              entry={entry}
+              key={node.path}
+              node={node}
               depth={0}
               expandedDirs={expandedDirs}
-              childrenCache={childrenCache}
+              resolveChildren={resolveChildren}
               onToggleDir={handleToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={handleTrackFile}
@@ -2400,10 +2952,10 @@ function UntrackedTree({
 }
 
 function UntrackedTreeNode({
-  entry,
+  node,
   depth,
   expandedDirs,
-  childrenCache,
+  resolveChildren,
   onToggleDir,
   onFileSelect,
   onTrackFile,
@@ -2413,69 +2965,76 @@ function UntrackedTreeNode({
   activePath,
   compact,
 }: {
-  entry: FileEntry;
+  node: TreeNode;
   depth: number;
   expandedDirs: Set<string>;
-  childrenCache: Map<string, FileEntry[]>;
+  resolveChildren: (node: TreeNode) => TreeNode[];
   onToggleDir: (path: string) => void;
   onFileSelect: (path: string, changeSetId: string) => void;
   onTrackFile: (path: string) => void;
   onAddComposerReference?: (path: string) => void;
   composerReferenceEnabled: boolean;
-  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean) => void;
+  onFileContextMenu?: (path: string, x: number, y: number, trackable?: boolean, isDir?: boolean) => void;
   activePath?: string;
   compact: boolean;
 }) {
-  const isDir = entry.kind === "Directory";
-  const isExpanded = expandedDirs.has(entry.path);
-  const children = childrenCache.get(entry.path);
+  const isDir = node.kind === "directory";
+  const isExpanded = expandedDirs.has(node.path);
+  const children = isDir ? resolveChildren(node) : [];
   const indent = compact ? `${depth * 12 + 4}px` : `${depth * 14 + 8}px`;
 
   return (
     <>
       <div
-        className={`review-untracked-row ${isDir ? "review-untracked-dir" : "review-untracked-file"} ${activePath === entry.path ? "is-active" : ""}`}
+        className={`review-untracked-row ${isDir ? "review-untracked-dir" : "review-untracked-file"} ${activePath === node.path ? "is-active" : ""}`}
         style={{ paddingLeft: indent }}
         onClick={() =>
           isDir
-            ? onToggleDir(entry.path)
-            : onFileSelect(entry.path, "git-worktree:untracked")
+            ? onToggleDir(node.path)
+            : onFileSelect(node.path, "git-worktree:untracked")
         }
         onContextMenu={(event) => {
-          if (isDir) return;
+          if (isDir) {
+            if (onFileContextMenu) {
+              event.preventDefault();
+              event.stopPropagation();
+              onFileContextMenu(node.path, event.clientX, event.clientY, true, true);
+            }
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           if (onFileContextMenu) {
-            onFileContextMenu(entry.path, event.clientX, event.clientY, true);
+            onFileContextMenu(node.path, event.clientX, event.clientY, true);
             return;
           }
           if (composerReferenceEnabled && onAddComposerReference) {
-            onAddComposerReference(entry.path);
+            onAddComposerReference(node.path);
             return;
           }
-          onTrackFile(entry.path);
+          onTrackFile(node.path);
         }}
-        title={isDir ? entry.path : entry.path}
+        title={node.path}
       >
         <span className="review-tree-arrow">
-          {isDir ? (isExpanded ? "v" : ">") : ""}
+          {isDir ? (isExpanded ? "\u25bc" : "\u25b6") : ""}
         </span>
         {isDir ? (
           <FolderTreeIcon className="review-tree-icon review-folder-icon" />
         ) : (
-          <img className="review-tree-icon" src={getFileIcon(entry.path)} alt="" />
+          <img className="review-tree-icon" src={getFileIcon(node.path)} alt="" />
         )}
-        <span className="review-tree-name">{entry.name}</span>
+        <span className="review-tree-name">{node.name}</span>
       </div>
-      {isDir && isExpanded && children && (
+      {isDir && isExpanded && (
         <div className="review-tree-children">
           {children.map((child) => (
             <UntrackedTreeNode
               key={child.path}
-              entry={child}
+              node={child}
               depth={depth + 1}
               expandedDirs={expandedDirs}
-              childrenCache={childrenCache}
+              resolveChildren={resolveChildren}
               onToggleDir={onToggleDir}
               onFileSelect={onFileSelect}
               onTrackFile={onTrackFile}
@@ -2492,23 +3051,23 @@ function UntrackedTreeNode({
   );
 }
 
-function changedFileToEntry(file: ChangedFile): FileEntry {
-  const path = normalizeEntryPath(file.path);
+function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.path === path) return node;
+    if (node.children.length > 0) {
+      const found = findTreeNode(node.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function fileEntryToTreeNode(entry: FileEntry): TreeNode {
   return {
-    name: entryName(path),
-    kind: isDirectoryEntry(file.path) ? "Directory" : "File",
-    path,
+    name: entry.name,
+    path: entry.path,
+    kind: entry.kind === "Directory" ? "directory" : "file",
+    children: [],
+    stats: { added: 0, removed: 0 },
   };
-}
-
-function normalizeEntryPath(path: string) {
-  return path.replace(/\\/g, "/").replace(/\/$/, "");
-}
-
-function isDirectoryEntry(path: string) {
-  return path.endsWith("/") || path.endsWith("\\");
-}
-
-function entryName(path: string) {
-  return path.split("/").filter(Boolean).pop() ?? path;
 }

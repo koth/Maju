@@ -838,42 +838,41 @@
   font-family: var(--font-mono);
   font-size: 0.86em;
   font-weight: 450;
-  background: var(--md-code-bg, var(--surface-bg));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
   color: var(--md-code-text, var(--text-muted));
-  padding: 0.5px 5px;
-  border: 1px solid var(--md-code-border, transparent);
-  border-radius: 5px;
+  padding: 0.5px 4px;
+  border: none;
+  border-radius: 3px;
 }
 
 .md-file-path {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--md-file-path, var(--accent-hover));
-  background: color-mix(in srgb, var(--md-file-path, var(--accent)) 12%, transparent);
-  border-color: color-mix(in srgb, var(--md-file-path, var(--accent)) 32%, transparent);
+  padding: 0 1px;
+  color: var(--md-file-path, #6ea8fe);
+  background: transparent;
+  border-color: transparent;
   cursor: pointer;
   text-decoration: none;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition: color 0.12s ease;
 }
 
 .md-file-path-icon {
   flex: none;
-  opacity: 0.9;
+  opacity: 0.75;
   margin-right: 1px;
 }
 
 .md-file-path:hover {
-  color: var(--accent-hover);
-  background: color-mix(in srgb, var(--md-file-path, var(--accent)) 20%, transparent);
-  border-color: color-mix(in srgb, var(--md-file-path, var(--accent)) 55%, transparent);
+  color: var(--md-file-path-hover, #93c2ff);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 :root[data-theme="light"] .md-file-path {
-  /* Darken the accent so the link stays legible on the light code chip. */
-  --md-file-path: color-mix(in srgb, var(--accent) 62%, #16302b);
+  --md-file-path: #1a5fd7;
+  --md-file-path-hover: #1550b8;
 }
 
 .md-code-block {
@@ -1006,8 +1005,18 @@
 
 :root[data-theme="light"] .md-inline-code {
   color: var(--md-code-text);
-  background: var(--md-code-bg);
-  border-color: rgba(32, 33, 36, 0.08);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border: none;
+}
+
+:root[data-theme="light"] .md-inline-code.md-file-path {
+  color: var(--md-file-path);
+  background: transparent;
+  border-color: transparent;
+}
+
+:root[data-theme="light"] .md-inline-code.md-file-path:hover {
+  color: var(--md-file-path-hover);
 }
 
 :root[data-theme="light"] .md-code-block {

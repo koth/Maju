@@ -136,6 +136,75 @@ fn ensure_local_workspace(app: &app_core::Application) -> Result<(), String> {
     }
 }
 
+/// Resolve bare file names mentioned in chat (e.g. `Composer.tsx:548`) to
+/// their workspace-relative path by scanning for the first file with that
+/// exact name. Returns null when no match exists so the span stays plain
+/// code. Skips heavy directories so the walk stays cheap.
+#[tauri::command]
+pub async fn fs_find_by_name(app: AppHandle, names: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = state
+            .with_app(|app| {
+                if app.is_remote_workspace() {
+                    return Ok(None);
+                }
+                let root = app.ui.workspace.root.clone();
+                Ok(if root.as_os_str().is_empty() { None } else { Some(root) })
+            })
+            .ok()
+            .flatten();
+        let Some(root) = root else {
+            return Ok(names.iter().map(|_| None).collect());
+        };
+        const SKIP_DIRS: &[&str] = &[
+            "node_modules", "target", "dist", ".git", "build", "out",
+            ".next", ".turbo", "coverage", "__pycache__",
+        ];
+        let mut remaining: std::collections::HashSet<&str> =
+            names.iter().map(String::as_str).collect();
+        let mut found: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            if remaining.is_empty() {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name_str) = name.to_str() else {
+                    continue;
+                };
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    if !SKIP_DIRS.contains(&name_str) && !name_str.starts_with('.') {
+                        stack.push(entry.path());
+                    }
+                } else if file_type.is_file() && remaining.contains(name_str) {
+                    if let Ok(relative) = entry.path().strip_prefix(&root) {
+                        found.insert(
+                            name_str.to_string(),
+                            relative.to_string_lossy().replace('\\', "/"),
+                        );
+                        remaining.remove(name_str);
+                    }
+                }
+            }
+        }
+        Ok(names
+            .iter()
+            .map(|name| found.get(name).cloned())
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("Find-by-name task failed: {e}"))?
+}
+
 #[cfg(target_os = "windows")]
 fn reveal_path(path: &Path, select: bool) -> std::io::Result<()> {
     let mut command = std::process::Command::new("explorer.exe");

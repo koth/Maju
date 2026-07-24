@@ -508,6 +508,21 @@ impl Application {
     }
 
     pub fn session_create(&mut self, agent: Option<AgentCliId>) -> Result<(), String> {
+        // Reuse the current session when it has no activity yet: opening a
+        // workspace bootstraps an empty placeholder session, so a fresh
+        // "��建对话" from the sidebar would otherwise create a second empty
+        // session alongside the bootstrap one. Activating the placeholder
+        // (optionally switching the agent) avoids the duplicate.
+        if self.ui.workspace.root == self.app_paths.chats_workspace_root()
+            && !self
+                .store
+                .session_has_activity(&self.ui.session.id.to_string())
+                .unwrap_or(true)
+        {
+            self.poll_current_runtime_progress();
+            self.bump_revision();
+            return Ok(());
+        }
         let runtime = self.runtime_for_new_session(agent)?;
         let background_runtime = self.install_runtime_as_visible(runtime);
         self.runtime_registry.insert(background_runtime);

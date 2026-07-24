@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use workspace_model::RepositorySnapshot;
 
 #[tauri::command]
@@ -30,4 +30,19 @@ pub fn git_unstage(state: State<'_, AppState>, paths: Vec<String>) -> Result<(),
 #[tauri::command]
 pub fn git_commit(state: State<'_, AppState>, message: String) -> Result<(), String> {
     state.with_app(|app| app.commit_files(&message))
+}
+
+#[tauri::command]
+pub async fn git_generate_commit_message(app: AppHandle) -> Result<String, String> {
+    let progress_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_app(|app| {
+            app.generate_commit_message(&|message: &str| {
+                let _ = progress_app.emit("commit:progress", message.to_string());
+            })
+        })
+    })
+    .await
+    .map_err(|e| format!("Generate commit message task failed: {e}"))?
 }

@@ -7,6 +7,7 @@ import type { UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
 import { ToolCallCard } from "../tooling/ToolCallCard";
 import MarkdownBody, { CopyTextButton, repairCompactMarkdown } from "./MarkdownBody";
+import { buildFilePathCandidatePool } from "./file-path-candidates";
 import {
   ensureStreamingMessageBody,
   subscribeStreamingMessage,
@@ -17,6 +18,11 @@ import "./ConversationTimeline.css";
  *  Set once per timeline render; module-level so the memoized streaming
  *  component can read it without prop drilling through the stream store. */
 let visibleWorkspaceRoot: string | undefined;
+
+/** Paths of files in the current git changeset — the strongest signal for
+ *  resolving bare file names (`Composer.tsx:548`) mentioned in assistant
+ *  messages, since the assistant almost always discusses files it changed. */
+let visibleChangedFiles: string[] = [];
 
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
@@ -56,12 +62,15 @@ interface MessageRowProps {
   copyable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  candidatePaths?: string[];
 }
 
 interface StreamingMarkdownProps {
   id: string;
   body: string;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  changedFiles?: string[];
+  candidatePaths?: string[];
 }
 
 interface UserMessageImage {
@@ -105,7 +114,7 @@ function contextCompactionState(body: string): ContextCompactionState | null {
   return null;
 }
 
-const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick }: StreamingMarkdownProps) {
+const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths }: StreamingMarkdownProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
 
@@ -141,7 +150,7 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePath
 
   return (
     <div ref={hostRef} className="msg-streaming-markdown">
-      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} />
+      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} />
     </div>
   );
 });
@@ -295,6 +304,7 @@ const MessageRow = memo(function MessageRow({
   copyable = false,
   onRetry,
   onFilePathClick,
+  candidatePaths,
 }: MessageRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(body);
@@ -431,12 +441,14 @@ const MessageRow = memo(function MessageRow({
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant">
           {streaming ? (
-            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} />
+            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} changedFiles={visibleChangedFiles} candidatePaths={candidatePaths} />
           ) : (
             <MarkdownBody
               content={body}
               workspaceRoot={visibleWorkspaceRoot}
               onFilePathClick={onFilePathClick}
+              changedFiles={visibleChangedFiles}
+              candidatePaths={candidatePaths}
             />
           )}
           {streaming && <span className="streaming-cursor" />}
@@ -757,6 +769,7 @@ export function ConversationTimeline({
   onFilePathClick,
 }: Props) {
   visibleWorkspaceRoot = snapshot.workspace.root;
+  visibleChangedFiles = snapshot.repository?.changed_files?.map((file) => file.path) ?? [];
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemsRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
@@ -1042,6 +1055,20 @@ export function ConversationTimeline({
   );
   const retryableMessages = useMemo(() => retryableUserMessageIds(snapshot), [snapshot]);
 
+  // Per-turn pool of file paths harvested from shell tool inputs/outputs and
+  // turn file changes; MarkdownBody matches message file references against
+  // this pool instead of searching the whole repository.
+  const filePathCandidatePool = useMemo(
+    () =>
+      buildFilePathCandidatePool(
+        snapshot.timeline,
+        allMessagesById,
+        allToolsById,
+        turnChangeSetsByMessageId,
+      ),
+    [snapshot.timeline, allMessagesById, allToolsById, turnChangeSetsByMessageId],
+  );
+
   const toggleCollapseGroup = (key: string) => {
     setExpandedCollapseGroups((previous) => {
       const next = new Set(previous);
@@ -1101,6 +1128,11 @@ export function ConversationTimeline({
               copyable={isLastMessage(i)}
               onRetry={onRetryUserMessage}
               onFilePathClick={onFilePathClick}
+              candidatePaths={
+                msg.role === "Assistant"
+                  ? [...(filePathCandidatePool.byMessageId.get(msg.id) ?? filePathCandidatePool.all)]
+                  : undefined
+              }
             />
           )}
           {changesForMessage && changesForMessage.files.length > 0 && (

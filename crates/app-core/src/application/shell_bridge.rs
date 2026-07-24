@@ -3,7 +3,8 @@ use crate::remote_workspace::RemoteWorkspaceClient;
 use git_service::GitService;
 use std::path::PathBuf;
 use workspace_model::{
-    ChangedFile, EditorFileSnapshot, EditorFileVersion, FileEntry, SearchResult, SessionFileChange,
+    ChangedFile, EditorFileSnapshot, EditorFileVersion, FileChangeType, FileEntry, SearchResult,
+    SessionFileChange,
 };
 
 impl Application {
@@ -216,6 +217,45 @@ impl Application {
             removed_lines: record.removed_lines,
             timestamp: record.updated_at,
         }))
+    }
+
+    pub fn reject_review_file_change(&mut self, path: &str) -> Result<(), String> {
+        self.ensure_local_workspace_for("local change review")?;
+        let rel_path = normalize_path_for_storage(path, &self.ui.workspace.root);
+        let normalized_rel = normalize_tracked_path(&rel_path);
+        let section = self
+            .ui
+            .repository
+            .changed_files
+            .iter()
+            .find(|file| normalize_tracked_path(&file.path.display().to_string()) == normalized_rel)
+            .map(|file| file.section.clone())
+            .ok_or_else(|| "没有可撤销的工作区改动".to_string())?;
+        let record = GitService::file_diff(&self.ui.workspace.root, &rel_path, section)
+            .map_err(|error| format!("无法加载差异: {error}"))?
+            .ok_or_else(|| "没有可撤销的工作区改动".to_string())?;
+
+        if matches!(record.change_type, FileChangeType::Created) {
+            let abs_path =
+                crate::editor_files::resolve_workspace_path(&self.ui.workspace.root, path, true)?;
+            std::fs::remove_file(&abs_path)
+                .map_err(|error| format!("无法删除文件: {error}"))?;
+        } else {
+            let old_text = record
+                .old_text
+                .ok_or_else(|| "无法确定撤销基线".to_string())?;
+            let abs_path = crate::editor_files::resolve_workspace_path(
+                &self.ui.workspace.root,
+                path,
+                false,
+            )?;
+            std::fs::write(&abs_path, old_text)
+                .map_err(|error| format!("无法还原文件: {error}"))?;
+        }
+
+        self.refresh_repository();
+        self.bump_revision();
+        Ok(())
     }
 
     pub fn session_file_diff(&self, path: &str) -> Result<SessionFileChange, String> {

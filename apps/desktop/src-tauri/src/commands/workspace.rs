@@ -103,6 +103,15 @@ pub fn workspace_has_open(state: State<'_, AppState>) -> Result<bool, String> {
     state.has_open_workspaces()
 }
 
+/// Return the project-less "聊天" workspace root (`~/.kodex/chats`).
+/// The sidebar hero "新建对话" routes new chats here so they are not bound
+/// to a real project directory.
+#[tauri::command]
+pub fn workspace_chats_root() -> Result<String, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    Ok(paths.chats_workspace_root().display().to_string())
+}
+
 #[tauri::command]
 pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSnapshot>, String> {
     app_core::startup_perf::mark("workspace_restore_open/start", "");

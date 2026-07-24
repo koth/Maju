@@ -19,6 +19,23 @@ use workspace_model::{
 
 use std::sync::Arc;
 
+/// Resolve the project-less "聊天" workspace root (`~/.kodex/chats`).
+/// Sessions created here are not bound to a real project directory.
+fn chats_workspace_root() -> Result<PathBuf, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    Ok(paths.chats_workspace_root())
+}
+
+/// Whether `identifier` refers to the project-less chats workspace.
+fn is_chats_workspace(identifier: &str) -> bool {
+    let Ok(root) = chats_workspace_root() else {
+        return false;
+    };
+    let normalized_target = normalize_tracked_path(identifier);
+    let normalized_root = normalize_tracked_path(&root.display().to_string());
+    normalized_target == normalized_root
+}
+
 pub struct AppState {
     workspaces: Mutex<WorkspaceRegistry>,
     lsp_service: LspService,
@@ -670,15 +687,29 @@ impl AppState {
                 .unwrap_or_else(|| normalize_tracked_path(&path)),
             None => guard.active_workspace.clone().ok_or("No workspace open")?,
         };
-        let (remote, path) = {
-            let entry = guard.workspaces.get(&key).ok_or("Workspace is not open")?;
-            (entry_remote(entry), entry_path(entry))
+        let (remote, path) = match guard.workspaces.get(&key) {
+            Some(entry) => (entry_remote(entry), entry_path(entry)),
+            None => {
+                // Auto-open the project-less "聊天" workspace so a new chat
+                // created from the sidebar hero does not require a real
+                // project directory to be opened first.
+                if is_chats_workspace(&key) {
+                    let root = chats_workspace_root()?;
+                    std::fs::create_dir_all(&root)
+                        .map_err(|e| format!("创建聊天工作区目录失败: {e}"))?;
+                    connect_workspace_locked(&mut guard, key.clone(), root, None)?;
+                    (None, None)
+                } else {
+                    return Err("Workspace is not open".into());
+                }
+            }
         };
         if let Some(remote) = remote {
             connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
-        } else {
-            let path = path.ok_or("Workspace is not open")?;
-            connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+        } else if let Some(path) = path {
+            if !matches!(guard.workspaces.get(&key), Some(WorkspaceEntry::Connected(_))) {
+                connect_workspace_locked(&mut guard, key.clone(), path, None)?;
+            }
         }
         guard.active_workspace = Some(key.clone());
         let app = match guard.workspaces.get_mut(&key) {

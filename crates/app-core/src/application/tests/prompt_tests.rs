@@ -837,6 +837,41 @@ fn streamable_http_connection_not_found_reason_is_human_readable() {
     assert!(!reason.contains("jsonrpc"));
 }
 
+#[test]
+fn ansi_laden_streamable_http_disconnect_reason_is_cleaned_and_human_readable() {
+    let raw = "agent process exited with exit code: 1073807364: \u{1b}[2m2026-07-24T06:24:48.131294Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mrmcp::transport::streamable_http_client\u{1b}[0m\u{1b}[2m:\u{1b}[0m fail to get common stream: Client error: streamable HTTP session expired with 404 Not Found";
+
+    let reason = humanize_acp_disconnect_reason(raw);
+
+    assert!(reason.contains("流式连接已过期"));
+    assert!(!reason.contains('\u{1b}'));
+    assert!(!reason.contains("2026-07-24"));
+    assert!(!reason.contains("rmcp::transport"));
+    assert!(!reason.contains("exit code"));
+}
+
+#[test]
+fn sanitize_acp_error_text_strips_ansi_timestamps_and_log_targets() {
+    let cleaned = sanitize_acp_error_text(
+        "\u{1b}[2m2026-07-24T06:24:48.131294Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mrmcp::transport::worker\u{1b}[0m\u{1b}[2m:\u{1b}[0m something went wrong",
+    );
+
+    // Timestamp at line start, log level and target are stripped, ANSI gone.
+    assert!(!cleaned.contains('\u{1b}'));
+    assert!(!cleaned.contains("2026-07-24"));
+    assert!(!cleaned.contains("ERROR"));
+    assert!(cleaned.contains("something went wrong"));
+}
+
+#[test]
+fn sanitize_acp_error_text_strips_log_target_when_line_starts_with_timestamp() {
+    let cleaned = sanitize_acp_error_text(
+        "2026-07-24T06:24:48.131294Z ERROR rmcp::transport::worker: something went wrong",
+    );
+
+    assert_eq!(cleaned, "something went wrong");
+}
+
 fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::PathBuf) {
     let service = crate::image_mcp::ImageMcpService::new(
         workspace_model::ImageCapabilities {

@@ -6,13 +6,26 @@ use workspace_model::{
 };
 
 pub(crate) fn build_initial_ui(workspace_root: &Path) -> anyhow::Result<UiSnapshot> {
+    // The project-less "聊天" workspace displays a friendly Chinese label
+    // rather than the raw "chats" directory name.
+    let is_chats = workspace_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "chats")
+        && workspace_root
+            .parent()
+            .is_some_and(|parent| parent.ends_with(".kodex"));
     let descriptor = WorkspaceDescriptor {
         id: uuid::Uuid::new_v4(),
-        name: workspace_root
+        name: if is_chats {
+            "聊天".to_string()
+        } else {
+            workspace_root
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("工作区")
-            .to_string(),
+            .to_string()
+        },
         root: workspace_root.to_path_buf(),
         location: WorkspaceLocation::Local,
     };

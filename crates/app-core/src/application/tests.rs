@@ -12,6 +12,7 @@ use super::titles::is_placeholder_session_title;
 use super::{
     Application, InFlightPrompt, ModelSelection, current_timestamp,
     humanize_acp_disconnect_reason,
+    sanitize_acp_error_text,
     update_signal::AppUpdate,
     normalize_tracked_path, turn_finished_notice,
 };
@@ -447,6 +448,50 @@ fn remote_session_config_workspace_root_uses_remote_path_not_workspace_key() {
     assert_ne!(
         app.session_config_workspace_root(Some(&remote_ssh)),
         app.ui.workspace.root.display().to_string()
+    );
+}
+
+#[test]
+fn reject_review_file_change_reverts_modified_file_to_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("main.rs"), "one\n").unwrap();
+    let repo = init_test_git_repo(dir.path());
+    commit_paths(&repo, &["main.rs"]);
+
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
+    let mut app = Application::bootstrap_with_app_paths(
+        dir.path(),
+        mock_agent_command(),
+        app_paths,
+    )
+    .unwrap();
+
+    fs::write(dir.path().join("main.rs"), "one\ntwo\n").unwrap();
+    app.refresh_repository();
+    assert!(
+        app.ui
+            .repository
+            .changed_files
+            .iter()
+            .any(|file| file.path == PathBuf::from("main.rs")),
+        "modified file should appear in repository snapshot"
+    );
+
+    app.reject_review_file_change("main.rs").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join("main.rs")).unwrap(),
+        "one\n",
+        "reject should restore the file to its git baseline"
+    );
+    app.refresh_repository();
+    assert!(
+        app.ui
+            .repository
+            .changed_files
+            .iter()
+            .all(|file| file.path != PathBuf::from("main.rs")),
+        "repository snapshot should no longer report the reverted file"
     );
 }
 

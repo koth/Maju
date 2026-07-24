@@ -887,6 +887,126 @@
   background: var(--surface-hover);
 }
 
+.review-file-context-menu button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.review-menu-spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 7px;
+  vertical-align: -1px;
+  border: 2px solid color-mix(in srgb, var(--text-muted) 26%, transparent);
+  border-top-color: var(--text-muted);
+  border-radius: 999px;
+  animation: review-menu-spin 0.8s linear infinite;
+}
+
+@keyframes review-menu-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.review-commit-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 11000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.review-commit-dialog {
+  width: min(460px, calc(100vw - 48px));
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-bg);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-commit-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.review-commit-dialog-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.review-commit-dialog-input-row .review-commit-message-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.review-commit-ai-button {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-hover);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.review-commit-ai-button:hover:not(:disabled) {
+  background: var(--surface-active, var(--surface-hover));
+}
+
+.review-commit-ai-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.review-commit-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.review-commit-progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--surface-hover);
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.review-commit-dialog-cancel {
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.review-commit-dialog-cancel:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
 .review-diff-tree {
   display: flex;
   flex-direction: column;
@@ -1050,4 +1170,56 @@
 
 :root[data-theme="light"] .review-git-filetree-search-input::placeholder {
   color: #9aa0a6;
+}
+
+.review-commit-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px 6px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border-strong);
+}
+
+.review-commit-message-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-bg);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 12px;
+}
+
+.review-commit-message-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.review-commit-message-input:disabled {
+  opacity: 0.6;
+}
+
+.review-commit-button {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.review-commit-button:not(:disabled):hover {
+  background: var(--accent-hover);
+}
+
+.review-commit-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

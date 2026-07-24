@@ -11,6 +11,7 @@ import {
   settingsGetAgentSnapshot,
   workspaceArchive,
   workspaceOpen,
+  workspaceChatsRoot,
 } from "../../lib/tauri";
 import { onSessionStatus } from "../../lib/events";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -73,6 +74,12 @@ export function SessionList({
   const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
   const [agentDropdownOpen, setAgentDropdownOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
+  const [chatsCollapsed, setChatsCollapsed] = useState(false);
+  const [chatsRoot, setChatsRoot] = useState<string | null>(null);
+  // Per-workspace collapse state hoisted to the list so a session switch /
+  // background refresh cannot reset it by recreating WorkspaceSection.
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState<Record<string, boolean>>({});
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
   const [comingSoonFeature, setComingSoonFeature] = useState<string | null>(null);
@@ -83,6 +90,12 @@ export function SessionList({
   const setComingSoon = useCallback((feature: string) => {
     setComingSoonFeature(feature);
     window.setTimeout(() => setComingSoonFeature(null), 1800);
+  }, []);
+
+  useEffect(() => {
+    workspaceChatsRoot()
+      .then(setChatsRoot)
+      .catch(() => {});
   }, []);
 
   const refresh = useCallback(() => {
@@ -407,13 +420,26 @@ export function SessionList({
           : null
       : null;
 
+  // Project-less "聊天" workspace lives under ~/.kodex/chats; separate it
+  // from real projects so it renders as its own collapsible group below the
+  // project list rather than as a regular project.
+  const chatsItem =
+    chatsRoot != null
+      ? workspaceSessions.find(
+          (item) => item.workspace.root === chatsRoot,
+        )
+      : undefined;
+  const projectItems = workspaceSessions.filter(
+    (item) => item.workspace.root !== (chatsRoot ?? "__chats__"),
+  );
+
   return (
     <div className="session-list">
       <div className="sl-hero">
         <button
           className="sl-hero-new"
           type="button"
-          onClick={() => handleOpenAgentPicker(activeWorkspaceRoot, null, false)}
+          onClick={() => handleOpenAgentPicker(chatsRoot ?? activeWorkspaceRoot, null, false)}
           title="新建对话"
           aria-label="新建对话"
         >
@@ -447,7 +473,17 @@ export function SessionList({
       </div>
 
       <div className="sl-header">
-        <span className="sl-kicker">项目</span>
+        <button
+          className="sl-kicker sl-kicker-toggle"
+          type="button"
+          onClick={() => setProjectsCollapsed((v) => !v)}
+          aria-expanded={!projectsCollapsed}
+          aria-label={projectsCollapsed ? "展开项目列表" : "折叠项目列表"}
+          title={projectsCollapsed ? "展开项目列表" : "折叠项目列表"}
+        >
+          <FolderIcon open={!projectsCollapsed} />
+          <span>项目</span>
+        </button>
         <div className="sl-header-actions">
           <div className="sl-new-workspace" ref={workspaceMenuRef}>
             <button
@@ -477,7 +513,7 @@ export function SessionList({
         </div>
       </div>
 
-      <div className="sl-workspaces">
+      <div className={`sl-workspaces${projectsCollapsed ? " is-hidden" : ""}`}>
         {workspaceSessions.length === 0 && (
           sessionsRefreshing ? (
             <div className="sl-loading" role="status" aria-live="polite">
@@ -492,11 +528,15 @@ export function SessionList({
           )
         )}
 
-        {workspaceSessions.map((workspaceItem) => (
+        {projectItems.map((workspaceItem) => (
           <WorkspaceSection
             key={workspaceItem.workspace.root}
             item={workspaceItem}
             activeSessionId={activeSessionId}
+            collapsedState={workspaceCollapsed[workspaceItem.workspace.root]}
+            onCollapsedChange={(root, next) =>
+              setWorkspaceCollapsed((prev) => ({ ...prev, [root]: next }))
+            }
             activeSessionTitle={activeSessionTitle}
             currentSessionStatus={currentSessionStatus}
             activeConversationVisible={activeConversationVisible}
@@ -508,6 +548,41 @@ export function SessionList({
           />
         ))}
       </div>
+
+      {chatsItem && (
+        <div className={`sl-chats${chatsCollapsed ? " is-collapsed" : ""}`}>
+          <button
+            className="sl-kicker sl-kicker-toggle"
+            type="button"
+            onClick={() => setChatsCollapsed((v) => !v)}
+            aria-expanded={!chatsCollapsed}
+            aria-label={chatsCollapsed ? "展开聊天列表" : "折叠聊天列表"}
+            title={chatsCollapsed ? "展开聊天列表" : "折叠聊天列表"}
+          >
+            <FolderIcon open={!chatsCollapsed} />
+            <span>聊天</span>
+          </button>
+          <div className={`sl-chats-list${chatsCollapsed ? " is-hidden" : ""}`}>
+            <WorkspaceSection
+              item={chatsItem}
+              isChats
+              activeSessionId={activeSessionId}
+              collapsedState={workspaceCollapsed[chatsItem.workspace.root]}
+              onCollapsedChange={(root, next) =>
+                setWorkspaceCollapsed((prev) => ({ ...prev, [root]: next }))
+              }
+              activeSessionTitle={activeSessionTitle}
+              currentSessionStatus={currentSessionStatus}
+              activeConversationVisible={activeConversationVisible}
+              onReconnectRemoteWorkspace={handleReconnectRemoteWorkspace}
+              onCreateSession={handleOpenAgentPicker}
+              onSwitch={handleSwitch}
+              onArchive={handleArchive}
+              onArchiveWorkspace={handleArchiveWorkspace}
+            />
+          </div>
+        </div>
+      )}
 
       <div className="sl-footer">
         <button className="sl-settings-btn" type="button" onClick={onOpenSettings} title="设置" aria-label="打开设置">
@@ -749,7 +824,10 @@ function claudeAgentReady(snapshot: AgentSettingsSnapshot) {
 
 function WorkspaceSection({
   item,
+  isChats = false,
   activeSessionId,
+  collapsedState,
+  onCollapsedChange,
   activeSessionTitle,
   currentSessionStatus,
   activeConversationVisible,
@@ -760,6 +838,9 @@ function WorkspaceSection({
   onArchiveWorkspace,
 }: {
   item: WorkspaceSessionList;
+  isChats?: boolean;
+  collapsedState?: boolean;
+  onCollapsedChange: (workspaceRoot: string, collapsed: boolean) => void;
   activeSessionId: string;
   activeSessionTitle: string;
   currentSessionStatus: SessionStatus;
@@ -771,113 +852,121 @@ function WorkspaceSection({
   onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
-  // Default expanded so background progress indicators stay visible; the user
-  // can click the collapse toggle to fold a workspace's session list.
-  const [collapsed, setCollapsed] = useState(false);
+  const collapsed = collapsedState ?? false;
+  const setCollapsed = (next: boolean) => onCollapsedChange(item.workspace.root, next);
   const workspaceRoot = item.workspace.root;
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
   const isDormantRemoteWorkspace = isRemoteWorkspace && !item.connected;
   const remoteWorkspace = item.workspace.location?.kind === "remote_linux" ? item.workspace.location : null;
   const workspaceActionRoot = remoteWorkspace ? remoteWorkspaceKey(remoteWorkspace) : workspaceRoot;
   const remoteAgent = remoteAgentForWorkspace(remoteWorkspace);
-const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
+  const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
   const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
   const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
+  const collapsedRunning =
+    collapsed &&
+    !isDormantRemoteWorkspace &&
+    sessions.some((s) => s.status === "Streaming" || s.status === "WaitingForTool");
 
   return (
-    <section className={`sl-workspace-section ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""}`}>
-      <div className="sl-workspace-row">
-        <div
-          className="sl-workspace-node"
-          role="button"
-          tabIndex={0}
-          aria-current={item.is_active ? "true" : undefined}
-          onClick={() => setCollapsed((value) => !value)}
-          onDoubleClick={() => {
-            if (isDormantRemoteWorkspace && remoteWorkspace) {
-              onReconnectRemoteWorkspace(remoteWorkspace);
-            }
-          }}
-          title={workspaceTooltip}
-        >
-          <button
-            className="sl-workspace-folder"
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              setCollapsed((value) => !value);
+    <section className={`sl-workspace-section ${isChats ? "is-chats" : ""} ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""} ${collapsedRunning ? "has-collapsed-running" : ""}`}>
+      {!isChats && (
+        <div className="sl-workspace-row">
+          <div
+            className="sl-workspace-node"
+            role="button"
+            tabIndex={0}
+            aria-current={item.is_active ? "true" : undefined}
+          onClick={() => setCollapsed(!collapsed)}
+            onDoubleClick={() => {
+              if (isDormantRemoteWorkspace && remoteWorkspace) {
+                onReconnectRemoteWorkspace(remoteWorkspace);
+              }
             }}
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? `展开 ${item.workspace.name} 的会话列表` : `折叠 ${item.workspace.name} 的会话列表`}
-            title={collapsed ? "展开会话列表" : "折叠会话列表"}
+            title={workspaceTooltip}
           >
-            <FolderIcon open={!collapsed} />
+            <button
+              className="sl-workspace-folder"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                setCollapsed(!collapsed);
+              }}
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? `展开 ${item.workspace.name} 的会话列表` : `折叠 ${item.workspace.name} 的会话列表`}
+              title={collapsed ? "展开会话列表" : "折叠会话列表"}
+            >
+              <FolderIcon open={!collapsed} />
+            </button>
+            {collapsedRunning && (
+              <span className="sl-session-online is-progress" title="有会话进行中" aria-label="有会话进行中" />
+            )}
+            <span className="sl-workspace-copy">
+              <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
+            </span>
+            <span
+              className="sl-workspace-state"
+              title={workspaceStateLabel}
+              aria-label={workspaceStateLabel}
+            />
+          </div>
+          <button
+            className="sl-workspace-edit"
+            type="button"
+            onClick={() => onCreateSession(workspaceActionRoot, remoteAgent, isRemoteWorkspace)}
+            title={isDormantRemoteWorkspace ? "先双击连接远程工作区" : "新建会话"}
+            aria-label={`在 ${item.workspace.name} 中新建会话`}
+            disabled={isDormantRemoteWorkspace}
+          >
+            <PlusIcon />
           </button>
-          <span className="sl-workspace-copy">
-            <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
-          </span>
-          <span
-            className="sl-workspace-state"
-            title={workspaceStateLabel}
-            aria-label={workspaceStateLabel}
-          />
+          <button
+            className="sl-workspace-archive"
+            type="button"
+            onClick={() => onArchiveWorkspace(workspaceActionRoot, item.is_active, item.workspace.name)}
+            title="归档项目"
+            aria-label={`归档项目 ${item.workspace.name}`}
+          >
+            <ArchiveIcon />
+          </button>
         </div>
-        <button
-          className="sl-workspace-edit"
-          type="button"
-          onClick={() => onCreateSession(workspaceActionRoot, remoteAgent, isRemoteWorkspace)}
-          title={isDormantRemoteWorkspace ? "先双击连接远程工作区" : "新建会话"}
-          aria-label={`在 ${item.workspace.name} 中新建会话`}
-          disabled={isDormantRemoteWorkspace}
-        >
-          <PlusIcon />
-        </button>
-        <button
-          className="sl-workspace-archive"
-          type="button"
-          onClick={() => onArchiveWorkspace(workspaceActionRoot, item.is_active, item.workspace.name)}
-          title="归档项目"
-          aria-label={`归档项目 ${item.workspace.name}`}
-        >
-          <ArchiveIcon />
-        </button>
-      </div>
+      )}
 
       {!collapsed && (
-      <div className="sl-thread-branch">
-        <div className="sl-items">
-          {item.sessions.length === 0 && (
-            <div className="sl-empty sl-session-empty">
-              <span className="sl-empty-title">{item.connected ? "暂无会话" : "未加载会话"}</span>
-              <span className="sl-empty-copy">{item.connected ? "在此工作区中开始一个会话。" : isDormantRemoteWorkspace ? "双击项目目录后重新连接。" : "点击工作区后按需加载。"}</span>
-            </div>
-          )}
+        <div className="sl-thread-branch">
+          <div className="sl-items">
+            {item.sessions.length === 0 && (
+              <div className="sl-empty sl-session-empty">
+                <span className="sl-empty-title">{item.connected ? "暂无会话" : "未加载会话"}</span>
+                <span className="sl-empty-copy">{item.connected ? "在此工作区中开始一个会话。" : isDormantRemoteWorkspace ? "双击项目目录后重新连接。" : "点击工作区后按需加载。"}</span>
+              </div>
+            )}
 
-          {sessions.map((session) => {
-            const isActiveSession = session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace;
-            const displaySession = isActiveSession
-              ? {
-                  ...session,
-                  title: activeSessionTitle || session.title,
-                  status: currentSessionStatus,
-                }
-              : session;
+            {sessions.map((session) => {
+              const isActiveSession = session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace;
+              const displaySession = isActiveSession
+                ? {
+                    ...session,
+                    title: activeSessionTitle || session.title,
+                    status: currentSessionStatus,
+                  }
+                : session;
 
-            return (
-              <ThreadRow
-                key={session.id}
-                session={displaySession}
-                active={isActiveSession}
-                activeConversationVisible={isActiveSession ? activeConversationVisible : true}
-                connected={session.id === activeSessionId && item.is_active && item.connected}
-                disabled={isDormantRemoteWorkspace}
-                onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
-                onArchive={(id) => onArchive(id, workspaceActionRoot, session.title)}
-              />
-            );
-          })}
+              return (
+                <ThreadRow
+                  key={session.id}
+                  session={displaySession}
+                  active={isActiveSession}
+                  activeConversationVisible={isActiveSession ? activeConversationVisible : true}
+                  connected={session.id === activeSessionId && item.is_active && item.connected}
+                  disabled={isDormantRemoteWorkspace}
+                  onSwitch={(id) => onSwitch(id, workspaceActionRoot)}
+                  onArchive={(id) => onArchive(id, workspaceActionRoot, session.title)}
+                />
+              );
+            })}
+          </div>
         </div>
-      </div>
       )}
     </section>
   );

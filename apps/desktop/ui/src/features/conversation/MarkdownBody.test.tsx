@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import MarkdownBody, {
   clearFilePathLinkCacheForTests,
+  pathMatchesFragment,
   resolveClickableFilePath,
 } from "./MarkdownBody";
 import { fsPathExists } from "../../lib/tauri";
@@ -22,6 +23,7 @@ describe("MarkdownBody", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.clearAllMocks();
     clearFilePathLinkCacheForTests();
     if (originalClipboard) {
       Object.defineProperty(navigator, "clipboard", {
@@ -95,7 +97,7 @@ describe("MarkdownBody", () => {
     const root = "D:\\work\\kodex";
     render(
       <MarkdownBody
-        content={"改动在 `crates/codebuddy-proxy/src/usage.rs:75` 里，另一个是 `README.md`。"}
+        content={"改动在 `crates/codebuddy-proxy/src/usage.rs:75` 里，另一个是 `to_openai_usage`。"}
         workspaceRoot={root}
         onFilePathClick={onFilePathClick}
       />,
@@ -116,7 +118,7 @@ describe("MarkdownBody", () => {
       75,
     );
 
-    const plainCode = screen.getByText("README.md");
+    const plainCode = screen.getByText("to_openai_usage");
     expect(plainCode).not.toHaveClass("md-file-path");
     fireEvent.click(plainCode);
     expect(onFilePathClick).toHaveBeenCalledTimes(1);
@@ -148,32 +150,159 @@ describe("MarkdownBody", () => {
     expect(screen.getByText("to_openai_usage")).not.toHaveClass("md-file-path");
     expect(screen.getByText("cargo test")).not.toHaveClass("md-file-path");
   });
+
+  it("resolves bare file names via the changeset as the priority source", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"改在 `Composer.tsx:548` 里，同时 `ConversationTimeline.css:848` 也改了。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        changedFiles={[
+          "apps/desktop/ui/src/features/composer/Composer.tsx",
+          "apps/desktop/ui/src/features/conversation/ConversationTimeline.css",
+        ]}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
+    );
+    expect(screen.getByText("ConversationTimeline.css:848")).toHaveClass("md-file-path");
+    fireEvent.click(screen.getByText("Composer.tsx:548"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\apps\\desktop\\ui\\src\\features\\composer\\Composer.tsx`,
+      548,
+    );
+  });
+
+  it("resolves partial relative paths via the changeset", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"改在 `commands/fs.rs:138` 里。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        changedFiles={["apps/desktop/src-tauri/src/commands/fs.rs"]}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("commands/fs.rs:138")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("commands/fs.rs:138"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      138,
+    );
+  });
+
+  it("resolves bare file names without a line number via the changeset", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"改在 `MarkdownBody.tsx` 里。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        changedFiles={["apps/desktop/ui/src/features/conversation/MarkdownBody.tsx"]}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("MarkdownBody.tsx")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("MarkdownBody.tsx"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\apps\\desktop\\ui\\src\\features\\conversation\\MarkdownBody.tsx`,
+      undefined,
+    );
+  });
+
+  it("matches space-separated path fragments as a whole against the candidate pool", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"2. `app-core / state.rs`：创建会话流程允许不绑定 workspace。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        candidatePaths={["crates/app-core/src/state.rs"]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("app-core / state.rs")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("app-core / state.rs"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\crates\\app-core\\src\\state.rs`,
+      undefined,
+    );
+  });
+
+  it("matches partial relative paths against the candidate pool without a changeset", async () => {
+    const onFilePathClick = vi.fn();
+    const root = "D:\\work\\kodex";
+    render(
+      <MarkdownBody
+        content={"输出里提到的 `commands/fs.rs:144` 可以直接跳转。"}
+        workspaceRoot={root}
+        onFilePathClick={onFilePathClick}
+        candidatePaths={["apps/desktop/src-tauri/src/commands/fs.rs"]}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("commands/fs.rs:144")).toHaveClass("md-file-path"),
+    );
+    fireEvent.click(screen.getByText("commands/fs.rs:144"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      `${root}\\apps\\desktop\\src-tauri\\src\\commands\\fs.rs`,
+      144,
+    );
+  });
+
+  it("keeps spans as plain code when neither the changeset nor the candidate pool matches", async () => {
+    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => paths.map(() => false));
+    render(
+      <MarkdownBody
+        content={"`SomeUnrelated.tsx:12` 不在本轮上下文里。"}
+        workspaceRoot="D:\\work\\kodex"
+        onFilePathClick={vi.fn()}
+        changedFiles={["apps/desktop/ui/src/features/composer/Composer.tsx"]}
+        candidatePaths={["crates/app-core/src/state.rs"]}
+      />,
+    );
+
+    await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
+    expect(screen.getByText("SomeUnrelated.tsx:12")).not.toHaveClass("md-file-path");
+  });
 });
 
 describe("resolveClickableFilePath", () => {
   const root = "D:\\work\\kodex";
 
   it("resolves relative paths with line and column", () => {
-    expect(resolveClickableFilePath("crates/acp-core/src/mapping.rs:391", root)).toEqual({
+    expect(resolveClickableFilePath("crates/acp-core/src/mapping.rs:391", root)).toMatchObject({
       path: `${root}\\crates\\acp-core\\src\\mapping.rs`,
       lineNumber: 391,
     });
-    expect(resolveClickableFilePath("src/lib.rs:10:5", root)).toEqual({
+    expect(resolveClickableFilePath("src/lib.rs:10:5", root)).toMatchObject({
       path: `${root}\\src\\lib.rs`,
       lineNumber: 10,
     });
   });
 
   it("resolves diff-prefixed and absolute paths", () => {
-    expect(resolveClickableFilePath("a/crates/x.rs:3", root)).toEqual({
+    expect(resolveClickableFilePath("a/crates/x.rs:3", root)).toMatchObject({
       path: `${root}\\crates\\x.rs`,
       lineNumber: 3,
     });
-    expect(resolveClickableFilePath("D:\\work\\kodex\\src\\main.rs:8", root)).toEqual({
+    expect(resolveClickableFilePath("D:\\work\\kodex\\src\\main.rs:8", root)).toMatchObject({
       path: "D:\\work\\kodex\\src\\main.rs",
       lineNumber: 8,
     });
-    expect(resolveClickableFilePath("/home/user/repo/src/main.rs", root)).toEqual({
+    expect(resolveClickableFilePath("/home/user/repo/src/main.rs", root)).toMatchObject({
       path: "/home/user/repo/src/main.rs",
       lineNumber: undefined,
     });
@@ -187,7 +316,66 @@ describe("resolveClickableFilePath", () => {
     expect(resolveClickableFilePath("README", root)).toBeNull();
   });
 
+  it("accepts space-separated path fragments and normalises them", () => {
+    expect(resolveClickableFilePath("app-core / state.rs", root)).toEqual({
+      path: `${root}\\app-core\\state.rs`,
+      lineNumber: undefined,
+      matchTail: "app-core/state.rs",
+    });
+    expect(resolveClickableFilePath("crates / app-core / src / state.rs:12", root)).toEqual({
+      path: `${root}\\crates\\app-core\\src\\state.rs`,
+      lineNumber: 12,
+      matchTail: "crates/app-core/src/state.rs",
+    });
+    expect(resolveClickableFilePath("foo bar.rs", root)).toBeNull();
+  });
+
   it("requires a workspace root for relative paths", () => {
     expect(resolveClickableFilePath("crates/x.rs:1")).toBeNull();
+  });
+
+  it("treats bare file names with a line reference as name-search candidates", () => {
+    expect(resolveClickableFilePath("Composer.tsx:548", root)).toEqual({
+      path: "Composer.tsx",
+      lineNumber: 548,
+      matchTail: "Composer.tsx",
+    });
+    expect(resolveClickableFilePath("taxonomy.ts:103", root)).toEqual({
+      path: "taxonomy.ts",
+      lineNumber: 103,
+      matchTail: "taxonomy.ts",
+    });
+  });
+
+  it("accepts bare names with or without a line reference", () => {
+    expect(resolveClickableFilePath("tagger.ts", root)).toMatchObject({
+      path: "tagger.ts",
+      matchTail: "tagger.ts",
+    });
+    expect(resolveClickableFilePath("Composer.tsx:548", root)).toMatchObject({
+      path: "Composer.tsx",
+      lineNumber: 548,
+      matchTail: "Composer.tsx",
+    });
+  });
+
+  it("rejects bare names without an extension", () => {
+    expect(resolveClickableFilePath("README", root)).toBeNull();
+    expect(resolveClickableFilePath("{ }", root)).toBeNull();
+  });
+});
+
+describe("pathMatchesFragment", () => {
+  it("matches fragments as an ordered segment subsequence", () => {
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs")).toBe(true);
+    expect(pathMatchesFragment("apps/desktop/src-tauri/src/commands/fs.rs", "commands/fs.rs")).toBe(true);
+    expect(pathMatchesFragment("apps/desktop/ui/src/features/composer/Composer.tsx", "Composer.tsx")).toBe(true);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/state.rs:12")).toBe(true);
+  });
+
+  it("rejects out-of-order or foreign fragments", () => {
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "state.rs/app-core")).toBe(false);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "other/state.rs")).toBe(false);
+    expect(pathMatchesFragment("crates/app-core/src/state.rs", "app-core/lib.rs")).toBe(false);
   });
 });

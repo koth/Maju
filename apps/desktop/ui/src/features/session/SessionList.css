@@ -24,6 +24,7 @@
 
 .sl-footer {
   flex-shrink: 0;
+  margin-top: auto;
   padding: 10px 8px 14px;
 }
 
@@ -1111,6 +1112,52 @@
   text-transform: none;
 }
 
+.sl-kicker-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  transition: color var(--transition-fast);
+}
+
+.sl-kicker-toggle:hover {
+  color: var(--text-strong);
+}
+
+.sl-kicker-toggle svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.sl-workspaces.is-hidden {
+  display: none;
+}
+
+.sl-chats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 10px 8px;
+}
+
+.sl-chats-list.is-hidden {
+  display: none;
+}
+
+.sl-chats .sl-workspace-section.is-chats {
+  margin: 0;
+}
+
+.sl-chats .sl-workspace-section.is-chats .sl-thread-branch {
+  margin-top: 0;
+}
+
 .sl-new-btn {
   display: grid;
   width: 30px;
@@ -1173,6 +1220,10 @@
   padding: 0 4px 0 9px;
   border-radius: 8px;
   color: var(--text-muted);
+}
+
+.sl-workspace-section.has-collapsed-running .sl-workspace-node {
+  grid-template-columns: 18px 12px minmax(0, 1fr) auto;
 }
 
 .sl-workspace-node:hover {

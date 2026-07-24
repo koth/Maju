@@ -298,7 +298,9 @@ fn turn_finished_notice(stop_reason: &str, agent_cli: Option<&str>) -> Option<St
 }
 
 fn humanize_acp_disconnect_reason(reason: &str) -> String {
-    let reason = unpack_acp_internal_error(reason).unwrap_or_else(|| reason.trim().to_string());
+    let cleaned = sanitize_acp_error_text(reason);
+    let reason =
+        unpack_acp_internal_error(&cleaned).unwrap_or_else(|| cleaned.trim().to_string());
     let lower = reason.to_ascii_lowercase();
     if lower.contains("requested token count exceeds")
         || lower.contains("maximum context length")
@@ -323,7 +325,113 @@ fn humanize_acp_disconnect_reason(reason: &str) -> String {
         return "远程 ACP Agent 启动后退出，尚未建立可用的 ACP TCP 连接。请检查远程 Agent 配置、模型凭据和远程目录后重试。".into();
     }
 
+    if lower.contains("streamable http session expired")
+        || (lower.contains("streamable_http") && lower.contains("404"))
+        || (lower.contains("fail to get common stream") && lower.contains("404"))
+    {
+        return "与模型服务的流式连接已过期（404 Not Found），通常是会话空闲过久或服务端断开了连接。请重试；若仍复现，请重新发送或新建会话。".into();
+    }
+
     reason
+}
+
+/// Strip terminal noise from a raw ACP/agent error string before it is shown
+/// to the user: ANSI escape sequences, leading ISO-8601 timestamps and
+/// `tracing` log-target prefixes, and the `agent process exited with exit
+/// code: N:` wrapper. Keeps the meaningful message so friendly matching and
+/// fallback display stay readable.
+fn sanitize_acp_error_text(input: &str) -> String {
+    let mut text = strip_ansi_escapes(input);
+
+    // Drop a leading `agent process exited with exit code: N:` wrapper so the
+    // underlying message is what gets matched and displayed.
+    if let Some(idx) = text.to_ascii_lowercase().find("exit code:") {
+        if let Some(colon) = text[idx..].find(':').map(|offset| idx + offset) {
+            // Skip past the exit-code number to the real message after it.
+            let after = &text[colon + 1..];
+            if let Some(msg_idx) = after.find(':') {
+                let candidate = after[msg_idx + 1..].trim();
+                if !candidate.is_empty() {
+                    text = candidate.to_string();
+                }
+            }
+        }
+    }
+
+    // Per line, drop leading timestamps and log-target noise
+    // (`2026-07-24T06:24:48.131294Z ERROR rmcp::transport::...: msg`).
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let mut line = line.trim();
+        line = strip_leading_timestamp(line);
+        // Remove a single `LEVEL` token (ERROR/WARN/INFO/DEBUG/TRACE).
+        for level in ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] {
+            if let Some(rest) = line.strip_prefix(level) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        // Remove a `some::log_target:` prefix, keeping the message after it.
+        // The target is delimited by the first `": "` (colon + space) so the
+        // `::` inside the target itself is not mistaken for the boundary.
+        if let Some(idx) = line.find(": ") {
+            let head = &line[..idx];
+            let looks_like_target = !head.contains(' ')
+                && head.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-'))
+                && head.matches("::").count() >= 1;
+            if looks_like_target {
+                line = line[idx + 2..].trim_start();
+            }
+        }
+        if !line.is_empty() {
+            out.push(line.to_string());
+        }
+    }
+
+    let joined = out.join(" — ");
+    if joined.is_empty() {
+        text.trim().to_string()
+    } else {
+        joined
+    }
+}
+
+fn strip_ansi_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI sequence: ESC [ ... final byte in @..~
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for nc in chars.by_ref() {
+                    if ('@'..='~').contains(&nc) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        result.push(c);
+    }
+    result
+}
+
+fn strip_leading_timestamp(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    // ISO-8601 like `2026-07-24T06:24:48.131294Z` (optionally with offset).
+    if bytes.len() >= 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && (bytes[10] == b'T' || bytes[10] == b' ')
+    {
+        let mut end = 10;
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+            end += 1;
+        }
+        return line[end..].trim_start();
+    }
+    line
 }
 
 fn unpack_acp_internal_error(reason: &str) -> Option<String> {

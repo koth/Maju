@@ -25,6 +25,10 @@ export function onGitStatusChanged(callback: (repo: RepositorySnapshot) => void)
   return listen<RepositorySnapshot>("git:status_changed", (event) => callback(event.payload));
 }
 
+export function onCommitProgress(callback: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("commit:progress", (event) => callback(event.payload));
+}
+
 export function onTerminalOutput(callback: (output: TerminalOutputEvent) => void): Promise<UnlistenFn> {
   return listen<TerminalOutputEvent>("terminal:output", (event) => callback(event.payload));
 }

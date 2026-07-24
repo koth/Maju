@@ -52,6 +52,13 @@ impl AppPaths {
         self.root.join("workspaces")
     }
 
+    /// Workspace root for project-less chat sessions (`~/.kodex/chats`).
+    /// Sessions created here are not bound to a real project directory and
+    /// surface under the "聊天" group in the sidebar.
+    pub fn chats_workspace_root(&self) -> PathBuf {
+        self.root.join("chats")
+    }
+
     pub fn ensure_root(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("创建 Kodex 数据根目录 {} 失败", self.root.display()))

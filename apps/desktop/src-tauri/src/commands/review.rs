@@ -17,9 +17,8 @@ pub fn review_apply_patch(_state: State<'_, AppState>, _path: String) -> Result<
 }
 
 #[tauri::command]
-pub fn review_reject_patch(_state: State<'_, AppState>, _path: String) -> Result<(), String> {
-    // TODO: implement patch rejection through app-core
-    Ok(())
+pub fn review_reject_patch(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    state.with_app(|app| app.reject_review_file_change(&path))
 }
 
 #[tauri::command]

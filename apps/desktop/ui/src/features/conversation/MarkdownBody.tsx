@@ -22,18 +22,33 @@ interface Props {
   workspaceRoot?: string;
   /** Called when the user clicks an inline-code file path (`crates/foo.rs:75`). */
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  /** Paths of files in the current git changeset — the strongest signal for
+   *  resolving bare file names, since the assistant usually discusses files
+   *  it just changed. */
+  changedFiles?: string[];
+  /** Paths collected from the current turn (shell commands, tool outputs,
+   *  turn file changes). Used as the second-priority match source after the
+   *  git changeset; candidates are matched as whole trailing segments, never
+   *  by basename alone. */
+  candidatePaths?: string[];
 }
 
 /** Cross-message cache of `fs_path_exists` results so the same file link is
  *  not re-probed for every assistant message that mentions it. */
 const filePathExistenceCache = new Map<string, boolean>();
 
+/** Workspace-relative (or absolute) path that a bare file name was located
+ *  at, keyed by the same `path#line` cache key so the click handler opens
+ *  the real file instead of the placeholder name. */
+const barePathOverrides = new Map<string, string>();
+
 /** Test hook: clear the module-level existence cache between cases. */
 export function clearFilePathLinkCacheForTests() {
   filePathExistenceCache.clear();
+  barePathOverrides.clear();
 }
 
-function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
+function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, candidatePaths }: Props) {
   const appTheme = useCurrentAppTheme();
   const codeTheme = appTheme === "light" ? oneLight : vscDarkPlus;
   const displayContent = repairCompactMarkdown(content);
@@ -56,19 +71,136 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
     );
     if (candidates.length === 0) return;
     let cancelled = false;
-    const uniquePaths = [...new Set(candidates.map(([, resolved]) => resolved.path))];
-    fsPathExists(uniquePaths)
-      .then((results) => {
+
+    const root = workspaceRoot
+      ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
+      : "";
+    const separator = root.includes("\\") ? "\\" : "/";
+
+    // Pass 0: changeset + turn candidate pool. A candidate's matchTail
+    //  (`Composer.tsx`, `commands/fs.rs` or `app-core / state.rs`) is matched
+    //  as an ordered segment subsequence against each candidate path — the
+    //  fragment is never split into a basename prefix. Hits resolve directly
+    //  to the real workspace path without any filesystem IO.
+    const poolMatched = new Map<string, string>();
+    const matchSources = [
+      ...(changedFiles ?? []),
+      ...(candidatePaths ?? []),
+    ];
+    if (matchSources.length > 0) {
+      for (const [key, resolved] of candidates) {
+        if (poolMatched.has(key) || !resolved.matchTail) continue;
+        const tail = resolved.matchTail.replace(/\\/g, "/");
+        for (const sourcePath of matchSources) {
+          const normalized = sourcePath.replace(/\\/g, "/");
+          if (!pathMatchesFragment(normalized, tail)) continue;
+          const isAbsolute =
+            /^[A-Za-z]:[\\/]/.test(sourcePath) || sourcePath.startsWith("/");
+          poolMatched.set(
+            key,
+            isAbsolute
+              ? sourcePath
+              : root
+                ? `${root}${separator}${sourcePath.replace(/[\\/]+/g, separator)}`
+                : "",
+          );
+          break;
+        }
+      }
+    }
+
+    // Candidates resolved by the pools are done immediately.
+    const poolKeys = new Set(poolMatched.keys());
+    const changesetVerified: string[] = [];
+    for (const [key, resolvedPath] of poolMatched) {
+      if (!resolvedPath) continue;
+      filePathExistenceCache.set(key, true);
+      barePathOverrides.set(key, resolvedPath);
+      changesetVerified.push(key);
+    }
+    if (changesetVerified.length > 0) {
+      setVerifiedPaths((prev) => {
+        const next = new Set(prev);
+        for (const key of changesetVerified) next.add(key);
+        return next;
+      });
+    }
+
+    // Remaining candidates still need filesystem probing.
+    const remaining = candidates.filter(([key]) => !poolKeys.has(key));
+
+    // Directories of already-resolved full paths in this message give bare
+    // names (`Composer.tsx:12`) a same-directory first guess before falling
+    // back to probing the raw span as-is.
+    const contextDirs = [
+      ...new Set(
+        [...pendingCandidates.values()]
+          .filter((resolved) => !resolved.matchTail)
+          .map((resolved) => {
+            const normalized = resolved.path.replace(/\\/g, "/");
+            const lastSlash = normalized.lastIndexOf("/");
+            return lastSlash > 0 ? normalized.slice(0, lastSlash) : null;
+          })
+          .filter((dir): dir is string => dir != null),
+      ),
+    ];
+
+    // Pass 1: probe every remaining candidate's resolved path with fsPathExists.
+    // This covers complete relative paths and absolute paths alike. Candidates
+    // with a matchTail (bare names or partial paths) that fail here get one
+    // context-directory retry below; there is deliberately no workspace-wide
+    // name search — unresolved spans stay plain code.
+    const allPaths = [...new Set(remaining.map(([, resolved]) => resolved.path))];
+    fsPathExists(allPaths)
+      .then(async (results) => {
         if (cancelled) return;
         const existsByPath = new Map(
-          uniquePaths.map((path, index) => [path, results[index] === true]),
+          allPaths.map((path, index) => [path, results[index] === true]),
         );
         const newlyVerified: string[] = [];
-        for (const [key, resolved] of candidates) {
+        for (const [key, resolved] of remaining) {
           const exists = existsByPath.get(resolved.path) === true;
           filePathExistenceCache.set(key, exists);
           if (exists) newlyVerified.push(key);
         }
+
+        // Pass 2: candidates that failed fsPathExists but have a matchTail
+        // (bare names or partial paths) get a second chance via context dirs.
+        const unresolved = remaining.filter(
+          ([key, resolved]) =>
+            !newlyVerified.includes(key) && resolved.matchTail,
+        );
+        const resolvedByKey = new Map<string, string | null>();
+
+        const guesses: { key: string; guess: string }[] = [];
+        for (const [key, resolved] of unresolved) {
+          const tail = resolved.matchTail!.replace(/\\/g, "/");
+          for (const dir of contextDirs) {
+            guesses.push({ key, guess: `${dir}/${tail}` });
+          }
+        }
+        if (guesses.length > 0) {
+          const uniqueGuesses = [...new Set(guesses.map((guess) => guess.guess))];
+          const guessResults = await fsPathExists(uniqueGuesses);
+          const exists = new Map(
+            uniqueGuesses.map((guess, index) => [guess, guessResults[index] === true]),
+          );
+          for (const { key, guess } of guesses) {
+            if (!resolvedByKey.has(key) && exists.get(guess)) {
+              resolvedByKey.set(key, guess);
+            }
+          }
+        }
+
+        for (const [key] of unresolved) {
+          const resolvedPath = resolvedByKey.get(key) ?? null;
+          filePathExistenceCache.set(key, resolvedPath != null);
+          if (resolvedPath != null) {
+            barePathOverrides.set(key, resolvedPath);
+            newlyVerified.push(key);
+          }
+        }
+
         if (newlyVerified.length > 0) {
           setVerifiedPaths((prev) => {
             const next = new Set(prev);
@@ -86,7 +218,7 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayContent, workspaceRoot, onFilePathClick, verifiedPaths, probeRound]);
+  }, [displayContent, workspaceRoot, changedFiles, candidatePaths, onFilePathClick, verifiedPaths, probeRound]);
 
   const handleInlineCodeClick = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
@@ -163,15 +295,21 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
               verifiedPaths.has(cacheKey) ||
               filePathExistenceCache.get(cacheKey) === true;
           }
+          const openPath =
+            clickable && resolved
+              ? barePathOverrides.get(
+                  `${resolved.path}#${resolved.lineNumber ?? 0}`,
+                ) ?? resolved.path
+              : undefined;
           return (
             <code
               className={clickable ? "md-inline-code md-file-path" : "md-inline-code"}
               data-file-path={
-                clickable && resolved
-                  ? `${resolved.path}#${resolved.lineNumber ?? 0}`
+                openPath
+                  ? `${openPath}#${resolved?.lineNumber ?? 0}`
                   : undefined
               }
-              title={clickable ? `${resolved?.path ?? ""} — 点击打开` : undefined}
+              title={openPath ? `${openPath} — 点击打开` : undefined}
               {...props}
             >
               {clickable && (
@@ -268,6 +406,11 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick }: Props) {
 interface ResolvedFilePath {
   path: string;
   lineNumber?: number;
+  /** Normalised path fragment used for changeset/context matching — the bare
+   *  name (`Composer.tsx`) for bare spans, or the relative fragment
+   *  (`commands/fs.rs`) for partial relative paths. Absent for absolute
+   *  paths that do not need disambiguation. */
+  matchTail?: string;
 }
 
 /**
@@ -282,7 +425,12 @@ export function resolveClickableFilePath(
 ): ResolvedFilePath | null {
   let candidate = raw.trim();
   if (candidate.length < 4 || candidate.length > 512) return null;
-  if (/\s/.test(candidate)) return null;
+  // Whitespace is only allowed around `/` separators — agents often write
+  // `app-core / state.rs`. The whole fragment is still matched as one tail.
+  if (/\s/.test(candidate)) {
+    if (!/^[^\s]+(?:\s*\/\s*[^\s]+)+$/.test(candidate)) return null;
+    candidate = candidate.replace(/\s*\/\s*/g, "/");
+  }
   // Strip diff prefixes so `a/src/foo.rs:10` / `b/src/foo.rs` also resolve.
   candidate = candidate.replace(/^[ab]\//, "");
 
@@ -308,7 +456,14 @@ export function resolveClickableFilePath(
   const isPosixAbs = candidate.startsWith("/");
   const isRelative = candidate.includes("/") || candidate.includes("\\");
   if (!isWindowsAbs && !isPosixAbs && !isRelative) {
-    return null;
+    // Bare file name such as `Composer.tsx:548` or `MarkdownBody.tsx` —
+    // resolvable when it carries an extension. The line reference is now
+    // optional because the changeset match is reliable enough on its own;
+    // the workspace-wide name search (fsFindByName) stays gated on a line
+    // number to avoid misidentifying common names in prose.
+    if (!workspaceRoot) return null;
+    if (!/^[^./\\]+\.[^./\\]{1,10}$/.test(candidate)) return null;
+    return { path: candidate, lineNumber, matchTail: candidate };
   }
   // Must carry a file extension so bare directories / URLs do not match.
   const lastSegment = candidate.replace(/\\/g, "/").split("/").pop() ?? "";
@@ -328,7 +483,10 @@ export function resolveClickableFilePath(
   const root = normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "");
   const separator = root.includes("\\") ? "\\" : "/";
   const relative = candidate.replace(/[\\/]+/g, separator);
-  return { path: `${root}${separator}${relative}`, lineNumber };
+  const matchTail = candidate
+    .replace(/\\/g, "/")
+    .replace(/:\d+(?::\d+)?$/, "");
+  return { path: `${root}${separator}${relative}`, lineNumber, matchTail };
 }
 
 /** Collapse mixed `\` / `/` separators to the platform-dominant one so the
@@ -338,6 +496,31 @@ function normalizeFilePathSeparators(value: string) {
   const backslashes = (value.match(/\\/g) ?? []).length;
   const slashes = (value.match(/\//g) ?? []).length;
   return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
+}
+
+/** A path fragment (`app-core/state.rs`) matches a candidate path when its
+ *  segments appear in order inside the candidate's segments and the fragment
+ *  ends on the candidate's file name. This lets `app-core / state.rs` match
+ *  `crates/app-core/src/state.rs` without ever splitting the fragment into
+ *  a bare basename. */
+export function pathMatchesFragment(candidatePath: string, fragment: string) {
+  const candidateSegments = candidatePath.split("/").filter(Boolean);
+  const fragmentSegments = fragment
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.replace(/:\d+(?::\d+)?$/, ""));
+  if (fragmentSegments.length === 0) return false;
+  if (fragmentSegments.length > candidateSegments.length) return false;
+  const fileSegment = fragmentSegments[fragmentSegments.length - 1];
+  if (candidateSegments[candidateSegments.length - 1] !== fileSegment) return false;
+  let cursor = 0;
+  for (const segment of candidateSegments) {
+    if (segment === fragmentSegments[cursor]) {
+      cursor += 1;
+      if (cursor === fragmentSegments.length) return true;
+    }
+  }
+  return false;
 }
 
 export default memo(MarkdownBody);

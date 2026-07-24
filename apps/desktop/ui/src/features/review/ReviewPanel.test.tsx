@@ -7,10 +7,12 @@ import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet
 import type { ChangedFile, ChangeSetSummary, FileChangeRecord, FileChangeSummary, UiSnapshot } from "../../types";
 import {
   fsListDir,
+  gitStage,
   sessionGetChangeSetFileDiff,
   sessionListChangeSetFiles,
   sessionListChangeSets,
 } from "../../lib/tauri";
+import { confirm } from "@tauri-apps/plugin-dialog";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
@@ -944,6 +946,185 @@ describe("ReviewPanel scoped change sets", () => {
         path: "src/untracked.ts",
       }),
     );
+  });
+
+  it("groups untracked files into an expandable directory tree", async () => {
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("crates/app-core/src/state.rs", "Untracked"),
+              makeChangedFile("crates/app-core/src/sessions.rs", "Untracked"),
+              makeChangedFile("README.md", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+
+    // Directories expand by default, so nested files are visible.
+    expect(await screen.findByText("crates")).toBeTruthy();
+    expect(screen.getByText("app-core")).toBeTruthy();
+    expect(screen.getByText("state.rs")).toBeTruthy();
+    expect(screen.getByText("sessions.rs")).toBeTruthy();
+    expect(screen.getByText("README.md")).toBeTruthy();
+
+    // Collapsing a parent directory hides its descendants.
+    fireEvent.click(screen.getByText("app-core"));
+    expect(screen.queryByText("state.rs")).toBeNull();
+    expect(screen.queryByText("sessions.rs")).toBeNull();
+    expect(screen.getByText("README.md")).toBeTruthy();
+
+    // Expanding again restores them.
+    fireEvent.click(screen.getByText("app-core"));
+    expect(await screen.findByText("state.rs")).toBeTruthy();
+  });
+
+  it("renders untracked directories as expandable nodes, not blank leaves", async () => {
+    vi.mocked(fsListDir).mockResolvedValue([
+      { name: "SKILL.md", kind: "File", path: ".agents/skills/SKILL.md" },
+    ]);
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile(".agents/", "Untracked"),
+              makeChangedFile(".agents/skills/", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+
+    // Directory entries render as named directory nodes — no blank file leaf.
+    const agentsDir = await screen.findByText(".agents");
+    expect(agentsDir).toBeTruthy();
+    expect(screen.getByText("skills")).toBeTruthy();
+
+    // Expanding a leaf untracked directory lazily lists its contents.
+    fireEvent.click(screen.getByText("skills"));
+    expect(await screen.findByText("SKILL.md")).toBeTruthy();
+    expect(fsListDir).toHaveBeenCalledWith(".agents/skills");
+  });
+
+  it("tracks all displayed files under an untracked directory from its context menu", async () => {
+    const onRefresh = vi.fn();
+    vi.mocked(confirm).mockResolvedValue(true);
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("crates/app-core/src/state.rs", "Untracked"),
+              makeChangedFile("crates/app-core/src/sessions.rs", "Untracked"),
+              makeChangedFile("crates/other/lib.rs", "Untracked"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={onRefresh}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    fireEvent.contextMenu(await screen.findByText("app-core"), { clientX: 10, clientY: 10 });
+
+    const trackAll = await screen.findByRole("menuitem", { name: "跟踪全部 (2)" });
+    fireEvent.click(trackAll);
+
+    await waitFor(() =>
+      expect(gitStage).toHaveBeenCalledWith([
+        "crates/app-core/src/state.rs",
+        "crates/app-core/src/sessions.rs",
+      ]),
+    );
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("offers one-click stage-all from the Unstaged group header context menu", async () => {
+    const onRefresh = vi.fn();
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [
+              makeChangedFile("src/a.ts", "Unstaged"),
+              makeChangedFile("src/b.ts", "Unstaged"),
+            ],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={onRefresh}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    fireEvent.contextMenu(await screen.findByText(/^未暂存/), { clientX: 10, clientY: 10 });
+
+    const stageAll = await screen.findByRole("menuitem", { name: "一键暂存全部 (2)" });
+    fireEvent.click(stageAll);
+
+    await waitFor(() =>
+      expect(gitStage).toHaveBeenCalledWith(["src/a.ts", "src/b.ts"]),
+    );
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("opens a commit dialog from the Staged group header context menu", async () => {
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          repository: {
+            branch: "main",
+            head: "abc",
+            changed_files: [makeChangedFile("src/a.ts", "Staged")],
+          },
+        })}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Git/ }));
+    fireEvent.contextMenu(await screen.findByText(/^已暂存/), { clientX: 10, clientY: 10 });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "提交 (1)" }));
+
+    expect(await screen.findByRole("dialog", { name: "提交已暂存变更" })).toBeTruthy();
+    expect(screen.getAllByPlaceholderText("提交信息...").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "AI 生成" })).toBeTruthy();
   });
 
   it("sends files to context from right-side file tree context menus", async () => {

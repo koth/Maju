@@ -137,6 +137,12 @@ export async function gitCommit(message: string): Promise<void> {
   return invoke("git_commit", { message });
 }
 
+/** Ask a throwaway sub-agent (using the current model settings) to write a
+ *  commit message for the currently staged changes. */
+export async function gitGenerateCommitMessage(): Promise<string> {
+  return invoke<string>("git_generate_commit_message");
+}
+
 export async function editorOpenFile(
   path: string,
 ): Promise<EditorFileSnapshot> {
@@ -275,6 +281,10 @@ export async function workspaceListOpen(): Promise<OpenWorkspaceItem[]> {
 
 export async function workspaceHasOpen(): Promise<boolean> {
   return invoke<boolean>("workspace_has_open");
+}
+
+export async function workspaceChatsRoot(): Promise<string> {
+  return invoke<string>("workspace_chats_root");
 }
 
 export async function workspaceRestoreOpen(): Promise<UiSnapshot | null> {
@@ -429,6 +439,10 @@ export async function fsReveal(path: string, select = false): Promise<void> {
 
 export async function fsPathExists(paths: string[]): Promise<boolean[]> {
   return invoke<boolean[]>("fs_path_exists", { paths });
+}
+
+export async function fsFindByName(names: string[]): Promise<(string | null)[]> {
+  return invoke<(string | null)[]>("fs_find_by_name", { names });
 }
 
 export async function fsMentionSuggest(query: string): Promise<FileEntry[]> {

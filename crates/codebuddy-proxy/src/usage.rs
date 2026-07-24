@@ -26,15 +26,43 @@ pub struct CliUsage {
 impl CliUsage {
     /// Turn a session-cumulative reading into a per-request OpenAI usage.
     ///
-    /// - First observation (`prev = None`): the cumulative value *is* the
-    ///   first-turn cost, so report it as-is.
+    /// - First observation (`prev = None`): the CLI's cumulative counters
+    ///   already include the full cached prefix (the prompt was written into
+    ///   the cache by a prior request on this pooled session). Reporting the
+    ///   raw cumulative cache-inclusive input as the first-turn delta would
+    ///   treat that entire cached prefix as new consumption, inflating usage
+    ///   by ~60× on cache-heavy sessions (e.g. glm-5.2-ioa with 10M+ cache
+    ///   reads reported as a single 11M "delta"). Instead, the first delta's
+    ///   `input_tokens` is the NON-cached portion (cache-inclusive input
+    ///   minus `cache_read`), which is the real new prompt tokens this turn.
+    ///   `cache_read` stays as the honest cache-hit count for display.
     /// - Subsequent observations: saturating subtract so a CLI reset cannot
     ///   produce underflows / huge wraparound values.
+    ///
+    /// The CLI's `input_tokens` convention is backend-dependent: glm-5.2-ioa
+    /// reports it cache-INCLUSIVE (`input == cache_read + cache_creation`
+    /// exactly), while Anthropic-shaped backends report it cache-EXCLUSIVE
+    /// (the non-cached subset, with the cached prefix only in
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens`).
+    /// [`Self::cache_inclusive_input`] normalizes both shapes to the
+    /// cache-inclusive total before any subtraction, so `input_tokens` in
+    /// the returned delta is always the full per-turn prompt size and the
+    /// cache axes stay proper subsets of it — the invariant downstream
+    /// consumers (mapping.rs, reducer, session-store, UI) rely on.
     pub fn turn_delta(&self, prev: Option<&CliUsage>) -> CliUsage {
         match prev {
-            None => *self,
+            None => CliUsage {
+                input_tokens: self
+                    .cache_inclusive_input()
+                    .saturating_sub(self.cache_read_input_tokens),
+                output_tokens: self.output_tokens,
+                cache_read_input_tokens: self.cache_read_input_tokens,
+                cache_creation_input_tokens: self.cache_creation_input_tokens,
+            },
             Some(p) => CliUsage {
-                input_tokens: self.input_tokens.saturating_sub(p.input_tokens),
+                input_tokens: self
+                    .cache_inclusive_input()
+                    .saturating_sub(p.cache_inclusive_input()),
                 output_tokens: self.output_tokens.saturating_sub(p.output_tokens),
                 cache_read_input_tokens: self
                     .cache_read_input_tokens
@@ -46,14 +74,39 @@ impl CliUsage {
         }
     }
 
+    /// Cache-inclusive input size, normalizing the backend-dependent
+    /// `input_tokens` convention (see [`Self::turn_delta`]).
+    ///
+    /// Detection: a cache-INCLUSIVE reading always satisfies
+    /// `input >= cache_read + cache_creation` (it counts the cached prefix
+    /// plus at least the non-cached remainder, and cache-write turns add a
+    /// fresh block that did not exist at read time). A cache-EXCLUSIVE
+    /// reading can still coincidentally satisfy this on an all-cache miss
+    /// (large fresh input, tiny cache), so the raw value is preferred
+    /// whenever the invariant holds; only when the invariant is violated
+    /// (`input < cache_read + cache_creation`, impossible for an inclusive
+    /// reading) do we fold the cache axes in. A mid-pool switch between
+    /// inclusive and exclusive backends could mis-detect one turn's delta,
+    /// but baselines are per pooled CLI session, which pins one backend.
+    fn cache_inclusive_input(&self) -> u64 {
+        let cache_axes = self
+            .cache_read_input_tokens
+            .saturating_add(self.cache_creation_input_tokens);
+        if self.input_tokens >= cache_axes {
+            self.input_tokens
+        } else {
+            self.input_tokens.saturating_add(cache_axes)
+        }
+    }
+
     /// Map a per-turn delta into the OpenAI usage shape that
     /// `codex_api_proxy::normalized_chat_usage` already understands.
     ///
     /// **OpenAI convention: `prompt_tokens` is the full prompt size and
-    /// already subsumes the cached prefix.** The CodeBuddy CLI reports
-    /// `input_tokens` the same way (for glm-5.2-ioa, `input_tokens ==
-    /// cache_read_input_tokens + cache_creation_input_tokens` exactly), so
-    /// the delta passes through unchanged. An earlier revision added
+    /// already subsumes the cached prefix.** `turn_delta` already normalized
+    /// the backend-dependent `input_tokens` convention via
+    /// [`Self::cache_inclusive_input`], so the delta passes through
+    /// unchanged. An earlier revision added
     /// `cache_read` on top of `prompt_tokens` to mirror the CodeBuddy
     /// backend's *billing* convention (cache reads billed additively), but
     /// the downstream `normalized_chat_usage` treats `prompt_tokens` as
@@ -80,10 +133,12 @@ impl CliUsage {
     }
 
     /// Approximate live context occupancy for this model call.
-    /// Prefer input size; fall back to cache-read when input is missing.
+    /// Prefer the cache-inclusive input size; fall back to cache-read when
+    /// input is missing.
     pub fn context_tokens(&self) -> u64 {
-        if self.input_tokens > 0 {
-            self.input_tokens
+        let inclusive = self.cache_inclusive_input();
+        if inclusive > 0 {
+            inclusive
         } else {
             self.cache_read_input_tokens
         }
@@ -344,14 +399,52 @@ mod tests {
     }
 
     #[test]
-    fn first_turn_delta_is_the_cumulative_value() {
+    fn first_turn_delta_excludes_cached_prefix() {
         let curr = CliUsage {
             input_tokens: 203_849,
             output_tokens: 412,
             cache_read_input_tokens: 100,
             cache_creation_input_tokens: 20,
         };
-        assert_eq!(curr.turn_delta(None), curr);
+        // First observation: the CLI's cumulative input already includes the
+        // cached prefix; the delta's input must be the non-cached portion so
+        // the cached prefix is not double-counted as new consumption.
+        assert_eq!(
+            curr.turn_delta(None),
+            CliUsage {
+                input_tokens: 203_849 - 100,
+                output_tokens: 412,
+                cache_read_input_tokens: 100,
+                cache_creation_input_tokens: 20,
+            }
+        );
+    }
+
+    /// Anthropic-shaped backends report `input_tokens` as the NON-cached
+    /// subset. The first-turn delta must NOT subtract `cache_read` again
+    /// (that double-subtraction made Settings → 用量 show cache reads
+    /// exceeding total input on kimi-k3-ioa sessions); it just keeps the
+    /// non-cached portion as-is.
+    #[test]
+    fn first_turn_delta_exclusive_input_not_double_subtracted() {
+        let curr = CliUsage {
+            input_tokens: 1_329,
+            output_tokens: 412,
+            cache_read_input_tokens: 203_849,
+            cache_creation_input_tokens: 500,
+        };
+        // `input < cache_read + cache_creation` → exclusive convention:
+        // cache-inclusive total = 1_329 + 203_849 + 500; minus cache_read
+        // leaves the non-cached portion, equal to the raw input here.
+        assert_eq!(
+            curr.turn_delta(None),
+            CliUsage {
+                input_tokens: 1_829,
+                output_tokens: 412,
+                cache_read_input_tokens: 203_849,
+                cache_creation_input_tokens: 500,
+            }
+        );
     }
 
     #[test]
@@ -375,6 +468,37 @@ mod tests {
                 output_tokens: 182,
                 cache_read_input_tokens: 300,
                 cache_creation_input_tokens: 20,
+            }
+        );
+    }
+
+    /// Anthropic-shaped backends report `input_tokens` as the NON-cached
+    /// subset. The per-turn delta must normalize both readings to the
+    /// cache-inclusive total before subtracting, so the reported input is
+    /// the full prompt size and the cache axes stay subsets of it.
+    #[test]
+    fn subsequent_turn_delta_folds_cache_axes_for_exclusive_upstream() {
+        let prev = CliUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_input_tokens: 37_888,
+            cache_creation_input_tokens: 1_329,
+        };
+        let curr = CliUsage {
+            input_tokens: 220,
+            output_tokens: 30,
+            cache_read_input_tokens: 77_888,
+            cache_creation_input_tokens: 1_529,
+        };
+        // Per-turn: non-cached input +120, cache_read +40_000, cache_write
+        // +200 → cache-inclusive input delta = 120 + 40_000 + 200.
+        assert_eq!(
+            curr.turn_delta(Some(&prev)),
+            CliUsage {
+                input_tokens: 40_320,
+                output_tokens: 20,
+                cache_read_input_tokens: 40_000,
+                cache_creation_input_tokens: 200,
             }
         );
     }
@@ -480,8 +604,9 @@ mod tests {
             cache_creation_input_tokens: 5,
         };
         let (oai, next) = resolve_turn_usage(Some(prev), Some(curr));
-        // delta input = 150 (already cache-inclusive); delta cache_read = 40
-        // stays a display-only breakdown field.
+        // `curr.input_tokens (250) >= cache axes (45)` → treated as
+        // cache-inclusive, so delta input = 250 − 100 = 150; delta
+        // cache_read = 40 stays a display-only breakdown field.
         assert_eq!(oai.prompt_tokens, 150);
         assert_eq!(oai.completion_tokens, 20);
         assert_eq!(oai.total_tokens, 170);

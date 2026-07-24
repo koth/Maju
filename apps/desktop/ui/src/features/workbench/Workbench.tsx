@@ -254,7 +254,6 @@ export function Workbench() {
     workspaceReady,
     pollState,
     acceptSnapshot,
-    clearSnapshot,
     clearWorkspace,
   } = useWorkbenchSnapshot();
   const {
@@ -623,7 +622,6 @@ export function Workbench() {
   ]);
 
   const handleSessionChanged = useCallback(() => {
-    clearSnapshot();
     clearChangeSets();
     setComposerReferenceRequests([]);
     resetGitHydration();
@@ -631,7 +629,7 @@ export function Workbench() {
     resetReviewPanelTabs();
     setReviewPanelExpanded(false);
     pollState();
-  }, [clearChangeSets, clearSnapshot, pollState, resetGitHydration, resetReviewPanelTabs, resetTabs]);
+  }, [clearChangeSets, pollState, resetGitHydration, resetReviewPanelTabs, resetTabs]);
 
   const handleSessionArchived = useCallback((session: ArchivedSessionNotice) => {
     setSessionArchiveToast({

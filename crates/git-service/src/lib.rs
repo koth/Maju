@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use git2::{IndexAddOption, Repository, Status, StatusOptions};
+use git2::{Repository, Status, StatusOptions};
 use similar::{ChangeTag, TextDiff};
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -63,23 +63,129 @@ impl GitService {
         })
     }
 
-    pub fn stage(path: impl AsRef<Path>, paths: &[String]) -> anyhow::Result<()> {
+    /// Stage only the given paths that currently appear in `git status`
+    /// (modified or untracked). The frontend passes the concrete files the
+    /// panel displays (directories are already expanded there), so this never
+    /// recurses into a directory — a path stages only when it is itself
+    /// status-listed, keeping `.gitignore`d and unlisted files out.
+    pub fn stage_status_paths(path: impl AsRef<Path>, paths: &[String]) -> anyhow::Result<()> {
         let repo = Repository::discover(path).context("未找到 Git 仓库")?;
-        let workdir = repo.workdir().context("仓库没有工作目录")?;
-        let mut index = repo.index().context("无法打开 Git 索引")?;
 
-        for raw_path in paths {
-            let relative_path = sanitize_relative_path(raw_path)?;
-            let absolute_path = workdir.join(&relative_path);
+        let mut requested: Vec<PathBuf> = Vec::with_capacity(paths.len());
+        for raw in paths {
+            requested.push(sanitize_relative_path(raw)?);
+        }
 
-            if absolute_path.is_dir() {
-                index.add_all([relative_path.as_path()], IndexAddOption::DEFAULT, None)?;
-            } else {
-                index.add_path(&relative_path)?;
+        let mut options = StatusOptions::new();
+        options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .update_index(true);
+        let statuses = repo.statuses(Some(&mut options))?;
+
+        let mut to_stage: Vec<PathBuf> = Vec::new();
+        for entry in statuses.iter() {
+            let Some(status_path) = entry.path() else {
+                continue;
+            };
+            let status = entry.status();
+            let relevant = status.intersects(
+                Status::WT_NEW
+                    | Status::WT_MODIFIED
+                    | Status::WT_DELETED
+                    | Status::WT_RENAMED
+                    | Status::WT_TYPECHANGE,
+            );
+            if !relevant {
+                continue;
+            }
+            let status_path_buf = PathBuf::from(status_path);
+            if requested.contains(&status_path_buf) {
+                to_stage.push(status_path_buf);
             }
         }
 
+        if to_stage.is_empty() {
+            return Ok(());
+        }
+
+        let mut index = repo.index().context("无法打开 Git 索引")?;
+        for relative_path in &to_stage {
+            index.add_path(relative_path)?;
+        }
         index.write().context("无法写入 Git 索引")
+    }
+
+    pub fn unstage(path: impl AsRef<Path>, paths: &[String]) -> anyhow::Result<()> {
+        let repo = Repository::discover(path).context("未找到 Git 仓库")?;
+        let relative_paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|raw| sanitize_relative_path(raw))
+            .collect::<Result<_, _>>()?;
+
+        let head_target = repo
+            .head()
+            .ok()
+            .and_then(|reference| reference.peel(git2::ObjectType::Commit).ok());
+
+        match head_target {
+            Some(target) => repo
+                .reset_default(
+                    Some(&target),
+                    relative_paths.iter().filter_map(|path| path.to_str()),
+                )
+                .context("无法取消暂存文件")?,
+            None => {
+                let mut index = repo.index().context("无法打开 Git 索引")?;
+                for relative_path in &relative_paths {
+                    index.remove_path(relative_path).ok();
+                }
+                index.write().context("无法写入 Git 索引")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn commit(path: impl AsRef<Path>, message: &str) -> anyhow::Result<()> {
+        let repo = Repository::discover(path).context("未找到 Git 仓库")?;
+        let mut index = repo.index().context("无法打开 Git 索引")?;
+        let tree_id = index.write_tree().context("无法生成 Git 树")?;
+
+        let head_tree_id = repo
+            .head()
+            .ok()
+            .and_then(|reference| reference.peel_to_tree().ok())
+            .map(|tree| tree.id());
+
+        if head_tree_id == Some(tree_id) {
+            bail!("没有已暂存的变更可提交");
+        }
+
+        let tree = repo.find_tree(tree_id).context("无法读取 Git 树")?;
+        let signature = repo
+            .signature()
+            .context("无法读取 Git 用户信息，请先配置 user.name 与 user.email")?;
+
+        let parents: Vec<git2::Commit> = repo
+            .head()
+            .ok()
+            .and_then(|reference| reference.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parent_refs,
+        )
+        .map(|_| ())
+        .context("无法创建提交")
     }
 
     pub fn head_text(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Option<String>> {
@@ -568,7 +674,7 @@ mod tests {
         fs::write(dir.path().join("notes.txt"), "draft").unwrap();
         drop(repo);
 
-        GitService::stage(dir.path(), &["notes.txt".to_string()]).unwrap();
+        GitService::stage_status_paths(dir.path(), &["notes.txt".to_string()]).unwrap();
 
         let snapshot = GitService::open(dir.path()).unwrap();
         assert_eq!(snapshot.changed_files.len(), 1);
@@ -591,6 +697,74 @@ mod tests {
             .unwrap();
         assert_eq!(file.stats.added, 3);
         assert_eq!(file.stats.removed, 0);
+    }
+
+    #[test]
+    fn stage_status_paths_stages_only_listed_files_under_directory() {
+        let (dir, repo) = setup_repo();
+        // A committed file that is later modified, plus an untracked file in
+        // the same directory, plus an ignored file that must never be staged.
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        commit_file(&repo, "src/tracked.rs", "fn a() {}\n");
+        fs::write(dir.path().join("src/tracked.rs"), "fn a() { changed }\n").unwrap();
+        fs::write(dir.path().join("src/new.rs"), "fn b() {}\n").unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored.log\n").unwrap();
+        fs::write(dir.path().join("src/ignored.log"), "noise\n").unwrap();
+        drop(repo);
+
+        // The frontend expands the directory to the displayed files; the
+        // backend stages exactly those and nothing more (ignored.log stays
+        // out even though it sits in the same directory).
+        GitService::stage_status_paths(
+            dir.path(),
+            &["src/tracked.rs".to_string(), "src/new.rs".to_string()],
+        )
+        .unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        let staged: Vec<&str> = snapshot
+            .changed_files
+            .iter()
+            .filter(|f| matches!(f.section, ChangeSection::Staged))
+            .map(|f| f.path.to_str().unwrap_or(""))
+            .collect();
+        assert!(staged.iter().any(|p| p.ends_with("src/tracked.rs")));
+        assert!(staged.iter().any(|p| p.ends_with("src/new.rs")));
+        assert!(!staged.iter().any(|p| p.ends_with("ignored.log")));
+    }
+
+    #[test]
+    fn stage_status_paths_does_not_recurse_into_a_directory() {
+        let (dir, repo) = setup_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        commit_file(&repo, "src/tracked.rs", "fn a() {}\n");
+        fs::write(dir.path().join("src/tracked.rs"), "fn a() { changed }\n").unwrap();
+        drop(repo);
+
+        // A bare directory path stages nothing — only explicit file paths do.
+        GitService::stage_status_paths(dir.path(), &["src".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .all(|f| !matches!(f.section, ChangeSection::Staged)));
+    }
+
+    #[test]
+    fn stage_status_paths_ignores_paths_without_changes() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "clean.rs", "fn a() {}\n");
+        drop(repo);
+
+        // A path with no status entry must be a no-op, not an error.
+        GitService::stage_status_paths(dir.path(), &["clean.rs".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .all(|f| !f.path.to_str().unwrap_or("").ends_with("clean.rs")));
     }
 
     #[test]
@@ -813,5 +987,108 @@ mod tests {
         assert_eq!(record.added_lines, 0);
         assert_eq!(record.removed_lines, 0);
         assert_eq!(record.quality, DiffQuality::BinarySkipped);
+    }
+
+    #[test]
+    fn unstages_modified_file_back_to_unstaged() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "one\n");
+
+        fs::write(dir.path().join("main.rs"), "one\ntwo\n").unwrap();
+        GitService::stage_status_paths(dir.path(), &["main.rs".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot.changed_files.iter().any(|file| {
+            matches!(file.section, ChangeSection::Staged) && file.path.ends_with("main.rs")
+        }));
+
+        GitService::unstage(dir.path(), &["main.rs".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot.changed_files.iter().any(|file| {
+            matches!(file.section, ChangeSection::Unstaged) && file.path.ends_with("main.rs")
+        }));
+    }
+
+    #[test]
+    fn unstages_newly_added_file_back_to_untracked() {
+        let (dir, _repo) = setup_repo();
+        fs::write(dir.path().join("notes.txt"), "draft").unwrap();
+        GitService::stage_status_paths(dir.path(), &["notes.txt".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot.changed_files.iter().any(|file| {
+            matches!(file.section, ChangeSection::Staged) && file.path.ends_with("notes.txt")
+        }));
+
+        GitService::unstage(dir.path(), &["notes.txt".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot.changed_files.iter().any(|file| {
+            matches!(file.section, ChangeSection::Untracked) && file.path.ends_with("notes.txt")
+        }));
+    }
+
+    #[test]
+    fn unstages_all_files_under_a_directory() {
+        let (dir, repo) = setup_repo();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        commit_file(&repo, "src/a.rs", "a\n");
+        commit_file(&repo, "src/b.rs", "b\n");
+
+        fs::write(dir.path().join("src/a.rs"), "a2\n").unwrap();
+        fs::write(dir.path().join("src/b.rs"), "b2\n").unwrap();
+        GitService::stage_status_paths(
+            dir.path(),
+            &["src/a.rs".to_string(), "src/b.rs".to_string()],
+        )
+        .unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert_eq!(
+            snapshot
+                .changed_files
+                .iter()
+                .filter(|file| matches!(file.section, ChangeSection::Staged))
+                .count(),
+            2
+        );
+
+        GitService::unstage(dir.path(), &["src".to_string()]).unwrap();
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot
+            .changed_files
+            .iter()
+            .all(|file| matches!(file.section, ChangeSection::Unstaged)));
+    }
+
+    #[test]
+    fn commits_staged_changes_and_advances_head() {
+        let (dir, repo) = setup_repo();
+        let before_head = repo.head().unwrap().target().unwrap();
+
+        fs::write(dir.path().join("feature.rs"), "pub fn feature() {}\n").unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@test.com").unwrap();
+
+        GitService::stage_status_paths(dir.path(), &["feature.rs".to_string()]).unwrap();
+        GitService::commit(dir.path(), "add feature").unwrap();
+
+        let after_head = repo.head().unwrap().target().unwrap();
+        assert_ne!(before_head, after_head);
+
+        let snapshot = GitService::open(dir.path()).unwrap();
+        assert!(snapshot.changed_files.is_empty());
+    }
+
+    #[test]
+    fn commit_without_staged_changes_errors() {
+        let (dir, repo) = setup_repo();
+        commit_file(&repo, "main.rs", "one\n");
+
+        let error = GitService::commit(dir.path(), "nothing").unwrap_err();
+        assert!(error.to_string().contains("没有已暂存的变更"));
     }
 }
