@@ -112,13 +112,13 @@ impl Application {
         Ok(())
     }
 
-    /// Generate a commit-message draft by spinning up a throwaway sub-agent
+/// Generate a commit-message draft by spinning up a throwaway sub-agent
     /// session with the current model settings. The agent is given read-only
-    /// permission, so only read-only commands like `git diff` run — it inspects
-    /// the staged changes itself and returns just the message. The temporary
-    /// session is used once and shut down; it never touches the visible
-    /// conversation. `progress` receives human-readable status updates as the
-    /// agent works. Blocking — call off the UI thread.
+    /// permission, so only inspection commands run — it inspects the staged
+    /// changes itself and returns just the message. The temporary session is
+    /// used once and shut down; it never touches the visible conversation.
+    /// `progress` receives human-readable status updates as the agent works.
+    /// Blocking — call off the UI thread.
     pub fn generate_commit_message(
         &self,
         progress: &dyn Fn(&str),
@@ -145,18 +145,23 @@ impl Application {
         };
 
         let prompt = format!(
-            "在当前 Git 仓库里，用 bash 运行 `git diff --staged` 查看已暂存的变更，\n\
-             然后只输出一条简洁的 commit message。\n\
+            "在当前 Git 仓库里查看已暂存的变更，然后只输出一条简洁的 commit message。\n\
+             建议先用只读命令建立全局视图，再按需深入细节，例如：\n\
+             - `git status --short`\n\
+             - `git diff --staged --stat`\n\
+             - `git diff --staged --name-status`\n\
+             - `git diff --staged`（内容过长或被截断时，再对关键文件用 `git diff --staged -- <path>`）\n\
+             - 必要时用 `git log -5 --oneline` 参考近期提交风格\n\
              要求：只输出 commit message 本身，不要任何解释、前缀、引号、代码块或 markdown；\n\
              使用约定式提交格式（如 feat/fix/chore/refactor: 描述），单行，不超过 72 个字符；\n\
-             不要执行除 git diff 之外的任何命令。"
+             只允许只读查看命令，不要 stage/unstage/commit/push，也不要修改任何文件。"
         );
 
         progress("正在启动 AI 会话…");
         let mut handle =
             SessionHandle::start(config).map_err(|e| format!("无法启动 AI 会话：{e}"))?;
-        // Read-only permission: read-only commands such as `git diff` are
-        // auto-approved; anything else is left unanswered and cancelled.
+        // Read-only permission: inspection commands such as `git diff` /
+        // `git status` are auto-approved; mutating commands stay blocked.
         let _ = handle.set_permission_mode("plan");
 
         progress("正在查看已暂存的变更…");
