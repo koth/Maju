@@ -38,6 +38,22 @@ function collectToolPaths(tool: ToolInvocation): string[] {
   return [...found];
 }
 
+/** Per-tool scan cache. `snapshot.tools` gets a fresh array identity on every
+ *  tool merge, and the pool rebuild walks the whole timeline — without this
+ *  cache every tool event re-ran the path regex over EVERY historical tool's
+ *  raw input/output (megabytes in long dsh sessions). Tool objects are
+ *  replaced only when their content actually changes, so identity is a sound
+ *  cache key. */
+const toolPathsCache = new WeakMap<ToolInvocation, readonly string[]>();
+
+function collectToolPathsCached(tool: ToolInvocation): readonly string[] {
+  const cached = toolPathsCache.get(tool);
+  if (cached) return cached;
+  const paths = collectToolPaths(tool);
+  toolPathsCache.set(tool, paths);
+  return paths;
+}
+
 /** Build the per-turn candidate pool. A turn spans from a user message
  *  (exclusive) to the next user message; steers do not break a turn. Every
  *  assistant message in the turn shares the accumulated pool. */
@@ -80,7 +96,7 @@ export function buildFilePathCandidatePool(
     if ("Tool" in item) {
       const tool = toolsById.get((item as { Tool: string }).Tool);
       if (!tool) continue;
-      for (const path of collectToolPaths(tool)) {
+      for (const path of collectToolPathsCached(tool)) {
         pool.add(path);
       }
       for (const path of tool.diff_paths ?? []) {

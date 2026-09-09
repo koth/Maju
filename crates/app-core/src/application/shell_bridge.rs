@@ -398,10 +398,39 @@ impl Application {
     /// fields + diff previews) for an expanded tool card.
     pub fn session_tool_detail(&self, tool_id: &str) -> Result<ToolInvocation, String> {
         let session_id = self.ui.session.id.to_string();
-        self.store
+        let mut tool = self
+            .store
             .load_tool_detail(&session_id, tool_id)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // The expanded card renders only a bounded window of the raw fields,
+        // so shipping multi-megabyte text buys nothing — and a multi-MB JSON
+        // response is parsed on the webview main thread, freezing the UI on
+        // every expand of a huge tool log. 1MB keeps every realistically
+        // readable/copyable log while bounding the parse.
+        cap_detail_field(&mut tool.detail_text);
+        if let Some(value) = tool.raw_input.as_mut() {
+            cap_detail_field(value);
+        }
+        if let Some(value) = tool.raw_output.as_mut() {
+            cap_detail_field(value);
+        }
+        Ok(tool)
     }
+}
+
+/// Wire cap for one raw text field of a tool detail response.
+const TOOL_DETAIL_WIRE_CAP_BYTES: usize = 1024 * 1024;
+
+fn cap_detail_field(value: &mut String) {
+    if value.len() <= TOOL_DETAIL_WIRE_CAP_BYTES {
+        return;
+    }
+    let mut cut = TOOL_DETAIL_WIRE_CAP_BYTES;
+    while cut < value.len() && !value.is_char_boundary(cut) {
+        cut += 1;
+    }
+    value.truncate(cut);
+    value.push_str("\n\n…[详情过长，已截断显示]");
 }
 
 /// A page of older timeline history prepended into the visible session.

@@ -123,8 +123,8 @@ pub struct MockHarnessConfig {
     /// When true, `agentPreset.select` answers with the `agent-preset-locked`
     /// business error (as dsh does for a session that has already started).
     pub preset_locked: bool,
-    /// When true, `/api/respond` rejects with `bad-response` (as dsh does for
-    /// a malformed/ mismatched answer payload).
+    /// When true, the answer carrier rejects with `bad-response` (as dsh does
+    /// for a malformed/mismatched answer payload).
     pub respond_reject: bool,
     /// When true, token-authenticated endpoints reject requests without the
     /// `dsh-auth-` cookie.
@@ -141,7 +141,8 @@ struct MockState {
     pub creates: Vec<Value>,
     /// `session.fork` payloads received, in order.
     pub forks: Vec<Value>,
-    /// `respond` payloads received (approval/question answers).
+    /// `respond` / `$events/result` payloads received (approval/question
+    /// answers).
     pub responds: Vec<Value>,
     /// `agentPreset.select` preset ids received, in order.
     pub preset_selects: Vec<String>,
@@ -396,8 +397,8 @@ async fn handle_connection(
             let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             state.lock().unwrap().responds.push(parsed.clone());
             // Real validation, mirroring dsh's respond() + matchesQuestions:
-            // the answer must reference a pending question rpcId and satisfy
-            // count/id/label constraints, else `bad-response`.
+            // the answer must reference a pending approval/question id and
+            // satisfy count/id/label constraints, else `bad-response`.
             let receipt = {
                 let state_guard = state.lock().unwrap();
                 let rpc_id = parsed.get("rpcId").and_then(Value::as_str).unwrap_or("");
@@ -441,6 +442,74 @@ async fn handle_connection(
                     }
                 } else {
                     serde_json::json!({ "accepted": false, "reason": "not-pending" })
+                }
+            };
+            let body = serde_json::to_vec(&receipt).unwrap();
+            write_response(&mut stream, 200, "application/json", &body).await;
+        }
+        ("POST", "/api/$events/result") => {
+            let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            state
+                .lock()
+                .unwrap()
+                .responds
+                .push(parsed.pointer("/args").cloned().unwrap_or(Value::Null));
+            // Real validation, mirroring dsh's receiveRemoteEventResult +
+            // matchesQuestions: the result must reference an active `$events`
+            // client id, a pending waterfall eventId, and satisfy
+            // count/id/label constraints.
+            let receipt = {
+                let state_guard = state.lock().unwrap();
+                let client_id = parsed
+                    .pointer("/args/clientId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let event_id = parsed
+                    .pointer("/args/eventId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let reject = config.lock().unwrap().respond_reject;
+                if client_id != "$events-client-1" {
+                    serde_json::json!({ "ok": false, "error": { "message": "identifies no active event stream" } })
+                } else if reject {
+                    serde_json::json!({ "ok": false, "error": { "message": "bad-response" } })
+                } else if let Some(questions) = state_guard.pending_questions.get(event_id) {
+                    let value = parsed.pointer("/args/outcome/value");
+                    let answers = value
+                        .and_then(|v| v.pointer("/answer/answers"))
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let ok = answers.len() == questions.len()
+                        && answers.iter().zip(questions.iter()).all(|(a, q)| {
+                            let qid = q.get("id").and_then(Value::as_str).unwrap_or("");
+                            let aid = a.get("id").and_then(Value::as_str).unwrap_or("");
+                            if aid != qid {
+                                return false;
+                            }
+                            let selected: Vec<&str> = a
+                                .get("selected")
+                                .and_then(Value::as_array)
+                                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                                .unwrap_or_default();
+                            let labels: Vec<&str> = q
+                                .get("options")
+                                .and_then(Value::as_array)
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|o| o.get("label").and_then(Value::as_str))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            selected.iter().all(|s| labels.contains(s))
+                        });
+                    if ok {
+                        serde_json::json!({ "ok": true, "value": null })
+                    } else {
+                        serde_json::json!({ "ok": false, "error": { "message": "bad-response" } })
+                    }
+                } else {
+                    serde_json::json!({ "ok": false, "error": { "message": "not-pending" } })
                 }
             };
             let body = serde_json::to_vec(&receipt).unwrap();
@@ -665,6 +734,15 @@ async fn serve_mux(
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
+    // Emit the gateway ready item so the bridge captures the client id before
+    // waterfall frames arrive.
+    let ready = serde_json::to_string(&serde_json::json!({
+        "type": "ready",
+        "clientId": "$events-client-1",
+        "host": "mock-host"
+    }))
+    .unwrap();
+    let _ = ws.send(Message::Text(ready.into())).await;
     for frame in &script.frames {
         // Record pending questions so the respond handler can validate answers
         // the way dsh's `matchesQuestions` does.

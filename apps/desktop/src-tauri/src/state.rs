@@ -6,7 +6,7 @@ use app_core::{
     AppUpdate, Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path,
 };
 use session_store::SessionStore;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use terminal_service::{TerminalEventSink, TerminalService};
@@ -42,6 +42,119 @@ pub struct AppState {
     terminal_service: TerminalService,
     codebuddy_proxy: Arc<CodebuddyProxyManager>,
     remote_control: Arc<RemoteControlManager>,
+    /// Recently emitted UI patches for incremental self-heal: when the
+    /// frontend detects a continuity break (its accepted revision does not
+    /// match a patch's diff base), it replays the missed chain from here
+    /// instead of refetching the whole snapshot — a multi-MB clone +
+    /// main-thread JSON.parse on long sessions.
+    patch_replay: Mutex<PatchReplayBuffer>,
+}
+
+/// Ring buffer of emitted patches, per session.
+struct PatchReplayBuffer {
+    session_id: Option<String>,
+    entries: VecDeque<PatchReplayEntry>,
+    approx_bytes: usize,
+}
+
+struct PatchReplayEntry {
+    base_revision: u64,
+    revision: u64,
+    approx_bytes: usize,
+    patch: workspace_model::UiSnapshotPatch,
+}
+
+const PATCH_REPLAY_MAX_ENTRIES: usize = 400;
+const PATCH_REPLAY_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+impl PatchReplayBuffer {
+    fn new() -> Self {
+        Self {
+            session_id: None,
+            entries: VecDeque::new(),
+            approx_bytes: 0,
+        }
+    }
+
+    fn approx_patch_bytes(patch: &workspace_model::UiSnapshotPatch) -> usize {
+        patch
+            .messages
+            .iter()
+            .map(|message| message.body.len() + 128)
+            .sum::<usize>()
+            + patch
+                .tools
+                .iter()
+                .map(|tool| {
+                    tool.raw_input.as_deref().map_or(0, str::len)
+                        + tool.raw_output.as_deref().map_or(0, str::len)
+                        + 128
+                })
+                .sum::<usize>()
+            + patch.timeline.len() * 64
+            + 512
+    }
+
+    fn record(
+        &mut self,
+        session_id: &str,
+        base_revision: u64,
+        revision: u64,
+        patch: &workspace_model::UiSnapshotPatch,
+    ) {
+        if self.session_id.as_deref() != Some(session_id) {
+            *self = Self {
+                session_id: Some(session_id.to_string()),
+                ..Self::new()
+            };
+        }
+        let approx_bytes = Self::approx_patch_bytes(patch);
+        self.entries.push_back(PatchReplayEntry {
+            base_revision,
+            revision,
+            approx_bytes,
+            patch: patch.clone(),
+        });
+        self.approx_bytes = self.approx_bytes.saturating_add(approx_bytes);
+        while self.entries.len() > PATCH_REPLAY_MAX_ENTRIES
+            || (self.approx_bytes > PATCH_REPLAY_MAX_BYTES && self.entries.len() > 1)
+        {
+            match self.entries.pop_front() {
+                Some(entry) => {
+                    self.approx_bytes = self.approx_bytes.saturating_sub(entry.approx_bytes);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Patches chaining from `since_revision` (the entry whose diff base
+    /// equals it, through every entry emitted after). `None` when the buffer
+    /// cannot cover the span (session changed, entries evicted) — the caller
+    /// then falls back to a full snapshot.
+    fn since(
+        &self,
+        session_id: &str,
+        since_revision: u64,
+    ) -> Option<Vec<workspace_model::UiSnapshotPatch>> {
+        if self.session_id.as_deref() != Some(session_id) {
+            return None;
+        }
+        let start = self
+            .entries
+            .iter()
+            .position(|entry| entry.base_revision == since_revision)?;
+        let mut patches = Vec::new();
+        let mut expected_base = since_revision;
+        for entry in self.entries.iter().skip(start) {
+            if entry.base_revision != expected_base {
+                return None;
+            }
+            expected_base = entry.revision;
+            patches.push(entry.patch.clone());
+        }
+        Some(patches)
+    }
 }
 
 #[derive(Default)]
@@ -82,7 +195,47 @@ impl AppState {
             terminal_service,
             codebuddy_proxy: Arc::new(CodebuddyProxyManager::new()),
             remote_control,
+            patch_replay: Mutex::new(PatchReplayBuffer::new()),
         }
+    }
+
+    /// Record an emitted patch for incremental self-heal (see
+    /// [`Self::get_patches_since`]).
+    pub fn record_patch_replay(
+        &self,
+        session_id: &str,
+        base_revision: u64,
+        revision: u64,
+        patch: &workspace_model::UiSnapshotPatch,
+    ) {
+        if let Ok(mut buffer) = self.patch_replay.lock() {
+            buffer.record(session_id, base_revision, revision, patch);
+        }
+    }
+
+    /// Reset the replay buffer when a Full snapshot is emitted (session or
+    /// workspace switch): the frontend's continuity baseline moves to the
+    /// snapshot's revision.
+    pub fn reset_patch_replay(&self, session_id: &str) {
+        if let Ok(mut buffer) = self.patch_replay.lock() {
+            if buffer.session_id.as_deref() != Some(session_id) {
+                *buffer = PatchReplayBuffer {
+                    session_id: Some(session_id.to_string()),
+                    ..PatchReplayBuffer::new()
+                };
+            }
+        }
+    }
+
+    /// Incremental self-heal source: the emitted-patch chain that continues
+    /// from `since_revision`, or `None` when it cannot be covered.
+    pub fn get_patches_since(
+        &self,
+        session_id: &str,
+        since_revision: u64,
+    ) -> Option<Vec<workspace_model::UiSnapshotPatch>> {
+        let buffer = self.patch_replay.lock().ok()?;
+        buffer.since(session_id, since_revision)
     }
 
     pub fn codebuddy_proxy(&self) -> Arc<CodebuddyProxyManager> {

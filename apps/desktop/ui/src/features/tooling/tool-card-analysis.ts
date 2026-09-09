@@ -1762,26 +1762,181 @@ export function normalizeComparableText(text: string | null | undefined): string
   return (text ?? "").replace(/\r\n/g, "\n").trim();
 }
 
+// ── Bounded line derivation ────────────────────────────────────────────────
+//
+// The expanded card merges the UNCAPPED stored tool detail, so raw fields can
+// be multi-megabyte (build logs, dumps). Derivations below used to split and
+// regex-scan the FULL text on EVERY render of the card — clicking a card then
+// froze the UI once per render. Two guards:
+//   1. per-tool-object memoization (tool objects are immutable per version);
+//   2. line extraction via indexOf walks over the display window only, never
+//      a whole-string split.
+
+const outputLinesCache = new WeakMap<
+  ToolInvocation,
+  { lines: string[]; omitted: number }
+>();
+const rawOutputLinesCache = new WeakMap<
+  ToolInvocation,
+  { lines: string[]; omitted: number }
+>();
+const detailLinesCache = new WeakMap<
+  ToolInvocation,
+  { lines: string[]; omitted: number }
+>();
+const visibleLogEntriesCache = new WeakMap<
+  ToolInvocation,
+  { entries: ToolInvocation["logs"]; omitted: number }
+>();
+
+function countLines(text: string): number {
+  let count = 1;
+  let index = text.indexOf("\n");
+  while (index !== -1) {
+    count += 1;
+    index = text.indexOf("\n", index + 1);
+  }
+  return count;
+}
+
+/** First `maxLines` lines without splitting the whole string. */
+function headLines(text: string, maxLines: number): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  while (lines.length < maxLines) {
+    const index = text.indexOf("\n", start);
+    if (index === -1) {
+      lines.push(text.slice(start));
+      return lines;
+    }
+    lines.push(text.slice(start, index));
+    start = index + 1;
+  }
+  return lines;
+}
+
+/** Last `maxLines` lines without splitting the whole string. */
+function tailLines(text: string, maxLines: number): string[] {
+  const lines: string[] = [];
+  let end = text.length;
+  while (lines.length < maxLines) {
+    const index = text.lastIndexOf("\n", end - 1);
+    if (index === -1) {
+      lines.push(text.slice(0, end));
+      return lines;
+    }
+    lines.push(text.slice(index + 1, end));
+    end = index;
+  }
+  return lines.reverse();
+}
+
+export function getOutputLines(tool: ToolInvocation): {
+  lines: string[];
+  omitted: number;
+} {
+  const cached = outputLinesCache.get(tool);
+  if (cached) return cached;
+  const result = computeOutputLines(tool);
+  outputLinesCache.set(tool, result);
+  return result;
+}
+
+function computeOutputLines(tool: ToolInvocation): {
+  lines: string[];
+  omitted: number;
+} {
+  if (tool.terminal_output) {
+    const raw = tool.terminal_output.output.trim();
+    if (!raw) {
+      const code = tool.terminal_output.exit_code;
+      if (code !== null && code !== 0) {
+        return { lines: [`(退出码 ${code})`], omitted: 0 };
+      }
+      return { lines: [], omitted: 0 };
+    }
+    const total = countLines(raw);
+    if (total <= MAX_OUTPUT_LINES) {
+      return { lines: raw.split("\n"), omitted: 0 };
+    }
+    return { lines: headLines(raw, MAX_OUTPUT_LINES), omitted: total - MAX_OUTPUT_LINES };
+  }
+
+  return { lines: [], omitted: 0 };
+}
+
+/** Get displayable lines from raw_output (for non-terminal tools) */
+export function getRawOutputLines(tool: ToolInvocation): {
+  lines: string[];
+  omitted: number;
+} {
+  const cached = rawOutputLinesCache.get(tool);
+  if (cached) return cached;
+  const result = computeRawOutputLines(tool);
+  rawOutputLinesCache.set(tool, result);
+  return result;
+}
+
+function computeRawOutputLines(tool: ToolInvocation): {
+  lines: string[];
+  omitted: number;
+} {
+  // Skip if terminal_output exists (handled by getOutputLines)
+  if (tool.terminal_output) return { lines: [], omitted: 0 };
+
+  const raw = tool.raw_output?.trim();
+  if (!raw) return { lines: [], omitted: 0 };
+  const normalizedRaw = normalizeComparableText(raw);
+  if (normalizedRaw === normalizeComparableText(tool.detail_text)) {
+    return { lines: [], omitted: 0 };
+  }
+  if (tool.logs.some((entry) => normalizeComparableText(entry.body) === normalizedRaw)) {
+    return { lines: [], omitted: 0 };
+  }
+
+  // Skip vague/unhelpful outputs
+  if (isVagueError(raw)) return { lines: [], omitted: 0 };
+  if (diffPreviewsFromRawOutput(raw).length > 0) return { lines: [], omitted: 0 };
+  // Skip outputs that just repeat the summary
+  if (raw === tool.summary) return { lines: [], omitted: 0 };
+  // Skip very short outputs that add no value (like "Completed", "OK")
+  if (raw.length < 10 && !raw.includes("\n")) return { lines: [], omitted: 0 };
+
+  const total = countLines(raw);
+  if (total <= MAX_OUTPUT_LINES) {
+    return { lines: raw.split("\n"), omitted: 0 };
+  }
+  return { lines: headLines(raw, MAX_OUTPUT_LINES), omitted: total - MAX_OUTPUT_LINES };
+}
+
 export function getDetailLines(tool: ToolInvocation): {
   lines: string[];
   omitted: number;
 } {
+  const cached = detailLinesCache.get(tool);
+  if (cached) return cached;
   const detail = normalizeComparableText(tool.detail_text);
-  if (!detail) return { lines: [], omitted: 0 };
-
-  const allLines = detail.split("\n");
-  if (allLines.length <= MAX_OUTPUT_LINES) {
-    return { lines: allLines, omitted: 0 };
+  let result: { lines: string[]; omitted: number };
+  if (!detail) {
+    result = { lines: [], omitted: 0 };
+  } else {
+    const total = countLines(detail);
+    if (total <= MAX_OUTPUT_LINES) {
+      result = { lines: detail.split("\n"), omitted: 0 };
+    } else {
+      result = { lines: tailLines(detail, MAX_OUTPUT_LINES), omitted: total - MAX_OUTPUT_LINES };
+    }
   }
-
-  const tail = allLines.slice(-MAX_OUTPUT_LINES);
-  return { lines: tail, omitted: allLines.length - MAX_OUTPUT_LINES };
+  detailLinesCache.set(tool, result);
+  return result;
 }
 
 export function getVisibleLogEntries(tool: ToolInvocation): {
   entries: ToolInvocation["logs"];
   omitted: number;
 } {
+  const cached = visibleLogEntriesCache.get(tool);
+  if (cached) return cached;
   const detail = normalizeComparableText(tool.detail_text);
   const rawOutput = normalizeComparableText(tool.raw_output);
   const entries = tool.logs.filter((entry) => {
@@ -1792,12 +1947,12 @@ export function getVisibleLogEntries(tool: ToolInvocation): {
     return true;
   });
 
-  if (entries.length <= MAX_OUTPUT_LINES) {
-    return { entries, omitted: 0 };
-  }
-
-  const tail = entries.slice(-MAX_OUTPUT_LINES);
-  return { entries: tail, omitted: entries.length - MAX_OUTPUT_LINES };
+  const result =
+    entries.length <= MAX_OUTPUT_LINES
+      ? { entries, omitted: 0 }
+      : { entries: entries.slice(-MAX_OUTPUT_LINES), omitted: entries.length - MAX_OUTPUT_LINES };
+  visibleLogEntriesCache.set(tool, result);
+  return result;
 }
 
 export function isExploreTool(tool: ToolInvocation, lower: string): boolean {
@@ -1953,64 +2108,6 @@ export function statusBullet(
     case "Interrupted":
       return { char: "•", className: "tc-bullet-warn" };
   }
-}
-
-export function getOutputLines(tool: ToolInvocation): {
-  lines: string[];
-  omitted: number;
-} {
-  if (tool.terminal_output) {
-    const raw = tool.terminal_output.output.trim();
-    if (!raw) {
-      const code = tool.terminal_output.exit_code;
-      if (code !== null && code !== 0) {
-        return { lines: [`(退出码 ${code})`], omitted: 0 };
-      }
-      return { lines: [], omitted: 0 };
-    }
-    const allLines = raw.split("\n");
-    if (allLines.length <= MAX_OUTPUT_LINES) {
-      return { lines: allLines, omitted: 0 };
-    }
-    const head = allLines.slice(0, MAX_OUTPUT_LINES);
-    return { lines: head, omitted: allLines.length - MAX_OUTPUT_LINES };
-  }
-
-  return { lines: [], omitted: 0 };
-}
-
-/** Get displayable lines from raw_output (for non-terminal tools) */
-export function getRawOutputLines(tool: ToolInvocation): {
-  lines: string[];
-  omitted: number;
-} {
-  // Skip if terminal_output exists (handled by getOutputLines)
-  if (tool.terminal_output) return { lines: [], omitted: 0 };
-
-  const raw = tool.raw_output?.trim();
-  if (!raw) return { lines: [], omitted: 0 };
-  const normalizedRaw = normalizeComparableText(raw);
-  if (normalizedRaw === normalizeComparableText(tool.detail_text)) {
-    return { lines: [], omitted: 0 };
-  }
-  if (tool.logs.some((entry) => normalizeComparableText(entry.body) === normalizedRaw)) {
-    return { lines: [], omitted: 0 };
-  }
-
-  // Skip vague/unhelpful outputs
-  if (isVagueError(raw)) return { lines: [], omitted: 0 };
-  if (diffPreviewsFromRawOutput(raw).length > 0) return { lines: [], omitted: 0 };
-  // Skip outputs that just repeat the summary
-  if (raw === tool.summary) return { lines: [], omitted: 0 };
-  // Skip very short outputs that add no value (like "Completed", "OK")
-  if (raw.length < 10 && !raw.includes("\n")) return { lines: [], omitted: 0 };
-
-  const allLines = raw.split("\n");
-  if (allLines.length <= MAX_OUTPUT_LINES) {
-    return { lines: allLines, omitted: 0 };
-  }
-  const head = allLines.slice(0, MAX_OUTPUT_LINES);
-  return { lines: head, omitted: allLines.length - MAX_OUTPUT_LINES };
 }
 
 /** Returns true for vague/unhelpful server errors that add no value when displayed */

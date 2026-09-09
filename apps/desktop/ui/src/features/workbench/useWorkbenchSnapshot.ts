@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UiSnapshot, UiSnapshotPatch } from "../../types";
-import { startupPerfMark, sessionGetState, sessionGetRevision, sessionLoadHistoryBefore } from "../../lib/tauri";
+import {
+  sessionGetPatchesSince,
+  startupPerfMark,
+  sessionGetState,
+  sessionGetRevision,
+  sessionLoadHistoryBefore,
+} from "../../lib/tauri";
 import { onUiSnapshot, onUiSnapshotPatch } from "../../lib/events";
 import {
   appendStreamingMessageDelta,
@@ -224,6 +230,15 @@ export function useWorkbenchSnapshot() {
   const snapshotRef = useRef<UiSnapshot | null>(null);
   const firstSnapshotLogged = useRef(false);
   const firstWorkspaceReadyLogged = useRef(false);
+  // Timestamp of the most recently ACCEPTED patch / full snapshot event. The
+  // 3s self-heal poll only re-fetches the full snapshot when updates have
+  // genuinely stopped flowing: while streaming, the backend revision advances
+  // through accepted patches, and treating that advance as "suspect desync"
+  // made pollState() clone + serialize + JSON.parse the ENTIRE snapshot
+  // (multi-MB once a session has real history) on the webview main thread
+  // every 3 seconds — a rhythmic ~100-400ms freeze for the whole turn, the
+  // "constantly laggy as soon as a conversation starts" complaint.
+  const lastAcceptedUpdateAtRef = useRef(0);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
@@ -262,6 +277,7 @@ export function useWorkbenchSnapshot() {
       ) {
         prevSnapshotSessionId.current = state.session.id;
         prevSnapshotRevision.current = state.revision;
+        lastAcceptedUpdateAtRef.current = Date.now();
         setSnapshot(materializeStreamingMessageBodies(state, { reconcileStore: true }));
       }
     } catch {
@@ -272,6 +288,7 @@ export function useWorkbenchSnapshot() {
   const acceptSnapshot = useCallback((nextSnapshot: UiSnapshot) => {
     prevSnapshotSessionId.current = nextSnapshot.session.id;
     prevSnapshotRevision.current = nextSnapshot.revision;
+    lastAcceptedUpdateAtRef.current = Date.now();
     setWorkspaceReady(true);
     setSnapshot(materializeStreamingMessageBodies(nextSnapshot, { reconcileStore: true }));
   }, []);
@@ -313,6 +330,95 @@ export function useWorkbenchSnapshot() {
     // re-invokes the setSnapshot updater for the same patch object.
     const appliedDeltaPatches = new WeakSet<UiSnapshotPatch>();
 
+    // Incremental self-heal: replay the missed patch chain from the bridge's
+    // ring buffer instead of refetching the whole snapshot. `fromRevision` is
+    // the last locally accepted revision; the backend returns every emitted
+    // patch continuing from there (or null when the buffer cannot cover the
+    // span — then, and only then, fall back to a full snapshot). The loop
+    // re-fetches until caught up so patches emitted while replaying are
+    // covered too.
+    const replayingRef = { active: false };
+    const replayPatchesSince = async (fromRevision: number) => {
+      if (replayingRef.active || disposed) return;
+      replayingRef.active = true;
+      try {
+        let from = fromRevision;
+        for (let round = 0; round < 20; round += 1) {
+          let chain: UiSnapshotPatch[] | null = null;
+          try {
+            chain = await sessionGetPatchesSince(from);
+          } catch {
+            chain = null;
+          }
+          if (disposed) return;
+          if (!chain) {
+            scheduleFullResync();
+            return;
+          }
+          if (chain.length === 0) return; // caught up
+          let lastRevision = from;
+          for (const missedPatch of chain) {
+            let misaligned = false;
+            setSnapshot((prev) => {
+              if (!prev) {
+                scheduleFullResync();
+                return prev;
+              }
+              if (
+                missedPatch.session.id !== prev.session.id ||
+                missedPatch.revision <= prev.revision
+              ) {
+                // Already covered (a live patch raced ahead during replay).
+                return prev;
+              }
+              prevSnapshotSessionId.current = missedPatch.session.id;
+              prevSnapshotRevision.current = Math.max(
+                prev.revision,
+                missedPatch.revision,
+              );
+              lastAcceptedUpdateAtRef.current = Date.now();
+              const missedHasDeltas =
+                (missedPatch.message_deltas?.length ?? 0) > 0;
+              if (
+                missedHasDeltas &&
+                !appliedDeltaPatches.has(missedPatch)
+              ) {
+                appliedDeltaPatches.add(missedPatch);
+                if (applyStreamingDeltas(missedPatch, prev.messages)) {
+                  misaligned = true;
+                }
+              }
+              if (
+                isStreamingDeltaOnlyPatch(missedPatch) ||
+                (missedHasDeltas && missedPatch.messages.length === 0)
+              ) {
+                return materializeStreamingMessageBodies({
+                  ...prev,
+                  revision: Math.max(prev.revision, missedPatch.revision),
+                  session: missedPatch.session,
+                  session_config: missedPatch.session_config ?? prev.session_config,
+                  thinking_status: missedPatch.thinking_status,
+                  thinking_text: missedPatch.thinking_text ?? prev.thinking_text,
+                  pending_steers: missedPatch.pending_steers ?? prev.pending_steers,
+                });
+              }
+              return materializeStreamingMessageBodies(
+                applySnapshotPatch(prev, missedPatch),
+              );
+            });
+            if (misaligned) {
+              scheduleFullResync();
+              return;
+            }
+            lastRevision = missedPatch.revision;
+          }
+          from = lastRevision;
+        }
+      } finally {
+        replayingRef.active = false;
+      }
+    };
+
     onUiSnapshot((nextSnapshot) => {
       if (disposed) return;
       if (
@@ -322,6 +428,7 @@ export function useWorkbenchSnapshot() {
         return;
       prevSnapshotSessionId.current = nextSnapshot.session.id;
       prevSnapshotRevision.current = nextSnapshot.revision;
+      lastAcceptedUpdateAtRef.current = Date.now();
       setWorkspaceReady(true);
       if (!firstWorkspaceReadyLogged.current) {
         firstWorkspaceReadyLogged.current = true;
@@ -364,18 +471,26 @@ export function useWorkbenchSnapshot() {
           scheduleFullResync();
           return prev;
         }
-        // A revision gap means one or more patches were dropped between the
-        // last accepted state and this one. Delta-only patches are only
-        // meaningful when applied in-order with no gaps — after a gap the
-        // stream store appends a suffix computed against an older backend
-        // body, permanently misaligning the displayed text (the classic
-        // "final part of the reply renders truncated"). Re-sync from a full
-        // snapshot instead of merging a corrupted delta.
-        if (patch.revision > prev.revision + 1) {
-          scheduleFullResync();
+        // Continuity check: each patch diffs from `base_revision` (the bridge
+        // cursor's last-emitted state). Coalesced revision bumps make jumps
+        // NORMAL — a matching base means the patch is self-contained, apply
+        // directly. A mismatch means emitted patch events were lost in IPC;
+        // repair incrementally from the bridge's replay buffer instead of
+        // refetching the whole snapshot (a multi-MB clone + main-thread
+        // JSON.parse on long sessions, previously triggered on nearly every
+        // streaming patch because bursts skip revision numbers).
+        const baseMatches =
+          patch.base_revision === 0 || patch.base_revision == null
+            ? patch.revision === prev.revision + 1
+            : patch.base_revision === prev.revision;
+        // Same-revision re-deliveries fall through to the delta dedupe below;
+        // only an AHEAD revision with a broken base means lost patch events.
+        if (!baseMatches && patch.revision > prev.revision) {
+          void replayPatchesSince(prev.revision);
           return prev;
         }
 
+        lastAcceptedUpdateAtRef.current = Date.now();
         prevSnapshotSessionId.current = patch.session.id;
         prevSnapshotRevision.current = Math.max(prev.revision, patch.revision);
 
@@ -453,7 +568,15 @@ export function useWorkbenchSnapshot() {
           const changed =
             sessionId !== prevSnapshotSessionId.current ||
             revision !== prevSnapshotRevision.current;
-          if (changed) void pollState();
+          if (!changed) return;
+          // While updates are flowing normally the revision advances through
+          // accepted patches/events and this probe stays a no-op. Only treat
+          // an ahead revision as a suspected loss when nothing has been
+          // accepted for a while (dropped events / throttled webview) —
+          // refetching the full snapshot for every streaming revision bump
+          // was a multi-MB main-thread freeze every 3s on long sessions.
+          if (Date.now() - lastAcceptedUpdateAtRef.current < 8000) return;
+          void pollState();
         })
         .catch(() => {});
     }, SNAPSHOT_SELF_HEAL_POLL_MS);

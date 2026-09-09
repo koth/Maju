@@ -84,7 +84,7 @@ impl Application {
     fn message_persistence_snapshot(&self) -> MessagePersistenceSnapshot {
         let last_message_id = self.ui.timeline.last().and_then(|item| match item {
             TimelineItem::Message(id) => Some(*id),
-            TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+            TimelineItem::Tool(_) | TimelineItem::Thinking(_) => None,
         });
         let last_message_body = last_message_id.and_then(|id| {
             self.ui
@@ -169,7 +169,7 @@ impl Application {
                     .last()
                     .and_then(|item| match item {
                         TimelineItem::Message(id) => Some(id),
-                        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+                        TimelineItem::Tool(_) | TimelineItem::Thinking(_) => None,
                     })
                     .and_then(|id| {
                         self.ui

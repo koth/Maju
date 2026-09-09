@@ -2,6 +2,109 @@ use super::*;
 use workspace_model::ChangeSetStatus;
 
 #[test]
+fn late_closing_reply_reanchors_turn_changes_to_last_assistant() {
+    // Regression: dsh delivers the turn's closing assistant text after the
+    // change set was last persisted (the final write-detection settle window
+    // fires while the reply is still streaming). The turn's change set stayed
+    // anchored to an INTERMEDIATE assistant message, so the timeline rendered
+    // its ChangesBar above the turn's collapse summary — visually detached
+    // from its own turn. A late-arriving assistant message must re-anchor the
+    // turn changes onto itself (the turn's last assistant).
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let user_id = uuid::Uuid::new_v4();
+    let intermediate_id = uuid::Uuid::new_v4();
+    let closing_id = uuid::Uuid::new_v4();
+
+    app.ui.messages.clear();
+    app.ui.timeline.clear();
+    app.ui.messages.push(ChatMessage {
+        id: user_id,
+        role: MessageRole::User,
+        body: "optimize rendering".into(),
+        created_at: "2026-05-13T00:00:00Z".into(),
+        ..Default::default()
+    });
+    app.ui.messages.push(ChatMessage {
+        id: intermediate_id,
+        role: MessageRole::Assistant,
+        body: "running verification".into(),
+        created_at: "2026-05-13T00:00:01Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(user_id));
+    app.ui.timeline.push(TimelineItem::Message(intermediate_id));
+    app.current_turn_user_message_id = Some(user_id);
+
+    // The store's turn-file-change rows carry an FK into messages — persist
+    // the transcript like the real apply paths do.
+    let session_id = app.ui.session.id.to_string();
+    app.store
+        .insert_message(&session_id, &user_id.to_string(), "User", "optimize rendering", 1)
+        .unwrap();
+    app.store
+        .insert_message(
+            &session_id,
+            &intermediate_id.to_string(),
+            "Assistant",
+            "running verification",
+            2,
+        )
+        .unwrap();
+
+    app.upsert_review_file_change(
+        "src/a.rs",
+        FileChangeType::Modified,
+        Some("x\n".into()),
+        "a\nb\nc\n".into(),
+    );
+    assert!(app.persist_current_turn_file_changes());
+    assert_eq!(app.ui.turn_changes[0].message_id, intermediate_id);
+
+    // The closing reply lands AFTER the last persist (post-turn / settle).
+    app.ui.messages.push(ChatMessage {
+        id: closing_id,
+        role: MessageRole::Assistant,
+        body: "all done".into(),
+        created_at: "2026-05-13T00:00:02Z".into(),
+        ..Default::default()
+    });
+    app.ui.timeline.push(TimelineItem::Message(closing_id));
+    app.store
+        .insert_message(&session_id, &closing_id.to_string(), "Assistant", "all done", 3)
+        .unwrap();
+
+    assert!(app.reanchor_turn_file_changes_to_last_assistant(user_id));
+    assert_eq!(
+        app.ui.turn_changes.len(),
+        1,
+        "the intermediate anchor must be moved, not duplicated"
+    );
+    assert_eq!(app.ui.turn_changes[0].message_id, closing_id);
+
+    let turns = app.store.load_recent_turn_file_changes(&session_id, 10).unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].message_id, closing_id);
+    assert_eq!(turns[0].changes.len(), 1);
+
+    let turn_sets = app
+        .store
+        .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+        .unwrap();
+    let anchored = turn_sets
+        .iter()
+        .find(|summary| summary.message_id == Some(closing_id))
+        .expect("AgentTurn change set must be re-pointed at the closing reply");
+    assert_eq!(anchored.file_count, 1);
+    assert!(
+        turn_sets
+            .iter()
+            .all(|summary| summary.message_id != Some(intermediate_id)),
+        "no change set may stay anchored to the intermediate reply"
+    );
+}
+
+#[test]
 fn multiple_files_with_nonzero_changes_keep_change_set_after_turn() {
     // Regression: a turn that edits two files must keep its AgentTurn change
     // set (and thus the ChangesBar / review panel) even though the per-file

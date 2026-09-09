@@ -321,7 +321,7 @@ pub fn project_remote_snapshot(
             workspace_model::TimelineItem::Tool(id) => {
                 referenced_tools.insert(*id);
             }
-            workspace_model::TimelineItem::Thinking => {}
+            workspace_model::TimelineItem::Thinking(_) => {}
         }
     }
     snapshot.messages.retain(|m| referenced_messages.contains(&m.id));
@@ -690,6 +690,7 @@ mod tests {
     fn remote_patch_projection_zeroes_desktop_only_fields() {
         let patch = workspace_model::UiSnapshotPatch {
             revision: 9,
+            base_revision: 8,
             session: workspace_model::SessionSummary {
                 id: uuid::Uuid::nil(),
                 workspace_id: uuid::Uuid::nil(),
@@ -964,12 +965,17 @@ impl Application {
             Some(repository)
         };
 
+        // The patch diffs from the cursor's current revision — stamp it so the
+        // frontend can verify continuity (coalesced jumps are self-contained;
+        // a mismatch means an emitted patch event was lost).
+        let base_revision = cursor.revision;
         cursor.revision = self.ui.revision;
         cursor.workspace_id = Some(self.ui.workspace.id);
         cursor.session_id = Some(self.ui.session.id);
 
         Some(UiSnapshotUpdate::Patch(UiSnapshotPatch {
             revision: self.ui.revision,
+            base_revision,
             session: self.ui.session.clone(),
             session_config: self.ui.session_config.clone(),
             prompt_capabilities: self.ui.prompt_capabilities.clone(),

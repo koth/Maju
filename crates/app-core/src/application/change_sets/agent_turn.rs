@@ -369,4 +369,90 @@ impl Application {
 
         assistant_ids
     }
+
+    /// Re-anchor a turn's file changes to the turn's LAST assistant message.
+    ///
+    /// The per-turn ChangesBar renders under the message the change set is
+    /// anchored to, and the timeline's collapse summary anchors at the same
+    /// final reply. When the closing assistant message lands after the change
+    /// set was persisted (dsh delivers the closing text after the final
+    /// write-detection settle window, replays re-order, ...), the change set
+    /// stays on an intermediate reply: its ChangesBar then renders ABOVE the
+    /// turn's collapse summary, visually detached from its own turn. Moves
+    /// every `turn_changes` entry of the turn onto the last assistant and
+    /// re-points the persisted AgentTurn change set row at the same anchor.
+    pub(in crate::application) fn reanchor_turn_file_changes_to_last_assistant(
+        &mut self,
+        turn_user_message_id: uuid::Uuid,
+    ) -> bool {
+        let previous_turn_user_id = self.current_turn_user_message_id;
+        self.current_turn_user_message_id = Some(turn_user_message_id);
+        let assistant_ids = self.current_turn_assistant_message_ids();
+        self.current_turn_user_message_id = previous_turn_user_id;
+
+        let Some(anchor_id) = assistant_ids.last().copied() else {
+            return false;
+        };
+        let session_id = self.ui.session.id.to_string();
+        let stale: Vec<(uuid::Uuid, Vec<SessionFileChange>)> = self
+            .ui
+            .turn_changes
+            .iter()
+            .filter(|entry| {
+                entry.message_id != anchor_id && assistant_ids.contains(&entry.message_id)
+            })
+            .map(|entry| (entry.message_id, entry.changes.clone()))
+            .collect();
+        if stale.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for (stale_id, changes) in stale {
+            self.ui
+                .turn_changes
+                .retain(|entry| entry.message_id != stale_id);
+            let _ = self
+                .store
+                .replace_turn_file_changes(&session_id, &stale_id, &[]);
+            match self
+                .ui
+                .turn_changes
+                .iter_mut()
+                .find(|entry| entry.message_id == anchor_id)
+            {
+                Some(entry) => {
+                    if entry.changes != changes {
+                        entry.changes = changes.clone();
+                        changed = true;
+                    }
+                }
+                None => {
+                    self.ui.turn_changes.push(TurnFileChanges {
+                        message_id: anchor_id,
+                        changes: changes.clone(),
+                    });
+                    changed = true;
+                }
+            }
+            let _ = self
+                .store
+                .replace_turn_file_changes(&session_id, &anchor_id, &changes);
+        }
+        // Re-point the persisted AgentTurn change set row at the same anchor.
+        // `upsert_change_set` only touches the change_sets row, so the already
+        // persisted file records survive (unlike
+        // `persist_current_agent_turn_change_set`, which rebuilds records from
+        // `review_changes` — empty once the turn has ended).
+        let change_set_id = format!("agent-turn:{}:{turn_user_message_id}", self.ui.session.id);
+        if let Ok(summaries) = self
+            .store
+            .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
+            && let Some(mut summary) =
+                summaries.into_iter().find(|summary| summary.id == change_set_id)
+        {
+            summary.message_id = Some(anchor_id);
+            let _ = self.store.upsert_change_set(&summary);
+        }
+        changed
+    }
 }

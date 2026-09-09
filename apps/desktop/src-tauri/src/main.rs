@@ -134,6 +134,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::session::session_get_state,
             commands::session::session_get_revision,
+            commands::session::session_get_patches_since,
             commands::session::session_send_prompt,
             commands::session::session_retry_user_message,
             commands::session::session_set_config_control,
@@ -555,9 +556,17 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
 
             match next_update {
                 Some(Some(UiSnapshotUpdate::Full(snapshot))) => {
+                    app.state::<AppState>()
+                        .reset_patch_replay(&snapshot.session.id.to_string());
                     events::emit_ui_snapshot(&app, &snapshot);
                 }
                 Some(Some(UiSnapshotUpdate::Patch(patch))) => {
+                    app.state::<AppState>().record_patch_replay(
+                        &patch.session.id.to_string(),
+                        patch.base_revision,
+                        patch.revision,
+                        &patch,
+                    );
                     events::emit_ui_snapshot_patch(&app, &patch);
                 }
                 Some(None) => {}

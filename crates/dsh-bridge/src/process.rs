@@ -346,11 +346,7 @@ pub(crate) fn parse_ps_rows(output: &str) -> Vec<PsRow> {
             if command.is_empty() {
                 return None;
             }
-            Some(PsRow {
-                pid,
-                ppid,
-                command,
-            })
+            Some(PsRow { pid, ppid, command })
         })
         .collect()
 }
@@ -1376,8 +1372,8 @@ mod tests {
             .expect("spawn victim");
         let victim_pid = victim.id().unwrap();
         // The test process itself is the "parent" and stays alive.
-        let mut watchdog = spawn_exit_watchdog(std::process::id(), victim_pid)
-            .expect("watchdog spawn");
+        let mut watchdog =
+            spawn_exit_watchdog(std::process::id(), victim_pid).expect("watchdog spawn");
 
         let _ = unsafe { libc::kill(victim_pid as libc::pid_t, libc::SIGKILL) };
         let _ = victim.wait().await;
@@ -1604,8 +1600,7 @@ mod tests {
             .unwrap();
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
             (fake_dir, script.display().to_string())
         };
@@ -1674,7 +1669,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(!pid_alive(orphan_a), "orphan survived the reap");
-        assert!(pid_alive(orphan_b), "home_b orphan was killed by the home_a reap");
+        assert!(
+            pid_alive(orphan_b),
+            "home_b orphan was killed by the home_a reap"
+        );
 
         // Cleanup: home_b's fake is deliberately still running; remove it so
         // the test leaves nothing behind.

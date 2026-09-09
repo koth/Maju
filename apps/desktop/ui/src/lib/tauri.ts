@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import type {
   UiSnapshot,
+  UiSnapshotPatch,
   RepositorySnapshot,
   ChangedFile,
   RecentWorkspace,
@@ -76,6 +77,17 @@ export async function sessionGetState(): Promise<UiSnapshot> {
  *  `sessionGetState()` when the returned revision/session actually changed. */
 export async function sessionGetRevision(): Promise<[string, number]> {
   return invoke<[string, number]>("session_get_revision");
+}
+
+/** Incremental self-heal: the emitted-patch chain continuing from
+ *  `sinceRevision`, or `null` when the bridge's replay buffer cannot cover
+ *  the span (caller falls back to a full `sessionGetState`). */
+export async function sessionGetPatchesSince(
+  sinceRevision: number,
+): Promise<UiSnapshotPatch[] | null> {
+  return invoke<UiSnapshotPatch[] | null>("session_get_patches_since", {
+    sinceRevision,
+  });
 }
 
 export async function sessionSendPrompt(

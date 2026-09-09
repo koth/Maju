@@ -349,7 +349,8 @@ pub fn run_harness_session(
             } => {
                 let respond_start = Instant::now();
                 let pending = sink.pending_approvals();
-                let response = pending.build_response(&sink, &rpc_id, &result);
+                let response =
+                    pending.build_response(&sink, host.remote_event_client_id(), &rpc_id, &result);
                 if let Some(response) = &response {
                     tracing::info!(
                         target: "dsh-bridge::respond",
@@ -358,8 +359,14 @@ pub fn run_harness_session(
                         "sending respond"
                     );
                 }
+                let is_question_result = response
+                    .as_ref()
+                    .is_some_and(|payload| payload.get("clientId").is_some());
                 let send_result = match response {
-                    Some(ref response) => host.runtime().block_on(client.respond(response)),
+                    Some(ref payload) if is_question_result => host
+                        .runtime()
+                        .block_on(client.remote_events_result(payload)),
+                    Some(ref payload) => host.runtime().block_on(client.respond_legacy(payload)),
                     None => Err(anyhow::anyhow!(
                         "no pending approval/question for id {rpc_id}"
                     )),
@@ -370,8 +377,7 @@ pub fn run_harness_session(
                 let send_result = send_result.and_then(|receipt| {
                     if !receipt.accepted() {
                         let reason = match &receipt {
-                            crate::rpc_types::RpcReceipt::Rejected { reason, .. } => reason.clone(),
-                            _ => "rejected".to_string(),
+                            _ => receipt.rejection_reason(),
                         };
                         tracing::warn!(
                             target: "dsh-bridge::respond",
@@ -391,7 +397,10 @@ pub fn run_harness_session(
                 // A not-pending receipt (late/duplicate) is a no-op, not an error.
                 let send_result = send_result.or_else(|err| {
                     if err.to_string().contains("not-pending") {
-                        Ok(crate::rpc_types::RpcReceipt::Accepted { accepted: true })
+                        Ok(crate::rpc_types::RpcReceipt::Legacy {
+                            accepted: true,
+                            reason: String::new(),
+                        })
                     } else {
                         Err(err)
                     }

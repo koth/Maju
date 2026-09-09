@@ -393,7 +393,9 @@ describe("ThinkingIndicator", () => {
 
     expect(container.textContent).toContain("已处理 1 次工具调用 · 1m 5s");
     expect(container.textContent).toContain("final answer");
-    expect(container.textContent).toContain("intermediate reply");
+    // Intermediate same-turn replies collapse into the turn summary together
+    // with the tools — expanded content only appears after expanding.
+    expect(container.textContent).not.toContain("intermediate reply");
     expect(container.textContent).not.toContain("pnpm test");
 
     fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
@@ -524,13 +526,16 @@ describe("ThinkingIndicator", () => {
 
     expect(container.textContent).toContain("已处理 · 1m 30s");
     expect(container.textContent).toContain("final long answer");
-    expect(container.textContent).toContain("visible intermediate 10");
+    // Intermediate assistant narration collapses into the turn summary; the
+    // summary sits directly between the (windowed-out) user prompt and the
+    // final reply instead of floating mid-prose.
+    expect(container.textContent).not.toContain("visible intermediate 10");
 
-    // Intermediate assistant replies are no longer collapsed, so the
-    // "展开已处理上下文" toggle is not present for this turn.
+    // The collapsed items (intermediate replies) are reachable via the
+    // "展开已处理上下文" toggle.
     expect(
       container.querySelector(".timeline-collapse-toggle"),
-    ).toBeNull();
+    ).not.toBeNull();
     unmount();
   });
 
@@ -2156,7 +2161,9 @@ describe("ThinkingIndicator", () => {
     });
 
     appendStreamingMessageDelta("streaming-msg", " **world**");
-    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    // The streaming markdown commit is throttled (STREAMING_RENDER_MIN_INTERVAL_MS);
+    // wait past the interval, then the double-rAF stick pass.
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
     await new Promise((resolve) => requestAnimationFrame(resolve));
     await new Promise((resolve) => requestAnimationFrame(resolve));
 

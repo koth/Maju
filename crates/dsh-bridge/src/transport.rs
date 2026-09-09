@@ -20,8 +20,8 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::rpc_types::{
-    ClientRequest, ClientResponse, HostDescribeValue, RpcId, RpcReceipt, ServerRequest,
-    ServerResponse, SessionAddress, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
+    ClientRequest, HostDescribeValue, RpcId, RpcReceipt, ServerRequest, ServerResponse,
+    SessionAddress, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
     SessionCreateValue, SessionForkPayload, SessionForkValue, SessionHistoryPayload,
     SessionHistoryValue, SessionListPayload, SessionListValue, SessionModelsPayload,
     SessionPageRequest, SessionPromptPayload, SessionPromptValue, SessionSelectModelPayload,
@@ -170,10 +170,10 @@ impl HttpClient {
         }
     }
 
-    /// POST a `ClientResponse` to `/api/respond` and return the carrier receipt.
-    /// A `not-pending` receipt (late/duplicate respond) is returned as-is, not
-    /// an error — the bridge treats it as a no-op.
-    pub async fn respond(&self, response: &ClientResponse) -> anyhow::Result<RpcReceipt> {
+    /// POST an approval response to the legacy `/api/respond` carrier.
+    /// dsh 0.1.2 moved user-question answers to the gateway-internal
+    /// `$events/result` endpoint; approvals may still use this path.
+    pub async fn respond_legacy(&self, response: &Value) -> anyhow::Result<RpcReceipt> {
         let mut resp_builder = self
             .inner
             .post(self.api_url("respond"))
@@ -195,8 +195,54 @@ impl HttpClient {
         }
         let text = resp.text().await.context("respond body read")?;
         tracing::debug!(target: "dsh-bridge::respond", body = %text, "respond receipt raw");
-        serde_json::from_str::<RpcReceipt>(&text)
-            .with_context(|| format!("invalid respond receipt: {text}"))
+        let raw: Value = serde_json::from_str(&text)
+            .with_context(|| format!("invalid respond receipt: {text}"))?;
+        let accepted = raw
+            .get("accepted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let reason = raw
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("rejected")
+            .to_string();
+        Ok(RpcReceipt::Legacy { accepted, reason })
+    }
+
+    /// POST a resolved `$events` waterfall result to the gateway-internal
+    /// `/api/$events/result` endpoint. `args` must already be the exact
+    /// `{ clientId, eventId, outcome }` object the gateway validates.
+    pub async fn remote_events_result(&self, args: &Value) -> anyhow::Result<RpcReceipt> {
+        let mut resp_builder = self
+            .inner
+            .post(self.api_url("$events/result"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "args": args }));
+        if let Some(cookie) = &self.auth_cookie {
+            resp_builder = resp_builder.header(reqwest::header::COOKIE, cookie);
+        }
+        let resp = resp_builder
+            .send()
+            .await
+            .context("transport failure for $events/result")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "transport failure for $events/result: HTTP {status}: {text}"
+            ));
+        }
+        let text = resp.text().await.context("$events/result body read")?;
+        tracing::debug!(target: "dsh-bridge::respond", body = %text, "$events/result receipt raw");
+        let raw: Value = serde_json::from_str(&text)
+            .with_context(|| format!("invalid $events/result receipt: {text}"))?;
+        let is_ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let message = raw
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("gateway error")
+            .to_string();
+        Ok(RpcReceipt::Gateway { is_ok, message })
     }
 
     // ---- Typed control-method helpers ----
@@ -519,6 +565,10 @@ pub struct SseStream {
                 > + Send,
         >,
     >,
+    /// Cached ready result: `Some(Some(client_id))` when the gateway assigned
+    /// a client id, `Some(None)` when a ready item had none, `None` while
+    /// waiting for the first ready item.
+    remote_event_ready: Option<Option<String>>,
 }
 
 impl SseStream {
@@ -534,6 +584,30 @@ impl SseStream {
     {
         Self {
             inner: Box::pin(ws),
+            remote_event_ready: None,
+        }
+    }
+
+    /// The gateway-assigned client id from the `$events` stream's ready item.
+    /// `None` until the gateway proves the stream is ready.
+    pub async fn remote_event_client_id(&mut self) -> Option<String> {
+        if let Some(ready) = self.remote_event_ready.take() {
+            return ready;
+        }
+        loop {
+            let raw = self.next_json().await?;
+            if raw.get("type").and_then(Value::as_str) == Some("ready") {
+                let client_id = raw
+                    .get("clientId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.remote_event_ready = Some(client_id.clone());
+                return client_id;
+            }
+            if remote_message_to_server_request(&raw).is_some() {
+                self.remote_event_ready = Some(None);
+                return None;
+            }
         }
     }
 
@@ -588,6 +662,16 @@ impl SseStream {
     pub async fn next(&mut self) -> Option<ServerRequest> {
         loop {
             let raw = self.next_json().await?;
+            if raw.get("type").and_then(Value::as_str) == Some("ready") {
+                if self.remote_event_ready.is_none() {
+                    self.remote_event_ready = Some(
+                        raw.get("clientId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    );
+                }
+                continue;
+            }
             if let Some(req) = remote_message_to_server_request(&raw) {
                 return Some(req);
             }

@@ -17,6 +17,7 @@ import {
 import "./ConversationTimeline.css";
 import { ForkDialog } from "./ForkDialog";
 import { useProxyRetry, proxyRetryReasonLabel } from "./useProxyRetry";
+import { useNearViewportOnce } from "./useNearViewportOnce";
 
 /** Workspace root for resolving relative file paths inside markdown messages.
  *  Set once per timeline render; module-level so the memoized streaming
@@ -32,6 +33,32 @@ const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
 /** Distance from the bottom that still counts as "following" the stream. */
 const STICKY_BOTTOM_THRESHOLD_PX = 96;
+/** Minimum interval between React commits of the streaming markdown body.
+ *  Each commit re-parses the whole body (react-markdown + Prism + compact
+ *  repair) — tens of ms for a long reply — and dsh streams chunks far faster
+ *  than that. Capping the commit rate bounds the per-frame UI work no matter
+ *  how fast the model streams; the trailing timer guarantees the final text
+ *  always lands (and turn completion swaps in the authoritative snapshot
+ *  body anyway). */
+const STREAMING_RENDER_MIN_INTERVAL_MS = 160;
+/** Tool cards kept visible at the tail of the ACTIVE turn; older tool runs in
+ *  the same turn collapse into the "已处理 N 次工具调用" summary (still
+ *  expandable). Without this cap a long dsh turn kept hundreds of live tool
+ *  cards in the DOM, and every streaming chunk paid layout over that entire
+ *  subtree — the "very laggy once the session has history" complaint. */
+const ACTIVE_TURN_VISIBLE_TOOLS = 8;
+/** Tail window rendered for thinking text. The backend keeps its live buffer
+ *  tail-capped too; this second cap bounds the expanded panel's text node so
+ *  mounting/updating it can never re-lay-out a multi-megabyte string (the
+ *  "expanding the thinking panel froze the UI" complaint on long sessions). */
+const THINKING_BODY_TAIL_CHARS = 20_000;
+
+function thinkingBodyTail(text: string): string {
+  if (text.length <= THINKING_BODY_TAIL_CHARS) return text;
+  return `……（前面已省略 ${text.length - THINKING_BODY_TAIL_CHARS} 字符）\n${text.slice(
+    -THINKING_BODY_TAIL_CHARS,
+  )}`;
+}
 
 /**
  * Timeline stick-to-bottom controller. Owned by `ConversationTimeline` and
@@ -125,7 +152,9 @@ interface MessageRowProps {
   retryable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
-  candidatePaths?: string[];
+  /** Readonly pool-owned array: identity stability is what lets memoized
+   *  MessageRows skip re-render (and markdown re-parse) on streaming deltas. */
+  candidatePaths?: readonly string[];
   /** Copy/fork actions live only under the final reply of a COMPLETED turn —
    *  earlier replies render bare (the trailing icon rows were just noise), and
    *  the active turn's intermediate segments never grow a row: the anchor
@@ -140,7 +169,7 @@ interface StreamingMarkdownProps {
   body: string;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
   changedFiles?: string[];
-  candidatePaths?: string[];
+  candidatePaths?: readonly string[];
   onImagePreview?: (src: string, alt?: string) => void;
 }
 
@@ -227,31 +256,84 @@ function contextCompactionDividerLabel(body: string, state: ContextCompactionSta
 const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: StreamingMarkdownProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
+  const contentRef = useRef(content);
+  const flushTimerRef = useRef<number | null>(null);
+  const followRequestedRef = useRef(false);
+  // Latest snapshot body, read by the mount/id effect below. The effect
+  // intentionally does NOT depend on `body`: a streaming reply folds a new
+  // body prop into the snapshot on every accepted patch, and re-running the
+  // effect per fold tore down + recreated the store subscription and timer
+  // each time. Store updates reach us through the subscription instead
+  // (append events while streaming, a `replace` event when a full snapshot
+  // re-aligns the store to the authoritative body).
+  const bodyRef = useRef(body);
+  bodyRef.current = body;
 
   useEffect(() => {
-    const currentBody = ensureStreamingMessageBody(id, body);
-    setContent(currentBody);
+    // The stream store is the authoritative source while streaming (the
+    // folded snapshot body is derived FROM it), so chunk events and body-prop
+    // folds funnel into the same throttled commit: at most one markdown
+    // re-parse per interval, always trailing, so the final text lands at most
+    // one interval after the last chunk (and turn completion swaps in the
+    // authoritative snapshot body anyway).
+    contentRef.current = ensureStreamingMessageBody(id, bodyRef.current);
 
-    return subscribeStreamingMessage(id, (event) => {
-      const shouldFollow = timelineScrollController?.isSticky() ?? false;
-      setContent((previous) =>
-        event.type === "replace" ? event.text : `${previous}${event.text}`,
-      );
-      if (!shouldFollow) return;
-      // Wait for React commit + layout so the new markdown height is included.
-      requestAnimationFrame(() => {
+    const commit = () => {
+      flushTimerRef.current = null;
+      setContent(contentRef.current);
+      if (followRequestedRef.current) {
+        followRequestedRef.current = false;
+        // Wait for React commit + layout so the new markdown height is
+        // included before pinning to the bottom.
         requestAnimationFrame(() => {
-          timelineScrollController?.stickToBottom();
+          requestAnimationFrame(() => {
+            timelineScrollController?.stickToBottom();
+          });
         });
-      });
+      }
+    };
+    const scheduleCommit = () => {
+      if (flushTimerRef.current != null) return;
+      // Adaptive cadence: remark parse + reconciliation cost scales with the
+      // body, so a long dsh reply widens the commit interval instead of
+      // dropping frames. Short replies keep the snappy base interval.
+      const length = contentRef.current.length;
+      const interval =
+        length > 64_000 ? 600 : length > 24_000 ? 320 : STREAMING_RENDER_MIN_INTERVAL_MS;
+      flushTimerRef.current = window.setTimeout(commit, interval);
+    };
+
+    scheduleCommit();
+    const unsubscribe = subscribeStreamingMessage(id, (event) => {
+      if (timelineScrollController?.isSticky() ?? false) {
+        followRequestedRef.current = true;
+      }
+      contentRef.current =
+        event.type === "replace" ? event.text : `${contentRef.current}${event.text}`;
+      scheduleCommit();
     });
-  }, [id, body]);
+    return () => {
+      unsubscribe();
+      if (flushTimerRef.current != null) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   return (
     <div ref={hostRef} className="msg-streaming-markdown">
       <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} onImagePreview={onImagePreview} />
     </div>
   );
+});
+
+/** Tail-capped body for the LIVE (in-progress) thinking segment. The parent
+ *  re-renders on every streaming patch, so without the cap each chunk would
+ *  re-lay-out the whole accumulated reasoning text. */
+const ThinkingBodyTail = memo(function ThinkingBodyTail({ text }: { text: string }) {
+  return <div className="thinking-body">{thinkingBodyTail(text)}</div>;
 });
 
 function TimelineCollapseSummary({
@@ -419,6 +501,12 @@ const MessageRow = memo(function MessageRow({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<ImagePreviewState | null>(null);
+  // Deferred markdown hydration: a long-history session can hold thousands of
+  // mounted rows (nav jumps / paging expand the window to the whole timeline),
+  // and eagerly parsing every assistant body froze the UI on each expansion.
+  // Large bodies render a placeholder until the row nears the viewport.
+  const markdownHostRef = useRef<HTMLDivElement | null>(null);
+  const nearViewport = useNearViewportOnce(markdownHostRef, body.length > 1200);
 
   useEffect(() => {
     if (!editing) setDraft(body);
@@ -563,10 +651,10 @@ const MessageRow = memo(function MessageRow({
     return (
       <div key={id} className="msg msg-assistant" data-message-id={id}>
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
-        <div className="msg-content msg-content-assistant">
+        <div className="msg-content msg-content-assistant" ref={markdownHostRef}>
           {streaming ? (
             <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} changedFiles={visibleChangedFiles} candidatePaths={candidatePaths} onImagePreview={handleImagePreview} />
-          ) : (
+          ) : nearViewport ? (
             <MarkdownBody
               content={body}
               workspaceRoot={visibleWorkspaceRoot}
@@ -575,6 +663,10 @@ const MessageRow = memo(function MessageRow({
               candidatePaths={candidatePaths}
               onImagePreview={handleImagePreview}
             />
+          ) : (
+            // Not yet near the viewport: skip the react-markdown parse until
+            // the row approaches (useNearViewportOnce flips this per row).
+            <div className="msg-markdown-lazy" aria-hidden="true" />
           )}
           {streaming && <span className="streaming-cursor" />}
         </div>
@@ -852,6 +944,77 @@ function buildTimelineCollapseState({
       return;
     }
 
+    const lastItem = turnItems[turnItems.length - 1];
+    const isCurrentTurn =
+      turnIsActive &&
+      (activeTurnStartIndex < 0 || (lastItem ? lastItem.index > activeTurnStartIndex : false));
+
+    if (isCurrentTurn) {
+      // The active turn used to render every item uncollapsed — a long dsh
+      // turn then kept hundreds of live tool cards in the DOM, and every
+      // streaming chunk paid style/layout over that entire subtree. Collapse
+      // older tool runs exactly like completed turns, but keep the newest
+      // tools (plus the growing reply) visible so live progress stays
+      // readable. When the turn completes, the normal completed-turn grouping
+      // below takes over.
+      const toolItems = turnItems.filter((candidate) => candidate.kind === "tool");
+      if (toolItems.length > ACTIVE_TURN_VISIBLE_TOOLS) {
+        const keepThresholdIndex =
+          toolItems[toolItems.length - ACTIVE_TURN_VISIBLE_TOOLS].index;
+        // Kept tail = the newest tool runs plus everything from the newest
+        // assistant segment onward (the growing reply must stay visible).
+        // Everything BEFORE the tail — older tools AND older intermediate
+        // assistant narration — collapses into the summary. Anchoring the
+        // summary to the tail's first item keeps it hugging the top of the
+        // visible region; anchoring it to the last assistant instead (the old
+        // behavior) stranded it mid-conversation whenever newer segments
+        // streamed in below it.
+        const lastAssistant = [...turnItems]
+          .reverse()
+          .find((candidate) => candidate.kind === "assistant");
+        const keptStartIndex = Math.min(
+          keepThresholdIndex,
+          lastAssistant ? lastAssistant.index : Number.MAX_SAFE_INTEGER,
+        );
+        const anchor = turnItems.find((candidate) => candidate.index >= keptStartIndex);
+        if (anchor) {
+          // Change-set-bearing rows stay visible (the ChangesBar anchors there).
+          const activeItemsToCollapse = turnItems.filter(
+            (candidate) =>
+              candidate.index < anchor.index &&
+              !(
+                candidate.message &&
+                turnChangeSetsByMessageId[candidate.message.id]?.files.length
+              ),
+          );
+          const groupHiddenIndexes = new Set(
+            activeItemsToCollapse.map((candidate) => candidate.index),
+          );
+          for (const index of groupHiddenIndexes) {
+            hiddenIndexes.add(index);
+          }
+          // Duration keeps tracking the newest assistant segment even when the
+          // anchor itself is a tool (no message to measure against).
+          const lastAssistantMessage = lastAssistant?.message ?? null;
+          groupsBySummaryIndex.set(anchor.index, {
+            key: `${turnStartMessage?.id ?? "turn"}:active`,
+            items: activeItemsToCollapse,
+            itemCount: activeItemsToCollapse.length,
+            toolCount: activeItemsToCollapse.filter(
+              (candidate) => candidate.kind === "tool",
+            ).length,
+            durationLabel: lastAssistantMessage
+              ? elapsedLabelForTurn(turnStartMessage, lastAssistantMessage, activeItemsToCollapse)
+              : null,
+            userMessageId: turnStartMessage?.id ?? null,
+          });
+        }
+      }
+      turnItems = [];
+      turnStartMessage = null;
+      return;
+    }
+
     const finalAssistant = [...turnItems]
       .reverse()
       .find((candidate) => candidate.kind === "assistant" && candidate.message);
@@ -863,10 +1026,12 @@ function buildTimelineCollapseState({
 
     const itemsToCollapse = turnItems.filter((candidate) => {
       if (candidate.index === finalAssistant.index) return false;
-      // Never collapse assistant replies: the user needs to see the full
-      // reasoning chain when browsing a restored session. Only tools and
-      // other non-message items go into the turn summary.
-      if (candidate.kind === "assistant") return false;
+      // Intermediate assistant segments (dsh progress narration) collapse
+      // into the turn summary together with the tools: leaving them expanded
+      // sandwiched the summary bar between blocks of assistant prose and it
+      // appeared "in the middle of the conversation". They stay reachable by
+      // expanding the summary. Change-set-bearing rows stay visible (the
+      // ChangesBar anchors there).
       if (
         candidate.message &&
         turnChangeSetsByMessageId[candidate.message.id]?.files.length
@@ -875,15 +1040,6 @@ function buildTimelineCollapseState({
       }
       return true;
     });
-
-    const isCurrentTurn =
-      turnIsActive &&
-      (activeTurnStartIndex < 0 || finalAssistant.index > activeTurnStartIndex);
-    if (isCurrentTurn) {
-      turnItems = [];
-      turnStartMessage = null;
-      return;
-    }
 
     const groupHiddenIndexes = new Set(itemsToCollapse.map((candidate) => candidate.index));
     for (const index of groupHiddenIndexes) {
@@ -1467,7 +1623,16 @@ export function ConversationTimeline({
   // 对话导航（左侧虚线刻度）：覆盖全部历史用户消息（不含追加指令），
   // 不限于当前可视窗口；超出窗口的轮次点击时先扩大窗口再跳转。
   // 预览文本截取用户消息首部与其后第一条助手回复的首部。
+  // Nav excerpts are immutable once built (user message bodies never change,
+  // and a turn's first non-empty reply does not either) — cache them by id so
+  // the per-patch O(timeline) walk stays a pointer chase instead of re-running
+  // body-splitting regexes over every historical user message on a long
+  // session.
+  const userNavExcerptCacheRef = useRef(
+    new Map<string, { id: string; timelineIndex: number; userExcerpt: string; replyExcerpt: string }>(),
+  );
   const userNavEntries = useMemo(() => {
+    const cache = userNavExcerptCacheRef.current;
     const entries: {
       id: string;
       timelineIndex: number;
@@ -1479,15 +1644,24 @@ export function ConversationTimeline({
       if (typeof item !== "object" || !("Message" in item)) continue;
       const msg = allMessagesById.get(item.Message);
       if (!msg || msg.role !== "User" || msg.is_steer) continue;
+      const cached = cache.get(msg.id);
+      if (cached) {
+        cached.timelineIndex = i;
+        entries.push(cached);
+        continue;
+      }
       const { text } = splitUserMessageBody(msg.body);
-      entries.push({
+      const entry = {
         id: msg.id,
         timelineIndex: i,
         userExcerpt: excerptPreviewText(text || msg.body),
         replyExcerpt: "",
-      });
+      };
+      cache.set(msg.id, entry);
+      entries.push(entry);
     }
     for (let i = 0; i < entries.length; i += 1) {
+      if (entries[i].replyExcerpt) continue;
       const searchEnd =
         i + 1 < entries.length ? entries[i + 1].timelineIndex : snapshot.timeline.length;
       for (let j = entries[i].timelineIndex + 1; j < searchEnd; j += 1) {
@@ -1546,11 +1720,18 @@ export function ConversationTimeline({
       const scroller = scrollRef.current;
       if (!scroller || userNavEntries.length === 0) return;
       const midY = scroller.getBoundingClientRect().top + scroller.clientHeight * 0.4;
+      // One querySelectorAll instead of one querySelector per entry: a
+      // long-history session has hundreds of nav entries but only a handful
+      // of rendered anchors, and per-entry DOM queries on every scroll event
+      // made expanding content above the fold jank.
+      const anchorById = new Map<string, HTMLElement>();
+      for (const node of scroller.querySelectorAll<HTMLElement>("[data-nav-user-id]")) {
+        const id = node.dataset.navUserId;
+        if (id) anchorById.set(id, node);
+      }
       let currentId: string | null = null;
       for (const entry of userNavEntries) {
-        const node = scroller.querySelector<HTMLElement>(
-          `[data-nav-user-id="${entry.id}"]`,
-        );
+        const node = anchorById.get(entry.id);
         if (!node) continue; // 该轮次尚未渲染（在可视窗口外），跳过
         if (node.getBoundingClientRect().top <= midY) {
           currentId = entry.id;
@@ -1560,9 +1741,7 @@ export function ConversationTimeline({
       }
       // 顶部没有任何渲染锚点在中线之上时，高亮第一个已渲染轮次。
       if (currentId === null) {
-        const firstVisible = userNavEntries.find((entry) =>
-          scroller.querySelector(`[data-nav-user-id="${entry.id}"]`),
-        );
+        const firstVisible = userNavEntries.find((entry) => anchorById.has(entry.id));
         currentId = firstVisible?.id ?? userNavEntries[userNavEntries.length - 1].id;
       }
       setNavActiveId((prev) => (prev === currentId ? prev : currentId));
@@ -1672,18 +1851,39 @@ export function ConversationTimeline({
   );
   const retryableMessages = useMemo(() => retryableUserMessageIds(snapshot), [snapshot]);
 
+  // Message meta (id/role/is_steer) with a structural identity: roles are
+  // immutable per id, so this map survives streaming body growth. Keying the
+  // file-path pool on it (instead of the per-delta `allMessagesById`) is what
+  // keeps the pool from being rebuilt — a regex sweep over EVERY historical
+  // tool's raw input/output — on each streamed chunk of a long dsh session.
+  const messageMetaSignature = `${snapshot.session.id}:${snapshot.messages.length}:${snapshot.messages[0]?.id ?? ""}`;
+  const messageMetaById = useMemo(
+    () =>
+      new Map(
+        snapshot.messages.map((message) => [
+          message.id,
+          { id: message.id, role: message.role, is_steer: message.is_steer },
+        ]),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messageMetaSignature],
+  );
+
   // Per-turn pool of file paths harvested from shell tool inputs/outputs and
   // turn file changes; MarkdownBody matches message file references against
-  // this pool instead of searching the whole repository.
+  // this pool instead of searching the whole repository. Rebuilt only when
+  // the timeline/tool structure changes — never per streaming text delta
+  // (per-tool scans are additionally cached by object identity, see
+  // file-path-candidates.ts).
   const filePathCandidatePool = useMemo(
     () =>
       buildFilePathCandidatePool(
         snapshot.timeline,
-        allMessagesById,
+        messageMetaById,
         allToolsById,
         turnChangeSetsByMessageId,
       ),
-    [snapshot.timeline, allMessagesById, allToolsById, turnChangeSetsByMessageId],
+    [snapshot.timeline, messageMetaById, allToolsById, turnChangeSetsByMessageId],
   );
 
   const toggleCollapseGroup = (key: string) => {
@@ -1698,6 +1898,13 @@ export function ConversationTimeline({
     });
   };
 
+  // Stable identity: an inline arrow here would break MessageRow memoization
+  // for the anchor rows on every streaming delta (each break costs a full
+  // markdown re-parse of that message).
+  const openForkPicker = useCallback((messageId: string) => {
+    setForkPickerMessageId(messageId);
+  }, []);
+
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
 
@@ -1709,7 +1916,12 @@ export function ConversationTimeline({
       renderChanges = true,
     }: { keyPrefix?: string; renderChanges?: boolean } = {},
   ) => {
-    if (typeof item === "string" && item === "Thinking") {
+    if (item === "Thinking" || (typeof item === "object" && "Thinking" in item)) {
+      // Historical thinking segments are live-only: once a reasoning segment
+      // ends, its conclusions are in the reply that follows — keeping a
+      // collapsed block per turn just clutters the timeline. The reducer
+      // still folds the (tail-capped) text into the segment item; it simply
+      // is not rendered.
       return null;
     }
 
@@ -1746,7 +1958,7 @@ export function ConversationTimeline({
               onFilePathClick={onFilePathClick}
               candidatePaths={
                 msg.role === "Assistant"
-                  ? [...(filePathCandidatePool.byMessageId.get(msg.id) ?? filePathCandidatePool.all)]
+                  ? filePathCandidatePool.byMessageId.get(msg.id) ?? filePathCandidatePool.all
                   : undefined
               }
               showActions={
@@ -1760,7 +1972,7 @@ export function ConversationTimeline({
               // 分叉只对已完成轮次开放，由后端再兜底校验一次。点击打开分叉点选择器。
               onForkOpen={
                 onForkConversation && !(turnIsActive && msg.role === "Assistant" && isCurrentTurnMessage)
-                  ? (messageId) => setForkPickerMessageId(messageId)
+                  ? openForkPicker
                   : undefined
               }
             />
@@ -1902,7 +2114,7 @@ export function ConversationTimeline({
               )}
             </button>
             {thinkingExpanded && snapshot.thinking_text && (
-              <div className="thinking-body">{snapshot.thinking_text}</div>
+              <ThinkingBodyTail text={snapshot.thinking_text} />
             )}
           </div>
         )}

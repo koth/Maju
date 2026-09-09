@@ -87,7 +87,7 @@ pub fn build_dormant_remote_workspace_ui(
     ui.timeline.retain(|item| match item {
         workspace_model::TimelineItem::Tool(_) => false,
         workspace_model::TimelineItem::Message(_) => true,
-        workspace_model::TimelineItem::Thinking => true,
+        workspace_model::TimelineItem::Thinking(_) => true,
     });
     Ok(ui)
 }
@@ -2152,7 +2152,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
         assert!(
             ui.timeline
                 .iter()
-                .any(|item| matches!(item, TimelineItem::Thinking))
+                .any(|item| matches!(item, TimelineItem::Thinking(_)))
         );
         assert_eq!(ui.messages.len(), initial_msg_count);
 

@@ -669,7 +669,20 @@ pub struct PendingSteer {
 pub enum TimelineItem {
     Message(Uuid),
     Tool(Uuid),
-    Thinking,
+    /// One thinking segment. The marker is pushed when the segment starts;
+    /// the reasoning text folds into it when the segment completes, so each
+    /// segment renders as its own collapsible block at its chronological
+    /// position (previously every segment shared one live buffer whose text
+    /// vanished once the segment ended).
+    Thinking(ThinkingSegment),
+}
+
+/// Reasoning text of a single thinking segment. The reducer keeps the live
+/// buffer tail-capped so no segment can grow unbounded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ThinkingSegment {
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1471,6 +1484,15 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiSnapshotPatch {
     pub revision: u64,
+    /// Revision this patch diffs FROM (the bridge cursor's revision before
+    /// this patch was emitted). Lets the frontend verify continuity cheaply:
+    /// a patch whose base matches the locally accepted revision is a
+    /// self-contained delta (coalesced revision jumps are normal); a mismatch
+    /// means emitted patch events were lost in IPC and the frontend must
+    /// repair from the bridge's patch replay buffer instead of refetching the
+    /// whole snapshot. 0 = unknown (legacy emitters).
+    #[serde(default)]
+    pub base_revision: u64,
     pub session: SessionSummary,
     #[serde(default)]
     pub session_config: SessionConfigState,

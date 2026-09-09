@@ -52,7 +52,7 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
   // jumps).
   const rows: Row[] = [];
   snapshot.timeline.forEach((item) => {
-    if (item === "Thinking") {
+    if (item === "Thinking" || (typeof item === "object" && "Thinking" in item)) {
       // Timeline Thinking markers render as nothing — exactly like the
       // desktop. The reducer pushes one per reasoning segment and LEAVES it
       // in place once real content lands, and ThinkingActivity does not touch

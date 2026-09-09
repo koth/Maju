@@ -3,15 +3,43 @@ use acp_core::{ClientEvent, diff_to_hunks};
 use serde_json::{Map, Value};
 use workspace_model::{
     AgentPlanEntry, AgentPlanEntryPriority, AgentPlanEntryStatus, ChatMessage, DiffHunk,
-    DiffLineKind, SessionStatus, SidebarSection, TerminalOutput, ThinkingStatus, TimelineItem,
-    ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot, UsageEvent,
-    UsageEventScope, UsageModelSummary, UsageTokenBreakdown,
+    DiffLineKind, SessionStatus, SidebarSection, TerminalOutput, ThinkingSegment, ThinkingStatus,
+    TimelineItem, ToolDiffPreview, ToolInvocation, ToolLogEntry, ToolStatus, UiSnapshot,
+    UsageEvent, UsageEventScope, UsageModelSummary, UsageTokenBreakdown,
 };
 
 const MAX_TOOL_DETAIL_CHARS: usize = 32 * 1024;
 const MAX_TOOL_RAW_INPUT_CHARS: usize = 16 * 1024;
 const MAX_TOOL_RAW_OUTPUT_CHARS: usize = 32 * 1024;
 const MAX_TOOL_LOG_CHARS: usize = 4 * 1024;
+/// Tail window kept for the live thinking text. A long reasoning segment
+/// otherwise grows unbounded (multi-MB on hour-long turns); every snapshot
+/// clone and patch serialization then pays for it, and the expanded thinking
+/// panel re-lays-out the whole text node on each streaming patch. The panel
+/// is a 320px-tall scroller — nobody reads beyond a tail window.
+const MAX_THINKING_TEXT_TAIL_BYTES: usize = 64 * 1024;
+/// Drain slack so the O(cap) memmove happens once per slack of growth rather
+/// than per chunk.
+const MAX_THINKING_TEXT_DRAIN_SLACK_BYTES: usize = 16 * 1024;
+
+/// Fold the live thinking buffer into the most recent Thinking timeline item
+/// so each completed segment keeps its own text at its own timeline position
+/// (the bottom live block only ever shows the in-progress segment). Safe to
+/// call repeatedly — it drains the buffer.
+fn finalize_thinking_segment(ui: &mut UiSnapshot) {
+    let text = std::mem::take(&mut ui.thinking_text);
+    if text.is_empty() {
+        return;
+    }
+    if let Some(TimelineItem::Thinking(segment)) = ui
+        .timeline
+        .iter_mut()
+        .rev()
+        .find(|item| matches!(item, TimelineItem::Thinking(_)))
+    {
+        segment.text.push_str(&text);
+    }
+}
 
 pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
     match event {
@@ -25,15 +53,32 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
                 // (repeated active:true deltas) keeps the text.
                 if ui.thinking_status != Some(ThinkingStatus::Active) {
                     ui.thinking_text.clear();
-                    ui.timeline.push(TimelineItem::Thinking);
+                    ui.timeline
+                        .push(TimelineItem::Thinking(ThinkingSegment::default()));
                 }
                 ui.thinking_status = Some(ThinkingStatus::Active);
             } else {
+                // Segment complete: fold the reasoning text into the segment's
+                // own timeline block so it stays visible at its chronological
+                // position instead of evaporating with the shared live buffer.
+                finalize_thinking_segment(ui);
                 ui.thinking_status = Some(ThinkingStatus::Completed);
             }
         }
         ClientEvent::ThinkingChunk { text } => {
             ui.thinking_text.push_str(&text);
+            // Keep only the tail of the reasoning buffer (see the consts
+            // above). Draining at a UTF-8 char boundary keeps the String
+            // valid; the slack amortizes the O(cap) memmove.
+            let cap_with_slack =
+                MAX_THINKING_TEXT_TAIL_BYTES + MAX_THINKING_TEXT_DRAIN_SLACK_BYTES;
+            if ui.thinking_text.len() > cap_with_slack {
+                let mut cut = ui.thinking_text.len() - cap_with_slack;
+                while cut < ui.thinking_text.len() && !ui.thinking_text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                ui.thinking_text.drain(..cut);
+            }
         }
         ClientEvent::UsageUpdated { usage } => {
             apply_usage_update(ui, usage);
@@ -41,7 +86,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         ClientEvent::TurnFinished { stop_reason, .. } => {
             finalize_open_tools(ui, &stop_reason);
             ui.thinking_status = None;
-            ui.thinking_text.clear();
+            finalize_thinking_segment(ui);
             ui.agent_plan.clear();
             ui.session.status = SessionStatus::Idle;
             let section_title = if stop_reason == "end_turn" {
@@ -550,7 +595,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
         }
         ClientEvent::Interrupted { reason } => {
             ui.agent_plan.clear();
-            ui.thinking_text.clear();
+            finalize_thinking_segment(ui);
             ui.session.status = workspace_model::SessionStatus::Interrupted;
             for tool in ui
                 .tools
@@ -678,7 +723,7 @@ fn push_context_compaction_notice(ui: &mut UiSnapshot, content: String) {
 fn push_or_replace_context_compaction_notice(ui: &mut UiSnapshot, content: String) {
     let last_message_id = ui.timeline.last().and_then(|item| match item {
         TimelineItem::Message(id) => Some(*id),
-        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+        TimelineItem::Tool(_) | TimelineItem::Thinking(_) => None,
     });
     if let Some(message_id) = last_message_id
         && let Some(message) = ui.messages.iter_mut().find(|message| {
@@ -1507,7 +1552,7 @@ fn cap_string(value: String, max_chars: usize) -> String {
 fn last_message_id(item: &TimelineItem) -> Option<uuid::Uuid> {
     match item {
         TimelineItem::Message(id) => Some(*id),
-        TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+        TimelineItem::Tool(_) | TimelineItem::Thinking(_) => None,
     }
 }
 
@@ -2886,5 +2931,43 @@ mod tests {
             ClientEvent::ThinkingChunk { text: "第二段".into() },
         );
         assert_eq!(ui.thinking_text, "第二段");
+    }
+
+    #[test]
+    fn thinking_segment_folds_text_into_its_timeline_block() {
+        let mut ui = empty_ui();
+
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk { text: "第一段推理".into() },
+        );
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: false });
+
+        // Segment completed: its text now lives in the segment's own timeline
+        // item, and the live buffer is drained.
+        assert_eq!(ui.thinking_text, "");
+        assert_eq!(ui.timeline.len(), 1);
+        assert_eq!(
+            ui.timeline[0],
+            workspace_model::TimelineItem::Thinking(workspace_model::ThinkingSegment {
+                text: "第一段推理".into(),
+            })
+        );
+
+        // A second segment gets its own block.
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
+        apply_event(
+            &mut ui,
+            ClientEvent::ThinkingChunk { text: "第二段推理".into() },
+        );
+        apply_event(&mut ui, ClientEvent::ThinkingActivity { active: false });
+        assert_eq!(ui.timeline.len(), 2);
+        assert_eq!(
+            ui.timeline[1],
+            workspace_model::TimelineItem::Thinking(workspace_model::ThinkingSegment {
+                text: "第二段推理".into(),
+            })
+        );
     }
 }

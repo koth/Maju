@@ -5,8 +5,8 @@ use workspace_model::{
     AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
     FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
     ListChangeSetsRequest, PermissionInputResponse, PromptSendOutcome, SessionConfigState,
-    SessionFileChange, UiSnapshot, UsageDailyBucket, UsageSummaryRequest, UsageSummaryRow,
-    UserPromptContent, WorkspaceSessionList,
+    SessionFileChange, UiSnapshot, UiSnapshotPatch, UsageDailyBucket, UsageSummaryRequest,
+    UsageSummaryRow, UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -26,6 +26,21 @@ pub fn session_get_revision(state: State<'_, AppState>) -> Result<(String, u64),
     state.with_app(|app| {
         app.poll_prompt_progress();
         Ok((app.ui.session.id.to_string(), app.ui.revision))
+    })
+}
+
+/// Incremental self-heal source: the emitted-patch chain continuing from
+/// `since_revision`, or `None` when the bridge's replay buffer cannot cover
+/// the span (eviction / session change) and the caller must fall back to a
+/// full `session_get_state`.
+#[tauri::command]
+pub fn session_get_patches_since(
+    state: State<'_, AppState>,
+    since_revision: u64,
+) -> Result<Option<Vec<UiSnapshotPatch>>, String> {
+    state.with_app(|app| {
+        let session_id = app.ui.session.id.to_string();
+        Ok(state.get_patches_since(&session_id, since_revision))
     })
 }
 

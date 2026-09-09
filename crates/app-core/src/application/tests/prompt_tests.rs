@@ -68,7 +68,7 @@ fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
         ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
-    app.ui.timeline.push(TimelineItem::Thinking);
+    app.ui.timeline.push(TimelineItem::Thinking(Default::default()));
     app.ui.timeline.push(TimelineItem::Message(system_id));
     app.store
         .insert_message(&session_id, &user_id.to_string(), "User", "old prompt", 1)
@@ -227,6 +227,89 @@ fn resumed_codex_session_applies_replayed_tool_completed() {
     app.session.shutdown();
 }
 
+/// codex `session/load` replays every historical tool call as a terminal
+/// `ToolCallUpdate` carrying rollout-internal ids (`tool_…`) that never match
+/// the app's persisted rows (`call_…`). The resume-replay filter must drop
+/// terminal events for unknown call ids — applying them created one junk
+/// "tool" card per history entry on every reopen (timeline flooding with
+/// "已运行 tool / Plan updated" rows) and `refresh_session_status` flipped the
+/// finished session back to Streaming (stop button + steer placeholder on a
+/// session that had ended). Terminal events for KNOWN call ids are still kept
+/// so a genuinely stuck Running card can be finalized.
+#[test]
+fn resume_replay_keeps_terminal_tool_events_only_for_known_call_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    wait_for_control(&mut app, SessionConfigCategory::Model);
+
+    app.skip_replay = true;
+
+    // Replay artifact: unknown rollout-internal call id → must be dropped.
+    let replayed = ClientEvent::ToolCompleted {
+        id: "tool_X95POpB556MXMdrD5E327f8s".into(),
+        name: Some("tool".into()),
+        outcome: "Plan updated".into(),
+        raw_output: None,
+        terminal_output: None,
+    };
+    assert!(
+        !app.keep_replay_event(&replayed),
+        "terminal event for an unknown call id is a replay artifact"
+    );
+
+    // Known row: the terminal event is kept so a stuck Running card can be
+    // finalized (the original purpose of the codex carve-out).
+    let known_id = "call-known".to_string();
+    let tool_id = uuid::Uuid::new_v4();
+    app.ui.tools.push(ToolInvocation {
+        id: tool_id,
+        call_id: known_id.clone(),
+        parent_call_id: None,
+        name: "bash".into(),
+        kind: "execute".into(),
+        summary: "ls".into(),
+        status: ToolStatus::Running,
+        is_subagent: false,
+        detail_text: String::new(),
+        logs: Vec::new(),
+        diff_paths: Vec::new(),
+        diff_previews: Vec::new(),
+        raw_input: None,
+        raw_output: None,
+        terminal_output: None,
+        error: None,
+        permission_options: Vec::new(),
+        permission_input: None,
+        permission_decision: None,
+        can_stop: false,
+        stop_kind: None,
+        stop_status: None,
+    });
+    let known = ClientEvent::ToolCompleted {
+        id: known_id,
+        name: Some("bash".into()),
+        outcome: "done".into(),
+        raw_output: None,
+        terminal_output: None,
+    };
+    assert!(
+        app.keep_replay_event(&known),
+        "terminal event for a known call id finalizes the stuck card"
+    );
+
+    // The dropped artifact must never reach the reducer: no new row, no
+    // timeline growth, no status flip.
+    let tools_before = app.ui.tools.len();
+    let timeline_before = app.ui.timeline.len();
+    app.ui.session.status = SessionStatus::Idle;
+    // (the filter drops it before apply — nothing to apply for `replayed`)
+    assert_eq!(app.ui.tools.len(), tools_before);
+    assert_eq!(app.ui.timeline.len(), timeline_before);
+    assert_eq!(app.ui.session.status, SessionStatus::Idle);
+
+    app.session.shutdown();
+}
+
 
 #[test]
 fn retry_user_message_is_rejected_after_assistant_started() {
@@ -330,7 +413,7 @@ fn interleaved_assistant_messages_survive_session_restore() {
                 .find(|tool| tool.id == *id)
                 .map(|tool| format!("tool:{}", tool.call_id))
                 .unwrap(),
-            TimelineItem::Thinking => "thinking".into(),
+            TimelineItem::Thinking(_) => "thinking".into(),
         })
         .collect::<Vec<_>>();
 

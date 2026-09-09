@@ -155,14 +155,39 @@ function makeChangedFile(path: string, section: ChangedFile["section"]): Changed
   };
 }
 
+/** Turn-change entry for the review reload signature (SessionFileChange). */
+function makeTurnChange(
+  messageId: string,
+  path: string,
+): UiSnapshot["turn_changes"][number] {
+  return {
+    message_id: messageId,
+    changes: [
+      {
+        path,
+        change_type: "Modified",
+        old_text: null,
+        new_text: "new\n",
+        added_lines: 1,
+        removed_lines: 0,
+        timestamp: "2026-05-12T04:00:00Z",
+      },
+    ],
+  };
+}
+
 beforeEach(() => {
   vi.mocked(appConfirm).mockResolvedValue(true);
   vi.mocked(fsListDir).mockResolvedValue([]);
-  vi.mocked(sessionListChangeSets).mockResolvedValue([]);
-  vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
-    change_set_id: "empty",
-    files: [],
-  });
+  // mockReset (not just clearAllMocks) so unconsumed mockResolvedValueOnce
+  // entries from an earlier test cannot leak into the next one's load queue.
+  vi.mocked(sessionListChangeSets).mockReset().mockResolvedValue([]);
+  vi.mocked(sessionListChangeSetFiles)
+    .mockReset()
+    .mockResolvedValue({
+      change_set_id: "empty",
+      files: [],
+    });
   vi.mocked(sessionGetChangeSetFileDiff).mockImplementation(async ({ change_set_id, path }) =>
     makeRecord(change_set_id, path),
   );
@@ -693,6 +718,9 @@ describe("ReviewPanel scoped change sets", () => {
             { id: "new-turn-message", role: "Assistant", body: "new edit" },
           ],
           timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+          // Newer agent changes landed: the turn-change signature advances,
+          // which is what triggers the review reload now (not the revision).
+          turn_changes: [makeTurnChange("new-turn-message", "src/new.ts")],
         })}
         refreshing={false}
         hydrated
@@ -731,6 +759,14 @@ describe("ReviewPanel scoped change sets", () => {
       ],
       timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
     });
+    const snapshotWithNewTurnFiles = makeSnapshot({
+      messages: [
+        { id: "old-turn-message", role: "Assistant", body: "old edit" },
+        { id: "new-turn-message", role: "Assistant", body: "new edit" },
+      ],
+      timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+      turn_changes: [makeTurnChange("new-turn-message", "src/new.ts")],
+    });
 
     const { rerender } = render(
       <ReviewPanel
@@ -750,7 +786,7 @@ describe("ReviewPanel scoped change sets", () => {
 
     rerender(
       <ReviewPanel
-        snapshot={snapshot}
+        snapshot={snapshotWithNewTurnFiles}
         refreshing={false}
         hydrated
         onRefresh={() => {}}
@@ -1477,6 +1513,10 @@ describe("ReviewPanel scoped change sets", () => {
               { id: "new-turn-message", role: "Assistant", body: "new edit" },
             ],
             timeline: [{ Message: "old-turn-message" }, { Message: "new-turn-message" }],
+            turn_changes:
+              revision > 1
+                ? [makeTurnChange("new-turn-message", "src/new.ts")]
+                : [],
           })}
           refreshing={false}
           hydrated

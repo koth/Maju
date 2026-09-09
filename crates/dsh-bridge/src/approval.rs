@@ -1,6 +1,7 @@
 //! Approval/question bridging: translate harness `approval/requested` /
 //! `question/requested` into Kodex `ToolPermissionRequest`, and carry the
-//! user's decision back to `/api/respond` via `RuntimeCommand::ResolveHarnessApproval`.
+//! user's decision back to the harness (`/api/$events/result` for questions;
+//! approvals retain the legacy `/api/respond` carrier).
 //!
 //! Pending entries are keyed by the dsh `rpcId`/`approvalId` (globally unique
 //! UUID), stored in the session's own `PermissionBroker`-adjacent table on the
@@ -10,9 +11,12 @@
 use acp_core::{HarnessApprovalOutcome, HarnessApprovalResult, HarnessQuestionAnswer};
 
 use crate::host::{PendingApprovalKind, SessionSink};
+use serde_json::Value;
+
 use crate::rpc_types::{
     ApprovalOutcomeWire, ApprovalResponsePayload, AskUserQuestionAnswerItemWire,
-    AskUserQuestionAnswerWire, ClientResponse, QuestionResponsePayload, RpcId,
+    AskUserQuestionAnswerWire, QuestionResponsePayload, RemoteEventOutcome, RemoteEventResultArgs,
+    RpcId,
 };
 
 /// Snapshot of a session's pending approvals/questions, used by the session
@@ -20,7 +24,7 @@ use crate::rpc_types::{
 #[derive(Debug, Default, Clone)]
 pub struct PendingApprovals {
     entries: Vec<PendingEntryView>,
-    question_rpc_ids: Vec<(String, RpcId)>,
+    question_event_ids: Vec<(String, RpcId)>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,7 +37,7 @@ struct PendingEntryView {
 impl PendingApprovals {
     pub fn from_entries(
         entries: Vec<crate::host::PendingEntry>,
-        question_rpc_ids: Vec<(String, RpcId)>,
+        question_event_ids: Vec<(String, RpcId)>,
     ) -> Self {
         Self {
             entries: entries
@@ -44,18 +48,20 @@ impl PendingApprovals {
                     approval_id: e.approval_id,
                 })
                 .collect(),
-            question_rpc_ids,
+            question_event_ids,
         }
     }
 
-    /// Build the `ClientResponse` for a resolved approval/question, looking up
-    /// the dsh `rpcId` and `sessionId` from the session sink.
+    /// Build the wire response for a resolved approval/question. Approvals use
+    /// the legacy `client-response` envelope; questions use the gateway's
+    /// strict `$events/result` args.
     pub fn build_response(
         &self,
         sink: &SessionSink,
+        remote_event_client_id: Option<String>,
         rpc_id: &str,
         result: &HarnessApprovalResult,
-    ) -> Option<ClientResponse> {
+    ) -> Option<Value> {
         let session_id = sink.session_id()?;
         // Find the pending entry by the ui_id (== approvalId for approvals; ==
         // first question id for questions).
@@ -77,20 +83,24 @@ impl PendingApprovals {
                     approval_id: approval_id.clone(),
                     outcome: wire_outcome,
                 };
-                let value = serde_json::to_value(&payload).ok()?;
-                Some(ClientResponse::ok(rpc_id.to_string(), value))
+                serde_json::to_value(payload).ok().map(|value| {
+                    serde_json::json!({
+                        "type": "client-response",
+                        "rpcId": rpc_id,
+                        "result": { "ok": true, "value": value }
+                    })
+                })
             }
             (PendingApprovalKind::Question, HarnessApprovalResult::Question { answers }) => {
-                // The respond rpcId is the question/requested ServerRequest's
-                // rpcId, not the UI-facing question id: the harness matches
-                // the pending ask by rpcId and rejects any other id as
-                // `bad-response` (which surfaced as a silent hang — the
-                // question stayed open forever).
-                let respond_rpc_id = self
-                    .question_rpc_ids
+                // The event id is the `$events` waterfall's `eventId`, not the
+                // UI-facing question id. dsh 0.1.2 resolves the waterfall by
+                // `(clientId, eventId)` and validates outcome/value strictly.
+                let event_id = self
+                    .question_event_ids
                     .iter()
                     .find(|(id, _)| id == rpc_id)
-                    .map(|(_, rpc_id)| rpc_id.clone())?;
+                    .map(|(_, event_id)| event_id.clone())?;
+                let client_id = remote_event_client_id.unwrap_or_default();
                 // dsh's `matchesQuestions` validates answers POSITIONALLY
                 // (`answer[i].id === questions[i].id`), so the batch must be
                 // re-ordered to the exact question order before sending —
@@ -120,8 +130,15 @@ impl PendingApprovals {
                         answers: wire_answers,
                     },
                 };
-                let value = serde_json::to_value(&payload).ok()?;
-                Some(ClientResponse::ok(respond_rpc_id, value))
+                let args = RemoteEventResultArgs {
+                    client_id,
+                    event_id,
+                    outcome: RemoteEventOutcome {
+                        kind: "result",
+                        value: serde_json::to_value(payload).ok()?,
+                    },
+                };
+                serde_json::to_value(args).ok()
             }
             // Kind/result mismatch — the UI sent the wrong shape for this id.
             _ => None,

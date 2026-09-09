@@ -108,6 +108,207 @@ export function clearToolDetailCacheForTests(): void {
 
 export { previewToCompactPatch } from "./compact-patch";
 
+// ── Per-version render model ────────────────────────────────────────────────
+//
+// Everything the card renders is derived from the tool object. The expanded
+// card merges the UNCAPPED stored detail, so these derivations are potential
+// multi-megabyte string scans (regex classification, JSON.parse of raw_input,
+// line splitting) — running them on EVERY render (i.e. on every streaming
+// patch) froze the UI on tool-heavy sessions. Tool objects are immutable per
+// version, so the whole chain is computed once per version into a cached
+// model; every re-render is a field read.
+interface ToolRenderModel {
+  presentation: ToolPresentation;
+  commandEditPaths: string[];
+  trackedDiffPaths: string[];
+  trackedDiffPreviews: ToolDiffPreview[];
+  diffPreviews: ToolDiffPreview[];
+  hasReviewableDiff: boolean;
+  effectiveCategory: ToolCategory;
+  verb: string;
+  bullet: { char: string; className: string };
+  outputLines: { lines: string[]; omitted: number };
+  detailLines: { lines: string[]; omitted: number };
+  logEntries: { entries: ToolInvocation["logs"]; omitted: number };
+  rawOutputLines: { lines: string[]; omitted: number };
+  errorLine: string | null;
+  diffStats: { added: number; removed: number };
+  showEditingDiffOnly: boolean;
+  cmdDetail: string | null;
+  headerTitle: string;
+  explorationResult: ReturnType<typeof getExplorationResult> | null;
+  shellPresentation: ToolPresentation | null;
+  needsPermission: boolean;
+  hasDetail: boolean;
+}
+
+const toolRenderModelCache = new WeakMap<ToolInvocation, ToolRenderModel>();
+
+function toolRenderModel(tool: ToolInvocation): ToolRenderModel {
+  const cached = toolRenderModelCache.get(tool);
+  if (cached) return cached;
+  const model = computeToolRenderModel(tool);
+  toolRenderModelCache.set(tool, model);
+  return model;
+}
+
+function computeToolRenderModel(tool: ToolInvocation): ToolRenderModel {
+  const presentation = deriveToolPresentation(tool);
+  const commandApplyPatchPreviews =
+    presentation.presentationKind === "command"
+      ? diffPreviewsFromApplyPatchCommand(presentation.command)
+      : [];
+  const rawCommandEditPaths =
+    presentation.presentationKind === "command"
+      ? uniqueStrings([
+          ...getCommandMutationDiffPaths(tool, presentation.command),
+          ...commandApplyPatchPreviews.map((preview) => preview.path),
+        ])
+      : [];
+  const commandEditPaths =
+    presentation.presentationKind === "command"
+      ? filterCompletedCommandEditPaths(tool, presentation.command, rawCommandEditPaths)
+      : [];
+  const trackedDiffPaths = getTrackedDiffPaths(tool, commandEditPaths);
+  const trackedDiffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
+  const diffPreviews =
+    trackedDiffPreviews.length > 0
+      ? trackedDiffPreviews
+      : commandApplyPatchPreviews.filter((preview) =>
+          commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
+        );
+  const readOnlyParsedCommand = rawInputHasReadOnlyParsedCommand(tool);
+  const category: ToolCategory =
+    rawInputHasEditPayload(tool) || commandEditPaths.length > 0
+      ? "editing"
+      : readOnlyParsedCommand
+      ? "exploring"
+      : presentation.presentationKind === "command"
+      ? classifyCommandPresentation(presentation.command)
+      : classifyTool(tool);
+  const outputLines = getOutputLines(tool);
+  const detailLines = getDetailLines(tool);
+  const logEntries = getVisibleLogEntries(tool);
+  const errorLine =
+    tool.error && !isVagueError(tool.error) ? tool.error : null;
+  const diffStats = getDiffStats(diffPreviews);
+  // Completed "edit" tools with no reviewable patch should not claim 已编辑.
+  // Keep 编辑中 while running; only the finished verb falls back to 已运行.
+  const hasReviewableDiff =
+    diffPreviews.length > 0 && (diffStats.added > 0 || diffStats.removed > 0);
+  const showAsExecutedWithoutDiff =
+    category === "editing" &&
+    !hasReviewableDiff &&
+    (tool.status === "Succeeded" ||
+      tool.status === "Failed" ||
+      tool.status === "Interrupted");
+  const verbCategory: ToolCategory = showAsExecutedWithoutDiff
+    ? "executing"
+    : category;
+  const verb = toolVerb(tool.status, verbCategory);
+  // When we demote a finished edit to "已运行", also leave the edit-only
+  // expand path so the shell/run panel can show the actual command.
+  const effectiveCategory: ToolCategory = showAsExecutedWithoutDiff
+    ? "executing"
+    : category;
+  const bullet = statusBullet(tool.status);
+  const cmdDetail = extractCommandDetail(
+    tool,
+    effectiveCategory === "editing" ? trackedDiffPaths : [],
+  );
+  const headerTitle =
+    effectiveCategory === "editing"
+      ? extractHeaderTitle(tool, trackedDiffPaths)
+      : showAsExecutedWithoutDiff
+      ? executedEditHeaderTitle(tool, cmdDetail, trackedDiffPaths) ??
+        extractHeaderTitle(tool, trackedDiffPaths)
+      : presentation.presentationKind === "command"
+      ? commandHeaderTitle(presentation.command, effectiveCategory, tool)
+      : extractHeaderTitle(tool, trackedDiffPaths);
+
+  // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
+  const rawOutputLines = getRawOutputLines(tool);
+  const explorationResult =
+    presentation.presentationKind !== "command" && effectiveCategory === "exploring"
+      ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
+      : null;
+  const shellPresentation =
+    presentation.presentationKind === "command" && effectiveCategory !== "editing"
+      ? presentation
+      : effectiveCategory === "exploring"
+        ? deriveExplorationShellPresentation(
+            tool,
+            presentation,
+            explorationResult,
+            cmdDetail,
+            errorLine,
+            logEntries.entries,
+            detailLines.lines,
+            outputLines.lines,
+            rawOutputLines.lines,
+          )
+        : showAsExecutedWithoutDiff
+          ? deriveExecutedEditShellPresentation(
+              tool,
+              presentation,
+              cmdDetail,
+              trackedDiffPaths,
+              errorLine,
+              logEntries.entries,
+              detailLines.lines,
+              outputLines.lines,
+              rawOutputLines.lines,
+            )
+          : null;
+  const needsPermission =
+    tool.status === "Running" &&
+    tool.permission_options.length > 0 &&
+    !tool.permission_decision;
+
+  // Editing cards with a real diff should expand to the patch only.
+  // Extra path/output/log noise makes the review view hard to scan.
+  const showEditingDiffOnly = effectiveCategory === "editing" && hasReviewableDiff;
+
+  // Does this card have expandable content?
+  const hasDetail = showEditingDiffOnly
+    ? true
+    : !!errorLine ||
+      !!cmdDetail ||
+      detailLines.lines.length > 0 ||
+      logEntries.entries.length > 0 ||
+      outputLines.lines.length > 0 ||
+      rawOutputLines.lines.length > 0 ||
+      presentation.command != null ||
+      presentation.primaryOutput != null ||
+      presentation.rawDetails.length > 0 ||
+      trackedDiffPaths.length > 0;
+
+  return {
+    presentation,
+    commandEditPaths,
+    trackedDiffPaths,
+    trackedDiffPreviews,
+    diffPreviews,
+    hasReviewableDiff,
+    effectiveCategory,
+    verb,
+    bullet,
+    outputLines,
+    detailLines,
+    logEntries,
+    rawOutputLines,
+    errorLine,
+    diffStats,
+    showEditingDiffOnly,
+    cmdDetail,
+    headerTitle,
+    explorationResult,
+    shellPresentation,
+    needsPermission,
+    hasDetail,
+  };
+}
+
 interface Props {
   tool: ToolInvocation;
   childToolsByParent?: Map<string, ToolInvocation[]>;
@@ -183,117 +384,27 @@ function ToolCallCardImpl({
   // (possibly capped) snapshot copy while the fetch is in flight.
   tool = detailedTool ? mergeToolDetail(tool, detailedTool) : tool;
 
-  const presentation = deriveToolPresentation(tool);
-  const commandApplyPatchPreviews =
-    presentation.presentationKind === "command"
-      ? diffPreviewsFromApplyPatchCommand(presentation.command)
-      : [];
-  const rawCommandEditPaths =
-    presentation.presentationKind === "command"
-      ? uniqueStrings([
-          ...getCommandMutationDiffPaths(tool, presentation.command),
-          ...commandApplyPatchPreviews.map((preview) => preview.path),
-        ])
-      : [];
-  const commandEditPaths =
-    presentation.presentationKind === "command"
-      ? filterCompletedCommandEditPaths(tool, presentation.command, rawCommandEditPaths)
-      : [];
-  const trackedDiffPaths = getTrackedDiffPaths(tool, commandEditPaths);
-  const trackedDiffPreviews = getTrackedDiffPreviews(tool, commandEditPaths);
-  const diffPreviews =
-    trackedDiffPreviews.length > 0
-      ? trackedDiffPreviews
-      : commandApplyPatchPreviews.filter((preview) =>
-          commandEditPaths.some((path) => sameOrNestedPath(path, preview.path)),
-        );
-  const readOnlyParsedCommand = rawInputHasReadOnlyParsedCommand(tool);
-  const category: ToolCategory =
-    rawInputHasEditPayload(tool) || commandEditPaths.length > 0
-      ? "editing"
-      : readOnlyParsedCommand
-      ? "exploring"
-      : presentation.presentationKind === "command"
-      ? classifyCommandPresentation(presentation.command)
-      : classifyTool(tool);
-const bullet = statusBullet(tool.status);
-  const outputLines = getOutputLines(tool);
-  const detailLines = getDetailLines(tool);
-  const logEntries = getVisibleLogEntries(tool);
-  const errorLine =
-    tool.error && !isVagueError(tool.error) ? tool.error : null;
-  const diffStats = getDiffStats(diffPreviews);
-  // Completed "edit" tools with no reviewable patch should not claim 已编辑.
-  // Keep 编辑中 while running; only the finished verb falls back to 已运行.
-  const hasReviewableDiff =
-    diffPreviews.length > 0 && (diffStats.added > 0 || diffStats.removed > 0);
-  const showAsExecutedWithoutDiff =
-    category === "editing" &&
-    !hasReviewableDiff &&
-    (tool.status === "Succeeded" ||
-      tool.status === "Failed" ||
-      tool.status === "Interrupted");
-  const verbCategory: ToolCategory = showAsExecutedWithoutDiff
-    ? "executing"
-    : category;
-  const verb = toolVerb(tool.status, verbCategory);
-  // When we demote a finished edit to "已运行", also leave the edit-only
-  // expand path so the shell/run panel can show the actual command.
-  const effectiveCategory: ToolCategory = showAsExecutedWithoutDiff
-    ? "executing"
-    : category;
-  const cmdDetail = extractCommandDetail(
-    tool,
-    effectiveCategory === "editing" ? trackedDiffPaths : [],
-  );
-  const headerTitle =
-    effectiveCategory === "editing"
-      ? extractHeaderTitle(tool, trackedDiffPaths)
-      : showAsExecutedWithoutDiff
-      ? executedEditHeaderTitle(tool, cmdDetail, trackedDiffPaths) ??
-        extractHeaderTitle(tool, trackedDiffPaths)
-      : presentation.presentationKind === "command"
-      ? commandHeaderTitle(presentation.command, effectiveCategory, tool)
-      : extractHeaderTitle(tool, trackedDiffPaths);
-
-  // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
-  const rawOutputLines = getRawOutputLines(tool);
-  const explorationResult =
-    presentation.presentationKind !== "command" && effectiveCategory === "exploring"
-      ? getExplorationResult(tool, cmdDetail, detailLines.lines, outputLines.lines, rawOutputLines.lines)
-      : null;
-  const shellPresentation =
-    presentation.presentationKind === "command" && effectiveCategory !== "editing"
-      ? presentation
-      : effectiveCategory === "exploring"
-        ? deriveExplorationShellPresentation(
-            tool,
-            presentation,
-            explorationResult,
-            cmdDetail,
-            errorLine,
-            logEntries.entries,
-            detailLines.lines,
-            outputLines.lines,
-            rawOutputLines.lines,
-          )
-        : showAsExecutedWithoutDiff
-          ? deriveExecutedEditShellPresentation(
-              tool,
-              presentation,
-              cmdDetail,
-              trackedDiffPaths,
-              errorLine,
-              logEntries.entries,
-              detailLines.lines,
-              outputLines.lines,
-              rawOutputLines.lines,
-            )
-          : null;
-  const needsPermission =
-    tool.status === "Running" &&
-    tool.permission_options.length > 0 &&
-    !tool.permission_decision;
+  const {
+    presentation,
+    trackedDiffPaths,
+    diffPreviews,
+    effectiveCategory,
+    verb,
+    bullet,
+    outputLines,
+    detailLines,
+    logEntries,
+    rawOutputLines,
+    errorLine,
+    diffStats,
+    hasReviewableDiff,
+    showEditingDiffOnly,
+    cmdDetail,
+    headerTitle,
+    shellPresentation,
+    needsPermission,
+    hasDetail,
+  } = toolRenderModel(tool);
   const canStopTool =
     !!onStopTool &&
     tool.can_stop &&
@@ -309,24 +420,6 @@ const bullet = statusBullet(tool.status);
       setStopRequested(false);
     }
   };
-
-// Editing cards with a real diff should expand to the patch only.
-  // Extra path/output/log noise makes the review view hard to scan.
-  const showEditingDiffOnly = effectiveCategory === "editing" && hasReviewableDiff;
-
-  // Does this card have expandable content?
-  const hasDetail = showEditingDiffOnly
-    ? true
-    : !!errorLine ||
-      !!cmdDetail ||
-      detailLines.lines.length > 0 ||
-      logEntries.entries.length > 0 ||
-      outputLines.lines.length > 0 ||
-      rawOutputLines.lines.length > 0 ||
-      presentation.command != null ||
-      presentation.primaryOutput != null ||
-      presentation.rawDetails.length > 0 ||
-      trackedDiffPaths.length > 0;
 
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>

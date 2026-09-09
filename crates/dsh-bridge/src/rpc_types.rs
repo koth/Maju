@@ -87,6 +87,24 @@ impl ClientResponse {
     }
 }
 
+/// Result args for the gateway-internal `POST /api/$events/result` carrier.
+/// dsh 0.1.2 resolves `$events` waterfalls through this endpoint instead of
+/// the legacy `client-response` envelope.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteEventResultArgs {
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    #[serde(rename = "eventId")]
+    pub event_id: String,
+    pub outcome: RemoteEventOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteEventOutcome {
+    pub kind: &'static str,
+    pub value: Value,
+}
+
 /// Business success/failure result. The error arm is held as opaque JSON so an
 /// unknown error `code` does not break deserialization. Manual serde keeps
 /// error parsing authoritative while accepting the typert void result
@@ -195,18 +213,30 @@ pub fn rpc_error_code(err: &anyhow::Error) -> Option<String> {
         .map(|code| code.to_string())
 }
 
-/// `RpcReceipt` — the HTTP response body of `POST /api/respond`. A late or
-/// duplicate respond yields `not-pending`; a malformed body yields `bad-response`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// `RpcReceipt` — the HTTP response body of legacy `/api/respond` or the
+/// gateway's `$events/result` RPC. A late/duplicate result yields
+/// `not-pending`; a malformed body yields `bad-response`.
+#[derive(Debug, Clone)]
 pub enum RpcReceipt {
-    Accepted { accepted: bool },
-    Rejected { accepted: bool, reason: String },
+    Legacy { accepted: bool, reason: String },
+    Gateway { is_ok: bool, message: String },
 }
 
 impl RpcReceipt {
     pub fn accepted(&self) -> bool {
-        matches!(self, RpcReceipt::Accepted { accepted: true })
+        match self {
+            RpcReceipt::Legacy { accepted, .. } => *accepted,
+            RpcReceipt::Gateway { is_ok, .. } => *is_ok,
+        }
+    }
+
+    /// Human-readable rejection reason. For gateway errors this prefers the
+    /// embedded `error.message`; for legacy receipts it uses `reason`.
+    pub fn rejection_reason(&self) -> String {
+        match self {
+            RpcReceipt::Legacy { reason, .. } => reason.clone(),
+            RpcReceipt::Gateway { message, .. } => message.clone(),
+        }
     }
 }
 
@@ -681,16 +711,20 @@ mod tests {
     }
 
     #[test]
-    fn rpc_receipt_accepted() {
-        let raw = serde_json::json!({ "accepted": true });
-        let receipt: RpcReceipt = serde_json::from_value(raw).unwrap();
+    fn rpc_receipt_gateway_accepted() {
+        let receipt = RpcReceipt::Gateway {
+            is_ok: true,
+            message: String::new(),
+        };
         assert!(receipt.accepted());
     }
 
     #[test]
-    fn rpc_receipt_not_pending() {
-        let raw = serde_json::json!({ "accepted": false, "reason": "not-pending" });
-        let receipt: RpcReceipt = serde_json::from_value(raw).unwrap();
+    fn rpc_receipt_gateway_not_pending() {
+        let receipt = RpcReceipt::Gateway {
+            is_ok: false,
+            message: "not-pending".to_string(),
+        };
         assert!(!receipt.accepted());
     }
 

@@ -12,7 +12,15 @@ export type ThinkingStatus = "Active" | "Completed";
 export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp";
 export type FileChangeType = "Created" | "Modified" | "Deleted";
 
-export type TimelineItem = { Message: string } | { Tool: string } | "Thinking";
+export type ThinkingSegment = { text: string };
+
+/** `Thinking` as a bare string is the legacy unit-variant payload; the backend
+ *  now carries each segment's text as `{ Thinking: ThinkingSegment }`. */
+export type TimelineItem =
+  | { Message: string }
+  | { Tool: string }
+  | "Thinking"
+  | { Thinking: ThinkingSegment };
 
 export type WorkspaceKind = "project" | "chats";
 

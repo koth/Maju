@@ -367,10 +367,19 @@ pub fn map_session_event(
                     if repaired.is_empty() {
                         Vec::new()
                     } else {
-                        vec![ClientEvent::MessageChunk {
-                            role: MessageRole::Assistant,
-                            content: repaired,
-                        }]
+                        // Close the current thinking segment before the reply
+                        // text: dsh never emits a reasoning-end signal, so
+                        // without this the reducer's thinking buffer keeps
+                        // accumulating every model call's reasoning for the
+                        // WHOLE turn (multi-MB on long turns) instead of one
+                        // block per reasoning burst.
+                        vec![
+                            ClientEvent::ThinkingActivity { active: false },
+                            ClientEvent::MessageChunk {
+                                role: MessageRole::Assistant,
+                                content: repaired,
+                            },
+                        ]
                     }
                 }
                 Some((turn, step, StreamChunk::ReasoningDelta { index, text })) => {

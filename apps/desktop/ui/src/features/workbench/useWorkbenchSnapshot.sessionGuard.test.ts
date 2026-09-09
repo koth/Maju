@@ -344,8 +344,17 @@ describe("useWorkbenchSnapshot – dropped patch self-heal", () => {
 
       mockSessionGetState = () => Promise.resolve(healed);
 
+      // While updates have been accepted recently the probe is deliberately a
+      // no-op (streaming bumps revisions constantly — a full refetch for each
+      // advance froze the UI on long sessions). The self-heal only fires once
+      // the update stream has gone quiet (>8s).
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(result.current.snapshot?.revision).toBe(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6000);
       });
 
       expect(result.current.snapshot?.revision).toBe(2);

@@ -20,7 +20,15 @@ export type SessionConfigSource =
   | "LegacyMode"
   | "LocalMode";
 
-export type TimelineItem = { Message: string } | { Tool: string } | "Thinking";
+export type ThinkingSegment = { text: string };
+
+/** `Thinking` as a bare string is the legacy unit-variant payload; the backend
+ *  now carries each segment's text as `{ Thinking: ThinkingSegment }`. */
+export type TimelineItem =
+  | { Message: string }
+  | { Tool: string }
+  | "Thinking"
+  | { Thinking: ThinkingSegment };
 
 export type ThinkingStatus = "Active" | "Completed";
 
@@ -563,6 +571,11 @@ export interface UiSnapshot {
 
 export interface UiSnapshotPatch {
   revision: number;
+  /** Revision this patch diffs FROM. Matches the locally accepted revision
+   *  for a self-contained apply (coalesced revision jumps are normal); a
+   *  mismatch means patch events were lost and the frontend must replay from
+   *  the bridge's patch buffer. 0 = unknown (legacy emitters). */
+  base_revision?: number;
   session: SessionSummary;
   session_config: SessionConfigState;
   prompt_capabilities: PromptInputCapabilities;

@@ -251,7 +251,10 @@ async fn approval_round_trip_posts_client_response_to_respond() {
             "outcome": "allowed-once"
         }),
     );
-    client.respond(&response).await.unwrap();
+    client
+        .respond_legacy(&serde_json::to_value(&response).unwrap())
+        .await
+        .unwrap();
     assert_eq!(mock.responds().len(), 1);
     assert_eq!(mock.responds()[0]["result"]["value"]["approvalId"], "a-1");
 }
@@ -1162,10 +1165,10 @@ async fn question_answer_multiple_questions_partial_payload() {
         .unwrap();
     let responds = mock.responds();
     assert_eq!(responds.len(), 1);
-    // The respond payload must list answers in the question order (q1 then q2),
+    // The result value must list answers in the question order (q1 then q2),
     // even though they were submitted reversed.
     let answers = responds[0]
-        .pointer("/result/value/answer/answers")
+        .pointer("/outcome/value/answer/answers")
         .and_then(Value::as_array)
         .expect("answers array");
     let ids: Vec<&str> = answers
@@ -1183,10 +1186,9 @@ async fn question_answer_multiple_questions_partial_payload() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn question_answer_payload_matches_dsh_schema() {
-    // Dump the exact bytes the bridge POSTs to /api/respond for a question
-    // answer, so we can diff against dsh's `questionResponsePayloadSchema`
-    // (sessionId + answer.answers[{id, selected, custom?}]) and
-    // `matchesQuestions` (count + id order + label membership).
+    // Dump the exact `$events/result` args for a question answer, so we can
+    // diff against the gateway's strict clientId/eventId/outcome format and
+    // dsh's answer schema/count/id-order/label validation.
     let mut c = default_config();
     c.mux = vec![MuxScript {
         frames: vec![
@@ -1276,9 +1278,12 @@ async fn question_answer_payload_matches_dsh_schema() {
         .unwrap();
     let responds = mock.responds();
     assert_eq!(responds.len(), 1);
-    println!(
-        "=== RESPOND PAYLOAD ===\n{}",
-        serde_json::to_string_pretty(&responds[0]).unwrap()
+    assert_eq!(responds[0]["clientId"], "$events-client-1");
+    assert_eq!(responds[0]["eventId"], "qrpc-1");
+    assert_eq!(responds[0]["outcome"]["kind"], "result");
+    assert_eq!(
+        responds[0]["outcome"]["value"]["answer"]["answers"][0]["selected"][0],
+        "是（推荐）"
     );
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();
@@ -1663,11 +1668,11 @@ async fn model_selector_publishes_model_control_with_catalog() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn question_answer_responds_with_envelope_rpc_id() {
-    // Regression: the /api/respond rpcId for a question answer must be the
-    // question/requested ServerRequest's envelope rpcId (what the harness
-    // matches its pending ask against), not the UI-facing question id. Using
-    // the question id got a `bad-response` rejection and the turn hung.
+async fn question_answer_uses_waterfall_event_id() {
+    // Regression: the question answer must echo the `$events` waterfall's
+    // eventId (what dsh 0.1.2 matches its pending ask against), not the
+    // UI-facing question id. Using the question id got a rejection and the
+    // turn hung.
     // The question frame rides right after the bridge's `session/subscribed`
     // for s-1, which the mock mux emits only after receiving the bridge's
     // subscribe message — so the sink is registered before the frame is
@@ -1775,14 +1780,16 @@ async fn question_answer_responds_with_envelope_rpc_id() {
         .expect("respond timed out")
         .expect("respond failed");
 
-    let responds = mock.responds();
-    assert_eq!(responds.len(), 1, "expected one /api/respond call");
+    let results = mock.responds();
+    assert_eq!(results.len(), 1, "expected one $events/result call");
+    assert_eq!(results[0]["clientId"], "$events-client-1");
     assert_eq!(
-        responds[0]["rpcId"], "question-rpc-9",
-        "respond must echo the question/requested envelope rpcId"
+        results[0]["eventId"], "question-rpc-9",
+        "$events/result must echo the question waterfall eventId"
     );
+    assert_eq!(results[0]["outcome"]["kind"], "result");
     assert_eq!(
-        responds[0]["result"]["value"]["answer"]["answers"][0]["selected"][0],
+        results[0]["outcome"]["value"]["answer"]["answers"][0]["selected"][0],
         "A"
     );
 

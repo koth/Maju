@@ -22,7 +22,7 @@ use crate::approval::PendingApprovals;
 use crate::frame::{HostFrame, MuxFrame};
 use crate::mojibake::{StreamRepairer, StreamTextKind};
 use crate::rpc_types::{RpcId, ServerRequest, SessionId};
-use crate::transport::HttpClient;
+use crate::transport::{HttpClient, SseStream};
 
 /// Bound on the re-baseline fan-out (`session.history` calls) after a stream drop.
 /// Matches the design doc's `REBASELINE_CONCURRENCY` default (4) for the
@@ -44,6 +44,8 @@ pub enum PendingApprovalKind {
 pub struct SessionSink {
     pub tx_events: mpsc::Sender<ClientEvent>,
     pub permission_broker: PermissionBroker,
+    /// Gateway-assigned id of the `$events` mux stream. Captured from the
+    /// stream's `ready` item and echoed when resolving a `waterfall` request.
     pub last_seq: AtomicU64,
     /// Set while history replay is feeding events (resume / stream-gap
     /// re-baseline). History pages contain both the raw `assistant/chunk`
@@ -80,13 +82,13 @@ pub struct SessionSink {
     /// Pending approvals/questions keyed by the id surfaced to the UI (dsh
     /// `approvalId` for approvals; the question batch's first `question.id` for
     /// questions). The value carries the dsh `rpcId` needed for `/api/respond`
-    /// (for questions, the rpcId is on the `question/requested` frame, stored
-    /// separately in `question_rpc_ids`).
+    /// (for questions, the rpcId is the `$events` waterfall `eventId`, stored
+    /// separately in `question_event_ids`).
     pending: Mutex<Vec<PendingEntry>>,
-    /// Map UI request id → dsh `rpcId` for question batches (approvals use the
-    /// approvalId as both the UI id and the respond payload field; questions
-    /// need the server-request rpcId for the respond envelope).
-    question_rpc_ids: Mutex<Vec<(String, RpcId)>>,
+    /// Map UI request id → `$events` waterfall `eventId` for question batches.
+    /// dsh 0.1.2 resolves waterfall results by `eventId`, not by the UI-facing
+    /// question id.
+    question_event_ids: Mutex<Vec<(String, RpcId)>>,
     /// The ordered question ids of each pending batch, keyed by UI request id.
     /// dsh's `matchesQuestions` validates answers positionally
     /// (`answer[i].id === questions[i].id`), so the respond payload must list
@@ -137,7 +139,7 @@ impl SessionSink {
             stream_repairs: Mutex::new(StreamRepairTable::new()),
             tool_call_args: Mutex::new(std::collections::HashMap::new()),
             pending: Mutex::new(Vec::new()),
-            question_rpc_ids: Mutex::new(Vec::new()),
+            question_event_ids: Mutex::new(Vec::new()),
             question_order: Mutex::new(std::collections::HashMap::new()),
             session_id: Mutex::new(None),
             compact_commands: Mutex::new(std::collections::VecDeque::new()),
@@ -370,9 +372,9 @@ impl SessionSink {
             .unwrap_or_default()
     }
 
-    pub fn attach_question_rpc_id(&self, ui_id: String, rpc_id: RpcId) {
-        if let Ok(mut guard) = self.question_rpc_ids.lock() {
-            guard.push((ui_id, rpc_id));
+    pub fn attach_question_event_id(&self, ui_id: String, event_id: RpcId) {
+        if let Ok(mut guard) = self.question_event_ids.lock() {
+            guard.push((ui_id, event_id));
         }
     }
 
@@ -385,7 +387,7 @@ impl SessionSink {
 
     /// Remove a pending question batch once the harness reports it resolved.
     pub fn clear_pending_question(&self, ui_id: &str) {
-        if let Ok(mut guard) = self.question_rpc_ids.lock() {
+        if let Ok(mut guard) = self.question_event_ids.lock() {
             guard.retain(|(id, _)| id != ui_id);
         }
         if let Ok(mut guard) = self.question_order.lock() {
@@ -397,25 +399,26 @@ impl SessionSink {
     }
 
     /// The UI-facing question id (`request_id`) for a pending batch, resolved
-    /// from its rpcId — `question/resolved` names the batch by rpcId, while
-    /// `ToolPermissionResolved` must carry the id the UI registered.
-    pub fn question_ui_id_for_rpc_id(&self, rpc_id: &str) -> Option<String> {
-        self.question_rpc_ids.lock().ok().and_then(|guard| {
+    /// from its waterfall `eventId` — `question/resolved` names the batch by
+    /// that id, while `ToolPermissionResolved` must carry the id the UI
+    /// registered.
+    pub fn question_ui_id_for_event_id(&self, event_id: &str) -> Option<String> {
+        self.question_event_ids.lock().ok().and_then(|guard| {
             guard
                 .iter()
-                .find(|(_, id)| id == rpc_id)
+                .find(|(_, id)| id == event_id)
                 .map(|(ui_id, _)| ui_id.clone())
         })
     }
 
     pub fn pending_approvals(&self) -> PendingApprovals {
         let entries = self.pending.lock().map(|g| g.clone()).unwrap_or_default();
-        let qrpc = self
-            .question_rpc_ids
+        let question_event_ids = self
+            .question_event_ids
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        PendingApprovals::from_entries(entries, qrpc)
+        PendingApprovals::from_entries(entries, question_event_ids)
     }
 }
 
@@ -494,6 +497,9 @@ pub struct HarnessHost {
     endpoint: String,
     client: HttpClient,
     router: Arc<SessionRouter>,
+    /// Gateway-assigned client id from the `$events` mux stream. Shared across
+    /// all sessions on this host (one mux connection per host).
+    remote_event_client_id: Mutex<Option<String>>,
     runtime: Runtime,
     /// Notified when the WebSocket loops should stop (last session dropped or
     /// shutdown). Drives cancellation of the read loops.
@@ -535,6 +541,7 @@ impl HarnessHost {
             endpoint,
             client,
             router: Arc::new(SessionRouter::new()),
+            remote_event_client_id: Mutex::new(None),
             runtime,
             stop: Arc::new(Notify::new()),
             spawned: AtomicBool::new(spawned),
@@ -583,6 +590,14 @@ impl HarnessHost {
         &self.router
     }
 
+    /// The gateway-assigned `$events` client id, if captured.
+    pub fn remote_event_client_id(&self) -> Option<String> {
+        self.remote_event_client_id
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     /// Whether the startup probe has failed (endpoint unreachable / not a
     /// harness host). Late-registered sinks are told via the router.
     pub fn probe_failed(&self) -> bool {
@@ -624,6 +639,7 @@ impl HarnessHost {
                         }
                     };
                     // On (re)open, re-baseline all live sessions from last_seq.
+                    self.capture_remote_event_client_id(&mut stream).await;
                     self.rebaseline_all().await;
                     loop {
                         tokio::select! {
@@ -644,6 +660,15 @@ impl HarnessHost {
     /// Dispatch one mux `ServerRequest`: parse the payload as a `MuxFrame`,
     /// demux by `sessionId`, map to `ClientEvent`(s), send to the matched sink.
     /// Unmatched/unknown frames are dropped with a debug log.
+    async fn capture_remote_event_client_id(&self, stream: &mut SseStream) {
+        if let Some(client_id) = stream.remote_event_client_id().await {
+            if let Ok(mut guard) = self.remote_event_client_id.lock() {
+                *guard = Some(client_id.clone());
+            }
+            tracing::info!(target: "dsh-bridge::host::mux", client_id = %client_id, "dsh remote events ready");
+        }
+    }
+
     fn dispatch_mux(&self, req: &ServerRequest) {
         if req.method == "remote/event" {
             let Some(event) = req.payload.get("event").and_then(Value::as_str) else {
@@ -770,9 +795,11 @@ impl HarnessHost {
         } = &frame
         {
             if let Some(sink) = self.router.get(session_id) {
-                if let Some(first) = questions.first() {
-                    sink.attach_question_rpc_id(first.id.clone(), rpc_id);
-                }
+                let ui_id = questions
+                    .first()
+                    .map(|q| q.id.clone())
+                    .unwrap_or_else(|| rpc_id.clone());
+                sink.attach_question_event_id(ui_id, rpc_id);
             }
         }
         // question/resolved names the batch by rpcId, while the UI tracks it by
@@ -784,7 +811,7 @@ impl HarnessHost {
             ..
         } = &frame
             && let Some(sink) = self.router.get(session_id)
-            && let Some(ui_id) = sink.question_ui_id_for_rpc_id(question_rpc_id)
+            && let Some(ui_id) = sink.question_ui_id_for_event_id(question_rpc_id)
         {
             sink.clear_pending_question(&ui_id);
             sink.send(ClientEvent::ToolPermissionResolved {

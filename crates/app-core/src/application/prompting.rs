@@ -560,9 +560,7 @@ impl Application {
                 // A resumed session must present Idle while replay is being
                 // filtered; any non-Idle status here is residue from an
                 // earlier replay window and would self-lock the UI.
-                if self.ui.session.status != SessionStatus::Idle {
-                    self.ui.session.status = SessionStatus::Idle;
-                }
+                self.ui.session.status = SessionStatus::Idle;
                 // Replay events from session/load (or dsh history replay) are
                 // already represented in the SQLite-restored UI. Applying
                 // message/tool/turn events again would append duplicate history
@@ -578,34 +576,14 @@ impl Application {
                 // `ContextSnapshot`) are not replay artifacts and stay so the
                 // dock's totals and context occupancy refresh after resume.
                 for event in events {
-                    let keep = match &event {
-                        ClientEvent::SessionStarted { .. }
-                        | ClientEvent::SessionConfigUpdated { .. }
-                        | ClientEvent::SessionConfigValueChanged { .. }
-                        | ClientEvent::PromptCapabilitiesUpdated { .. }
-                        | ClientEvent::AvailableCommandsUpdated { .. }
-                        | ClientEvent::SessionTitleUpdated { .. } => true,
-                        // Tool completion/failure can arrive after the turn
-                        // formally ends (the agent processes the tool result
-                        // asynchronously). Dropping them leaves the tool card
-                        // stuck in "running" — the UI never sees the terminal
-                        // state. Keep them only for codex/ACP sessions: the
-                        // dsh history replay re-delivers the same terminal
-                        // state already persisted in SQLite, and re-applying
-                        // it resets the persisted tool row to Running.
-                        ClientEvent::ToolCompleted { .. }
-                        | ClientEvent::ToolFailed { .. } => {
-                            !crate::settings::is_deepseek_harness_command(&self.agent_command)
-                        }
-                        ClientEvent::UsageUpdated { usage } => {
-                            usage.scope != UsageEventScope::TurnDelta
-                        }
-                        _ => false,
-                    };
-                    if keep {
+                    if self.keep_replay_event(&event) {
                         self.apply_event_and_restore_model(event);
                     }
                 }
+                // Kept terminal tool events run `refresh_session_status`
+                // inside the reducer, which would flip the resumed session to
+                // Streaming; the replay window must always present Idle.
+                self.ui.session.status = SessionStatus::Idle;
                 self.bump_revision();
                 return;
             }
@@ -694,6 +672,37 @@ impl Application {
         }
     }
 
+    /// Which events survive the resume-replay filter (armed from a resume
+    /// until the first user prompt). Everything not listed here is a replay
+    /// artifact of content that already lives in SQLite.
+    ///
+    /// Terminal tool events are kept per-call-id: a late completion/failure is
+    /// only meaningful for a tool row the app already knows about (it
+    /// finalizes a card stuck in Running after its turn formally ended). A
+    /// terminal event for an UNKNOWN call_id is a replay artifact — codex
+    /// `session/load` re-delivers every historical tool call with
+    /// rollout-internal ids (`tool_…`) that never match the persisted rows
+    /// (`call_…`), and applying it used to create a junk "tool" card per
+    /// history entry on every reopen (the timeline flooding with
+    /// "已运行 tool / Plan updated" rows) while `refresh_session_status`
+    /// flipped the finished session back to Streaming.
+    pub(super) fn keep_replay_event(&self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::SessionStarted { .. }
+            | ClientEvent::SessionConfigUpdated { .. }
+            | ClientEvent::SessionConfigValueChanged { .. }
+            | ClientEvent::PromptCapabilitiesUpdated { .. }
+            | ClientEvent::AvailableCommandsUpdated { .. }
+            | ClientEvent::SessionTitleUpdated { .. } => true,
+            ClientEvent::ToolCompleted { id, .. } | ClientEvent::ToolFailed { id, .. } => {
+                !crate::settings::is_deepseek_harness_command(&self.agent_command)
+                    && self.ui.tools.iter().any(|tool| tool.call_id == *id)
+            }
+            ClientEvent::UsageUpdated { usage } => usage.scope != UsageEventScope::TurnDelta,
+            _ => false,
+        }
+    }
+
     /// Force-finalize any tool still in Pending/Running when the session is
     /// fully Idle (no in-flight prompt, no pending image degradation). This
     /// is the last-line guard for late `tool_call_update`s that arrive after
@@ -763,6 +772,7 @@ impl Application {
         let workspace_root = self.ui.workspace.root.clone();
         let mut had_file_changes = false;
         let mut batch_file_versions = HashMap::<String, String>::new();
+        let messages_before = self.ui.messages.len();
         let (turn_stop_reason, turn_detail) =
             match events.iter().rev().find_map(|event| match event {
                 ClientEvent::TurnFinished {
@@ -1047,6 +1057,18 @@ impl Application {
         if had_file_changes {
             self.persist_file_changes();
             self.persist_review_file_changes();
+        }
+
+        // A batch that appended an assistant message may have landed the
+        // turn's closing reply AFTER the change set was last persisted — the
+        // anchor must follow the newest assistant of the turn or the ChangesBar
+        // detaches from its turn's collapse summary. No-op when the anchor is
+        // already the last assistant.
+        if self.ui.messages.len() > messages_before
+            && let Some(turn_user_message_id) = self.current_turn_user_message_id
+            && self.reanchor_turn_file_changes_to_last_assistant(turn_user_message_id)
+        {
+            had_file_changes = true;
         }
 
         RuntimeEventApplyResult {
@@ -1335,7 +1357,7 @@ impl Application {
                 TimelineItem::Tool(_) => {
                     anyhow::bail!("智能体已经开始执行工具，不能重写这条消息");
                 }
-                TimelineItem::Thinking => {}
+                TimelineItem::Thinking(_) => {}
             }
         }
 
@@ -1350,7 +1372,7 @@ impl Application {
             .skip(message_index + 1)
             .filter_map(|item| match item {
                 TimelineItem::Message(id) => Some(*id),
-                TimelineItem::Tool(_) | TimelineItem::Thinking => None,
+                TimelineItem::Tool(_) | TimelineItem::Thinking(_) => None,
             })
             .collect::<Vec<_>>();
         if message_ids_to_delete.is_empty() && self.ui.timeline.len() == message_index + 1 {

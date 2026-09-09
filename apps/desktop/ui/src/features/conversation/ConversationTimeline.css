@@ -5,8 +5,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
-  /* 左侧轮次导航预留宽度，供内容列 padding 与刻度定位共用。 */
+  /* 不在此处做 overflow 裁剪：`.timeline-scroll` 用负 margin 向两侧 gutter
+     扩展，让原生滚动条贴住右侧分栏边线；一旦这里 overflow: hidden，扩展带
+     （含 8px 滚动条）会被裁掉，滚动条整体消失。裁剪边界交给 .center-panel。 */
   --timeline-nav-space: 30px;
 }
 
@@ -157,6 +158,20 @@
   padding: 5px 0;
   content-visibility: auto;
   contain-intrinsic-size: 48px;
+}
+
+/* Placeholder for assistant rows whose markdown has not hydrated yet
+ * (deferred until the row nears the viewport — see useNearViewportOnce).
+ * Keeps a stable-ish block so scroll anchoring has something to hold. */
+.msg-markdown-lazy {
+  min-height: 56px;
+  width: 100%;
+  border-radius: 8px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, currentColor 5%, transparent)
+  );
 }
 
 .msg-user {
