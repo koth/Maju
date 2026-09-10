@@ -41,6 +41,12 @@ const EMPTY_USAGE_SNAPSHOT: SessionUsageSnapshot = {
   by_model: [],
 };
 
+/** How old a context-occupancy sample may be before an active turn marks it
+ *  "更新中" instead of showing its last-refresh time. Agents that report
+ *  occupancy live (dsh) stay well under this; codex-core, which samples at the
+ *  next model response, crosses it as soon as a turn starts. */
+const CONTEXT_SAMPLE_STALE_AFTER_MS = 15_000;
+
 export interface AgentPlanEnvironmentInfo {
   changeCount: number;
   addedLines: number;
@@ -208,12 +214,19 @@ export function AgentPlanEnvironment({
       : currentTurnTotal > 0
         ? `本轮 ${formatTokenCount(currentTurnTotal)}`
         : "等待用量";
-  // Staleness cue: codex-core only emits a context-occupancy update at the
-  // next model response, so while a turn is active the "已用上下文" figure
-  // is pending refresh. Mark it "更新中" then, otherwise show when it last
-  // refreshed so the dock never looks frozen.
+  // Staleness cue. codex-core only samples context occupancy at the next model
+  // response, while the dsh harness reports it live (a `contextPressure`
+  // projection per advanced event). So a running turn alone does not mean the
+  // figure is pending: mark it "更新中" only when the sample has actually gone
+  // stale, and otherwise show when it last refreshed so the dock never looks
+  // frozen — and never claims to be updating while it is.
   const contextUpdatedAt = usage.context.updated_at ?? null;
-  const usagePendingRefresh = environment.streaming === true && hasContextUsage;
+  const contextUpdatedMs = contextUpdatedAt != null ? Date.parse(contextUpdatedAt) : Number.NaN;
+  const contextSampleAgeMs = Number.isFinite(contextUpdatedMs) ? Date.now() - contextUpdatedMs : null;
+  const usagePendingRefresh =
+    environment.streaming === true &&
+    hasContextUsage &&
+    (contextSampleAgeMs == null || contextSampleAgeMs > CONTEXT_SAMPLE_STALE_AFTER_MS);
   const stalenessLabel = usagePendingRefresh
     ? "更新中"
     : contextUpdatedAt != null

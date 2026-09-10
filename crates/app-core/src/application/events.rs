@@ -334,13 +334,20 @@ impl Application {
         };
         self.mark_event_tools_dirty(&event);
         apply_event(&mut self.ui, event.clone());
-        if let ClientEvent::ToolPermissionRequest { id, input, .. } = &event {
-            if let Some(request) = input.clone() {
-                self.broadcast_permission_request(id, request);
-            }
-        } else {
-            self.broadcast_ui_updated();
+        if let ClientEvent::ToolPermissionRequest { id, input, .. } = &event
+            && let Some(request) = input.clone()
+        {
+            // A question form (harness `user_question`) rides its own signal, so
+            // a subscriber can surface it without scraping a patch.
+            self.broadcast_permission_request(id, request);
         }
+        // Every event advances the snapshot, permission requests included: the
+        // tool carries the approval's `permission_options` and
+        // `permission_decision`, and a plain allow/deny approval — Codex's
+        // run/apply_patch prompt, which has no `input` at all — has no other
+        // signal. Suppressing this left remote clients with no way to learn the
+        // approval existed, so the phone could not answer it.
+        self.broadcast_ui_updated();
         if let (ClientEvent::MessageChunk { role, .. }, Some(message_before)) =
             (&event, message_before)
         {

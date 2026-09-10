@@ -51,7 +51,12 @@ pub(super) fn legacy_records_from_session_changes(
         .collect()
 }
 
-pub(super) fn summarize_change_records(
+/// Summary built from a `COUNT`/`SUM`/`MAX` aggregate instead of the records
+/// themselves: the legacy fallback needs nothing but file count, line totals
+/// and the newest timestamp, so the summary list never has to materialize
+/// every historical diff text.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn summarize_change_aggregate(
     id: String,
     source: ChangeSetSource,
     session_id: &str,
@@ -59,7 +64,10 @@ pub(super) fn summarize_change_records(
     label: &str,
     status: ChangeSetStatus,
     workspace_root: &str,
-    records: &[FileChangeRecord],
+    file_count: usize,
+    added_lines: usize,
+    removed_lines: usize,
+    updated_at: String,
 ) -> ChangeSetSummary {
     ChangeSetSummary {
         id,
@@ -70,15 +78,10 @@ pub(super) fn summarize_change_records(
         tool_call_id: None,
         owner_key: None,
         label: label.to_string(),
-        added_lines: records.iter().map(|record| record.added_lines).sum(),
-        removed_lines: records.iter().map(|record| record.removed_lines).sum(),
-        file_count: records.len(),
-        updated_at: records
-            .iter()
-            .map(|record| record.updated_at.as_str())
-            .max()
-            .unwrap_or_default()
-            .to_string(),
+        added_lines,
+        removed_lines,
+        file_count,
+        updated_at,
         status,
     }
 }

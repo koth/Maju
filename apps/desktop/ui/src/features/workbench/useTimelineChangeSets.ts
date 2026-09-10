@@ -197,9 +197,13 @@ export function useTimelineChangeSets({
     workspaceRoot: string;
     signature: string;
   } | null>(null);
-  const fileCacheScopeRef = useRef<string | null>(null);
+  // Per (workspace, session) cache of each change set's file list. Scoped by
+  // session but NOT dropped when the session changes: switching away and back
+  // is a normal way to review two sessions, and re-listing every historical
+  // change set made that round trip pay the full load again. Only the current
+  // scope and the one just left are kept.
   const fileCacheRef = useRef<
-    Map<string, { signature: string; files: FileChangeSummary[] }>
+    Map<string, Map<string, { signature: string; files: FileChangeSummary[] }>>
   >(new Map());
 
   const clearChangeSets = useCallback(() => {
@@ -207,7 +211,6 @@ export function useTimelineChangeSets({
     setLiveTurnChangeSet(null);
     setAgentConversationChangeCount(0);
     changeSetRefreshRef.current = null;
-    fileCacheScopeRef.current = null;
     fileCacheRef.current.clear();
   }, []);
 
@@ -239,10 +242,24 @@ export function useTimelineChangeSets({
 
     let cancelled = false;
     const cacheScope = `${workspaceRoot}:${sessionId}`;
-    if (fileCacheScopeRef.current !== cacheScope) {
-      fileCacheScopeRef.current = cacheScope;
-      fileCacheRef.current.clear();
-    }
+    const fileCache = (() => {
+      const caches = fileCacheRef.current;
+      const existing = caches.get(cacheScope);
+      if (existing) return existing;
+      const cache = new Map<
+        string,
+        { signature: string; files: FileChangeSummary[] }
+      >();
+      caches.set(cacheScope, cache);
+      // Keep the current scope plus the session that was open just before it;
+      // drop anything older so long sessions cannot accumulate unbounded.
+      while (caches.size > 2) {
+        const oldest = caches.keys().next().value;
+        if (oldest === undefined || oldest === cacheScope) break;
+        caches.delete(oldest);
+      }
+      return cache;
+    })();
     Promise.all([
       sessionListChangeSets({
         source: "AgentTurn",
@@ -269,15 +286,15 @@ export function useTimelineChangeSets({
           ? [...turnSummaries, pendingTurnSummary]
           : turnSummaries;
         const summaryIds = new Set(summariesToLoad.map((summary) => summary.id));
-        for (const cachedId of fileCacheRef.current.keys()) {
+        for (const cachedId of fileCache.keys()) {
           if (!summaryIds.has(cachedId)) {
-            fileCacheRef.current.delete(cachedId);
+            fileCache.delete(cachedId);
           }
         }
         const fileEntries = await Promise.all(
           summariesToLoad.map(async (summary) => {
             const cacheSignature = changeSetFileCacheSignature(summary);
-            const cached = fileCacheRef.current.get(summary.id);
+            const cached = fileCache.get(summary.id);
             if (cached?.signature === cacheSignature) {
               return [summary.id, cached.files] as const;
             }
@@ -285,7 +302,7 @@ export function useTimelineChangeSets({
               const response = await sessionListChangeSetFiles({
                 change_set_id: summary.id,
               });
-              fileCacheRef.current.set(summary.id, {
+              fileCache.set(summary.id, {
                 signature: cacheSignature,
                 files: response.files,
               });

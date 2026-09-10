@@ -2925,6 +2925,178 @@ fn load_session_usage_snapshot_rebuilds_context_from_persisted_events() {
 }
 
 #[test]
+fn list_change_sets_filters_by_session_in_sql() {
+    // Regression: the session filter used to be applied in Rust over every
+    // change set of the *workspace*, with an extra `SELECT session_id` per
+    // non-matching row (a query that could only return the value already in
+    // hand). Scoping must stay exact now that SQL does the work.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    let session_a = Uuid::new_v4().to_string();
+    let session_b = Uuid::new_v4().to_string();
+    store.create_session(&session_a, "gpt-4").unwrap();
+    store.create_session(&session_b, "gpt-4").unwrap();
+
+    for (session_id, id) in [(session_a.as_str(), "set-a"), (session_b.as_str(), "set-b")] {
+        let summary = make_change_set_summary(
+            &store,
+            id,
+            session_id,
+            ChangeSetSource::AgentTurn,
+            None,
+            id,
+        );
+        store
+            .replace_change_set(
+                &summary,
+                &[make_file_record(id, "src/main.rs", Some("old"), Some("new"), 1, 1)],
+            )
+            .unwrap();
+    }
+    // A workspace-scoped set (no owning session, like the git-worktree sets)
+    // must never be listed for one session.
+    let workspace_set = make_change_set_summary(
+        &store,
+        "set-workspace",
+        "not-a-session-uuid",
+        ChangeSetSource::AgentTurn,
+        None,
+        "set-workspace",
+    );
+    store
+        .replace_change_set(
+            &workspace_set,
+            &[make_file_record(
+                "set-workspace",
+                "src/main.rs",
+                Some("old"),
+                Some("new"),
+                1,
+                1,
+            )],
+        )
+        .unwrap();
+
+    let summaries = store
+        .list_change_sets(Some(&session_a), Some(ChangeSetSource::AgentTurn))
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, "set-a");
+
+    let summaries = store
+        .list_change_sets(Some(&session_b), Some(ChangeSetSource::AgentTurn))
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].id, "set-b");
+
+    let all = store.list_change_sets(None, Some(ChangeSetSource::AgentTurn)).unwrap();
+    assert_eq!(all.len(), 3);
+}
+
+#[test]
+fn legacy_change_set_summaries_aggregate_turn_totals() {
+    // The legacy wrappers are now backed by COUNT/SUM/MAX aggregates instead of
+    // loading every historical diff text. Totals, file counts and the newest
+    // timestamp must survive that change, and a per-turn diff lookup must
+    // return only that turn's file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    let older = Uuid::new_v4();
+    let newer = Uuid::new_v4();
+
+    store.create_session("s-agg", "gpt-4").unwrap();
+    store
+        .insert_message("s-agg", &older.to_string(), "Assistant", "older", 1)
+        .unwrap();
+    store
+        .insert_message("s-agg", &newer.to_string(), "Assistant", "newer", 2)
+        .unwrap();
+    store
+        .replace_turn_file_changes(
+            "s-agg",
+            &older,
+            &[
+                SessionFileChange {
+                    path: "src/one.rs".into(),
+                    change_type: FileChangeType::Modified,
+                    old_text: Some("a".into()),
+                    new_text: "b".into(),
+                    added_lines: 2,
+                    removed_lines: 1,
+                    timestamp: "10".into(),
+                },
+                SessionFileChange {
+                    path: "src/two.rs".into(),
+                    change_type: FileChangeType::Created,
+                    old_text: None,
+                    new_text: "fresh".into(),
+                    added_lines: 4,
+                    removed_lines: 0,
+                    timestamp: "11".into(),
+                },
+            ],
+        )
+        .unwrap();
+    store
+        .replace_turn_file_changes(
+            "s-agg",
+            &newer,
+            &[SessionFileChange {
+                path: "src/three.rs".into(),
+                change_type: FileChangeType::Modified,
+                old_text: Some("x".into()),
+                new_text: "y".into(),
+                added_lines: 1,
+                removed_lines: 3,
+                timestamp: "12".into(),
+            }],
+        )
+        .unwrap();
+
+    let summaries = store.list_change_sets_with_legacy("s-agg", None).unwrap();
+    let older_summary = summaries
+        .iter()
+        .find(|summary| summary.id == legacy_agent_turn_id("s-agg", &older))
+        .expect("older turn summary");
+    assert_eq!(older_summary.file_count, 2);
+    assert_eq!(older_summary.added_lines, 6);
+    assert_eq!(older_summary.removed_lines, 1);
+    assert!(
+        !older_summary.updated_at.is_empty(),
+        "the aggregate must still carry the newest row timestamp"
+    );
+    assert_eq!(older_summary.message_id, Some(older));
+
+    let newer_summary = summaries
+        .iter()
+        .find(|summary| summary.id == legacy_agent_turn_id("s-agg", &newer))
+        .expect("newer turn summary");
+    assert_eq!(newer_summary.file_count, 1);
+    assert_eq!(newer_summary.added_lines, 1);
+    assert_eq!(newer_summary.removed_lines, 3);
+    assert!(!newer_summary.updated_at.is_empty());
+
+    let diff = store
+        .load_change_set_file_diff_with_legacy(&legacy_agent_turn_id("s-agg", &newer), "src/three.rs")
+        .unwrap()
+        .expect("newer turn diff");
+    assert_eq!(diff.new_text.as_deref(), Some("y"));
+    assert!(
+        store
+            .load_change_set_file_diff_with_legacy(&legacy_agent_turn_id("s-agg", &newer), "src/one.rs")
+            .unwrap()
+            .is_none(),
+        "a per-turn lookup must not leak another turn's file"
+    );
+
+    let files = store
+        .list_change_set_files_with_legacy(&legacy_agent_turn_id("s-agg", &older))
+        .unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].path, "src/one.rs");
+}
+
+#[test]
 fn load_recent_turn_file_changes_keeps_newest_and_orders_chronologically() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path(), dir.path()).unwrap();

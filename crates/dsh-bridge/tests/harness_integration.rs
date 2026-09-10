@@ -9,8 +9,9 @@ mod common;
 
 use acp_core::{ClientEvent, PermissionBroker};
 use common::{
-    HoldFramesUntil, MockHarness, MuxEnd, MuxScript, default_config, history_event,
-    mux_assistant_final, mux_assistant_text_delta, mux_session_event, mux_subscribed, scripts_with,
+    HoldFramesUntil, MockHarness, MuxEnd, MuxScript, default_config, follow_assistant_stream,
+    history_event, mux_assistant_final, mux_assistant_text_delta, mux_host_event,
+    mux_session_event, mux_subscribed, scripts_with,
 };
 use dsh_bridge::{HarnessHostRegistry, HttpClient};
 use serde_json::{Value, json};
@@ -849,6 +850,324 @@ async fn session_follow_delivers_assistant_text() {
     let _ = worker.join();
 }
 
+/// dsh 0.1.5 regression: the durable `assistant/chunk` event is gone, and live
+/// model output only arrives as opted-in `assistant-stream` frames. Without
+/// folding those frames the transcript shows neither the reply text nor the
+/// model's reasoning, because the finalized `assistant/message` deliberately
+/// re-emits no text for a step that already streamed.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_follow_delivers_assistant_stream_text() {
+    let mut c = default_config();
+    c.follow = scripts_with(vec![
+        serde_json::json!({
+            "type": "snapshot",
+            "cursor": 0,
+            "records": [],
+            "hasMore": false,
+            "projections": { "asOfSeq": 0, "values": {} }
+        }),
+        // Reasoning streams first (start carries the turn/step the chunk
+        // frames themselves do not).
+        follow_assistant_stream(serde_json::json!({
+            "type": "start",
+            "attemptId": "attempt-1",
+            "revision": 1,
+            "startedAfterSeq": 0,
+            "turn": 1,
+            "step": 1
+        })),
+        follow_assistant_stream(serde_json::json!({
+            "type": "chunk",
+            "attemptId": "attempt-1",
+            "revision": 1,
+            "index": 0,
+            "time": 0.0,
+            "chunk": { "type": "reasoning-delta", "index": 0, "text": "weighing it up" }
+        })),
+        follow_assistant_stream(serde_json::json!({
+            "type": "chunk",
+            "attemptId": "attempt-1",
+            "revision": 1,
+            "index": 1,
+            "time": 0.0,
+            "chunk": { "type": "text-delta", "index": 0, "text": "streamed answer" }
+        })),
+        follow_assistant_stream(serde_json::json!({
+            "type": "end",
+            "attemptId": "attempt-1",
+            "revision": 1,
+            "index": 2,
+            "outcome": { "kind": "committed", "eventType": "assistant/message", "seq": 1 }
+        })),
+    ]);
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut saw_text = false;
+    let mut saw_reasoning = false;
+    while start.elapsed() < Duration::from_secs(5) && !(saw_text && saw_reasoning) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::MessageChunk { content, .. }) if content == "streamed answer" => {
+                saw_text = true;
+            }
+            Ok(ClientEvent::ThinkingChunk { text }) if text == "weighing it up" => {
+                saw_reasoning = true;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(
+        saw_text,
+        "assistant-stream text-delta was not delivered as a message chunk"
+    );
+    assert!(
+        saw_reasoning,
+        "assistant-stream reasoning-delta was not delivered as a thinking chunk"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+/// The harness reports `api-session/status(<id>, false)` on every turn end
+/// (agent running→idle) as well as when a host failure stops a turn. A
+/// completed turn must not push the UI into its "session disconnected" state.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_status_idle_after_turn_end_does_not_interrupt() {
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            mux_session_event("s-1", 1, "turn/start", json!({ "turn": 1 })),
+            mux_session_event(
+                "s-1",
+                2,
+                "turn/end",
+                json!({ "turn": 1, "reason": { "kind": "completed" } }),
+            ),
+            mux_host_event("api-session/status", vec![json!("s-1"), json!(false)]),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut saw_turn_end = false;
+    let mut interrupted = None;
+    while start.elapsed() < Duration::from_secs(3) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::TurnFinished { .. }) => saw_turn_end = true,
+            Ok(ClientEvent::Interrupted { reason }) => {
+                interrupted = Some(reason);
+                break;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_turn_end, "turn/end was not mapped to TurnFinished");
+    assert_eq!(
+        interrupted, None,
+        "an idle transition after turn/end must not interrupt the session"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+/// The same idle report while a turn is still in flight means the host stopped
+/// the session mid-turn, which the UI must learn about.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_status_idle_mid_turn_interrupts() {
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            mux_session_event("s-1", 1, "turn/start", json!({ "turn": 1 })),
+            mux_host_event("api-session/status", vec![json!("s-1"), json!(false)]),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut interrupted = false;
+    while start.elapsed() < Duration::from_secs(3) && !interrupted {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::Interrupted { .. }) => interrupted = true,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(
+        interrupted,
+        "a session that stopped mid-turn must be reported as interrupted"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+/// dsh 0.1.5 reports agent failures as the `api-session/error` remote event;
+/// the bridge must surface it (there is no `host/agent-error` host frame).
+#[tokio::test(flavor = "multi_thread")]
+async fn host_agent_error_event_interrupts() {
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            mux_host_event(
+                "api-session/error",
+                vec![json!("s-1"), json!("model exploded")],
+            ),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut reason = None;
+    while start.elapsed() < Duration::from_secs(3) && reason.is_none() {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::Interrupted { reason: r }) => reason = Some(r),
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let reason = reason.expect("api-session/error must interrupt the session");
+    assert!(
+        reason.contains("model exploded"),
+        "interrupt reason must carry the harness error, got {reason}"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn session_restore_model_control_uses_projection_not_catalog_default() {
     // On resume the session's durable model selection (from the
@@ -1168,7 +1487,7 @@ async fn question_answer_multiple_questions_partial_payload() {
     // The result value must list answers in the question order (q1 then q2),
     // even though they were submitted reversed.
     let answers = responds[0]
-        .pointer("/outcome/value/answer/answers")
+        .pointer("/outcome/value/answers")
         .and_then(Value::as_array)
         .expect("answers array");
     let ids: Vec<&str> = answers
@@ -1180,6 +1499,7 @@ async fn question_answer_multiple_questions_partial_payload() {
         vec!["q1", "q2"],
         "answers must be re-ordered to the question order"
     );
+    assert_eq!(mock.answer_envelopes(), vec![true]);
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
@@ -1281,10 +1601,19 @@ async fn question_answer_payload_matches_dsh_schema() {
     assert_eq!(responds[0]["clientId"], "$events-client-1");
     assert_eq!(responds[0]["eventId"], "qrpc-1");
     assert_eq!(responds[0]["outcome"]["kind"], "result");
+    // dsh 0.1.5: the waterfall resolves with the bare answer object — a
+    // `{ sessionId, answer }` wrapper makes `ctx.userQuestions.ask()` hand the
+    // tool a value it cannot read (`answer.answers`), so the turn dies with a
+    // tool error even when the carrier accepts it.
     assert_eq!(
-        responds[0]["outcome"]["value"]["answer"]["answers"][0]["selected"][0],
+        responds[0]["outcome"]["value"]["answers"][0]["selected"][0],
         "是（推荐）"
     );
+    assert!(
+        responds[0]["outcome"]["value"].get("answer").is_none(),
+        "the 0.1.5 waterfall value must not be wrapped"
+    );
+    assert_eq!(mock.answer_envelopes(), vec![true]);
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
@@ -1788,9 +2117,261 @@ async fn question_answer_uses_waterfall_event_id() {
         "$events/result must echo the question waterfall eventId"
     );
     assert_eq!(results[0]["outcome"]["kind"], "result");
+    // dsh ≥ 0.1.5 resolves the question waterfall with the bare
+    // `AskUserQuestionAnswer` the tool hands back to the model.
     assert_eq!(
-        results[0]["outcome"]["value"]["answer"]["answers"][0]["selected"][0],
+        results[0]["outcome"]["value"]["answers"][0]["selected"][0],
         "A"
+    );
+    // …and the endpoint only accepts it inside the Connection RPC envelope.
+    assert_eq!(
+        mock.answer_envelopes(),
+        vec![true],
+        "the answer must ride a client-request envelope"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+/// Spawn `run_harness_session` against `endpoint`, returning its command
+/// channel, event channel, and worker thread.
+#[allow(clippy::type_complexity)]
+fn spawn_harness_session(
+    endpoint: String,
+) -> (
+    mpsc::Sender<acp_core::RuntimeCommand>,
+    mpsc::Receiver<ClientEvent>,
+    std::thread::JoinHandle<anyhow::Result<()>>,
+) {
+    let registry = Arc::new(HarnessHostRegistry::new());
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(endpoint),
+        agent_preset: None,
+    };
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+    (command_tx, rx, worker)
+}
+
+/// Wait for one `ToolPermissionRequest` carrying `id`.
+fn wait_for_permission_request(rx: &mpsc::Receiver<ClientEvent>, id: &str) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::ToolPermissionRequest { id: seen, .. }) if seen == id => return true,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    false
+}
+
+/// One scripted `user-questions/request` waterfall asking `q1`.
+fn question_waterfall(event_id: &str) -> Value {
+    json!({
+        "type": "waterfall",
+        "event": "user-questions/request",
+        "eventId": event_id,
+        "agentId": "s-1",
+        "request": {
+            "type": "question/requested",
+            "sessionId": "s-1",
+            "questions": [
+                { "id": "q1", "question": "Pick one", "options": [{ "label": "A" }] }
+            ]
+        }
+    })
+}
+
+fn answer_q1(command_tx: &mpsc::Sender<acp_core::RuntimeCommand>) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "q1".into(),
+            result: acp_core::HarnessApprovalResult::Question {
+                answers: vec![acp_core::HarnessQuestionAnswer {
+                    question_id: "q1".into(),
+                    selected: vec!["A".into()],
+                    custom: None,
+                }],
+            },
+            reply_tx,
+        })
+        .unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("respond timed out")
+        .expect("respond failed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_answer_uses_forwarded_waterfall_outcome() {
+    // dsh 0.1.5 forwards approvals as `$events` waterfalls and dropped the
+    // approval id from the request entirely: the approval IS the waterfall, so
+    // the UI id must be its `eventId` and the answer must resolve the waterfall
+    // with the bare closed outcome. The old code posted a `client-response` to
+    // `/api/respond` (an endpoint 0.1.5 no longer serves) and, because the
+    // request carried no `approvalId`, never even surfaced the prompt.
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            json!({
+                "type": "waterfall",
+                "event": "approval/request",
+                "eventId": "approval-rpc-7",
+                "agentId": "s-1",
+                "request": {
+                    "toolName": "bash",
+                    "callId": "call-7",
+                    "reason": "shell command needs approval"
+                }
+            }),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let (command_tx, rx, worker) = spawn_harness_session(mock.endpoint());
+
+    assert!(
+        wait_for_permission_request(&rx, "approval-rpc-7"),
+        "the approval prompt was not surfaced with the waterfall eventId as its id"
+    );
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "approval-rpc-7".into(),
+            result: acp_core::HarnessApprovalResult::Approval {
+                approval_id: "approval-rpc-7".into(),
+                outcome: acp_core::HarnessApprovalOutcome::AllowedOnce,
+            },
+            reply_tx,
+        })
+        .unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("respond timed out")
+        .expect("respond failed");
+
+    let results = mock.responds();
+    assert_eq!(results.len(), 1, "expected one $events/result call");
+    assert_eq!(results[0]["clientId"], "$events-client-1");
+    assert_eq!(results[0]["eventId"], "approval-rpc-7");
+    assert_eq!(results[0]["outcome"]["kind"], "result");
+    assert_eq!(
+        results[0]["outcome"]["value"], "allowed-once",
+        "an approval waterfall resolves with the bare closed outcome"
+    );
+    assert_eq!(mock.answer_envelopes(), vec![true]);
+    assert!(
+        !mock.calls().iter().any(|(method, _)| method == "respond"),
+        "dsh 0.1.5 approvals must not use the retired /api/respond carrier"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_host_question_answer_uses_the_wrapped_bare_carrier() {
+    // A dsh ≤ 0.1.4 host sends its `ready` frame top-level, so the bridge
+    // starts out on the legacy carrier: a bare `{ args }` body whose question
+    // value is the `{ sessionId, answer }` wrapper its `matchesQuestions`
+    // unwraps.
+    let mut c = default_config();
+    c.legacy_answer_protocol = true;
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            question_waterfall("legacy-qrpc-1"),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let (command_tx, rx, worker) = spawn_harness_session(mock.endpoint());
+
+    assert!(
+        wait_for_permission_request(&rx, "q1"),
+        "question request was not surfaced"
+    );
+    answer_q1(&command_tx);
+
+    let results = mock.responds();
+    assert_eq!(
+        results.len(),
+        1,
+        "a legacy host is answered on the first try"
+    );
+    assert_eq!(results[0]["eventId"], "legacy-qrpc-1");
+    assert_eq!(
+        results[0]["outcome"]["value"]["answer"]["answers"][0]["selected"][0], "A",
+        "a legacy host unwraps {{ sessionId, answer }}"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_protocol_probe_retries_once_with_the_other_carrier() {
+    // The answer protocol is inferred from the `$events` ready envelope. When
+    // that inference is wrong the host refuses the carrier itself, and the
+    // bridge must rebuild the (protocol-dependent) answer for the other
+    // protocol and retry once. Here the ready frame looks pre-0.1.5 while the
+    // endpoint requires the 0.1.5 envelope: the first attempt is refused, the
+    // second (enveloped, bare-valued) one succeeds.
+    let mut c = default_config();
+    c.legacy_answer_protocol = false;
+    c.ready_frame_item_envelope = Some(false);
+    c.mux = vec![MuxScript {
+        frames: vec![mux_subscribed("s-1", 0), question_waterfall("probe-qrpc-1")],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let (command_tx, rx, worker) = spawn_harness_session(mock.endpoint());
+
+    assert!(
+        wait_for_permission_request(&rx, "q1"),
+        "question request was not surfaced"
+    );
+    answer_q1(&command_tx);
+
+    assert_eq!(
+        mock.answer_envelopes(),
+        vec![false, true],
+        "the refused legacy attempt must be followed by the enveloped retry"
+    );
+    let results = mock.responds();
+    assert_eq!(results[0]["eventId"], "probe-qrpc-1");
+    assert_eq!(
+        results[1]["outcome"]["value"]["answers"][0]["selected"][0], "A",
+        "the retry carries the bare 0.1.5 answer value"
     );
 
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);

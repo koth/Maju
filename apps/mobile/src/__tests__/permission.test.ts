@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   PermissionApprovalStore,
+  allowOptionId,
   isDestructive,
+  isPendingPermissionTool,
   type PendingApproval,
 } from "../session/permission";
 import type { ControlClient } from "../session/control-client";
@@ -86,6 +88,75 @@ describe("isDestructive heuristic", () => {
   });
 });
 
+describe("isPendingPermissionTool", () => {
+  // Regression: Codex's run/apply_patch approvals carry NO `permission_input`
+  // (they are plain allow/deny choices living in `permission_options`), so a
+  // filter that required an input form hid every one of them from the phone.
+  it("treats an options-only approval (Codex) as awaiting a decision", () => {
+    expect(
+      isPendingPermissionTool({
+        permission_options: [
+          { id: "approved" },
+          { id: "abort" },
+        ],
+        permission_input: null,
+        permission_decision: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("treats a harness question form as awaiting a decision", () => {
+    expect(
+      isPendingPermissionTool({
+        permission_options: [],
+        permission_input: REQUEST,
+        permission_decision: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores ordinary tools and already-decided approvals", () => {
+    expect(
+      isPendingPermissionTool({
+        permission_options: [],
+        permission_input: null,
+        permission_decision: null,
+      }),
+    ).toBe(false);
+    expect(
+      isPendingPermissionTool({
+        permission_options: [{ id: "approved" }],
+        permission_input: null,
+        permission_decision: "allowed",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("allowOptionId", () => {
+  it("recognises the agents' allow options", () => {
+    // Codex (codex-acp): approved / abort.
+    expect(allowOptionId([{ id: "approved", label: "Yes" }])).toBe("approved");
+    // Codebuddy + generic ACP: allow / reject.
+    expect(allowOptionId([{ id: "allow", label: "Yes" }])).toBe("allow");
+    // DeepSeek harness approval: allowed-once / rejected.
+    expect(
+      allowOptionId([{ id: "allowed-once", label: "Allow once" }]),
+    ).toBe("allowed-once");
+    // An opaque label is still recognised through the ACP option kind.
+    expect(
+      allowOptionId([{ id: "opt-1", label: "确定", kind: "allow_once" }]),
+    ).toBe("opt-1");
+  });
+
+  it("returns null when no option is recognisable (caller must ask)", () => {
+    // The sheet must not fall back to `option_id: null` here: the PC reads a
+    // null option as a rejection, which silently denies the call.
+    expect(allowOptionId([{ id: "y", label: "确定", kind: "reject_once" }])).toBeNull();
+    expect(allowOptionId([])).toBeNull();
+  });
+});
+
 describe("PermissionApprovalStore", () => {
   it("surfaces a pending approval and notifies subscribers", () => {
     const { store } = makeStore();
@@ -97,6 +168,19 @@ describe("PermissionApprovalStore", () => {
     expect(seen[0]).toHaveLength(1);
     expect(seen[0][0].permissionRequestId).toBe("pr-1");
     expect(seen[0][0].toolName).toBe("edit_file");
+  });
+
+  it("surfaces an options-only approval (Codex) with no question form", () => {
+    const { store, calls } = makeStore();
+    store.surface(
+      "call-7",
+      { name: "run_command", kind: "execute", id: "t7", call_id: "call-7" },
+      null,
+    );
+    expect(store.snapshot()).toHaveLength(1);
+    expect(store.snapshot()[0].request).toBeNull();
+    expect(store.snapshot()[0].toolCallId).toBe("call-7");
+    expect(calls).toHaveLength(0);
   });
 
   it("approve sends ResolvePermission with the option id and clears the pending request", async () => {

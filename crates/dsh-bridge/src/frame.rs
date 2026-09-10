@@ -1,10 +1,15 @@
 //! Lenient frame unions: `MuxFrame`, `HostFrame`, and the embedded
 //! `SessionEvent` / `ToolEventView` mirrors.
 //!
-//! Mirrors `deepseek-harness/packages/host/apiproxy/src/api/events.schema.ts`
-//! and `.../sessions.schema.ts`. Unknown variants fall back to a generic
-//! `Other` arm (carrying the raw JSON) so an additive harness schema change
-//! never breaks the stream — the design doc's lenient-deserialization decision.
+//! Mirrors the harness event schema (the host `apiproxy` `events.schema.ts` /
+//! `sessions.schema.ts` pair up to dsh 0.1.2, the `api-session-controller`
+//! types from 0.1.5 on). Unknown variants fall back to a generic `Other` arm
+//! (carrying the raw JSON) so an additive harness schema change never breaks
+//! the stream — the design doc's lenient-deserialization decision.
+//!
+//! The `session/follow` journal frames are mirrored here too: durable entries
+//! reuse [`SessionEvent`], and the transient, opt-in live-chunk frames are
+//! [`AssistantStreamFrame`].
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -289,6 +294,51 @@ impl MuxFrame {
     }
 }
 
+/// One `session/control` frame (the dsh 0.1.5+ `SessionControlFrame` union).
+///
+/// dsh 0.1.5 moved the host-wide session control channel — per-session queues,
+/// jobs, and **projection updates** — onto its own `session/control` logical
+/// stream, opened over the same `/api/remote.mux` WebSocket. The `$events` mux
+/// now carries only forwarded Remote events (`{type:"emit"}`).
+///
+/// Projections are where the live token figures live: `contextPressure`
+/// (context occupancy, and the only thing that reacts to a `/compact`) and
+/// `tokenUsage` (durable cumulative usage). A bridge that follows only
+/// `session/follow` sees them once, in that stream's opening baseline, so the
+/// usage dock freezes at the value from session load — the "usage never
+/// updates, not even after compaction" regression.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum ControlFrame {
+    /// Opening snapshot: every session's queues, jobs, and projection values.
+    #[serde(rename = "baseline")]
+    Baseline { value: Value },
+    /// One advanced projection value for one session.
+    #[serde(rename = "projection")]
+    Projection {
+        #[serde(rename = "sessionId")]
+        session_id: SessionId,
+        key: String,
+        value: Value,
+    },
+    #[serde(rename = "queue")]
+    Queue {
+        #[serde(rename = "sessionId")]
+        session_id: SessionId,
+        #[serde(default)]
+        items: Vec<Value>,
+    },
+    #[serde(rename = "jobs")]
+    Jobs {
+        #[serde(rename = "sessionId")]
+        session_id: SessionId,
+        #[serde(default)]
+        jobs: Vec<Value>,
+    },
+    #[serde(other)]
+    Other,
+}
+
 /// `HostFrame` union — the payload slot of an `events.host` `ServerRequest`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -434,6 +484,75 @@ pub enum StreamChunk {
     Finish { reason: Value },
     #[serde(other)]
     Other,
+}
+
+/// One `assistant-stream` item of a `session/follow` stream — the 0.1.5+
+/// carrier for live model output.
+///
+/// dsh 0.1.5 stopped appending the durable `assistant/chunk` session event and
+/// moved token streaming to this process-local, opt-in presentation channel: a
+/// follower must ask for it with `assistantStream: true` and fold the dense
+/// frames itself. Each frame is transient — it carries an `attemptId` and a
+/// dense `index`, never a durable `seq`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssistantStreamItem {
+    pub frame: AssistantStreamFrame,
+}
+
+/// One dense live frame of the active model attempt (`SessionAssistantStreamFrame`).
+///
+/// Only `start` carries `turn`/`step`; chunks are matched to their attempt by
+/// `attemptId`, so a follower that attaches mid-attempt needs the snapshot
+/// baseline to resolve them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum AssistantStreamFrame {
+    #[serde(rename = "start")]
+    Start {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+        #[serde(default)]
+        turn: u64,
+        #[serde(default)]
+        step: u64,
+    },
+    #[serde(rename = "chunk")]
+    Chunk {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+        chunk: StreamChunk,
+    },
+    /// Terminal marker; `outcome.kind` is `committed` (with the settlement
+    /// `seq`) or `abandoned`.
+    #[serde(rename = "end")]
+    End {
+        #[serde(rename = "attemptId")]
+        attempt_id: String,
+        #[serde(default)]
+        outcome: Option<Value>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// `snapshot.assistantStream` — present only when the follow request opted in.
+/// A follower attaching mid-attempt resolves later `chunk` frames through
+/// `activeAttempt`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssistantStreamBaseline {
+    #[serde(default, rename = "activeAttempt")]
+    pub active_attempt: Option<AssistantStreamAttempt>,
+}
+
+/// The attempt already streaming when a follow generation opened.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssistantStreamAttempt {
+    #[serde(rename = "attemptId")]
+    pub attempt_id: String,
+    #[serde(default)]
+    pub turn: u64,
+    #[serde(default)]
+    pub step: u64,
 }
 
 /// `assistant/message` data — `{ turn, step, message, usage? }`.
@@ -594,6 +713,58 @@ mod tests {
     }
 
     #[test]
+    fn control_frame_projection_parse() {
+        // The 0.1.5 session control stream's live projection tick — the shape
+        // the usage dock depends on for context occupancy and token totals.
+        let raw = serde_json::json!({
+            "type": "projection",
+            "sessionId": "s-1",
+            "key": "contextPressure",
+            "value": { "pressureTokens": 12000, "projectedTokens": 9000, "contextWindow": 200000 },
+            "seq": 42
+        });
+        let frame: ControlFrame = serde_json::from_value(raw).unwrap();
+        match &frame {
+            ControlFrame::Projection {
+                session_id,
+                key,
+                value,
+            } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(key, "contextPressure");
+                assert_eq!(value["projectedTokens"], 9000);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_frame_baseline_and_unknown_parse() {
+        let raw = serde_json::json!({
+            "type": "baseline",
+            "value": {
+                "queues": {},
+                "jobs": {},
+                "projections": {
+                    "s-1": { "asOfSeq": 3, "values": { "title": "hello" } }
+                }
+            }
+        });
+        let frame: ControlFrame = serde_json::from_value(raw).unwrap();
+        match frame {
+            ControlFrame::Baseline { value } => {
+                assert_eq!(value["projections"]["s-1"]["values"]["title"], "hello");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // Additive frame kinds must degrade to `Other`, never break the loop.
+        let raw = serde_json::json!({ "type": "future-control-frame" });
+        let frame: ControlFrame = serde_json::from_value(raw).unwrap();
+        assert!(matches!(frame, ControlFrame::Other));
+    }
+
+    #[test]
     fn tool_call_view_unknown_card_falls_back() {
         let raw =
             serde_json::json!({ "for": "call", "view": { "card": "future-card", "title": "x" } });
@@ -678,5 +849,114 @@ mod tests {
             MuxFrame::QuestionRequested { questions, .. } => assert_eq!(questions.len(), 1),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn assistant_stream_start_carries_turn_step() {
+        let raw = serde_json::json!({
+            "type": "assistant-stream",
+            "frame": {
+                "type": "start",
+                "attemptId": "attempt-1",
+                "revision": 2,
+                "startedAfterSeq": 7,
+                "turn": 1,
+                "step": 2
+            }
+        });
+        let item: AssistantStreamItem = serde_json::from_value(raw).unwrap();
+        match item.frame {
+            AssistantStreamFrame::Start {
+                attempt_id,
+                turn,
+                step,
+            } => {
+                assert_eq!(attempt_id, "attempt-1");
+                assert_eq!((turn, step), (1, 2));
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    /// The chunk frame carries no `turn`/`step` (they belong to the attempt's
+    /// `start` frame), so the bridge must resolve them through the attempt id
+    /// registered from `start` or the snapshot baseline.
+    #[test]
+    fn assistant_stream_chunk_is_sparse() {
+        let raw = serde_json::json!({
+            "type": "assistant-stream",
+            "frame": {
+                "type": "chunk",
+                "attemptId": "attempt-1",
+                "revision": 2,
+                "index": 0,
+                "time": 1700000000.0,
+                "chunk": { "type": "reasoning-delta", "index": 0, "text": "hmm" }
+            }
+        });
+        let item: AssistantStreamItem = serde_json::from_value(raw).unwrap();
+        match item.frame {
+            AssistantStreamFrame::Chunk { attempt_id, chunk } => {
+                assert_eq!(attempt_id, "attempt-1");
+                assert!(
+                    matches!(chunk, StreamChunk::ReasoningDelta { ref text, .. } if text == "hmm")
+                );
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    #[test]
+    fn assistant_stream_end_outcome_parse() {
+        let raw = serde_json::json!({
+            "type": "assistant-stream",
+            "frame": {
+                "type": "end",
+                "attemptId": "attempt-1",
+                "revision": 2,
+                "index": 5,
+                "outcome": { "kind": "committed", "eventType": "assistant/message", "seq": 9 }
+            }
+        });
+        let item: AssistantStreamItem = serde_json::from_value(raw).unwrap();
+        match item.frame {
+            AssistantStreamFrame::End {
+                attempt_id,
+                outcome,
+            } => {
+                assert_eq!(attempt_id, "attempt-1");
+                assert_eq!(outcome.unwrap()["kind"], "committed");
+            }
+            _ => panic!("wrong frame variant"),
+        }
+    }
+
+    #[test]
+    fn assistant_stream_baseline_parse() {
+        let raw = serde_json::json!({
+            "revision": 3,
+            "activeAttempt": {
+                "attemptId": "attempt-2",
+                "startedAfterSeq": 4,
+                "turn": 2,
+                "step": 1,
+                "nextIndex": 5,
+                "stream": []
+            }
+        });
+        let baseline: AssistantStreamBaseline = serde_json::from_value(raw).unwrap();
+        let attempt = baseline.active_attempt.unwrap();
+        assert_eq!(attempt.attempt_id, "attempt-2");
+        assert_eq!((attempt.turn, attempt.step), (2, 1));
+    }
+
+    #[test]
+    fn assistant_stream_unknown_frame_falls_back() {
+        let raw = serde_json::json!({
+            "type": "assistant-stream",
+            "frame": { "type": "future-frame", "attemptId": "attempt-1" }
+        });
+        let item: AssistantStreamItem = serde_json::from_value(raw).unwrap();
+        assert!(matches!(item.frame, AssistantStreamFrame::Other));
     }
 }

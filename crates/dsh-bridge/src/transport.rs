@@ -20,11 +20,13 @@ use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::rpc_types::{
-    ClientRequest, HostDescribeValue, RpcId, RpcReceipt, ServerRequest, ServerResponse,
-    SessionAddress, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
+    ANSWER_PROTOCOL_MISMATCH, AnswerProtocol, ClientRequest, CommandAttachmentField,
+    CommandsExecutePayload, HostDescribeValue, RpcId, RpcReceipt, RpcResult, ServerRequest,
+    ServerResponse, SessionAddress, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
     SessionCreateValue, SessionForkPayload, SessionForkValue, SessionHistoryPayload,
     SessionHistoryValue, SessionListPayload, SessionListValue, SessionModelsPayload,
     SessionPageRequest, SessionPromptPayload, SessionPromptValue, SessionSelectModelPayload,
+    is_command_attachment_field_mismatch,
 };
 
 /// Default timeout for bounded control calls (a hung host must not leave the
@@ -45,6 +47,17 @@ pub struct HttpClient {
     inner: reqwest::Client,
     base_url: reqwest::Url,
     auth_cookie: Option<String>,
+    /// Attachment wire name the host last ACCEPTED for `commands/execute`.
+    /// `false` = `submittedAttachments` (dsh ≥ 0.1.5), `true` = `images`
+    /// (dsh ≤ 0.1.4). The bridge has no version negotiation for this
+    /// surface (`host.describe` returns no invocation manifest), so the answer
+    /// is learned from the first call and reused for the rest of the
+    /// connection.
+    legacy_command_attachments: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The answer protocol this host speaks, learned from the `$events` item
+    /// envelope and corrected by a one-shot retry (`false` = `Envelope`,
+    /// i.e. dsh ≥ 0.1.5).
+    legacy_answer_protocol: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for HttpClient {
@@ -86,11 +99,37 @@ impl HttpClient {
             inner,
             base_url,
             auth_cookie,
+            legacy_command_attachments: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            legacy_answer_protocol: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
     pub fn endpoint(&self) -> &str {
         self.base_url.as_str()
+    }
+
+    /// The answer carrier this host is believed to speak (see
+    /// [`AnswerProtocol`]).
+    pub fn answer_protocol(&self) -> AnswerProtocol {
+        if self
+            .legacy_answer_protocol
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            AnswerProtocol::Legacy
+        } else {
+            AnswerProtocol::Envelope
+        }
+    }
+
+    /// Remember the answer carrier the host actually speaks, so later answers
+    /// skip the protocol probe.
+    pub fn set_answer_protocol(&self, protocol: AnswerProtocol) {
+        self.legacy_answer_protocol.store(
+            protocol == AnswerProtocol::Legacy,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     fn api_url(&self, path: &str) -> reqwest::Url {
@@ -170,30 +209,41 @@ impl HttpClient {
         }
     }
 
-    /// POST an approval response to the legacy `/api/respond` carrier.
-    /// dsh 0.1.2 moved user-question answers to the gateway-internal
-    /// `$events/result` endpoint; approvals may still use this path.
-    pub async fn respond_legacy(&self, response: &Value) -> anyhow::Result<RpcReceipt> {
+    /// POST one JSON body to `/api/<path>` and return the response text.
+    /// Shared by the answer carriers, which are the only endpoints that do not
+    /// ride the typed [`HttpClient::call`] envelope path.
+    async fn post_json_text(&self, path: &str, body: &Value) -> anyhow::Result<String> {
         let mut resp_builder = self
             .inner
-            .post(self.api_url("respond"))
+            .post(self.api_url(path))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(response);
+            .json(body);
         if let Some(cookie) = &self.auth_cookie {
             resp_builder = resp_builder.header(reqwest::header::COOKIE, cookie);
         }
         let resp = resp_builder
             .send()
             .await
-            .context("transport failure for respond")?;
+            .with_context(|| format!("transport failure for {path}"))?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "transport failure for respond: HTTP {status}: {text}"
+                "transport failure for {path}: HTTP {status}: {text}"
             ));
         }
-        let text = resp.text().await.context("respond body read")?;
+        resp.text()
+            .await
+            .with_context(|| format!("{path} body read"))
+    }
+
+    /// POST an approval response to the legacy `/api/respond` carrier.
+    /// dsh 0.1.2 moved user-question answers to the gateway-internal
+    /// `$events/result` endpoint; approvals use this path only on hosts that
+    /// predate the forwarded `approval/request` waterfall (see
+    /// [`AnswerProtocol::Legacy`]).
+    pub async fn respond_legacy(&self, response: &Value) -> anyhow::Result<RpcReceipt> {
+        let text = self.post_json_text("respond", response).await?;
         tracing::debug!(target: "dsh-bridge::respond", body = %text, "respond receipt raw");
         let raw: Value = serde_json::from_str(&text)
             .with_context(|| format!("invalid respond receipt: {text}"))?;
@@ -211,38 +261,92 @@ impl HttpClient {
 
     /// POST a resolved `$events` waterfall result to the gateway-internal
     /// `/api/$events/result` endpoint. `args` must already be the exact
-    /// `{ clientId, eventId, outcome }` object the gateway validates.
+    /// `{ clientId, eventId, outcome }` object the gateway validates, rendered
+    /// for the protocol in use (the answer value itself is protocol-dependent).
+    ///
+    /// The carrier differs by host generation:
+    ///
+    /// * `Envelope` (dsh ≥ 0.1.5) — the endpoint sits behind the shared
+    ///   Connection RPC interceptor, so the body must be a full
+    ///   `client-request` and the receipt is a `server-response`. A bare
+    ///   `{ args }` body is refused with `gateway/bad-request: invalid
+    ///   client-request message`, which is what made every question submission
+    ///   fail with a bare "gateway error" (the old parser found neither `ok`
+    ///   nor `error.message` in the envelope).
+    /// * `Legacy` (dsh ≤ 0.1.4) — a bare `{ args }` body answering with a bare
+    ///   `{ ok, error }` result.
+    ///
+    /// When the host answers with the *other* protocol's shape this returns the
+    /// [`ANSWER_PROTOCOL_MISMATCH`] error, so the caller can rebuild the answer
+    /// for that protocol and retry once.
     pub async fn remote_events_result(&self, args: &Value) -> anyhow::Result<RpcReceipt> {
-        let mut resp_builder = self
-            .inner
-            .post(self.api_url("$events/result"))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&serde_json::json!({ "args": args }));
-        if let Some(cookie) = &self.auth_cookie {
-            resp_builder = resp_builder.header(reqwest::header::COOKIE, cookie);
+        match self.answer_protocol() {
+            AnswerProtocol::Envelope => {
+                let rpc_id = uuid::Uuid::new_v4().to_string();
+                let body = ClientRequest::new(
+                    rpc_id.clone(),
+                    "$events/result".to_string(),
+                    serde_json::json!({ "args": args }),
+                );
+                let text = self
+                    .post_json_text("$events/result", &serde_json::to_value(&body)?)
+                    .await?;
+                tracing::debug!(target: "dsh-bridge::respond", body = %text, "$events/result receipt raw");
+                let raw: Value = serde_json::from_str(&text)
+                    .with_context(|| format!("invalid $events/result receipt: {text}"))?;
+                // A `server-response` is the envelope spine; anything else is a
+                // pre-0.1.5 host answering the bare-body carrier.
+                if raw.get("result").is_none() {
+                    return Err(answer_protocol_mismatch(AnswerProtocol::Envelope, &raw));
+                }
+                let server: ServerResponse = serde_json::from_value(raw)
+                    .with_context(|| "invalid server-response for $events/result".to_string())?;
+                if server.rpcId != rpc_id {
+                    return Err(anyhow!(
+                        "rpcId mismatch for $events/result: sent {rpc_id}, got {}",
+                        server.rpcId
+                    ));
+                }
+                match server.result {
+                    RpcResult::Ok { .. } => Ok(RpcReceipt::Gateway {
+                        is_ok: true,
+                        message: String::new(),
+                    }),
+                    RpcResult::Err { error, .. } => {
+                        if error.code == "gateway/bad-request" {
+                            // The host refused the envelope itself (rather than
+                            // the answer inside it): it speaks the legacy
+                            // carrier.
+                            return Err(answer_protocol_mismatch(AnswerProtocol::Envelope, &error));
+                        }
+                        Ok(RpcReceipt::Gateway {
+                            is_ok: false,
+                            message: error.message,
+                        })
+                    }
+                }
+            }
+            AnswerProtocol::Legacy => {
+                let text = self
+                    .post_json_text("$events/result", &serde_json::json!({ "args": args }))
+                    .await?;
+                tracing::debug!(target: "dsh-bridge::respond", body = %text, "$events/result receipt raw");
+                let raw: Value = serde_json::from_str(&text)
+                    .with_context(|| format!("invalid $events/result receipt: {text}"))?;
+                if raw.get("result").is_some() {
+                    // A `server-response`: this host puts `$events/result`
+                    // behind the Connection RPC envelope.
+                    return Err(answer_protocol_mismatch(AnswerProtocol::Legacy, &raw));
+                }
+                let is_ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                let message = raw
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("gateway error")
+                    .to_string();
+                Ok(RpcReceipt::Gateway { is_ok, message })
+            }
         }
-        let resp = resp_builder
-            .send()
-            .await
-            .context("transport failure for $events/result")?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "transport failure for $events/result: HTTP {status}: {text}"
-            ));
-        }
-        let text = resp.text().await.context("$events/result body read")?;
-        tracing::debug!(target: "dsh-bridge::respond", body = %text, "$events/result receipt raw");
-        let raw: Value = serde_json::from_str(&text)
-            .with_context(|| format!("invalid $events/result receipt: {text}"))?;
-        let is_ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        let message = raw
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or("gateway error")
-            .to_string();
-        Ok(RpcReceipt::Gateway { is_ok, message })
     }
 
     // ---- Typed control-method helpers ----
@@ -370,26 +474,77 @@ impl HttpClient {
     /// Returns `Ok(None)` when the line did not resolve to a registered
     /// command (the wire serializes the void business result with no `value`
     /// field). `Ok(Some(value))` carries the settled execution outcome.
+    ///
+    /// The descriptor's attachment parameter was renamed `images` →
+    /// `submittedAttachments` in dsh 0.1.5, and the gateway rejects whichever
+    /// name its descriptor does not declare (`gateway/arguments-invalid`, which
+    /// shipped as "/compact fails with missing submittedAttachments /
+    /// unexpected images" on 0.1.5.1-rc.1). Both names are only ever sent as an
+    /// empty array, so the call retries once with the other name and remembers
+    /// the one that worked.
     pub async fn commands_execute(
         &self,
         rpc_id: RpcId,
         session_id: &str,
         line: &str,
     ) -> anyhow::Result<Option<crate::rpc_types::CommandsExecuteValue>> {
+        let preferred = self.command_attachment_field();
         // Bare wire fields; `remote_payload` adds the single `{ "args": … }`
         // envelope (see CommandsExecutePayload for the double-wrap hazard).
-        let payload = crate::rpc_types::CommandsExecutePayload {
-            agent_id: session_id.to_string(),
-            line: line.to_string(),
-            images: Vec::new(),
-        };
-        self.call_bounded(
-            "commands/execute",
-            rpc_id,
-            &payload,
-            COMMANDS_EXECUTE_TIMEOUT,
-        )
-        .await
+        let payload = CommandsExecutePayload::new(session_id, line, preferred);
+        match self
+            .call_bounded(
+                "commands/execute",
+                rpc_id.clone(),
+                &payload,
+                COMMANDS_EXECUTE_TIMEOUT,
+            )
+            .await
+        {
+            Ok(value) => Ok(value),
+            Err(err) if is_command_attachment_field_mismatch(&err) => {
+                let fallback = preferred.toggled();
+                tracing::info!(
+                    target: "dsh-bridge::transport",
+                    from = ?preferred,
+                    to = ?fallback,
+                    "commands/execute rejected the attachment field name; retrying with the other wire name",
+                );
+                let payload = CommandsExecutePayload::new(session_id, line, fallback);
+                let result = self
+                    .call_bounded(
+                        "commands/execute",
+                        rpc_id,
+                        &payload,
+                        COMMANDS_EXECUTE_TIMEOUT,
+                    )
+                    .await;
+                if result.is_ok() {
+                    self.set_command_attachment_field(fallback);
+                }
+                result
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Attachment wire name to try first for `commands/execute`.
+    fn command_attachment_field(&self) -> CommandAttachmentField {
+        if self
+            .legacy_command_attachments
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            CommandAttachmentField::Images
+        } else {
+            CommandAttachmentField::SubmittedAttachments
+        }
+    }
+
+    fn set_command_attachment_field(&self, field: CommandAttachmentField) {
+        self.legacy_command_attachments.store(
+            field == CommandAttachmentField::Images,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     // ---- WebSocket event streams ----
@@ -451,6 +606,27 @@ impl HttpClient {
         Ok(stream)
     }
 
+    /// Open the host-wide `session/control` logical stream.
+    ///
+    /// dsh 0.1.5 moved the session control channel (per-session queues, jobs,
+    /// and the projection updates that carry context occupancy and cumulative
+    /// token usage) here from the `$events` mux. It takes no parameters, so the
+    /// open payload must carry an empty `args` object — the gateway's
+    /// `assertExactArguments` rejects anything else.
+    pub async fn open_session_control(&self) -> anyhow::Result<SseStream> {
+        let request = serde_json::json!({
+            "type": "open",
+            "streamId": uuid::Uuid::new_v4().to_string(),
+            "endpoint": "session/control",
+            "payload": { "args": {} }
+        });
+        let text = serde_json::to_string(&request)?;
+        tracing::info!(target: "dsh-bridge::ws", "opening dsh session control");
+        let stream = self.open_ws("remote.mux", Some(text)).await?;
+        tracing::info!(target: "dsh-bridge::ws", "dsh session control opened");
+        Ok(stream)
+    }
+
     /// Open one `session/follow` logical stream for `session_id`.
     ///
     /// The dsh gateway multiplexes Typert Remote streams over a single
@@ -458,25 +634,41 @@ impl HttpClient {
     /// carrying the endpoint name and its request payload. Session content
     /// events (assistant chunks, tool calls, …) are delivered on this
     /// per-session journal stream — not on the `$events` mux.
+    ///
+    /// `assistantStream: true` opts into the live model-output frames. dsh
+    /// 0.1.5 stopped appending the durable `assistant/chunk` event and serves
+    /// streaming text/reasoning only on that opt-in channel, so leaving it out
+    /// yields a transcript with no reply text or thinking at all.
     pub async fn open_session_follow(&self, session_id: &str) -> anyhow::Result<SseStream> {
-        let request = serde_json::json!({
-            "type": "open",
-            "streamId": uuid::Uuid::new_v4().to_string(),
-            "endpoint": "session/follow",
-            "payload": {
-                "args": {
-                    "request": {
-                        "address": { "kind": "session", "sessionId": session_id }
-                    }
-                }
-            }
-        });
+        let request = session_follow_open_message(session_id);
         let text = serde_json::to_string(&request)?;
         tracing::info!(target: "dsh-bridge::ws", session_id = %session_id, "opening dsh session follow");
         let stream = self.open_ws("remote.mux", Some(text)).await?;
         tracing::info!(target: "dsh-bridge::ws", session_id = %session_id, "dsh session follow opened");
         Ok(stream)
     }
+}
+
+/// The `open` message for a `session/follow` logical stream.
+///
+/// `assistantStream: true` is required from dsh 0.1.5 on: the durable
+/// `assistant/chunk` event no longer exists, so a follower that omits the opt-in
+/// receives no reply text and no reasoning at all. Older harness schemas reject
+/// unknown keys by stripping them, so sending it is backward compatible.
+fn session_follow_open_message(session_id: &str) -> Value {
+    serde_json::json!({
+        "type": "open",
+        "streamId": uuid::Uuid::new_v4().to_string(),
+        "endpoint": "session/follow",
+        "payload": {
+            "args": {
+                "request": {
+                    "address": { "kind": "session", "sessionId": session_id },
+                    "assistantStream": true
+                }
+            }
+        }
+    })
 }
 
 async fn exchange_launch_token(
@@ -551,6 +743,20 @@ fn remote_payload(endpoint: &str, payload: Value) -> Value {
     }
 }
 
+/// The error raised when the host answered an answer carrier with the *other*
+/// answer protocol's response shape. Carries the [`ANSWER_PROTOCOL_MISMATCH`]
+/// marker so the caller can rebuild the (protocol-dependent) answer value and
+/// retry once.
+fn answer_protocol_mismatch(
+    used: AnswerProtocol,
+    detail: &impl std::fmt::Display,
+) -> anyhow::Error {
+    anyhow!(
+        "{ANSWER_PROTOCOL_MISMATCH}: the host answered the {used:?} $events/result carrier with \
+         the other protocol's shape: {detail}"
+    )
+}
+
 /// A WebSocket message stream. Yields raw `tungstenite::Message`s; callers
 /// parse the dsh remote-mux envelope themselves (the `$events` mux and the
 /// per-session `session/follow` stream carry different payload shapes).
@@ -569,6 +775,37 @@ pub struct SseStream {
     /// a client id, `Some(None)` when a ready item had none, `None` while
     /// waiting for the first ready item.
     remote_event_ready: Option<Option<String>>,
+    /// Whether the first logical-stream value arrived wrapped in the dsh 0.1.5
+    /// `{ type: "item", value }` envelope (`false` = the pre-0.1.5 top-level
+    /// form). The same release moved `$events/result` behind the Connection RPC
+    /// envelope, so this doubles as the answer-protocol probe.
+    item_envelope: bool,
+}
+
+/// One `session/follow` journal frame.
+#[derive(Debug)]
+pub enum FollowStreamItem {
+    /// A journal frame (snapshot / event / assistant-stream).
+    Item(Value),
+    /// The host ended this logical stream (`{type:"end"}`) without closing the
+    /// socket; the caller must reopen it.
+    Ended,
+    /// The host rejected or failed the logical stream (`{type:"error"}`).
+    Failed(Value),
+}
+
+/// The `ready` payload of a `$events` frame, in either wire form.
+///
+/// dsh ≤ 0.1.4 sent the `ready` discriminator top-level; 0.1.5 wraps every
+/// logical-stream value in an `item` envelope, so the same facts arrive as
+/// `{ type: "item", value: { type: "ready", clientId, host } }`.
+fn ready_payload(raw: &Value) -> Option<&Value> {
+    let candidate = if raw.get("type").and_then(Value::as_str) == Some("item") {
+        raw.get("value")?
+    } else {
+        raw
+    };
+    (candidate.get("type").and_then(Value::as_str) == Some("ready")).then_some(candidate)
 }
 
 impl SseStream {
@@ -585,7 +822,19 @@ impl SseStream {
         Self {
             inner: Box::pin(ws),
             remote_event_ready: None,
+            item_envelope: false,
         }
+    }
+
+    /// Whether this stream's values arrived in the dsh 0.1.5 `item` envelope.
+    /// Only meaningful after the first frame was read (the ready item).
+    pub fn uses_item_envelope(&self) -> bool {
+        self.item_envelope
+    }
+
+    /// Record the wire form of a raw frame (see [`Self::uses_item_envelope`]).
+    fn note_envelope(&mut self, raw: &Value) {
+        self.item_envelope = raw.get("type").and_then(Value::as_str) == Some("item");
     }
 
     /// The gateway-assigned client id from the `$events` stream's ready item.
@@ -596,8 +845,9 @@ impl SseStream {
         }
         loop {
             let raw = self.next_json().await?;
-            if raw.get("type").and_then(Value::as_str) == Some("ready") {
-                let client_id = raw
+            self.note_envelope(&raw);
+            if let Some(ready) = ready_payload(&raw) {
+                let client_id = ready
                     .get("clientId")
                     .and_then(Value::as_str)
                     .map(str::to_string);
@@ -662,15 +912,32 @@ impl SseStream {
     pub async fn next(&mut self) -> Option<ServerRequest> {
         loop {
             let raw = self.next_json().await?;
-            if raw.get("type").and_then(Value::as_str) == Some("ready") {
+            self.note_envelope(&raw);
+            if let Some(ready) = ready_payload(&raw) {
                 if self.remote_event_ready.is_none() {
                     self.remote_event_ready = Some(
-                        raw.get("clientId")
+                        ready
+                            .get("clientId")
                             .and_then(Value::as_str)
                             .map(str::to_string),
                     );
                 }
                 continue;
+            }
+            // Each logical stream rides its own socket here, so a terminal
+            // envelope means this stream is over: report the end instead of
+            // leaving the reader looping on a dead stream.
+            match raw.get("type").and_then(Value::as_str) {
+                Some("end") => return None,
+                Some("error") => {
+                    tracing::warn!(
+                        target: "dsh-bridge::ws",
+                        frame = %raw,
+                        "dsh remote stream reported an error; ending stream"
+                    );
+                    return None;
+                }
+                _ => {}
             }
             if let Some(req) = remote_message_to_server_request(&raw) {
                 return Some(req);
@@ -678,13 +945,22 @@ impl SseStream {
         }
     }
 
-    /// Next `item` frame's `value`, skipping `ready` / `end` / `error`
-    /// envelopes. Used by the per-session `session/follow` journal stream.
-    pub async fn next_item(&mut self) -> Option<Value> {
+    /// Next `session/follow` journal item. Used by the per-session journal
+    /// stream; terminal envelopes are reported so the caller can reopen the
+    /// stream instead of waiting on a stream the host has already ended.
+    pub async fn next_item(&mut self) -> Option<FollowStreamItem> {
         loop {
             let raw = self.next_json().await?;
             if raw.get("type").and_then(Value::as_str) == Some("item") {
-                return raw.get("value").cloned();
+                match raw.get("value") {
+                    Some(value) => return Some(FollowStreamItem::Item(value.clone())),
+                    None => continue,
+                }
+            }
+            match raw.get("type").and_then(Value::as_str) {
+                Some("end") => return Some(FollowStreamItem::Ended),
+                Some("error") => return Some(FollowStreamItem::Failed(raw)),
+                _ => {}
             }
         }
     }
@@ -718,63 +994,103 @@ fn remote_message_to_server_request(raw: &Value) -> Option<ServerRequest> {
     }
 }
 
-/// Translate one `session/follow` WS item into `MuxFrame`s.
+/// One decoded `session/follow` journal item.
 ///
-/// The journal stream yields:
-/// - `{ type: "snapshot", cursor, records, hasMore, projections }` — the
-///   opening baseline. Projections carry the durable model selection; records
-///   are replayed through the mapping layer.
-/// - `{ type: "event", event }` — a live session event.
+/// The journal stream carries three kinds of item:
+/// - `{ type: "snapshot", … }` — the opening baseline. `projections` holds
+///   durable session metadata (model selection, preset, usage) and `records`
+///   the durable history prefix; `assistantStream`, present only when the
+///   request opted in, names an attempt that was already streaming when this
+///   generation opened.
+/// - `{ type: "event", event }` — one live durable session event. These are
+///   `seq`-ordered so the caller can dedup a re-delivered replay.
+/// - `{ type: "assistant-stream", frame }` — dsh 0.1.5+ live model output.
+///   Transient: no durable `seq`, so it must never advance the caller's
+///   re-baseline cursor.
+#[derive(Debug)]
+pub enum FollowItem {
+    Snapshot {
+        frames: Vec<crate::frame::MuxFrame>,
+        projections: Option<Value>,
+        active_attempt: Option<crate::frame::AssistantStreamAttempt>,
+    },
+    /// One live durable session event.
+    Event(Box<crate::frame::MuxFrame>),
+    /// One transient assistant live-chunk frame.
+    Assistant(Box<crate::frame::AssistantStreamFrame>),
+    /// An item the bridge does not consume (unknown type, or unparseable).
+    Ignored,
+}
+
+/// Translate one `session/follow` WS item into a [`FollowItem`].
 ///
-/// Returns `(MuxFrame`s from records/events, snapshot projections if any)`.
-/// Snapshot `records` are *not* turned into frames here — the caller replays
-/// them via `replay_history`-style mapping to preserve dedup semantics.
-pub fn follow_item_to_frames(
-    session_id: &str,
-    value: &Value,
-) -> (Vec<crate::frame::MuxFrame>, Option<Value>) {
-    let mut frames = Vec::new();
-    let mut snapshot_projections = None;
+/// Snapshot `records` become `MuxFrame`s like `event` entries; the caller
+/// applies them with the same dedup/`seq` rules it uses for live events.
+pub fn decode_follow_item(session_id: &str, value: &Value) -> FollowItem {
     match value.get("type").and_then(Value::as_str) {
         Some("snapshot") => {
-            if let Some(projections) = value.get("projections") {
-                snapshot_projections = Some(projections.clone());
-            }
+            let mut frames = Vec::new();
             if let Some(records) = value.get("records").and_then(Value::as_array) {
                 for record in records {
-                    if record.get("type").and_then(Value::as_str) == Some("event")
-                        && let Some(event) = record.get("event")
-                    {
-                        frames.push(crate::frame::MuxFrame::SessionEvent {
-                            session_id: session_id.to_string(),
-                            event: match serde_json::from_value(event.clone()) {
-                                Ok(ev) => ev,
-                                Err(_) => continue,
-                            },
-                            view: record
-                                .get("view")
-                                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                        });
+                    if record.get("type").and_then(Value::as_str) != Some("event") {
+                        continue;
                     }
-                }
-            }
-        }
-        Some("event") => {
-            if let Some(event) = value.get("event") {
-                if let Ok(ev) = serde_json::from_value(event.clone()) {
+                    let Some(event) = record.get("event") else {
+                        continue;
+                    };
+                    let Ok(event) = serde_json::from_value(event.clone()) else {
+                        continue;
+                    };
                     frames.push(crate::frame::MuxFrame::SessionEvent {
                         session_id: session_id.to_string(),
-                        event: ev,
-                        view: value
+                        event,
+                        view: record
                             .get("view")
                             .and_then(|v| serde_json::from_value(v.clone()).ok()),
                     });
                 }
             }
+            let active_attempt = value
+                .get("assistantStream")
+                .and_then(|baseline| {
+                    serde_json::from_value::<crate::frame::AssistantStreamBaseline>(
+                        baseline.clone(),
+                    )
+                    .ok()
+                })
+                .and_then(|baseline| baseline.active_attempt);
+            FollowItem::Snapshot {
+                frames,
+                projections: value.get("projections").cloned(),
+                active_attempt,
+            }
         }
-        _ => {}
+        Some("event") => {
+            let Some(event) = value.get("event") else {
+                return FollowItem::Ignored;
+            };
+            let Ok(event) = serde_json::from_value(event.clone()) else {
+                return FollowItem::Ignored;
+            };
+            FollowItem::Event(Box::new(crate::frame::MuxFrame::SessionEvent {
+                session_id: session_id.to_string(),
+                event,
+                view: value
+                    .get("view")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            }))
+        }
+        Some("assistant-stream") => {
+            let Some(frame) = value.get("frame") else {
+                return FollowItem::Ignored;
+            };
+            match serde_json::from_value::<crate::frame::AssistantStreamFrame>(frame.clone()) {
+                Ok(frame) => FollowItem::Assistant(Box::new(frame)),
+                Err(_) => FollowItem::Ignored,
+            }
+        }
+        _ => FollowItem::Ignored,
     }
-    (frames, snapshot_projections)
 }
 
 #[cfg(test)]
@@ -791,15 +1107,15 @@ mod tests {
         // which the typert gateway rejects with `arguments-invalid`
         // ("missing agentId, line, images; unexpected args") — /compact then
         // failed silently for the user (fire-and-forget logs the RPC error).
-        let payload = serde_json::json!({
-            "agentId": "session-1",
-            "line": "/compact",
-            "images": [],
-        });
-        let wire = remote_payload("commands/execute", payload);
+        let payload = CommandsExecutePayload::new(
+            "session-1",
+            "/compact",
+            CommandAttachmentField::SubmittedAttachments,
+        );
+        let wire = remote_payload("commands/execute", serde_json::to_value(payload).unwrap());
         assert_eq!(wire["args"]["agentId"], "session-1");
         assert_eq!(wire["args"]["line"], "/compact");
-        assert_eq!(wire["args"]["images"], serde_json::json!([]));
+        assert_eq!(wire["args"]["submittedAttachments"], serde_json::json!([]));
         assert_eq!(
             wire.as_object().unwrap().len(),
             1,
@@ -877,5 +1193,113 @@ mod tests {
         let f1 = sse.next().await.unwrap();
         assert_eq!(f1.payload["args"][0], "r1");
         assert!(sse.next().await.is_none());
+    }
+
+    /// The follow request must opt into the live model-output channel: dsh
+    /// 0.1.5 serves streaming text/reasoning only to followers that ask for it.
+    #[test]
+    fn follow_request_opts_into_assistant_stream() {
+        let request = session_follow_open_message("session-1");
+        assert_eq!(request["endpoint"], "session/follow");
+        assert_eq!(
+            request["payload"]["args"]["request"]["assistantStream"],
+            true
+        );
+        assert_eq!(
+            request["payload"]["args"]["request"]["address"]["sessionId"],
+            "session-1"
+        );
+    }
+
+    #[test]
+    fn decode_follow_item_transient_chunk() {
+        let value = serde_json::json!({
+            "type": "assistant-stream",
+            "frame": {
+                "type": "chunk",
+                "attemptId": "attempt-1",
+                "revision": 1,
+                "index": 0,
+                "time": 1.5,
+                "chunk": { "type": "text-delta", "index": 0, "text": "hi" }
+            }
+        });
+        match decode_follow_item("session-1", &value) {
+            FollowItem::Assistant(frame) => match *frame {
+                crate::frame::AssistantStreamFrame::Chunk { attempt_id, .. } => {
+                    assert_eq!(attempt_id, "attempt-1");
+                }
+                _ => panic!("wrong assistant frame"),
+            },
+            other => panic!("wrong follow item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_follow_item_snapshot_exposes_active_attempt() {
+        let value = serde_json::json!({
+            "type": "snapshot",
+            "cursor": 3,
+            "records": [],
+            "hasMore": false,
+            "projections": { "asOfSeq": 3, "values": {} },
+            "assistantStream": {
+                "revision": 4,
+                "activeAttempt": {
+                    "attemptId": "attempt-9",
+                    "startedAfterSeq": 3,
+                    "turn": 1,
+                    "step": 2,
+                    "nextIndex": 7,
+                    "stream": []
+                }
+            }
+        });
+        match decode_follow_item("session-1", &value) {
+            FollowItem::Snapshot {
+                active_attempt,
+                frames,
+                projections,
+            } => {
+                assert!(frames.is_empty());
+                assert!(projections.is_some());
+                let attempt = active_attempt.expect("baseline attempt");
+                assert_eq!(attempt.attempt_id, "attempt-9");
+                assert_eq!((attempt.turn, attempt.step), (1, 2));
+            }
+            other => panic!("wrong follow item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_follow_item_unknown_is_ignored() {
+        let value = serde_json::json!({ "type": "future-frame", "payload": {} });
+        assert!(matches!(
+            decode_follow_item("session-1", &value),
+            FollowItem::Ignored
+        ));
+    }
+
+    /// dsh ≤ 0.1.4 sent the `$events` ready frame top-level; 0.1.5 wraps every
+    /// logical-stream value in an `item` envelope. Both must yield the client
+    /// id, which `$events/result` echoes to resolve approvals and questions.
+    #[test]
+    fn ready_payload_accepts_both_wire_forms() {
+        let top_level = serde_json::json!({ "type": "ready", "clientId": "c-1" });
+        assert_eq!(ready_payload(&top_level).unwrap()["clientId"], "c-1");
+
+        let nested = serde_json::json!({
+            "type": "item",
+            "streamId": "stream-1",
+            "value": { "type": "ready", "clientId": "c-2", "host": { "home": "/home/x" } }
+        });
+        assert_eq!(ready_payload(&nested).unwrap()["clientId"], "c-2");
+
+        let event = serde_json::json!({
+            "type": "item",
+            "streamId": "stream-1",
+            "value": { "type": "emit", "event": "api-session/status", "args": [] }
+        });
+        assert!(ready_payload(&event).is_none());
     }
 }

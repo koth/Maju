@@ -254,7 +254,8 @@ export function ReviewPanel({
   const [changeSetState, setChangeSetState] = useState<{
     summaries: ChangeSetSummary[];
     filesById: Record<string, FileChangeSummary[]>;
-  }>({ summaries: [], filesById: {} });
+    filesSignatureById: Record<string, string>;
+  }>({ summaries: [], filesById: {}, filesSignatureById: {} });
   const activeTab = controlledActiveTab ?? internalActiveTab;
   const setActiveTab = onActiveTabChange ?? setInternalActiveTab;
   const openTabs = controlledOpenTabs ?? internalOpenTabs;
@@ -430,6 +431,10 @@ export function ReviewPanel({
         ...changeSetState.filesById,
         [liveSummary.id]: liveTurnChangeSet.files,
       },
+      filesSignatureById: {
+        ...changeSetState.filesSignatureById,
+        [liveSummary.id]: reviewChangeSetFilesSignature(liveSummary),
+      },
     };
   }, [
     activeTurnOwner,
@@ -498,17 +503,31 @@ export function ReviewPanel({
   // async reload completes.
   const loadedChangeSetSessionIdRef = useRef<string | null>(null);
 
-  // Structural signature of the live turn changes — advances only when file
-  // changes actually land (never on plain streaming revision bumps).
-  const turnChangesSignature = `${snapshot.turn_changes.length}:${snapshot.turn_changes.reduce(
-    (total, turn) => total + turn.changes.length,
-    0,
-  )}`;
+  // File changes that have already LANDED for the current turn.
+  //
+  // `review_changes` is the running turn's edit list, and the backend upserts
+  // the turn's AgentTurn change set (status `Pending`) at the same moment it
+  // gains an entry. Depending on it is what keeps the panel current while a
+  // turn runs: `turn_changes` is only written when a turn is finalized (or by
+  // the post-turn repair paths), so a count-only signature of it left the
+  // summary list frozen for the whole turn — and on a resumed session, frozen
+  // until the user switched away and back.
+  const liveChangesSignature = useMemo(
+    () => reviewFileChangesSignature(snapshot.review_changes),
+    [snapshot.review_changes],
+  );
+  // Persisted per-turn changes (restored on resume). Content-based on purpose:
+  // an in-place update or a re-anchor changes what the panel must show while
+  // the entry count stays the same.
+  const persistedTurnChangesSignature = useMemo(
+    () => reviewTurnChangesSignature(snapshot.turn_changes),
+    [snapshot.turn_changes],
+  );
 
   useEffect(() => {
     if (!workspaceConnected || !hydrated) {
       loadedChangeSetSessionIdRef.current = null;
-      setChangeSetState({ summaries: [], filesById: {} });
+      setChangeSetState({ summaries: [], filesById: {}, filesSignatureById: {} });
       return;
     }
 
@@ -516,15 +535,15 @@ export function ReviewPanel({
     // shows another session's change sets while the new data loads.
     if (loadedChangeSetSessionIdRef.current !== snapshot.session.id) {
       loadedChangeSetSessionIdRef.current = snapshot.session.id;
-      setChangeSetState({ summaries: [], filesById: {} });
+      setChangeSetState({ summaries: [], filesById: {}, filesSignatureById: {} });
     }
 
     let cancelled = false;
-    // Summaries ONLY — one light SQL query. Files are fetched on demand for
-    // the SELECTED change set (see ReviewChangesView): the panel renders just
-    // the selected set's files and selection works from summary.file_count,
-    // so preloading every historical change set's files was pure O(history)
-    // waste — the review panel froze on long sessions.
+    // Summaries ONLY — one light, session-scoped SQL query. Files are fetched
+    // on demand for the SELECTED change set (see ReviewChangesView): the panel
+    // renders just the selected set's files and selection works from
+    // summary.file_count, so preloading every historical change set's files
+    // was pure O(history) waste — the review panel froze on long sessions.
     sessionListChangeSets({
       session_id: snapshot.session.id,
       workspace_root: snapshot.workspace.root,
@@ -535,48 +554,73 @@ export function ReviewPanel({
           (summary) =>
             summary.source === "AgentTurn" || summary.source === "ManualEdit",
         );
-        // Keep the on-demand files cache across reloads: only the summary
-        // list is refreshed here.
-        setChangeSetState((prev) => ({
-          summaries: relevant,
-          filesById: prev.filesById,
-        }));
+        // Keep the on-demand file cache across reloads — but only while the
+        // change set it belongs to has not advanced. A live turn keeps the
+        // SAME change set id while gaining files, so an unconditionally kept
+        // cache would pin its first (partial) file list forever.
+        setChangeSetState((prev) => {
+          const filesById: Record<string, FileChangeSummary[]> = {};
+          const filesSignatureById: Record<string, string> = {};
+          for (const summary of relevant) {
+            const signature = reviewChangeSetFilesSignature(summary);
+            const cached = prev.filesById[summary.id];
+            if (cached && prev.filesSignatureById[summary.id] === signature) {
+              filesById[summary.id] = cached;
+              filesSignatureById[summary.id] = signature;
+            }
+          }
+          return { summaries: relevant, filesById, filesSignatureById };
+        });
       })
       .catch(() => {
-        if (!cancelled) setChangeSetState({ summaries: [], filesById: {} });
+        if (!cancelled)
+          setChangeSetState({ summaries: [], filesById: {}, filesSignatureById: {} });
       });
 
     return () => {
       cancelled = true;
     };
-    // Reload triggers: panel focus, session/workspace switch, connection —
-    // plus a structural signature of the live turn changes (file count grows
-    // when the assistant edits files). NOT `snapshot.revision`: the revision
-    // advances on every streaming event and the change-set list only changes
-    // when file changes land.
-  }, [focusRequestKey, hydrated, snapshot.session.id, snapshot.workspace.root, turnChangesSignature, workspaceConnected]);
+    // Reload triggers: panel focus, session/workspace switch, connection, plus
+    // the landed file changes described above. NOT `snapshot.revision`: the
+    // revision advances on every streaming event while the change-set list only
+    // changes when file changes land.
+  }, [
+    focusRequestKey,
+    hydrated,
+    liveChangesSignature,
+    persistedTurnChangesSignature,
+    snapshot.session.id,
+    snapshot.workspace.root,
+    workspaceConnected,
+  ]);
 
   // On-demand files for the selected change set (wired into
-  // ReviewChangesView below). Undefined in `filesById` means "not loaded";
-  // an empty array counts as loaded (a change set may legitimately have no
-  // readable files).
-  const handleLoadChangeSetFiles = useCallback((changeSetId: string) => {
-    sessionListChangeSetFiles({ change_set_id: changeSetId })
-      .then((response) => {
-        setChangeSetState((prev) =>
-          prev.filesById[changeSetId] !== undefined
-            ? prev
-            : {
-                summaries: prev.summaries,
-                filesById: { ...prev.filesById, [changeSetId]: response.files },
-              },
-        );
-      })
-      .catch(() => {
-        // Leave the entry undefined; the view retries on the next selection
-        // change.
-      });
-  }, []);
+  // ReviewChangesView below). A change set is recorded as loaded only under the
+  // summary signature it was fetched for, so the view re-fetches when the set
+  // advances instead of trusting a stale list.
+  const handleLoadChangeSetFiles = useCallback(
+    (changeSetId: string, signature: string) => {
+      sessionListChangeSetFiles({ change_set_id: changeSetId })
+        .then((response) => {
+          setChangeSetState((prev) =>
+            prev.filesSignatureById[changeSetId] === signature
+              ? prev
+              : {
+                  summaries: prev.summaries,
+                  filesById: { ...prev.filesById, [changeSetId]: response.files },
+                  filesSignatureById: {
+                    ...prev.filesSignatureById,
+                    [changeSetId]: signature,
+                  },
+                },
+          );
+        })
+        .catch(() => {
+          // Leave the entry unrecorded; the view retries on the next reload.
+        });
+    },
+    [],
+  );
 
   return (
     <div ref={panelRef} className="review-panel">
@@ -1421,8 +1465,9 @@ function ReviewChangesView({
   changeSetState: {
     summaries: ChangeSetSummary[];
     filesById: Record<string, FileChangeSummary[]>;
+    filesSignatureById: Record<string, string>;
   };
-  onLoadChangeSetFiles: (changeSetId: string) => void;
+  onLoadChangeSetFiles: (changeSetId: string, signature: string) => void;
   lastAssistantMessageId: string | null;
   activeTurnOwnerKey: string | null;
   appTheme: AppTheme;
@@ -1470,16 +1515,29 @@ function ReviewChangesView({
     ],
   );
 
-  // Load the SELECTED change set's files on demand. `undefined` in filesById
-  // means "not loaded yet" (an empty array counts as loaded); without this,
-  // the panel preloaded every historical change set's files and froze on
-  // long sessions.
+  // Load the SELECTED change set's files on demand, and re-load them whenever
+  // the set itself advances (a live turn gains files under the same id).
+  // An empty array counts as loaded; loading is keyed by the summary signature
+  // it was fetched for, so a changed set is never served from a stale cache.
   const selectedChangeSetId = selectedChangeSet?.id ?? null;
+  const selectedChangeSetFilesSignature = selectedChangeSet
+    ? reviewChangeSetFilesSignature(selectedChangeSet)
+    : null;
   useEffect(() => {
-    if (!selectedChangeSetId) return;
-    if (changeSetState.filesById[selectedChangeSetId] !== undefined) return;
-    onLoadChangeSetFiles(selectedChangeSetId);
-  }, [changeSetState.filesById, onLoadChangeSetFiles, selectedChangeSetId]);
+    if (!selectedChangeSetId || !selectedChangeSetFilesSignature) return;
+    if (
+      changeSetState.filesSignatureById[selectedChangeSetId] ===
+      selectedChangeSetFilesSignature
+    ) {
+      return;
+    }
+    onLoadChangeSetFiles(selectedChangeSetId, selectedChangeSetFilesSignature);
+  }, [
+    changeSetState.filesSignatureById,
+    onLoadChangeSetFiles,
+    selectedChangeSetFilesSignature,
+    selectedChangeSetId,
+  ]);
 
   useEffect(() => {
     if (!activePreferredChangeSet) return;
@@ -1863,6 +1921,57 @@ function changeSetHasFiles(
   filesById: Record<string, FileChangeSummary[]>,
 ) {
   return (filesById[summary.id]?.length ?? summary.file_count) > 0;
+}
+
+/// Fingerprint of the file list BEHIND a change set — everything the panel
+/// needs to know that a file list it cached for this set is out of date.
+function reviewChangeSetFilesSignature(summary: ChangeSetSummary) {
+  return [
+    summary.status,
+    summary.updated_at,
+    summary.file_count,
+    summary.added_lines,
+    summary.removed_lines,
+  ].join(":");
+}
+
+/// Signature of the running turn's landed edits (`ui.review_changes`).
+function reviewFileChangesSignature(changes: UiSnapshot["review_changes"]) {
+  if (changes.length === 0) return "";
+  return changes
+    .map((change) =>
+      [
+        change.path,
+        change.change_type,
+        change.added_lines,
+        change.removed_lines,
+        change.timestamp,
+      ].join(":"),
+    )
+    .sort()
+    .join("|");
+}
+
+/// Content signature of the persisted per-turn changes. Order-insensitive by
+/// design — a re-anchored or re-sorted entry must not read as a new change.
+function reviewTurnChangesSignature(turns: UiSnapshot["turn_changes"]) {
+  if (turns.length === 0) return "";
+  const parts: string[] = [];
+  for (const turn of turns) {
+    for (const change of turn.changes) {
+      parts.push(
+        [
+          turn.message_id,
+          change.path,
+          change.change_type,
+          change.added_lines,
+          change.removed_lines,
+          change.timestamp,
+        ].join(":"),
+      );
+    }
+  }
+  return parts.sort().join("|");
 }
 
 function lastReviewableAssistantMessageId(

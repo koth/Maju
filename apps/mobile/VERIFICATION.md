@@ -6,10 +6,26 @@ implementation, with automated vs. needs-native-device status.
 ## Automated (green here)
 
 - `npx tsc --noEmit` — clean
-- `npx vitest run` — 146 tests across 17 files
+- `npx vitest run` — 166 tests across 19 files
 - `src/__tests__/integration.test.ts` — end-to-end over an in-memory relay
+- `src/__tests__/permission.test.ts` — approval store, default-deny timeout, and
+  the two approval shapes (question form vs. options-only)
 - `src/__tests__/turn-completion.test.ts` — turn-completion watcher transitions/dedupe/suppression
 - `src/__tests__/alert-presenter.test.ts` — context-aware alert policy table
+
+## Remote approvals
+
+Two shapes arrive over the relay, and both are answerable from the phone:
+
+| Shape | Example | Phone behavior |
+|---|---|---|
+| `permission_input` question form | DeepSeek harness `ask_user_question` | Full question UI (radio/checkbox/free text) + submit/cancel |
+| `permission_options` only (no input) | Codex `run_command` / `apply_patch`, Codebuddy bash | Option list from the tool; destructive ones require picking an option, then a second confirm |
+
+Both are derived from the snapshot tool (`isPendingPermissionTool`), which is why
+the PC must push the snapshot update for an input-less approval as well — a
+`PermissionRequested` signal alone cannot carry its options
+(`crates/app-core/src/application/events.rs`).
 
 ## Turn-completion alerts (add-mobile-turn-completion-alerts)
 
@@ -42,7 +58,7 @@ server-side push (FCM/APNs) is introduced.
 | 1 | Scan QR → pair → both derive the same SessionKey (encrypt/decrypt round-trip) | `pairing.test.ts`, `integration.test.ts` bootstrap | automated |
 | 2 | `CreateSession` → `session_id` + `SnapshotFull` | `integration.test.ts` (creates a session) | automated |
 | 3 | `SendPrompt` → `ToolUpdated` stream → `SessionStatusChanged{Idle}` | `integration.test.ts` (streams tool updates to Idle) | automated |
-| 4 | Destructive tool → `PermissionRequest` → approve executes; deny aborts | `permission.test.ts`, `integration.test.ts` (approve) | automated (approve); deny covered by `permission.test.ts` deny path |
+| 4 | Destructive tool → `PermissionRequest` → approve executes; deny aborts | `permission.test.ts`, `integration.test.ts` (approve, incl. the options-only Codex shape) | automated (approve); deny covered by `permission.test.ts` deny path |
 | 5 | `Cancel` → session back to Idle | `integration.test.ts` (cancel returns to Idle) | automated |
 | 6 | `ListSessions` + `SwitchSession` → history snapshot | `integration.test.ts` (list + switch) | automated |
 | 7 | Login + valid subscription → `BindDeviceResponse.ok=true`, restart免扫码 | `binding.test.ts`, `account/*` | logic automated; live relay login TBD per relay contract |

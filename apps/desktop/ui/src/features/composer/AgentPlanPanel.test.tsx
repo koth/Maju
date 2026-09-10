@@ -139,9 +139,39 @@ describe("AgentPlanPanel", () => {
       />,
     );
     // codex-core only emits a context update at the next model response, so
-    // during an active turn the figure is marked pending-refresh.
+    // during an active turn a stale figure is marked pending-refresh.
     expect(screen.getByText("更新中")).toBeInTheDocument();
     expect(screen.queryByText(/上次更新/)).toBeNull();
+  });
+  it("keeps the last-updated label while streaming when the sample is fresh", () => {
+    // The dsh harness reports occupancy live, so an active turn must not label
+    // a just-refreshed figure as "更新中" — that is what made the dock look
+    // frozen while the number underneath was already current.
+    render(
+      <AgentPlanEnvironment
+        environment={{
+          changeCount: 0,
+          addedLines: 0,
+          removedLines: 0,
+          locationLabel: "本地",
+          branchLabel: "master",
+          actionLabel: "工作区干净",
+          streaming: true,
+          usage: {
+            context: {
+              used_tokens: 12345,
+              window_tokens: 128000,
+              updated_at: new Date().toISOString(),
+            },
+            current_turn: {},
+            session_total: {},
+            by_model: [],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/上次更新 刚刚/)).toBeInTheDocument();
+    expect(screen.queryByText("更新中")).toBeNull();
   });
   it("shows a last-updated label for the context figure when idle", () => {
     render(

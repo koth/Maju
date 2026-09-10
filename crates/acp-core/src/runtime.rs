@@ -52,7 +52,9 @@ pub enum RuntimeCommand {
         reply_tx: mpsc::Sender<anyhow::Result<()>>,
     },
     /// Answer a DeepSeek Harness approval/question (server-request) by its `rpcId`.
-    /// The bridge POSTs a `ClientResponse` to `/api/respond` over the shared HTTP client.
+    /// The bridge posts the answer over the shared HTTP client, through whichever
+    /// carrier the host speaks (`$events/result` on dsh ≥ 0.1.5, `/api/respond`
+    /// before that).
     ResolveHarnessApproval {
         rpc_id: String,
         result: HarnessApprovalResult,
@@ -96,7 +98,7 @@ pub enum RuntimeCommand {
 }
 
 /// User decision for a harness approval/question, carried back through
-/// `RuntimeCommand::ResolveHarnessApproval` to the bridge's `/api/respond` POST.
+/// `RuntimeCommand::ResolveHarnessApproval` to the bridge's answer POST.
 #[derive(Debug, Clone)]
 pub enum HarnessApprovalResult {
     /// Approval: `allowed-once` or `rejected`.

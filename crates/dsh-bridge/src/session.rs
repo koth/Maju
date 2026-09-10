@@ -16,11 +16,13 @@ use std::time::Instant;
 use uuid::Uuid;
 use workspace_model::UserPromptContent;
 
+use crate::frame::{AssistantStreamFrame, MuxFrame};
 use crate::host::{HarnessHostRegistry, SessionSink};
 use crate::rpc_types::{
     PromptContentPart, PromptMode, SessionCancelPayload, SessionCreatePayload, SessionId,
-    SessionPromptPayload,
+    SessionPromptPayload, is_answer_protocol_mismatch,
 };
+use crate::transport::{FollowItem, FollowStreamItem};
 
 /// Entry point — same shape as `acp_core::runtime::run_session`.
 ///
@@ -349,40 +351,80 @@ pub fn run_harness_session(
             } => {
                 let respond_start = Instant::now();
                 let pending = sink.pending_approvals();
-                let response =
-                    pending.build_response(&sink, host.remote_event_client_id(), &rpc_id, &result);
-                if let Some(response) = &response {
-                    tracing::info!(
-                        target: "dsh-bridge::respond",
-                        rpc_id,
-                        payload = %serde_json::to_string(response).unwrap_or_default(),
-                        "sending respond"
+                let client_id = host.remote_event_client_id();
+                // The answer value and its carrier are protocol-dependent (see
+                // `AnswerProtocol`): dsh ≥ 0.1.5 wants the bare resolved value
+                // in a `client-request` envelope, dsh ≤ 0.1.4 a wrapped value in
+                // a bare body. The protocol is detected up front; a host that
+                // still answers with the other shape gets one retry with the
+                // answer rebuilt for it.
+                let mut protocol = client.answer_protocol();
+                let mut attempts = 0u8;
+                let (send_result, response) = loop {
+                    let request = pending.build_response(
+                        &sink,
+                        client_id.clone(),
+                        protocol,
+                        &rpc_id,
+                        &result,
                     );
-                }
-                let is_question_result = response
-                    .as_ref()
-                    .is_some_and(|payload| payload.get("clientId").is_some());
-                let send_result = match response {
-                    Some(ref payload) if is_question_result => host
-                        .runtime()
-                        .block_on(client.remote_events_result(payload)),
-                    Some(ref payload) => host.runtime().block_on(client.respond_legacy(payload)),
-                    None => Err(anyhow::anyhow!(
-                        "no pending approval/question for id {rpc_id}"
-                    )),
+                    let Some(request) = request else {
+                        break (
+                            Err(anyhow::anyhow!(
+                                "no pending approval/question for id {rpc_id}"
+                            )),
+                            None,
+                        );
+                    };
+                    if attempts == 0 {
+                        tracing::info!(
+                            target: "dsh-bridge::respond",
+                            rpc_id,
+                            protocol = ?protocol,
+                            payload = %serde_json::to_string(request.body()).unwrap_or_default(),
+                            "sending respond"
+                        );
+                    }
+                    let attempt = match &request {
+                        crate::approval::AnswerRequest::Waterfall(args) => {
+                            host.runtime().block_on(client.remote_events_result(args))
+                        }
+                        crate::approval::AnswerRequest::Legacy(payload) => {
+                            host.runtime().block_on(client.respond_legacy(payload))
+                        }
+                    };
+                    match attempt {
+                        Err(err) if attempts == 0 && is_answer_protocol_mismatch(&err) => {
+                            let next = protocol.toggled();
+                            tracing::info!(
+                                target: "dsh-bridge::respond",
+                                rpc_id,
+                                from = ?protocol,
+                                to = ?next,
+                                error = %err,
+                                "host answered the other answer protocol; retrying once",
+                            );
+                            client.set_answer_protocol(next);
+                            protocol = next;
+                            attempts += 1;
+                            continue;
+                        }
+                        other => break (other, Some(request)),
+                    }
                 };
                 // A `bad-response` means dsh rejected the answer payload
                 // (validation mismatch) — the pending ask stays open on the
                 // host and the turn hangs. Surface it instead of swallowing.
                 let send_result = send_result.and_then(|receipt| {
                     if !receipt.accepted() {
-                        let reason = match &receipt {
-                            _ => receipt.rejection_reason(),
-                        };
+                        let reason = receipt.rejection_reason();
                         tracing::warn!(
                             target: "dsh-bridge::respond",
                             rpc_id,
-                            response = %serde_json::to_string(&response).unwrap_or_default(),
+                            response = %response
+                                .as_ref()
+                                .map(|r| serde_json::to_string(r.body()).unwrap_or_default())
+                                .unwrap_or_default(),
                             reason = %reason,
                             "harness rejected respond (question/approval stays pending)"
                         );
@@ -1393,12 +1435,22 @@ fn local_timezone() -> String {
 /// The opening `snapshot` frame carries the durable projections (model
 /// selection) and historical records; both are replayed through the mapping
 /// layer. Subsequent `event` frames are mapped and forwarded live.
+///
+/// dsh 0.1.5+ serves live model output as transient `assistant-stream` frames
+/// instead of durable `assistant/chunk` events; those are folded separately and
+/// never advance the durable `seq` cursor.
 async fn run_session_follow(
     client: crate::transport::HttpClient,
     sink: Arc<SessionSink>,
     session_id: SessionId,
     shutdown: ShutdownSignal,
 ) {
+    // Attempt id → `(turn, step)`. The transient chunk frames carry only the
+    // attempt id, while the mapping layer keys its repairers and dedup state on
+    // the durable step. Kept across reconnects so a re-attach mid-attempt keeps
+    // resolving its frames.
+    let mut attempts: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
     loop {
         if shutdown.is_requested() {
             return;
@@ -1423,44 +1475,55 @@ async fn run_session_follow(
             if shutdown.is_requested() {
                 return;
             }
-            let Some(value) = stream.next_item().await else {
-                tracing::debug!(
-                    target: "dsh-bridge::session::follow",
-                    session_id = %session_id,
-                    "session follow stream ended; reconnecting"
-                );
-                break;
+            let value = match stream.next_item().await {
+                Some(FollowStreamItem::Item(value)) => value,
+                other => {
+                    // The host can end or fail this logical stream without
+                    // closing the socket; without this the loop would wait
+                    // forever on a stream that will never produce again and the
+                    // session would silently stop updating.
+                    let reason = match &other {
+                        Some(FollowStreamItem::Failed(error)) => format!("error: {error}"),
+                        _ => "end".to_string(),
+                    };
+                    tracing::debug!(
+                        target: "dsh-bridge::session::follow",
+                        session_id = %session_id,
+                        reason = %reason,
+                        "session follow stream finished; reconnecting"
+                    );
+                    break;
+                }
             };
-            let (frames, projections) =
-                crate::transport::follow_item_to_frames(&session_id, &value);
-            // The snapshot's projections carry durable session metadata
-            // (model selection, agent preset, usage). Map the whole baseline
-            // so resumed sessions restore everything instead of only the
-            // model selection.
-            if let Some(projections) = &projections
-                && let Some(values) = projections.get("values")
-            {
-                for event in crate::mapping::map_projection_values(values) {
-                    sink.send(event);
-                }
-            }
-            for frame in frames {
-                if let crate::frame::MuxFrame::SessionEvent { event, view, .. } = &frame {
-                    // SSE re-baseline can re-deliver frames at or below the
-                    // last seen seq. Applying them again re-runs `tool/call`
-                    // → `ToolStarted`, resurrecting an already-completed card
-                    // to Running with no terminal event ever following.
-                    let last = sink.last_seq.load(std::sync::atomic::Ordering::Acquire);
-                    if event.seq <= last {
-                        continue;
+            match crate::transport::decode_follow_item(&session_id, &value) {
+                FollowItem::Snapshot {
+                    frames,
+                    projections,
+                    active_attempt,
+                } => {
+                    // An attempt that was already streaming when this generation
+                    // opened still delivers chunks without a preceding `start`.
+                    if let Some(attempt) = active_attempt {
+                        attempts.insert(attempt.attempt_id, (attempt.turn, attempt.step));
                     }
-                    let events = crate::mapping::map_session_event(event, view.as_ref(), &sink);
-                    for ev in events {
-                        sink.send(ev);
+                    // The snapshot's projections carry durable session metadata
+                    // (model selection, agent preset, usage). Map the whole
+                    // baseline so resumed sessions restore everything instead of
+                    // only the model selection.
+                    if let Some(projections) = &projections
+                        && let Some(values) = projections.get("values")
+                    {
+                        for event in crate::mapping::map_projection_values(values) {
+                            sink.send(event);
+                        }
                     }
-                    sink.last_seq
-                        .store(event.seq, std::sync::atomic::Ordering::Release);
+                    apply_follow_frames(&sink, frames);
                 }
+                FollowItem::Event(frame) => apply_follow_frames(&sink, vec![*frame]),
+                FollowItem::Assistant(frame) => {
+                    handle_assistant_stream(&sink, &mut attempts, *frame);
+                }
+                FollowItem::Ignored => {}
             }
         }
         // Backoff before reconnect.
@@ -1468,6 +1531,86 @@ async fn run_session_follow(
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             _ = shutdown_wait(&shutdown) => return,
         }
+    }
+}
+
+/// Apply durable follow frames, deduping against the re-baseline cursor.
+///
+/// SSE re-baseline can re-deliver frames at or below the last seen seq.
+/// Applying them again re-runs `tool/call` → `ToolStarted`, resurrecting an
+/// already-completed card to Running with no terminal event ever following.
+fn apply_follow_frames(sink: &Arc<SessionSink>, frames: Vec<MuxFrame>) {
+    for frame in frames {
+        if let MuxFrame::SessionEvent { event, view, .. } = &frame {
+            let last = sink.last_seq.load(std::sync::atomic::Ordering::Acquire);
+            if event.seq <= last {
+                continue;
+            }
+            let events = crate::mapping::map_session_event(event, view.as_ref(), sink);
+            for ev in events {
+                sink.send(ev);
+            }
+            sink.last_seq
+                .store(event.seq, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Fold one transient `assistant-stream` frame into `ClientEvent`s.
+///
+/// Transient frames are outside the durable log (no `seq`), so this must not
+/// touch `last_seq` or the seq-based dedup.
+fn handle_assistant_stream(
+    sink: &Arc<SessionSink>,
+    attempts: &mut std::collections::HashMap<String, (u64, u64)>,
+    frame: crate::frame::AssistantStreamFrame,
+) {
+    match frame {
+        AssistantStreamFrame::Start {
+            attempt_id,
+            turn,
+            step,
+        } => {
+            attempts.insert(attempt_id, (turn, step));
+        }
+        AssistantStreamFrame::Chunk { attempt_id, chunk } => {
+            // Without a known step the chunk cannot be keyed to the durable
+            // turn, and re-sending it under a guessed step would corrupt the
+            // repair/usage dedup state — drop it instead.
+            let Some(&(turn, step)) = attempts.get(&attempt_id) else {
+                tracing::debug!(
+                    target: "dsh-bridge::session::follow",
+                    attempt_id = %attempt_id,
+                    "assistant-stream chunk for an unknown attempt; skipping"
+                );
+                return;
+            };
+            for event in crate::mapping::map_assistant_chunk(sink, turn, step, chunk) {
+                sink.send(event);
+            }
+        }
+        AssistantStreamFrame::End {
+            attempt_id,
+            outcome,
+        } => {
+            attempts.remove(&attempt_id);
+            // `committed` means the durable settlement (`assistant/message` /
+            // `assistant/attempt`) follows as a normal session event;
+            // `abandoned` means the attempt left no durable content, so the
+            // streamed prefix is all the UI will ever see.
+            let kind = outcome
+                .as_ref()
+                .and_then(|outcome| outcome.get("kind"))
+                .and_then(serde_json::Value::as_str);
+            if kind == Some("abandoned") {
+                tracing::debug!(
+                    target: "dsh-bridge::session::follow",
+                    attempt_id = %attempt_id,
+                    "assistant attempt abandoned without a durable settlement"
+                );
+            }
+        }
+        AssistantStreamFrame::Other => {}
     }
 }
 

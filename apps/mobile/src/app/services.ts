@@ -4,6 +4,7 @@ import { ControlClient } from "../session/control-client";
 import { SessionStore } from "../session/store";
 import {
   PermissionApprovalStore,
+  isPendingPermissionTool,
   type PendingApproval,
 } from "../session/permission";
 import { ConnectionStateMachine, type ConnectionState } from "../relay/state-machine";
@@ -703,32 +704,27 @@ export class AppController {
 
   /** Surface pending permissions from the snapshot (the snapshot is the
    * source of the tool call_id, which is the permission_request_id on the
-   * wire). */
+   * wire, and of the approval's `permission_options`). */
   private rescanPendingPermissions(): void {
     const snap = this.sessionStore.state;
     const pending = this.permissions.snapshot();
     const pendingIds = new Set(pending.map((p) => p.permissionRequestId));
-    if (snap) {
-      for (const tool of snap.tools) {
-        if (
-          tool.permission_input &&
-          !tool.permission_decision &&
-          !pendingIds.has(tool.call_id)
-        ) {
-          this.permissions.surface(
-            tool.call_id,
-            { name: tool.name, kind: tool.kind, id: tool.id, call_id: tool.call_id },
-            tool.permission_input,
-          );
-        }
-      }
+    // A tool is awaiting a decision when it has no `permission_decision` and
+    // offers something to decide: `permission_options` for a plain allow/deny
+    // approval (Codex's run/apply_patch prompt) or `permission_input` questions
+    // for a harness `user_question`. Filtering on `permission_input` alone hid
+    // every Codex approval from the phone.
+    const awaitingDecision = (snap?.tools ?? []).filter(isPendingPermissionTool);
+    for (const tool of awaitingDecision) {
+      if (pendingIds.has(tool.call_id)) continue;
+      this.permissions.surface(
+        tool.call_id,
+        { name: tool.name, kind: tool.kind, id: tool.id, call_id: tool.call_id },
+        tool.permission_input,
+      );
     }
     // Dismiss approvals whose tool is no longer pending (resolved/denied).
-    const stillPending = new Set(
-      (snap?.tools ?? [])
-        .filter((t) => t.permission_input && !t.permission_decision)
-        .map((t) => t.call_id),
-    );
+    const stillPending = new Set(awaitingDecision.map((tool) => tool.call_id));
     for (const p of pending) {
       if (!stillPending.has(p.permissionRequestId)) {
         this.permissions.dismiss(p.permissionRequestId);

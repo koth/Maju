@@ -16,7 +16,7 @@ use codec::{
 use legacy::{
     LEGACY_AGENT_CONVERSATION_PREFIX, LEGACY_AGENT_RECENT_PREFIX, LEGACY_AGENT_TURN_PREFIX,
     file_summary_from_record, legacy_agent_conversation_id, legacy_agent_recent_id,
-    legacy_agent_turn_id, legacy_records_from_session_changes, summarize_change_records,
+    legacy_agent_turn_id, legacy_records_from_session_changes, summarize_change_aggregate,
 };
 use util::{
     cap_string, decode_json_vec, epoch_start_of_date_local, instant_to_date_local,
@@ -47,6 +47,23 @@ const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
 /// `update_session_agent_cli` / `append_usage_event`, which write this exact
 /// string to `sessions.agent_cli` and `usage_events.agent_cli`.
 pub(super) const NON_REPORTING_AGENT_CLI: &str = "codebuddy";
+
+/// Aggregate of a flat change table (see `load_session_change_aggregate`).
+struct ChangeAggregate {
+    file_count: usize,
+    added_lines: usize,
+    removed_lines: usize,
+    updated_at: String,
+}
+
+/// Aggregate of one turn's file changes (see `load_turn_file_change_aggregates`).
+struct TurnChangeAggregate {
+    message_id: Uuid,
+    file_count: usize,
+    added_lines: usize,
+    removed_lines: usize,
+    updated_at: String,
+}
 
 #[derive(Debug, Clone)]
 struct StoredUsageEvent {
@@ -2138,82 +2155,62 @@ impl SessionStore {
              ORDER BY COALESCE(m.seq, 9223372036854775807), c.message_id, c.path",
         )?;
 
-        let rows = stmt.query_map(params![session_id], |row| {
-            let change_type_str: String = row.get(2)?;
-            let change_type = match change_type_str.as_str() {
-                "Created" => FileChangeType::Created,
-                "Deleted" => FileChangeType::Deleted,
-                _ => FileChangeType::Modified,
-            };
-            Ok((
-                row.get::<_, String>(0)?,
-                SessionFileChange {
-                    path: row.get(1)?,
-                    change_type,
-                    old_text: row.get(3)?,
-                    new_text: row.get(4)?,
-                    added_lines: row.get::<_, i64>(5)? as usize,
-                    removed_lines: row.get::<_, i64>(6)? as usize,
-                    timestamp: row.get(7)?,
-                },
-            ))
-        })?;
-
-        let mut items: Vec<TurnFileChanges> = Vec::new();
-        for row in rows {
-            let (message_id, mut change) = row?;
-            let Ok(message_id) = Uuid::parse_str(&message_id) else {
-                continue;
-            };
-            change.path = normalize_change_path(&change.path);
-            if let Some(entry) = items
-                .iter_mut()
-                .find(|entry| entry.message_id == message_id)
-            {
-                upsert_loaded_change(&mut entry.changes, change);
-            } else {
-                items.push(TurnFileChanges {
-                    message_id,
-                    changes: vec![change],
-                });
-            }
-        }
-
-        Ok(items)
+        let rows = stmt.query_map(params![session_id], turn_file_change_row)?;
+        Ok(collect_turn_file_changes(rows))
     }
 
     /// Load at most `limit` most recent turns' file changes, oldest first.
     /// Used by session restore: the phone's turn bar and its on-demand
     /// GetFileDiff read `ui.turn_changes`, which used to start empty after a
     /// desktop restart — capping keeps very long sessions bounded.
+    ///
+    /// Only the selected turns' rows are read: listing the session's turn
+    /// changes in full (diff texts included) just to throw the old ones away
+    /// made every restore of a history-heavy session pay for its whole
+    /// transcript.
     pub fn load_recent_turn_file_changes(
         &self,
         session_id: &str,
         limit: i64,
     ) -> Result<Vec<TurnFileChanges>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT c.message_id
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT c.message_id
+                 FROM session_turn_file_changes c
+                 LEFT JOIN messages m ON m.id = c.message_id AND m.session_id = c.session_id
+                 WHERE c.session_id = ?1
+                 GROUP BY c.message_id
+                 ORDER BY COALESCE(m.seq, -1) DESC
+                 LIMIT ?2",
+            )?;
+            stmt.query_map(params![session_id, limit], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (0..ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT c.message_id, c.path, c.change_type, c.base_text, c.new_text, c.added_lines, c.removed_lines, c.updated_at
              FROM session_turn_file_changes c
              LEFT JOIN messages m ON m.id = c.message_id AND m.session_id = c.session_id
-             WHERE c.session_id = ?1
-             GROUP BY c.message_id
-             ORDER BY COALESCE(m.seq, -1) DESC
-             LIMIT ?2",
-        )?;
-        let ids: Vec<String> = stmt
-            .query_map(params![session_id, limit], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let all = self.load_turn_file_changes(session_id)?;
-        let recent_ids: std::collections::HashSet<Uuid> = ids
-            .iter()
-            .filter_map(|id| Uuid::parse_str(id).ok())
-            .collect();
-        // `all` is oldest-first; keep only the selected (most recent) turns,
-        // preserving chronological order.
-        Ok(all
-            .into_iter()
-            .filter(|turn| recent_ids.contains(&turn.message_id))
-            .collect())
+             WHERE c.session_id = ?1 AND c.message_id IN ({placeholders})
+             ORDER BY COALESCE(m.seq, 9223372036854775807), c.message_id, c.path"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut query_params: Vec<&dyn ToSql> = Vec::with_capacity(ids.len() + 1);
+        query_params.push(&session_id);
+        for id in &ids {
+            query_params.push(id);
+        }
+        let rows = stmt.query_map(params_from_iter(query_params), turn_file_change_row)?;
+        // The rows arrive oldest-first, which is exactly what the restore
+        // wants; `collect_turn_file_changes` preserves that order.
+        Ok(collect_turn_file_changes(rows))
     }
 
     fn insert_turn_file_change(
@@ -2540,6 +2537,15 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Change-set summaries for one session (or every session in the workspace
+    /// when `session_id` is `None`).
+    ///
+    /// The session filter is applied in SQL: the previous implementation listed
+    /// every change set in the *workspace* and filtered in Rust, then issued an
+    /// extra `SELECT session_id` per non-matching row (a query that can only
+    /// return the value already in hand) — one round trip per change set of
+    /// every other session on every panel refresh, which is what made the
+    /// review panel crawl once a workspace had real history.
     pub fn list_change_sets(
         &self,
         session_id: Option<&str>,
@@ -2563,11 +2569,12 @@ impl SessionStore {
              FROM change_sets cs
              LEFT JOIN change_set_files f ON f.change_set_id = cs.id
              WHERE cs.workspace_root = ?1
+               AND (?2 IS NULL OR cs.session_id = ?2)
              GROUP BY cs.id
              ORDER BY cs.updated_at DESC",
         )?;
 
-        let rows = stmt.query_map(params![&self.workspace_root], |row| {
+        let rows = stmt.query_map(params![&self.workspace_root, session_id], |row| {
             let source_str: String = row.get(1)?;
             let status_str: String = row.get(12)?;
             let session_id_str: Option<String> = row.get(2)?;
@@ -2596,19 +2603,10 @@ impl SessionStore {
         let mut summaries = Vec::new();
         for row in rows {
             let summary = row?;
-            let session_matches = session_id.is_none_or(|expected| {
-                summary.session_id.map(|id| id.to_string()).as_deref() == Some(expected)
-                    || self
-                        .change_set_session_id(&summary.id)
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                        == Some(expected)
-            });
             let source_matches = source
                 .as_ref()
                 .is_none_or(|expected| &summary.source == expected);
-            if session_matches && source_matches {
+            if source_matches {
                 summaries.push(summary);
             }
         }
@@ -2717,57 +2715,172 @@ impl SessionStore {
     fn load_legacy_change_set_summaries(&self, session_id: &str) -> Result<Vec<ChangeSetSummary>> {
         let mut summaries = Vec::new();
 
-        let conversation = self.load_file_changes(session_id)?;
-        if !conversation.is_empty() {
-            let id = legacy_agent_conversation_id(session_id);
-            let records = legacy_records_from_session_changes(&id, conversation);
-            summaries.push(summarize_change_records(
-                id,
+        // Every legacy summary is built from aggregates (COUNT/SUM/MAX) — the
+        // review panel only needs file count, line totals and the newest
+        // timestamp, and the previous implementation loaded every historical
+        // diff text of the session just to sum it up. On a long session this
+        // ran on every change-set listing (panel refresh, timeline bars, git
+        // refresh), which is what made the panel crawl.
+        if let Some(aggregate) = self.load_session_change_aggregate("session_file_changes", session_id)?
+        {
+            summaries.push(summarize_change_aggregate(
+                legacy_agent_conversation_id(session_id),
                 ChangeSetSource::AgentConversation,
                 session_id,
                 None,
                 "整体对话（旧数据）",
                 ChangeSetStatus::LegacyIncomplete,
                 &self.workspace_root,
-                &records,
+                aggregate.file_count,
+                aggregate.added_lines,
+                aggregate.removed_lines,
+                aggregate.updated_at,
             ));
         }
 
-        let recent = self.load_review_file_changes(session_id)?;
-        if !recent.is_empty() {
-            let id = legacy_agent_recent_id(session_id);
-            let records = legacy_records_from_session_changes(&id, recent);
-            summaries.push(summarize_change_records(
-                id,
+        if let Some(aggregate) =
+            self.load_session_change_aggregate("session_review_file_changes", session_id)?
+        {
+            summaries.push(summarize_change_aggregate(
+                legacy_agent_recent_id(session_id),
                 ChangeSetSource::AgentTurn,
                 session_id,
                 None,
                 "最近对话（旧数据）",
                 ChangeSetStatus::LegacyIncomplete,
                 &self.workspace_root,
-                &records,
+                aggregate.file_count,
+                aggregate.added_lines,
+                aggregate.removed_lines,
+                aggregate.updated_at,
             ));
         }
 
-        for entry in self.load_turn_file_changes(session_id)? {
-            if entry.changes.is_empty() {
-                continue;
-            }
-            let id = legacy_agent_turn_id(session_id, &entry.message_id);
-            let records = legacy_records_from_session_changes(&id, entry.changes);
-            summaries.push(summarize_change_records(
-                id,
+        for aggregate in self.load_turn_file_change_aggregates(session_id)? {
+            summaries.push(summarize_change_aggregate(
+                legacy_agent_turn_id(session_id, &aggregate.message_id),
                 ChangeSetSource::AgentTurn,
                 session_id,
-                Some(entry.message_id),
+                Some(aggregate.message_id),
                 "历史对话（旧数据）",
                 ChangeSetStatus::LegacyIncomplete,
                 &self.workspace_root,
-                &records,
+                aggregate.file_count,
+                aggregate.added_lines,
+                aggregate.removed_lines,
+                aggregate.updated_at,
             ));
         }
 
         Ok(summaries)
+    }
+
+    /// Session-wide aggregate of one of the flat change tables: number of
+    /// changed paths, line totals and the newest `updated_at`. Returns `None`
+    /// for an untouched table.
+    fn load_session_change_aggregate(
+        &self,
+        table: &str,
+        session_id: &str,
+    ) -> Result<Option<ChangeAggregate>> {
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(added_lines), 0), COALESCE(SUM(removed_lines), 0), COALESCE(MAX(updated_at), '')
+             FROM {table} WHERE session_id = ?1"
+        );
+        let aggregate = self.conn.query_row(&sql, params![session_id], |row| {
+            Ok(ChangeAggregate {
+                file_count: row.get::<_, i64>(0)? as usize,
+                added_lines: row.get::<_, i64>(1)? as usize,
+                removed_lines: row.get::<_, i64>(2)? as usize,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        Ok((aggregate.file_count > 0).then_some(aggregate))
+    }
+
+    /// Per-message aggregates of a session's turn file changes, ordered like
+    /// [`SessionStore::load_turn_file_changes`] but without the diff texts.
+    fn load_turn_file_change_aggregates(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TurnChangeAggregate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.message_id,
+                    COUNT(*),
+                    COALESCE(SUM(c.added_lines), 0),
+                    COALESCE(SUM(c.removed_lines), 0),
+                    COALESCE(MAX(c.updated_at), '')
+             FROM session_turn_file_changes c
+             LEFT JOIN messages m ON m.id = c.message_id AND m.session_id = c.session_id
+             WHERE c.session_id = ?1
+             GROUP BY c.message_id
+             ORDER BY COALESCE(m.seq, 9223372036854775807), c.message_id",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as usize,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut aggregates = Vec::new();
+        for row in rows {
+            let (message_id, file_count, added_lines, removed_lines, updated_at) = row?;
+            let Ok(message_id) = Uuid::parse_str(&message_id) else {
+                continue;
+            };
+            aggregates.push(TurnChangeAggregate {
+                message_id,
+                file_count,
+                added_lines,
+                removed_lines,
+                updated_at,
+            });
+        }
+        Ok(aggregates)
+    }
+
+    /// One turn's file changes. Unlike [`SessionStore::load_turn_file_changes`]
+    /// this never reads the rest of the session's history, which is what every
+    /// `legacy:agent-turn:` diff lookup used to do.
+    fn load_turn_file_changes_for_message(
+        &self,
+        session_id: &str,
+        message_id: &Uuid,
+    ) -> Result<Vec<SessionFileChange>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, change_type, base_text, new_text, added_lines, removed_lines, updated_at
+             FROM session_turn_file_changes
+             WHERE session_id = ?1 AND message_id = ?2
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![session_id, &message_id.to_string()], |row| {
+            let change_type_str: String = row.get(1)?;
+            Ok(SessionFileChange {
+                path: row.get(0)?,
+                change_type: match change_type_str.as_str() {
+                    "Created" => FileChangeType::Created,
+                    "Deleted" => FileChangeType::Deleted,
+                    _ => FileChangeType::Modified,
+                },
+                old_text: row.get(2)?,
+                new_text: row.get(3)?,
+                added_lines: row.get::<_, i64>(4)? as usize,
+                removed_lines: row.get::<_, i64>(5)? as usize,
+                timestamp: row.get(6)?,
+            })
+        })?;
+
+        let mut changes = Vec::new();
+        for row in rows {
+            let mut change = row?;
+            change.path = normalize_change_path(&change.path);
+            changes.push(change);
+        }
+        Ok(changes)
     }
 
     fn load_legacy_change_set_records(
@@ -2792,13 +2905,11 @@ impl SessionStore {
             && let Some((session_id, message_id)) = rest.split_once(':')
             && let Ok(message_id) = Uuid::parse_str(message_id)
         {
-            let records = self
-                .load_turn_file_changes(session_id)?
-                .into_iter()
-                .find(|entry| entry.message_id == message_id)
-                .map(|entry| legacy_records_from_session_changes(change_set_id, entry.changes))
-                .unwrap_or_default();
-            return Ok(Some(records));
+            let changes = self.load_turn_file_changes_for_message(session_id, &message_id)?;
+            return Ok(Some(legacy_records_from_session_changes(
+                change_set_id,
+                changes,
+            )));
         }
         Ok(None)
     }
@@ -3835,6 +3946,59 @@ fn opt_i64(value: Option<u64>) -> Option<i64> {
 
 fn opt_u64(value: Option<i64>) -> Option<u64> {
     value.and_then(|value| u64::try_from(value).ok())
+}
+
+/// Row mapper shared by the two turn-file-change readers so both project the
+/// same columns into the same shape.
+fn turn_file_change_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, SessionFileChange)> {
+    let change_type_str: String = row.get(2)?;
+    Ok((
+        row.get::<_, String>(0)?,
+        SessionFileChange {
+            path: row.get(1)?,
+            change_type: match change_type_str.as_str() {
+                "Created" => FileChangeType::Created,
+                "Deleted" => FileChangeType::Deleted,
+                _ => FileChangeType::Modified,
+            },
+            old_text: row.get(3)?,
+            new_text: row.get(4)?,
+            added_lines: row.get::<_, i64>(5)? as usize,
+            removed_lines: row.get::<_, i64>(6)? as usize,
+            timestamp: row.get(7)?,
+        },
+    ))
+}
+
+/// Group turn-file-change rows by message, preserving row order.
+fn collect_turn_file_changes<F>(rows: rusqlite::MappedRows<'_, F>) -> Vec<TurnFileChanges>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(String, SessionFileChange)>,
+{
+    let mut items: Vec<TurnFileChanges> = Vec::new();
+    for row in rows {
+        let Ok((message_id, mut change)) = row else {
+            continue;
+        };
+        let Ok(message_id) = Uuid::parse_str(&message_id) else {
+            continue;
+        };
+        change.path = normalize_change_path(&change.path);
+        if let Some(entry) = items
+            .iter_mut()
+            .find(|entry| entry.message_id == message_id)
+        {
+            upsert_loaded_change(&mut entry.changes, change);
+        } else {
+            items.push(TurnFileChanges {
+                message_id,
+                changes: vec![change],
+            });
+        }
+    }
+    items
 }
 
 #[cfg(test)]

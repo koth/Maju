@@ -12,13 +12,67 @@ export interface PendingApproval {
   permissionRequestId: string;
   toolCallId: string | null;
   toolName: string;
-  request: PermissionInputRequest;
+  /** The question form of a `user_question` request, or null for a plain
+   * allow/deny approval (Codex's "run this command?" / apply_patch prompt,
+   * Codebuddy's bash prompt), whose choices live in the tool's
+   * `permission_options` on the snapshot instead. */
+  request: PermissionInputRequest | null;
   receivedAtMs: number;
 }
 
 export type ApprovalListener = (pending: PendingApproval[]) => void;
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
+
+/**
+ * Whether one snapshot tool is waiting for the user's decision.
+ *
+ * Mirrors the desktop `hasPendingPermission` (companion bridge): a tool is
+ * pending while it has no decision AND offers something to decide —
+ * `permission_options` for a plain allow/deny approval, or `permission_input`
+ * questions for a harness `user_question`.
+ *
+ * Requiring `permission_input` (the original filter) hid EVERY Codex approval:
+ * those carry options only, so the phone rendered the call as merely
+ * "Running" and the user had no way to approve it.
+ */
+export function isPendingPermissionTool(tool: {
+  permission_options: { id: string }[];
+  permission_input: PermissionInputRequest | null;
+  permission_decision: string | null;
+}): boolean {
+  if (tool.permission_decision) return false;
+  return (
+    tool.permission_options.length > 0 ||
+    (tool.permission_input?.questions.length ?? 0) > 0
+  );
+}
+
+/**
+ * The allow-ish option id of an approval's option list, or null when none is
+ * recognisable.
+ *
+ * Mirrors the desktop's allow detection (app-core `permission_selection_is_allow`):
+ * the ACP option kind, the id, and the label all count, because agents differ
+ * (`allow`/`Yes` for Codebuddy, `approved`/`Yes` for Codex, `allowed-once`/
+ * `Allow once` for the DeepSeek harness).
+ *
+ * Callers must treat null as "the user has to pick explicitly" rather than
+ * sending `option_id: null`: the PC reads a null option as a rejection/
+ * cancellation, so guessing here silently denies the tool call.
+ */
+export function allowOptionId(
+  options: { id: string; label: string; kind?: string }[],
+): string | null {
+  const match = options.find(
+    (option) =>
+      // The ACP kind is authoritative when present (`AllowOnce`/`allow_once`);
+      // it is checked on its own because a reject kind also ends in `_once`.
+      /allow/i.test(option.kind ?? "") ||
+      /allow|yes|approve|once|submit/i.test(`${option.id} ${option.label}`),
+  );
+  return match?.id ?? null;
+}
 
 /** Heuristic for whether an operation is destructive (requires 2nd confirm). */
 export function isDestructive(tool: { name: string; kind: string }): boolean {
@@ -58,11 +112,12 @@ export class PermissionApprovalStore {
   return () => this.listeners.delete(listener);
   }
 
-  /** Surface a PermissionRequest (from EventFrame) as a pending approval. */
+  /** Surface a PermissionRequest (from EventFrame or the snapshot) as a
+   * pending approval. `request` is null for a plain allow/deny approval. */
   surface(
   permissionRequestId: string,
   tool: Pick<ToolInvocation, "name" | "kind"> & { id: string; call_id: string },
-  request: PermissionInputRequest,
+  request: PermissionInputRequest | null,
   ): void {
   const approval: PendingApproval = {
   permissionRequestId,

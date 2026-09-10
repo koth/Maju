@@ -213,6 +213,65 @@ pub fn rpc_error_code(err: &anyhow::Error) -> Option<String> {
         .map(|code| code.to_string())
 }
 
+/// Whether a `commands/execute` failure is the gateway refusing the args shape
+/// over the ATTACHMENT field name.
+///
+/// The descriptor renamed `images` → `submittedAttachments` in dsh 0.1.5, and
+/// the rejection names both sides of the mismatch, e.g.
+/// `gateway/arguments-invalid: type=t gateway: commands/execute: args fields do
+/// not match the descriptor: missing "submittedAttachments"; unexpected
+/// "images"`. Requiring the `arguments-invalid` code keeps a genuinely bad
+/// command line (unknown name, malformed syntax) from triggering a retry.
+pub fn is_command_attachment_field_mismatch(err: &anyhow::Error) -> bool {
+    let message = format!("{err}");
+    message.contains("arguments-invalid")
+        && (message.contains("submittedAttachments") || message.contains("images"))
+}
+
+/// Marker embedded in the transport error raised when a host answered a
+/// forwarded-waterfall answer through the *other* answer protocol's carrier.
+/// Only that error may trigger a protocol retry.
+pub const ANSWER_PROTOCOL_MISMATCH: &str = "answer-protocol-mismatch";
+
+/// Whether an `$events/result` failure means the host speaks the other
+/// [`AnswerProtocol`] than the one we used. The answer value itself is
+/// protocol-dependent, so the caller must rebuild it before retrying.
+pub fn is_answer_protocol_mismatch(err: &anyhow::Error) -> bool {
+    format!("{err}").contains(ANSWER_PROTOCOL_MISMATCH)
+}
+
+/// How this host accepts a forwarded-waterfall answer (`$events/result`), and
+/// therefore how the answer value itself is shaped.
+///
+/// dsh 0.1.5 moved the gateway-internal `$events/result` endpoint onto the
+/// shared Connection RPC interceptor: the request must now be a full
+/// `client-request` envelope, and the forwarded waterfall resolves with the
+/// **bare** answer value. dsh ≤ 0.1.4 served a bare `{ args }` body and
+/// resolved user questions with a `{ sessionId, answer }` wrapper, while
+/// approvals rode the separate `/api/respond` `client-response` carrier.
+///
+/// The bridge has no version negotiation (see [`crate::rpc_types`] `host.describe`
+/// — it is a local stub), so the protocol is learned from the `$events` item
+/// envelope (0.1.5 wraps every logical-stream value) and corrected by one
+/// retry if the host answers with the other protocol's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerProtocol {
+    /// dsh ≥ 0.1.5 — `client-request` envelope, bare waterfall value.
+    Envelope,
+    /// dsh ≤ 0.1.4 — bare `{ args }` body, wrapped question value.
+    Legacy,
+}
+
+impl AnswerProtocol {
+    /// The other protocol (the one to try when the host rejects this carrier).
+    pub fn toggled(self) -> Self {
+        match self {
+            AnswerProtocol::Envelope => AnswerProtocol::Legacy,
+            AnswerProtocol::Legacy => AnswerProtocol::Envelope,
+        }
+    }
+}
+
 /// `RpcReceipt` — the HTTP response body of legacy `/api/respond` or the
 /// gateway's `$events/result` RPC. A late/duplicate result yields
 /// `not-pending`; a malformed body yields `bad-response`.
@@ -546,12 +605,43 @@ pub struct AskUserQuestionAnswerItemWire {
 // validates the args shape against the generated descriptor and rejects
 // anything else with `arguments-invalid`.
 
+/// Wire name of the `commands/execute` attachment parameter.
+///
+/// dsh 0.1.5 replaced the `images` field with `submittedAttachments` (encoded
+/// images plus staged file receipts). The typert gateway validates the args
+/// object against its generated descriptor and reports unknown fields as
+/// `gateway/arguments-invalid`, so exactly one of the two names may be sent —
+/// the bridge picks by trial and remembers the answer (see
+/// `HttpClient::commands_execute`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandAttachmentField {
+    /// dsh ≥ 0.1.5.
+    SubmittedAttachments,
+    /// dsh ≤ 0.1.4.
+    Images,
+}
+
+impl CommandAttachmentField {
+    /// The other wire name — what to retry with after an `arguments-invalid`
+    /// rejection that names the attachment field.
+    pub fn toggled(self) -> Self {
+        match self {
+            CommandAttachmentField::SubmittedAttachments => CommandAttachmentField::Images,
+            CommandAttachmentField::Images => CommandAttachmentField::SubmittedAttachments,
+        }
+    }
+}
+
 /// `commands/execute` request payload: the descriptor's named wire fields
 /// themselves. `remote_payload` wraps this into the single `{ "args": … }`
 /// envelope the gateway validates — carrying an `args` field here would
 /// double-wrap into `{ "args": { "args": … } }`, which the typert gateway
 /// rejects with `arguments-invalid` (observed live against dsh 0.1.2-rc.1:
 /// `missing "agentId", "line", "images"; unexpected "args"`).
+///
+/// Exactly one attachment field is serialized, chosen by
+/// [`CommandsExecutePayload::new`]: dsh 0.1.5 renamed `images` to
+/// `submittedAttachments` and rejects the other name as unexpected.
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandsExecutePayload {
     /// Wire name for the descriptor's `agent` lookup parameter: the session id.
@@ -559,8 +649,31 @@ pub struct CommandsExecutePayload {
     pub agent_id: String,
     /// Full command line including the leading slash (e.g. `/compact`).
     pub line: String,
-    /// Base64 image attachments; always empty for the commands kodex issues.
-    pub images: Vec<serde_json::Value>,
+    /// Attachments for dsh ≥ 0.1.5; always empty for the commands kodex issues.
+    #[serde(
+        rename = "submittedAttachments",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub submitted_attachments: Option<Vec<Value>>,
+    /// Attachments for dsh ≤ 0.1.4; always empty for the commands kodex issues.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<Value>>,
+}
+
+impl CommandsExecutePayload {
+    /// Build a payload whose attachment parameter uses `field`'s wire name.
+    pub fn new(agent_id: &str, line: &str, field: CommandAttachmentField) -> Self {
+        let (submitted_attachments, images) = match field {
+            CommandAttachmentField::SubmittedAttachments => (Some(Vec::new()), None),
+            CommandAttachmentField::Images => (None, Some(Vec::new())),
+        };
+        Self {
+            agent_id: agent_id.to_string(),
+            line: line.to_string(),
+            submitted_attachments,
+            images,
+        }
+    }
 }
 
 /// `commands/execute` response value: the settled `CommandExecution`, present
@@ -684,16 +797,60 @@ mod tests {
         // A payload with its own `args` field would double-wrap and the
         // gateway would reject it: missing "agentId", "line", "images";
         // unexpected "args" (seen live on dsh 0.1.2-rc.1).
-        let payload = crate::rpc_types::CommandsExecutePayload {
-            agent_id: "s-1".into(),
-            line: "/compact".into(),
-            images: Vec::new(),
-        };
-        let json = serde_json::to_value(&payload).unwrap();
+        //
+        // Exactly ONE attachment field may be present: dsh 0.1.5 renamed
+        // `images` to `submittedAttachments` and rejects the other name.
+        let current = crate::rpc_types::CommandsExecutePayload::new(
+            "s-1",
+            "/compact",
+            crate::rpc_types::CommandAttachmentField::SubmittedAttachments,
+        );
+        let json = serde_json::to_value(&current).unwrap();
         assert_eq!(json["agentId"], "s-1");
         assert_eq!(json["line"], "/compact");
+        assert_eq!(json["submittedAttachments"], serde_json::json!([]));
+        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert!(
+            json.get("images").is_none(),
+            "the pre-0.1.5 field must not ride along: {json}"
+        );
+
+        // Wire shape for harnesses that still declare `images`.
+        let legacy = crate::rpc_types::CommandsExecutePayload::new(
+            "s-1",
+            "/compact",
+            crate::rpc_types::CommandAttachmentField::Images,
+        );
+        let json = serde_json::to_value(&legacy).unwrap();
         assert_eq!(json["images"], serde_json::json!([]));
         assert_eq!(json.as_object().unwrap().len(), 3);
+        assert!(json.get("submittedAttachments").is_none());
+    }
+
+    #[test]
+    fn detects_attachment_field_argument_mismatch() {
+        // The live dsh 0.1.5.1-rc.1 rejection that broke /compact.
+        let err = anyhow::anyhow!(
+            "gateway/arguments-invalid: type=t gateway: commands/execute: args fields do not match \
+             the descriptor: missing \"submittedAttachments\"; unexpected \"images\""
+        );
+        assert!(is_command_attachment_field_mismatch(&err));
+
+        // The reverse direction (a 0.1.5-shaped payload against an older host).
+        let err = anyhow::anyhow!(
+            "gateway/arguments-invalid: type=t gateway: commands/execute: args fields do not match \
+             the descriptor: missing \"images\"; unexpected \"submittedAttachments\""
+        );
+        assert!(is_command_attachment_field_mismatch(&err));
+
+        // Other failures must not trigger an attachment retry.
+        let err = anyhow::anyhow!("unknown-command: /compact is not registered");
+        assert!(!is_command_attachment_field_mismatch(&err));
+        let err = anyhow::anyhow!(
+            "gateway/arguments-invalid: type=t gateway: commands/execute: args fields do not match \
+             the descriptor: missing \"line\""
+        );
+        assert!(!is_command_attachment_field_mismatch(&err));
     }
 
     #[test]

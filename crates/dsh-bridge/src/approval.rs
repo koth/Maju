@@ -1,12 +1,21 @@
 //! Approval/question bridging: translate harness `approval/requested` /
 //! `question/requested` into Kodex `ToolPermissionRequest`, and carry the
-//! user's decision back to the harness (`/api/$events/result` for questions;
-//! approvals retain the legacy `/api/respond` carrier).
+//! user's decision back to the harness.
+//!
+//! Two answer carriers exist, and the host generation picks both the carrier
+//! and the *shape of the answer value* (see [`AnswerProtocol`]):
+//!
+//! * dsh ≥ 0.1.5 forwards approvals and questions as `$events` waterfalls, so
+//!   both are answered through `/api/$events/result` with the bare resolved
+//!   value (`{ answers }` for a question batch, the outcome string for an
+//!   approval). The endpoint sits behind the shared Connection RPC envelope.
+//! * dsh ≤ 0.1.4 answered questions through the same endpoint with a
+//!   `{ sessionId, answer }` wrapper, and approvals through the legacy
+//!   `/api/respond` `client-response` carrier.
 //!
 //! Pending entries are keyed by the dsh `rpcId`/`approvalId` (globally unique
 //! UUID), stored in the session's own `PermissionBroker`-adjacent table on the
-//! `SessionSink`. The harness's global pending registry cross-checks
-//! `sessionId` on respond, so a misrouted answer is rejected as `bad-response`.
+//! `SessionSink`.
 
 use acp_core::{HarnessApprovalOutcome, HarnessApprovalResult, HarnessQuestionAnswer};
 
@@ -14,17 +23,36 @@ use crate::host::{PendingApprovalKind, SessionSink};
 use serde_json::Value;
 
 use crate::rpc_types::{
-    ApprovalOutcomeWire, ApprovalResponsePayload, AskUserQuestionAnswerItemWire,
+    AnswerProtocol, ApprovalOutcomeWire, ApprovalResponsePayload, AskUserQuestionAnswerItemWire,
     AskUserQuestionAnswerWire, QuestionResponsePayload, RemoteEventOutcome, RemoteEventResultArgs,
     RpcId,
 };
 
+/// One answer ready to send, rendered for the protocol in use.
+#[derive(Debug, Clone)]
+pub enum AnswerRequest {
+    /// POST `/api/$events/result` with these `{ clientId, eventId, outcome }`
+    /// args (the forwarded-waterfall carrier).
+    Waterfall(Value),
+    /// POST the legacy `/api/respond` carrier with this `client-response` body.
+    Legacy(Value),
+}
+
+impl AnswerRequest {
+    /// The exact wire body, for logging and assertions.
+    pub fn body(&self) -> &Value {
+        match self {
+            AnswerRequest::Waterfall(value) | AnswerRequest::Legacy(value) => value,
+        }
+    }
+}
+
 /// Snapshot of a session's pending approvals/questions, used by the session
-/// loop to build the `/api/respond` payload for a `ResolveHarnessApproval`.
+/// loop to build the answer payload for a `ResolveHarnessApproval`.
 #[derive(Debug, Default, Clone)]
 pub struct PendingApprovals {
     entries: Vec<PendingEntryView>,
-    question_event_ids: Vec<(String, RpcId)>,
+    waterfall_event_ids: Vec<(String, RpcId)>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +65,7 @@ struct PendingEntryView {
 impl PendingApprovals {
     pub fn from_entries(
         entries: Vec<crate::host::PendingEntry>,
-        question_event_ids: Vec<(String, RpcId)>,
+        waterfall_event_ids: Vec<(String, RpcId)>,
     ) -> Self {
         Self {
             entries: entries
@@ -48,20 +76,21 @@ impl PendingApprovals {
                     approval_id: e.approval_id,
                 })
                 .collect(),
-            question_event_ids,
+            waterfall_event_ids,
         }
     }
 
-    /// Build the wire response for a resolved approval/question. Approvals use
-    /// the legacy `client-response` envelope; questions use the gateway's
-    /// strict `$events/result` args.
+    /// Build the answer for a resolved approval/question, for the protocol the
+    /// host speaks. Returns `None` when no pending entry matches `rpc_id` or the
+    /// UI sent the wrong result shape for this id.
     pub fn build_response(
         &self,
         sink: &SessionSink,
         remote_event_client_id: Option<String>,
+        protocol: AnswerProtocol,
         rpc_id: &str,
         result: &HarnessApprovalResult,
-    ) -> Option<Value> {
+    ) -> Option<AnswerRequest> {
         let session_id = sink.session_id()?;
         // Find the pending entry by the ui_id (== approvalId for approvals; ==
         // first question id for questions).
@@ -78,34 +107,44 @@ impl PendingApprovals {
                     HarnessApprovalOutcome::AllowedOnce => ApprovalOutcomeWire::AllowedOnce,
                     HarnessApprovalOutcome::Rejected => ApprovalOutcomeWire::Rejected,
                 };
+                if protocol == AnswerProtocol::Envelope {
+                    // dsh ≥ 0.1.5: the forwarded `approval/request` waterfall
+                    // resolves with the bare closed outcome. The waterfall's
+                    // `eventId` is the request id the UI was given (the request
+                    // carries no approval id of its own any more).
+                    let event_id = self
+                        .waterfall_event_id(rpc_id)
+                        .unwrap_or_else(|| rpc_id.to_string());
+                    let value = match wire_outcome {
+                        ApprovalOutcomeWire::AllowedOnce => "allowed-once",
+                        ApprovalOutcomeWire::Rejected => "rejected",
+                    };
+                    return Self::waterfall_args(
+                        remote_event_client_id?,
+                        event_id,
+                        Value::String(value.to_string()),
+                    )
+                    .map(AnswerRequest::Waterfall);
+                }
                 let payload = ApprovalResponsePayload {
                     session_id,
                     approval_id: approval_id.clone(),
                     outcome: wire_outcome,
                 };
                 serde_json::to_value(payload).ok().map(|value| {
-                    serde_json::json!({
+                    AnswerRequest::Legacy(serde_json::json!({
                         "type": "client-response",
                         "rpcId": rpc_id,
                         "result": { "ok": true, "value": value }
-                    })
+                    }))
                 })
             }
             (PendingApprovalKind::Question, HarnessApprovalResult::Question { answers }) => {
-                // The event id is the `$events` waterfall's `eventId`, not the
-                // UI-facing question id. dsh 0.1.2 resolves the waterfall by
-                // `(clientId, eventId)` and validates outcome/value strictly.
-                let event_id = self
-                    .question_event_ids
-                    .iter()
-                    .find(|(id, _)| id == rpc_id)
-                    .map(|(_, event_id)| event_id.clone())?;
-                let client_id = remote_event_client_id.unwrap_or_default();
-                // dsh's `matchesQuestions` validates answers POSITIONALLY
-                // (`answer[i].id === questions[i].id`), so the batch must be
-                // re-ordered to the exact question order before sending —
-                // the UI's answers arrive keyed by id (a map), whose
-                // iteration order does not match the question order.
+                // dsh's answer validation is POSITIONAL (`answer[i].id ===
+                // questions[i].id`), so the batch must be re-ordered to the
+                // exact question order before sending — the UI's answers arrive
+                // keyed by id (a map), whose iteration order need not match the
+                // question order.
                 let order = sink.question_order(rpc_id);
                 let mut sorted: Vec<&HarnessQuestionAnswer> = answers.iter().collect();
                 if !order.is_empty() {
@@ -124,24 +163,52 @@ impl PendingApprovals {
                         custom: a.custom.clone(),
                     })
                     .collect();
-                let payload = QuestionResponsePayload {
-                    session_id,
-                    answer: AskUserQuestionAnswerWire {
-                        answers: wire_answers,
-                    },
+                // dsh ≤ 0.1.4 resolved the question waterfall with a
+                // `{ sessionId, answer }` payload that its `matchesQuestions`
+                // unwrapped; dsh ≥ 0.1.5 resolves it with the bare
+                // `AskUserQuestionAnswer` the tool feeds straight back to the
+                // model.
+                let value = if protocol == AnswerProtocol::Envelope {
+                    serde_json::json!({ "answers": wire_answers })
+                } else {
+                    let payload = QuestionResponsePayload {
+                        session_id,
+                        answer: AskUserQuestionAnswerWire {
+                            answers: wire_answers,
+                        },
+                    };
+                    serde_json::to_value(payload).ok()?
                 };
-                let args = RemoteEventResultArgs {
-                    client_id,
-                    event_id,
-                    outcome: RemoteEventOutcome {
-                        kind: "result",
-                        value: serde_json::to_value(payload).ok()?,
-                    },
-                };
-                serde_json::to_value(args).ok()
+                // The event id is the `$events` waterfall's `eventId`, not the
+                // UI-facing question id: `question/resolved` and the answer
+                // correlation both name the batch by the waterfall event.
+                let event_id = self.waterfall_event_id(rpc_id)?;
+                Self::waterfall_args(remote_event_client_id?, event_id, value)
+                    .map(AnswerRequest::Waterfall)
             }
             // Kind/result mismatch — the UI sent the wrong shape for this id.
             _ => None,
         }
+    }
+
+    /// The waterfall `eventId` recorded for one UI-facing request id.
+    fn waterfall_event_id(&self, ui_id: &str) -> Option<String> {
+        self.waterfall_event_ids
+            .iter()
+            .find(|(id, _)| id == ui_id)
+            .map(|(_, event_id)| event_id.clone())
+    }
+
+    /// The `$events/result` args for one resolved waterfall.
+    fn waterfall_args(client_id: String, event_id: String, value: Value) -> Option<Value> {
+        serde_json::to_value(RemoteEventResultArgs {
+            client_id,
+            event_id,
+            outcome: RemoteEventOutcome {
+                kind: "result",
+                value,
+            },
+        })
+        .ok()
     }
 }

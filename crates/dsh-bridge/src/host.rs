@@ -19,9 +19,9 @@ use tokio::runtime::Runtime;
 use tokio::sync::Notify;
 
 use crate::approval::PendingApprovals;
-use crate::frame::{HostFrame, MuxFrame};
+use crate::frame::{ControlFrame, HostFrame, MuxFrame};
 use crate::mojibake::{StreamRepairer, StreamTextKind};
-use crate::rpc_types::{RpcId, ServerRequest, SessionId};
+use crate::rpc_types::{AnswerProtocol, RpcId, ServerRequest, SessionId};
 use crate::transport::{HttpClient, SseStream};
 
 /// Bound on the re-baseline fan-out (`session.history` calls) after a stream drop.
@@ -29,8 +29,16 @@ use crate::transport::{HttpClient, SseStream};
 /// typical 1–3 session desktop case.
 const REBASELINE_CONCURRENCY: usize = 4;
 
+/// Reconnect backoff bounds for the optional `session/control` stream.
+/// Harnesses before dsh 0.1.5 have no such endpoint, so repeated failures must
+/// back off (and stop logging at `warn`) instead of hot-looping against a host
+/// that will never serve it — their projections still arrive on the `$events`
+/// mux.
+const CONTROL_BACKOFF_BASE: Duration = Duration::from_millis(500);
+const CONTROL_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
 /// One pending approval/question entry kind, recorded in the session sink so
-/// the respond path can route the user's decision back to `/api/respond`.
+/// the answer path can route the user's decision back to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingApprovalKind {
     Approval,
@@ -80,15 +88,17 @@ pub struct SessionSink {
     /// editor tools whose dsh card variant did not carry a diff view.
     tool_call_args: Mutex<std::collections::HashMap<String, (String, serde_json::Value)>>,
     /// Pending approvals/questions keyed by the id surfaced to the UI (dsh
-    /// `approvalId` for approvals; the question batch's first `question.id` for
-    /// questions). The value carries the dsh `rpcId` needed for `/api/respond`
-    /// (for questions, the rpcId is the `$events` waterfall `eventId`, stored
-    /// separately in `question_event_ids`).
+    /// `approvalId` for approvals — or, on dsh 0.1.5+, the forwarded
+    /// waterfall's `eventId`; the question batch's first `question.id` for
+    /// questions). The value carries the dsh `rpcId` the legacy `/api/respond`
+    /// carrier echoes, while the `$events` waterfall `eventId` needed by
+    /// `/api/$events/result` is stored separately in `waterfall_event_ids`.
     pending: Mutex<Vec<PendingEntry>>,
-    /// Map UI request id → `$events` waterfall `eventId` for question batches.
-    /// dsh 0.1.2 resolves waterfall results by `eventId`, not by the UI-facing
-    /// question id.
-    question_event_ids: Mutex<Vec<(String, RpcId)>>,
+    /// Map UI request id → `$events` waterfall `eventId`, for question batches
+    /// (whose UI id is the first question id) and for approvals forwarded as
+    /// waterfalls. dsh resolves waterfall results by `eventId`, not by the
+    /// UI-facing id.
+    waterfall_event_ids: Mutex<Vec<(String, RpcId)>>,
     /// The ordered question ids of each pending batch, keyed by UI request id.
     /// dsh's `matchesQuestions` validates answers positionally
     /// (`answer[i].id === questions[i].id`), so the respond payload must list
@@ -113,6 +123,13 @@ pub struct SessionSink {
     /// prompt. `None` until the session thread attaches it via
     /// [`SessionSink::set_inflight_flag`].
     inflight: Mutex<Option<Arc<AtomicBool>>>,
+    /// Whether a prompt turn is currently in flight, maintained from the
+    /// durable `turn/start` / `turn/end` session events. The harness emits
+    /// `api-session/status(<sessionId>, false)` both when a turn finishes
+    /// normally (the agent goes running→idle at every turn end) and when a
+    /// host-side failure stops one mid-turn; this flag is the only signal that
+    /// distinguishes them.
+    turn_active: AtomicBool,
 }
 
 /// Per-block-stream mojibake repairer table: `(turn, step, block index)` maps
@@ -139,12 +156,13 @@ impl SessionSink {
             stream_repairs: Mutex::new(StreamRepairTable::new()),
             tool_call_args: Mutex::new(std::collections::HashMap::new()),
             pending: Mutex::new(Vec::new()),
-            question_event_ids: Mutex::new(Vec::new()),
+            waterfall_event_ids: Mutex::new(Vec::new()),
             question_order: Mutex::new(std::collections::HashMap::new()),
             session_id: Mutex::new(None),
             compact_commands: Mutex::new(std::collections::VecDeque::new()),
             removed: AtomicBool::new(false),
             inflight: Mutex::new(None),
+            turn_active: AtomicBool::new(false),
         }
     }
 
@@ -299,6 +317,17 @@ impl SessionSink {
         self.removed.load(Ordering::Acquire)
     }
 
+    /// Record a durable turn boundary (`turn/start` / `turn/end`).
+    pub fn set_turn_active(&self, active: bool) {
+        self.turn_active.store(active, Ordering::Release);
+    }
+
+    /// Whether a turn is in flight for this session. See the field docs for why
+    /// the host-status mapping needs it.
+    pub fn is_turn_active(&self) -> bool {
+        self.turn_active.load(Ordering::Acquire)
+    }
+
     /// Attach the shared in-flight flag owned by the session thread. The sink
     /// clears it when a `TurnFinished`/`Interrupted` reaches app-core, so the
     /// session thread's "one prompt per turn" guard stays in sync with turns
@@ -372,14 +401,22 @@ impl SessionSink {
             .unwrap_or_default()
     }
 
-    pub fn attach_question_event_id(&self, ui_id: String, event_id: RpcId) {
-        if let Ok(mut guard) = self.question_event_ids.lock() {
+    /// Record the `$events` waterfall `eventId` behind one UI-facing request id,
+    /// so the answer can be correlated by the gateway (`question/requested` and
+    /// a dsh 0.1.5+ `approval/request` are forwarded waterfalls, and the answer
+    /// must echo their `eventId`).
+    pub fn attach_waterfall_event_id(&self, ui_id: String, event_id: RpcId) {
+        if let Ok(mut guard) = self.waterfall_event_ids.lock() {
+            guard.retain(|(id, _)| id != &ui_id);
             guard.push((ui_id, event_id));
         }
     }
 
     /// Remove a pending approval once the harness reports it resolved.
     pub fn clear_pending_approval(&self, ui_id: &str) {
+        if let Ok(mut guard) = self.waterfall_event_ids.lock() {
+            guard.retain(|(id, _)| id != ui_id);
+        }
         if let Ok(mut pending) = self.pending.lock() {
             pending.retain(|e| !(e.kind == PendingApprovalKind::Approval && e.ui_id == ui_id));
         }
@@ -387,7 +424,7 @@ impl SessionSink {
 
     /// Remove a pending question batch once the harness reports it resolved.
     pub fn clear_pending_question(&self, ui_id: &str) {
-        if let Ok(mut guard) = self.question_event_ids.lock() {
+        if let Ok(mut guard) = self.waterfall_event_ids.lock() {
             guard.retain(|(id, _)| id != ui_id);
         }
         if let Ok(mut guard) = self.question_order.lock() {
@@ -398,12 +435,11 @@ impl SessionSink {
         }
     }
 
-    /// The UI-facing question id (`request_id`) for a pending batch, resolved
-    /// from its waterfall `eventId` — `question/resolved` names the batch by
-    /// that id, while `ToolPermissionResolved` must carry the id the UI
-    /// registered.
-    pub fn question_ui_id_for_event_id(&self, event_id: &str) -> Option<String> {
-        self.question_event_ids.lock().ok().and_then(|guard| {
+    /// The UI-facing request id for a pending waterfall, resolved from its
+    /// `eventId` — `question/resolved` names the batch by that id, while
+    /// `ToolPermissionResolved` must carry the id the UI registered.
+    pub fn waterfall_ui_id_for_event_id(&self, event_id: &str) -> Option<String> {
+        self.waterfall_event_ids.lock().ok().and_then(|guard| {
             guard
                 .iter()
                 .find(|(_, id)| id == event_id)
@@ -413,12 +449,12 @@ impl SessionSink {
 
     pub fn pending_approvals(&self) -> PendingApprovals {
         let entries = self.pending.lock().map(|g| g.clone()).unwrap_or_default();
-        let question_event_ids = self
-            .question_event_ids
+        let waterfall_event_ids = self
+            .waterfall_event_ids
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
-        PendingApprovals::from_entries(entries, question_event_ids)
+        PendingApprovals::from_entries(entries, waterfall_event_ids)
     }
 }
 
@@ -575,6 +611,11 @@ impl HarnessHost {
         let host_for_mux = host.clone();
         host.runtime
             .spawn(async move { host_for_mux.run_mux_loop().await });
+        // …and the session control stream, which carries the live projections
+        // (context occupancy, cumulative token usage) from dsh 0.1.5 on.
+        let host_for_control = host.clone();
+        host.runtime
+            .spawn(async move { host_for_control.run_control_loop().await });
         Ok(host)
     }
 
@@ -657,6 +698,162 @@ impl HarnessHost {
         }
     }
 
+    /// Session control read loop (dsh 0.1.5+).
+    ///
+    /// The `session/control` logical stream is host-wide: it carries every
+    /// session's queue, jobs, and projection values. Projections are what keep
+    /// the usage dock honest — `contextPressure` is the harness's real context
+    /// occupancy (and the only figure that reacts to `/compact`) and
+    /// `tokenUsage` is the durable cumulative usage. Only the
+    /// `session/follow` opening baseline carries them otherwise, so without
+    /// this loop the panel freezes at the value read when the session was
+    /// loaded.
+    ///
+    /// Reconnects with the same bounded backoff as the mux loop. A failure here
+    /// is NOT fatal for the sessions (usage would simply go stale), so unlike
+    /// the mux loop it never broadcasts `Interrupted`.
+    async fn run_control_loop(self: Arc<Self>) {
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            tokio::select! {
+                _ = self.stop.notified() => return,
+                result = self.client.open_session_control() => {
+                    let mut stream = match result {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            if !self
+                                .control_backoff(&mut consecutive_failures, Some(&err))
+                                .await
+                            {
+                                return;
+                            }
+                            continue;
+                        }
+                    };
+                    consecutive_failures = 0;
+                    loop {
+                        tokio::select! {
+                            _ = self.stop.notified() => return,
+                            item = stream.next_item() => {
+                                let Some(item) = item else { break; };
+                                match item {
+                                    crate::transport::FollowStreamItem::Item(value) => {
+                                        self.dispatch_control(&value);
+                                    }
+                                    crate::transport::FollowStreamItem::Ended => break,
+                                    crate::transport::FollowStreamItem::Failed(value) => {
+                                        tracing::warn!(
+                                            target: "dsh-bridge::host::control",
+                                            frame = %value,
+                                            "session control stream failed; reconnecting"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tracing::debug!(target: "dsh-bridge::host::control", "session control stream ended; reconnecting");
+                    if !self.control_backoff(&mut consecutive_failures, None).await {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bounded, escalating sleep between control-stream reconnect attempts.
+    /// Returns `false` when the host is stopping.
+    async fn control_backoff(
+        &self,
+        consecutive_failures: &mut u32,
+        err: Option<&anyhow::Error>,
+    ) -> bool {
+        *consecutive_failures = consecutive_failures.saturating_add(1);
+        let delay = CONTROL_BACKOFF_BASE
+            .saturating_mul(1u32 << (*consecutive_failures).min(6))
+            .min(CONTROL_BACKOFF_MAX);
+        if *consecutive_failures <= 2 {
+            match err {
+                Some(err) => tracing::warn!(
+                    target: "dsh-bridge::host::control",
+                    error = %err,
+                    failures = *consecutive_failures,
+                    "session control open failed; backing off (harnesses before dsh 0.1.5 have no control stream)"
+                ),
+                None => tracing::debug!(
+                    target: "dsh-bridge::host::control",
+                    failures = *consecutive_failures,
+                    "session control stream closed; backing off"
+                ),
+            }
+        } else {
+            tracing::debug!(
+                target: "dsh-bridge::host::control",
+                failures = *consecutive_failures,
+                delay_ms = delay.as_millis() as u64,
+                "session control still unavailable; backing off"
+            );
+        }
+        tokio::select! {
+            _ = self.stop.notified() => return false,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        !self.stop_inner()
+    }
+
+    /// Route one `session/control` value to the owning sessions' sinks.
+    fn dispatch_control(&self, value: &Value) {
+        let frame: ControlFrame = match serde_json::from_value(value.clone()) {
+            Ok(frame) => frame,
+            Err(err) => {
+                tracing::debug!(target: "dsh-bridge::host::control", error = %err, "dropping unparseable control frame");
+                return;
+            }
+        };
+        match frame {
+            ControlFrame::Projection {
+                session_id,
+                key,
+                value,
+            } => {
+                self.dispatch_mux_frame(
+                    MuxFrame::SessionProjection {
+                        session_id,
+                        key,
+                        value,
+                        // The control stream's per-frame `seq` is a projection
+                        // watermark, not a journal cursor; nothing in the
+                        // mapping layer reads it.
+                        seq: 0,
+                    },
+                    String::new(),
+                );
+            }
+            ControlFrame::Baseline { value } => {
+                // Every session's values at the cut. Keys are session ids;
+                // each value is a projection snapshot `{ asOfSeq, values }`.
+                let Some(projections) = value.get("projections").and_then(Value::as_object) else {
+                    return;
+                };
+                for (session_id, snapshot) in projections {
+                    let Some(values) = snapshot.get("values") else {
+                        continue;
+                    };
+                    let Some(sink) = self.router.get(session_id) else {
+                        continue;
+                    };
+                    for event in crate::mapping::map_projection_values(values) {
+                        sink.send(event);
+                    }
+                }
+            }
+            // Queue/jobs are not represented in `ClientEvent` (same as the
+            // mux frames for them).
+            ControlFrame::Queue { .. } | ControlFrame::Jobs { .. } | ControlFrame::Other => {}
+        }
+    }
+
     /// Dispatch one mux `ServerRequest`: parse the payload as a `MuxFrame`,
     /// demux by `sessionId`, map to `ClientEvent`(s), send to the matched sink.
     /// Unmatched/unknown frames are dropped with a debug log.
@@ -667,6 +864,22 @@ impl HarnessHost {
             }
             tracing::info!(target: "dsh-bridge::host::mux", client_id = %client_id, "dsh remote events ready");
         }
+        // The 0.1.5 `item` envelope is the answer-protocol probe: the same
+        // release that wraps every `$events` value moved `$events/result`
+        // behind the shared Connection RPC envelope, so a top-level `ready`
+        // means the pre-0.1.5 bare-body carrier. A wrong guess costs one
+        // retry (the answer is rebuilt for the other protocol then).
+        let protocol = if stream.uses_item_envelope() {
+            AnswerProtocol::Envelope
+        } else {
+            AnswerProtocol::Legacy
+        };
+        tracing::debug!(
+            target: "dsh-bridge::host::mux",
+            ?protocol,
+            "dsh answer protocol detected"
+        );
+        self.client.set_answer_protocol(protocol);
     }
 
     fn dispatch_mux(&self, req: &ServerRequest) {
@@ -686,10 +899,49 @@ impl HarnessHost {
                             .and_then(|args| args.get(1))
                             .and_then(Value::as_bool),
                     ) {
+                        // The agent reports `running: false` on every turn end
+                        // (running→idle), not only when a session dies. Only a
+                        // turn still in flight can have been stopped by a
+                        // host-side failure, so an idle transition that follows
+                        // the turn's own `turn/end` must not be surfaced as an
+                        // interruption (it would put the UI into its
+                        // "session disconnected" state after every reply).
+                        if !running
+                            && !self
+                                .router
+                                .get(&session_id.to_string())
+                                .is_some_and(|sink| sink.is_turn_active())
+                        {
+                            return;
+                        }
                         let frame = serde_json::json!({
                             "type": "host/session-status",
                             "sessionId": session_id,
                             "running": running
+                        });
+                        if let Ok(frame) = serde_json::from_value::<HostFrame>(frame) {
+                            self.dispatch_host_frame(frame);
+                        }
+                    }
+                }
+                // dsh 0.1.5 carries agent failures on `api-session/error`
+                // instead of a host frame; surface it so a turn that died is
+                // reported rather than left silently spinning.
+                "api-session/error" => {
+                    if let (Some(session_id), Some(error)) = (
+                        req.payload
+                            .get("args")
+                            .and_then(|args| args.get(0))
+                            .and_then(Value::as_str),
+                        req.payload
+                            .get("args")
+                            .and_then(|args| args.get(1))
+                            .and_then(Value::as_str),
+                    ) {
+                        let frame = serde_json::json!({
+                            "type": "host/agent-error",
+                            "sessionId": session_id,
+                            "message": error
                         });
                         if let Ok(frame) = serde_json::from_value::<HostFrame>(frame) {
                             self.dispatch_host_frame(frame);
@@ -715,17 +967,29 @@ impl HarnessHost {
                 "approval/request" => {
                     if let Some(session_id) = req.payload.get("agentId").and_then(Value::as_str) {
                         let request = req.payload.get("request").cloned().unwrap_or(Value::Null);
+                        // dsh 0.1.5 forwards approvals as a scoped waterfall
+                        // whose request carries no approval id at all: the
+                        // approval IS the waterfall, identified by its
+                        // `eventId` (our envelope rpcId), which is also what the
+                        // answer must echo. Older hosts name it explicitly.
+                        let approval_id = request
+                            .get("approvalId")
+                            .or_else(|| request.get("id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| req.rpcId.clone());
                         let frame = serde_json::json!({
                             "type": "approval/requested",
                             "sessionId": session_id,
-                            "approvalId": request
-                                .get("approvalId")
-                                .or_else(|| request.get("id")),
+                            "approvalId": approval_id,
                             "toolName": request.get("toolName"),
                             "callId": request.get("callId"),
                             "reason": request.get("reason")
                         });
                         if let Ok(frame) = serde_json::from_value(frame) {
+                            if let Some(sink) = self.router.get(&session_id.to_string()) {
+                                sink.attach_waterfall_event_id(approval_id, req.rpcId.clone());
+                            }
                             self.dispatch_mux_frame(frame, req.rpcId.clone());
                         }
                     }
@@ -799,7 +1063,7 @@ impl HarnessHost {
                     .first()
                     .map(|q| q.id.clone())
                     .unwrap_or_else(|| rpc_id.clone());
-                sink.attach_question_event_id(ui_id, rpc_id);
+                sink.attach_waterfall_event_id(ui_id, rpc_id);
             }
         }
         // question/resolved names the batch by rpcId, while the UI tracks it by
@@ -811,7 +1075,7 @@ impl HarnessHost {
             ..
         } = &frame
             && let Some(sink) = self.router.get(session_id)
-            && let Some(ui_id) = sink.question_ui_id_for_event_id(question_rpc_id)
+            && let Some(ui_id) = sink.waterfall_ui_id_for_event_id(question_rpc_id)
         {
             sink.clear_pending_question(&ui_id);
             sink.send(ClientEvent::ToolPermissionResolved {

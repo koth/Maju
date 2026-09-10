@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { View, Text, TextInput, Pressable, Modal, ScrollView, StyleSheet } from "react-native";
 import { useAppController, useSnapshot, usePendingApprovals } from "../../app/AppServicesContext";
-import { isDestructive } from "../../session/permission";
+import { isDestructive, allowOptionId } from "../../session/permission";
 import type { PermissionInputResponse } from "../../types";
 import { styles, colors, spacing, radius, shadows } from "../theme";
 
@@ -34,6 +34,7 @@ export function PermissionApprovalSheet() {
   const snapshot = useSnapshot();
   const pending = usePendingApprovals();
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(null);
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [textInputs, setTextInputs] = useState<Record<string, string>>({});
 
@@ -45,6 +46,18 @@ export function PermissionApprovalSheet() {
   const destructive = tool ? isDestructive(tool) : true;
   const options = tool?.permission_options ?? [];
   const questions = approval.request?.questions ?? [];
+  // A plain allow/deny approval (Codex's run/apply_patch prompt, Codebuddy's
+  // bash prompt) has no questions: its choices ARE the tool's permission
+  // options. They must be picked explicitly, because `option_id: null` reads as
+  // a rejection on the PC — inferring one silently denies the call.
+  const optionChoice = questions.length === 0 ? options : [];
+  const allowOption = options.find(
+    (option) => option.id === allowOptionId(options),
+  );
+  const effectiveOptionId =
+    optionChoice.length > 0 ? picked : (allowOption?.id ?? null);
+  const canConfirm =
+    questions.length > 0 || optionChoice.length === 0 || picked !== null;
 
   const toggleOption = (questionId: string, label: string, multiSelect: boolean) => {
     setSelected((prev) => {
@@ -76,12 +89,12 @@ export function PermissionApprovalSheet() {
       await controller.approvePermission(approval.permissionRequestId, optionId);
     }
     setConfirming(null);
+    setPicked(null);
     setSelected({});
     setTextInputs({});
   };
 
   const requireConfirm = destructive && confirming !== approval.permissionRequestId;
-  const allowOption = options.find((option) => /allow|yes|approve|once|submit/i.test(option.id + option.label));
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={() => controller.denyPermission(approval.permissionRequestId)}>
@@ -176,10 +189,43 @@ export function PermissionApprovalSheet() {
                 <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
                   <Text style={{ color: colors.danger, fontSize: 12 }}>此操作可能修改你的工作区,确认后放行。</Text>
                 </View>
+                {optionChoice.length > 0 ? (
+                  <View style={{ marginTop: spacing.sm }}>
+                    {optionChoice.map((option) => {
+                      const isPicked = picked === option.id;
+                      return (
+                        <Pressable
+                          key={option.id}
+                          onPress={() => setPicked(option.id)}
+                          style={({ pressed }) => [
+                            sheetStyles.optionRow,
+                            pressed ? sheetStyles.optionRowPressed : null,
+                            isPicked ? sheetStyles.optionRowChecked : null,
+                          ]}
+                          accessibilityRole="radio"
+                          accessibilityState={{ checked: isPicked }}
+                        >
+                          <View style={[sheetStyles.check, isPicked ? sheetStyles.checkRadio : null]}>
+                            {isPicked ? <View style={sheetStyles.checkDot} /> : null}
+                          </View>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={[styles.text, { fontSize: 13, fontWeight: "600" }]}>
+                              {optionDisplayLabel(option.label)}
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                ) : null}
                 <View style={[styles.row, { marginTop: spacing.md }]}>
                   <Pressable
-                    style={({ pressed }) => [styles.buttonDanger, { flex: 1, marginRight: spacing.sm, opacity: pressed ? 0.9 : 1 }]}
-                    onPress={() => resolve(allowOption?.id ?? null)}
+                    disabled={!canConfirm}
+                    style={({ pressed }) => [
+                      styles.buttonDanger,
+                      { flex: 1, marginRight: spacing.sm, opacity: !canConfirm ? 0.5 : pressed ? 0.9 : 1 },
+                    ]}
+                    onPress={() => resolve(effectiveOptionId)}
                   >
                     <Text style={styles.buttonText}>确认放行</Text>
                   </Pressable>
@@ -190,6 +236,11 @@ export function PermissionApprovalSheet() {
                     <Text style={[styles.text, { fontWeight: "600" }]}>拒绝</Text>
                   </Pressable>
                 </View>
+                {!canConfirm ? (
+                  <Text style={[styles.textFaint, { fontSize: 11, marginTop: spacing.xs }]}>
+                    请先选择要放行的选项。
+                  </Text>
+                ) : null}
               </View>
             ) : (
               <View style={[styles.row, { flexWrap: "wrap", marginTop: spacing.lg }]}>

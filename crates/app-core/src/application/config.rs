@@ -341,8 +341,10 @@ impl Application {
         self.start_permission_write_baseline_if_allowed(request_id, option_id.as_deref());
 
         // DeepSeek Harness: approvals/questions are server-requested by dsh and
-        // must be answered via `session.resolve_harness_approval` (→ `/api/respond`),
-        // not the ACP `PermissionBroker` (the bridge does not consume it).
+        // must be answered via `session.resolve_harness_approval` (the bridge
+        // posts the answer through the carrier the host speaks — the forwarded
+        // `$events` waterfall on dsh ≥ 0.1.5, the legacy `/api/respond` before
+        // that), not the ACP `PermissionBroker` (the bridge does not consume it).
         if crate::settings::is_deepseek_harness_command(&self.agent_command) {
             let result = self.build_harness_approval_result(
                 request_id,

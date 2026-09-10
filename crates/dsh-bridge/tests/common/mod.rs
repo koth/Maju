@@ -114,6 +114,10 @@ pub struct MockHarnessConfig {
     /// Frames for the per-session `session/follow` WS. Each new follow
     /// connection drains one script (same lifecycle as `mux`).
     pub follow: Vec<MuxScript>,
+    /// Frames for the host-wide `session/control` WS. Each new control
+    /// connection drains one script (same lifecycle as `mux`). These carry the
+    /// live projection updates (`contextPressure`, `tokenUsage`).
+    pub control: Vec<MuxScript>,
     /// Per-session history failure: session ids whose `session.history` call
     /// should return an error (to exercise per-session re-baseline isolation).
     pub history_failures: Vec<String>,
@@ -126,12 +130,33 @@ pub struct MockHarnessConfig {
     /// When true, the answer carrier rejects with `bad-response` (as dsh does
     /// for a malformed/mismatched answer payload).
     pub respond_reject: bool,
+    /// When true, the mock speaks the dsh ≤ 0.1.4 *answer protocol*: the
+    /// `$events` ready frame is sent top-level (no `item` envelope) and
+    /// `POST /api/$events/result` takes a bare `{ args }` body whose question
+    /// value is the wrapped `{ sessionId, answer }`. The default emulates dsh
+    /// ≥ 0.1.5: an `item`-wrapped ready frame plus the shared Connection RPC
+    /// `client-request` envelope, resolving with the bare answer value.
+    pub legacy_answer_protocol: bool,
+    /// Overrides the `$events` ready-frame wire form independently of the
+    /// answer carrier, to emulate a host whose stream form and answer carrier
+    /// disagree — the case the bridge's one-shot protocol retry exists for.
+    /// `None` follows `legacy_answer_protocol`.
+    pub ready_frame_item_envelope: Option<bool>,
     /// When true, token-authenticated endpoints reject requests without the
     /// `dsh-auth-` cookie.
     pub require_auth: bool,
     /// Projection values returned by `session/page` under its top-level
     /// `projections.values` object (dsh supplies `modelSelection` here).
     pub history_projections: Option<Value>,
+    /// Wire name the mock's `commands/execute` descriptor declares for the
+    /// attachment parameter. dsh ≤ 0.1.4 declares `images`, dsh ≥ 0.1.5
+    /// declares `submittedAttachments` (the rename that broke `/compact`);
+    /// any other name in the args is rejected as `arguments-invalid`.
+    pub command_attachment_field: String,
+    /// When set, every `commands/execute` answers with this
+    /// `gateway/arguments-invalid` message instead of validating the args —
+    /// used to check that unrelated args rejections are not retried.
+    pub commands_execute_error: Option<String>,
 }
 #[derive(Debug, Default)]
 struct MockState {
@@ -142,13 +167,24 @@ struct MockState {
     /// `session.fork` payloads received, in order.
     pub forks: Vec<Value>,
     /// `respond` / `$events/result` payloads received (approval/question
-    /// answers).
+    /// answers). For `$events/result` this is the args object the bridge built,
+    /// with the carrier envelope stripped.
     pub responds: Vec<Value>,
+    /// Whether each `$events/result` request arrived as a Connection RPC
+    /// `client-request` envelope (dsh ≥ 0.1.5) rather than a bare `{ args }`
+    /// body, in order.
+    pub answer_envelopes: Vec<bool>,
     /// `agentPreset.select` preset ids received, in order.
     pub preset_selects: Vec<String>,
+    /// `commands/execute` args objects received, in order (including rejected
+    /// attempts, so tests can observe the attachment-field fallback).
+    pub commands_execute_args: Vec<Value>,
     /// Pending question frames keyed by envelope rpcId (the questions the host
     /// is waiting on). Populated when a `question/requested` frame is sent.
     pub pending_questions: std::collections::HashMap<String, Vec<Value>>,
+    /// Pending approval waterfalls keyed by envelope rpcId, so the answer
+    /// handler can validate the closed outcome the way dsh does.
+    pub pending_approvals: std::collections::HashMap<String, Value>,
     /// Set once a `session.models` POST has been served. `run_harness_session`
     /// only sends it after the session sink is registered, so tests can use it
     /// as a registration barrier (`HoldFramesUntil::SessionRegistered`).
@@ -239,9 +275,21 @@ impl MockHarness {
         self.state.lock().unwrap().responds.clone()
     }
 
+    /// Whether each `$events/result` request arrived in the Connection RPC
+    /// `client-request` envelope, in order.
+    pub fn answer_envelopes(&self) -> Vec<bool> {
+        self.state.lock().unwrap().answer_envelopes.clone()
+    }
+
     /// `agentPreset.select` preset ids received, in order.
     pub fn preset_selects(&self) -> Vec<String> {
         self.state.lock().unwrap().preset_selects.clone()
+    }
+
+    /// `commands/execute` args objects received, in order (rejected attempts
+    /// included).
+    pub fn commands_execute_args(&self) -> Vec<Value> {
+        self.state.lock().unwrap().commands_execute_args.clone()
     }
 
     pub fn mux_connection_count(&self) -> usize {
@@ -356,29 +404,19 @@ async fn handle_connection(
 
     match (method.as_str(), path.as_str()) {
         ("GET", "/api/remote.mux") => {
-            mux_conns.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let scripts = {
-                let mut guard = config.lock().unwrap();
-                // Take the next script; keep the remainder for reconnections.
-                let next = if guard.mux.is_empty() {
-                    None
-                } else {
-                    guard.mux.drain(..1).next()
-                };
-                if next.is_none() {
-                    // No scripts configured or none remaining: use the
-                    // steady-state idle keep-alive.
-                    guard.mux = scripts_for_hold();
-                }
-                next.unwrap_or_else(|| scripts_for_hold().remove(0))
-            };
+            // The mux path carries every logical stream: the `$events` event
+            // mux, each session's `session/follow` journal, and the host-wide
+            // `session/control` channel. `serve_mux` reads the opening frame to
+            // learn which one this is, so nothing may be consumed from the
+            // scripted `mux` list until then — a control connection that stole
+            // a script would silently break the event-mux tests.
             serve_mux(
                 stream,
                 buf[..head_end].to_vec(),
-                scripts,
                 drop_tx,
                 state.clone(),
                 config.clone(),
+                mux_conns.clone(),
             )
             .await;
         }
@@ -449,38 +487,117 @@ async fn handle_connection(
         }
         ("POST", "/api/$events/result") => {
             let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            state
-                .lock()
-                .unwrap()
-                .responds
-                .push(parsed.pointer("/args").cloned().unwrap_or(Value::Null));
-            // Real validation, mirroring dsh's receiveRemoteEventResult +
-            // matchesQuestions: the result must reference an active `$events`
-            // client id, a pending waterfall eventId, and satisfy
-            // count/id/label constraints.
-            let receipt = {
+            let legacy = config.lock().unwrap().legacy_answer_protocol;
+            // dsh 0.1.5 serves this endpoint through the shared Connection RPC
+            // interceptor: the body MUST be a `client-request` envelope. A bare
+            // `{ args }` body is refused before the answer is ever looked at —
+            // which is what reached the user as an opaque "gateway error".
+            let enveloped = parsed.get("type").and_then(Value::as_str) == Some("client-request")
+                && parsed.get("method").and_then(Value::as_str) == Some("$events/result")
+                && parsed.pointer("/payload/args").is_some();
+            let respond_legacy_shape = |ok: bool, reason: &str| {
+                if ok {
+                    serde_json::json!({ "ok": true, "value": null })
+                } else {
+                    serde_json::json!({ "ok": false, "error": { "message": reason } })
+                }
+            };
+            let rpc_id = parsed
+                .get("rpcId")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid-request")
+                .to_string();
+            let respond_envelope = |ok: bool, reason: &str| {
+                if ok {
+                    serde_json::json!({
+                        "type": "server-response",
+                        "rpcId": rpc_id,
+                        "result": { "ok": true }
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "server-response",
+                        "rpcId": rpc_id,
+                        "result": {
+                            "ok": false,
+                            "error": {
+                                "code": "gateway/bad-response",
+                                "message": reason,
+                                "details": {}
+                            }
+                        }
+                    })
+                }
+            };
+            let args = if enveloped {
+                parsed
+                    .pointer("/payload/args")
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                parsed.get("args").cloned().unwrap_or(Value::Null)
+            };
+            // Record every attempt (carrier + args) so tests can assert both the
+            // envelope and a protocol-retry sequence.
+            {
+                let mut guard = state.lock().unwrap();
+                guard.answer_envelopes.push(enveloped);
+                guard.responds.push(args.clone());
+            }
+            if !legacy && !enveloped {
+                // Mirror the Connection interceptor's envelope refusal.
+                let response = serde_json::json!({
+                    "type": "server-response",
+                    "rpcId": rpc_id,
+                    "result": {
+                        "ok": false,
+                        "error": {
+                            "code": "gateway/bad-request",
+                            "message": "invalid client-request message",
+                            "details": { "issues": [] }
+                        }
+                    }
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                write_response(&mut stream, 200, "application/json", &body).await;
+                return;
+            }
+            if legacy && enveloped {
+                // Mirror the pre-0.1.5 handler, which requires the body to be
+                // exactly `{ args }`.
+                let response = serde_json::json!({
+                    "ok": false,
+                    "error": {
+                        "code": "gateway/internal",
+                        "message": "typert gateway: Remote event result requires exactly one plain-object args field"
+                    }
+                });
+                let body = serde_json::to_vec(&response).unwrap();
+                write_response(&mut stream, 200, "application/json", &body).await;
+                return;
+            }
+            // Real validation, mirroring dsh's receiveRemoteEventResult and the
+            // answer schema: the result must reference an active `$events`
+            // client id, a pending waterfall eventId, and carry the value shape
+            // that protocol resolves waterfalls with.
+            let (ok, reason) = {
                 let state_guard = state.lock().unwrap();
-                let client_id = parsed
-                    .pointer("/args/clientId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let event_id = parsed
-                    .pointer("/args/eventId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let client_id = args.get("clientId").and_then(Value::as_str).unwrap_or("");
+                let event_id = args.get("eventId").and_then(Value::as_str).unwrap_or("");
                 let reject = config.lock().unwrap().respond_reject;
+                let value = args.pointer("/outcome/value");
                 if client_id != "$events-client-1" {
-                    serde_json::json!({ "ok": false, "error": { "message": "identifies no active event stream" } })
+                    (false, "identifies no active event stream".to_string())
                 } else if reject {
-                    serde_json::json!({ "ok": false, "error": { "message": "bad-response" } })
+                    (false, "bad-response".to_string())
                 } else if let Some(questions) = state_guard.pending_questions.get(event_id) {
-                    let value = parsed.pointer("/args/outcome/value");
+                    // 0.1.5 resolves with the bare answer; ≤ 0.1.4 wrapped it.
                     let answers = value
-                        .and_then(|v| v.pointer("/answer/answers"))
+                        .and_then(|v| v.pointer("/answer/answers").or_else(|| v.get("answers")))
                         .and_then(Value::as_array)
                         .cloned()
                         .unwrap_or_default();
-                    let ok = answers.len() == questions.len()
+                    let matches = answers.len() == questions.len()
                         && answers.iter().zip(questions.iter()).all(|(a, q)| {
                             let qid = q.get("id").and_then(Value::as_str).unwrap_or("");
                             let aid = a.get("id").and_then(Value::as_str).unwrap_or("");
@@ -503,16 +620,28 @@ async fn handle_connection(
                                 .unwrap_or_default();
                             selected.iter().all(|s| labels.contains(s))
                         });
-                    if ok {
-                        serde_json::json!({ "ok": true, "value": null })
+                    if matches {
+                        (true, String::new())
                     } else {
-                        serde_json::json!({ "ok": false, "error": { "message": "bad-response" } })
+                        (false, "bad-response".to_string())
+                    }
+                } else if state_guard.pending_approvals.contains_key(event_id) {
+                    // An approval waterfall resolves with the bare closed
+                    // outcome string.
+                    match value.and_then(Value::as_str) {
+                        Some("allowed-once") | Some("rejected") => (true, String::new()),
+                        _ => (false, "bad-response".to_string()),
                     }
                 } else {
-                    serde_json::json!({ "ok": false, "error": { "message": "not-pending" } })
+                    (false, "not-pending".to_string())
                 }
             };
-            let body = serde_json::to_vec(&receipt).unwrap();
+            let response = if legacy {
+                respond_legacy_shape(ok, &reason)
+            } else {
+                respond_envelope(ok, &reason)
+            };
+            let body = serde_json::to_vec(&response).unwrap();
             write_response(&mut stream, 200, "application/json", &body).await;
         }
         ("POST", path) => {
@@ -626,6 +755,72 @@ async fn handle_connection(
                     "authorable": false,
                     "hasDocument": false,
                 }),
+                "commands/execute" => {
+                    // Mirror the typert gateway's args validation: the args
+                    // object must carry exactly the attachment field the
+                    // descriptor declares. Everything else is rejected with
+                    // `gateway/arguments-invalid`, the shape dsh 0.1.5.1-rc.1
+                    // returns for the pre-rename `images` payload.
+                    let args = parsed
+                        .pointer("/payload/args")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    state
+                        .lock()
+                        .unwrap()
+                        .commands_execute_args
+                        .push(args.clone());
+                    let expected = config.lock().unwrap().command_attachment_field.clone();
+                    let forced_error = config.lock().unwrap().commands_execute_error.clone();
+                    let rejection = match forced_error {
+                        Some(message) => Some((expected.clone(), message, true)),
+                        None if args.get(&expected).is_none() => {
+                            let unexpected = ["submittedAttachments", "images"]
+                                .into_iter()
+                                .find(|field| args.get(*field).is_some())
+                                .unwrap_or("<none>");
+                            Some((
+                                expected.clone(),
+                                format!(
+                                    "type=t gateway: commands/execute: args fields do not match the descriptor: missing \"{expected}\"; unexpected \"{unexpected}\""
+                                ),
+                                false,
+                            ))
+                        }
+                        None => None,
+                    };
+                    if let Some((_, message, forced)) = rejection {
+                        let message = if forced {
+                            // A rejection unrelated to the attachment field.
+                            format!("type=t gateway: commands/execute: {message}")
+                        } else {
+                            message
+                        };
+                        let response = serde_json::json!({
+                            "type": "server-response",
+                            "rpcId": rpc_id,
+                            "result": {
+                                "ok": false,
+                                "error": {
+                                    "code": "gateway/arguments-invalid",
+                                    "message": message,
+                                    "details": {}
+                                }
+                            }
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        write_response(&mut stream, 200, "application/json", &body).await;
+                        return;
+                    }
+                    serde_json::json!({
+                        "commandId": "cmd-compact-1",
+                        "result": {
+                            "kind": "success",
+                            "text": "Compacted 3 history items (~1.2k tokens).",
+                            "sourceEventSeq": 42
+                        }
+                    })
+                }
                 "agentPresets/select" => {
                     let preset = parsed
                         .pointer("/payload/args/agentPreset")
@@ -678,10 +873,10 @@ async fn handle_connection(
 async fn serve_mux(
     stream: TcpStream,
     head: Vec<u8>,
-    script: MuxScript,
     drop_tx: mpsc::Sender<()>,
     state: Arc<Mutex<MockState>>,
     config: Arc<Mutex<MockHarnessConfig>>,
+    mux_conns: Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let prefixed = PrefixedStream {
         prefix: head,
@@ -708,11 +903,8 @@ async fn serve_mux(
         .unwrap_or("")
         .to_string();
     if endpoint == "session/follow" {
-        let session_id = open
-            .pointer("/payload/args/request/address/sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        // Journal frames carry the session id in their payload; the bridge
+        // demuxes by stream, not by frame content.
         let follow_script = {
             let mut guard = config.lock().unwrap();
             if guard.follow.is_empty() {
@@ -720,27 +912,69 @@ async fn serve_mux(
             }
             guard.follow.drain(..1).next().unwrap()
         };
-        serve_follow(ws, follow_script, session_id, drop_tx).await;
+        serve_logical_stream(ws, follow_script, "mock-follow", drop_tx, state).await;
         return;
     }
-    // `$events` mux: fall through to the original scripted path.
-    if script.hold_frames_until == HoldFramesUntil::SessionRegistered {
-        // `run_harness_session` registers the sink before POSTing
-        // `session.models`, so serving that call is the earliest observable
-        // signal that scripted frames will find their sink. Bounded so a test
-        // that never reaches models fails visibly instead of hanging.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !state.lock().unwrap().models_served && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    if endpoint == "session/control" {
+        // Host-wide control stream: queues, jobs, and the live projection
+        // updates the usage dock depends on.
+        let control_script = {
+            let mut guard = config.lock().unwrap();
+            if guard.control.is_empty() {
+                guard.control = scripts_for_hold();
+            }
+            guard.control.drain(..1).next().unwrap()
+        };
+        serve_logical_stream(ws, control_script, "mock-control", drop_tx, state).await;
+        return;
+    }
+    // `$events` mux: only this logical stream is scripted by `config.mux` and
+    // counted by `mux_connection_count` (the follow/control streams above have
+    // their own scripts and would otherwise steal a mux script).
+    let script = {
+        let mut guard = config.lock().unwrap();
+        // Take the next script; keep the remainder for reconnections.
+        let next = if guard.mux.is_empty() {
+            None
+        } else {
+            guard.mux.drain(..1).next()
+        };
+        if next.is_none() {
+            // No scripts configured or none remaining: use the steady-state
+            // idle keep-alive.
+            guard.mux = scripts_for_hold();
         }
+        next.unwrap_or_else(|| scripts_for_hold().remove(0))
+    };
+    mux_conns.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    if script.hold_frames_until == HoldFramesUntil::SessionRegistered {
+        wait_for_session_registered(&state).await;
     }
     // Emit the gateway ready item so the bridge captures the client id before
-    // waterfall frames arrive.
-    let ready = serde_json::to_string(&serde_json::json!({
+    // waterfall frames arrive. dsh 0.1.5 wraps every logical-stream value in the
+    // `item` envelope; ≤ 0.1.4 sent the ready discriminator top-level. The
+    // bridge reads that difference as its answer-protocol probe, so the shape
+    // must match `legacy_answer_protocol`.
+    let legacy_answer_protocol = config.lock().unwrap().legacy_answer_protocol;
+    let item_envelope = config
+        .lock()
+        .unwrap()
+        .ready_frame_item_envelope
+        .unwrap_or(!legacy_answer_protocol);
+    let ready_value = serde_json::json!({
         "type": "ready",
         "clientId": "$events-client-1",
         "host": "mock-host"
-    }))
+    });
+    let ready = serde_json::to_string(&if item_envelope {
+        serde_json::json!({
+            "type": "item",
+            "streamId": "mock-$events",
+            "value": ready_value
+        })
+    } else {
+        ready_value
+    })
     .unwrap();
     let _ = ws.send(Message::Text(ready.into())).await;
     for frame in &script.frames {
@@ -766,6 +1000,19 @@ async fn serve_mux(
                 .pending_questions
                 .insert(rpc_id, questions);
         }
+        // An approval forwarded as a waterfall (dsh 0.1.5): the answer resolves
+        // the waterfall with the bare outcome, correlated by `eventId`.
+        if frame.get("type").and_then(Value::as_str) == Some("waterfall")
+            && frame.get("event").and_then(Value::as_str) == Some("approval/request")
+            && let Some(rpc_id) = frame.get("eventId").and_then(Value::as_str)
+        {
+            let request = frame.get("request").cloned().unwrap_or(Value::Null);
+            state
+                .lock()
+                .unwrap()
+                .pending_approvals
+                .insert(rpc_id.to_string(), request);
+        }
         let payload = serde_json::to_string(&serde_json::json!({
             "type": "item",
             "streamId": "mock-$events",
@@ -787,21 +1034,23 @@ async fn serve_mux(
     }
 }
 
-/// Serve one `session/follow` WS: emit the scripted journal frames as
+/// Serve one logical Remote stream (the per-session `session/follow` journal or
+/// the host-wide `session/control` channel): emit the scripted frames as
 /// `{ type: "item", value: <frame> }`, then hold or close per `script.end`.
-async fn serve_follow(
+async fn serve_logical_stream(
     mut ws: tokio_tungstenite::WebSocketStream<PrefixedStream>,
     script: MuxScript,
-    session_id: String,
+    stream_id: &str,
     drop_tx: mpsc::Sender<()>,
+    state: Arc<Mutex<MockState>>,
 ) {
+    if script.hold_frames_until == HoldFramesUntil::SessionRegistered {
+        wait_for_session_registered(&state).await;
+    }
     for frame in &script.frames {
-        // Journal frames carry the session id in their payload; the bridge
-        // demuxes by stream, not by frame content.
-        let _ = session_id;
         let payload = serde_json::to_string(&serde_json::json!({
             "type": "item",
-            "streamId": "mock-follow",
+            "streamId": stream_id,
             "value": frame
         }))
         .unwrap();
@@ -813,6 +1062,17 @@ async fn serve_follow(
             let _ = drop_tx.send(()).await;
             let _ = ws.close(None).await;
         }
+    }
+}
+
+/// Block until `run_harness_session` has registered its session sink, using the
+/// `session/models` POST as the observable barrier (the sink is registered
+/// synchronously right after `session.create` returns, strictly before that
+/// call). Bounded so a test that never gets there fails visibly.
+async fn wait_for_session_registered(state: &Arc<Mutex<MockState>>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !state.lock().unwrap().models_served && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -894,6 +1154,19 @@ pub fn mux_subscribed(session_id: &str, last_seq: i64) -> Value {
     })
 }
 
+/// Build a `$events` emit frame for one host-scoped remote event.
+///
+/// dsh delivers session/agent lifecycle facts (`api-session/status`,
+/// `api-session/error`, …) as Cordis remote events rather than session events.
+pub fn mux_host_event(event: &str, args: Vec<Value>) -> Value {
+    serde_json::json!({ "type": "emit", "event": event, "args": args })
+}
+
+/// One `session/follow` `assistant-stream` item (dsh 0.1.5+ live model output).
+pub fn follow_assistant_stream(frame: Value) -> Value {
+    serde_json::json!({ "type": "assistant-stream", "frame": frame })
+}
+
 /// A single-connection script list (one mux connection that holds open).
 pub fn scripts_with(frames: Vec<Value>) -> Vec<MuxScript> {
     vec![MuxScript {
@@ -907,12 +1180,19 @@ pub fn default_config() -> MockHarnessConfig {
     MockHarnessConfig {
         mux: Vec::new(),
         follow: Vec::new(),
+        control: Vec::new(),
         history_failures: Vec::new(),
         history_events: Vec::new(),
         preset_locked: false,
         respond_reject: false,
+        // Current dsh (0.1.5) answer protocol; set true to emulate ≤ 0.1.4.
+        legacy_answer_protocol: false,
+        ready_frame_item_envelope: None,
         require_auth: false,
         history_projections: None,
+        // Current dsh descriptor; set `"images"` to emulate dsh ≤ 0.1.4.
+        command_attachment_field: "submittedAttachments".to_string(),
+        commands_execute_error: None,
     }
 }
 

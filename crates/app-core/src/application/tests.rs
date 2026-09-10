@@ -1903,6 +1903,46 @@ fn broadcast_emits_permission_requested_for_tool_permission_event() {
     );
 }
 
+/// A plain allow/deny approval (Codex's run/apply_patch prompt) carries no
+/// `input`, so it produces no `PermissionRequested` signal — only the snapshot
+/// update that holds the tool's `permission_options`. Without that update a
+/// remote client never learns the approval exists and cannot answer it.
+#[test]
+fn tool_permission_without_input_broadcasts_the_snapshot_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+    let mut rx = app.subscribe_updates();
+
+    app.apply_event_with_dirty_tracking(&ClientEvent::ToolPermissionRequest {
+        id: "call-2".to_string(),
+        name: "run_command".to_string(),
+        options: vec![workspace_model::PermissionOption {
+            id: "approved".to_string(),
+            label: "Yes".to_string(),
+            kind: "allow_once".to_string(),
+        }],
+        details: None,
+        input: None,
+    });
+
+    let mut saw_ui_update = false;
+    while let Ok(update) = rx.try_recv() {
+        match update {
+            AppUpdate::UiUpdated { revision } => {
+                assert_eq!(revision, app.ui.revision);
+                saw_ui_update = true;
+            }
+            AppUpdate::PermissionRequested { .. } => {
+                panic!("an input-less approval must not claim a question form");
+            }
+        }
+    }
+    assert!(
+        saw_ui_update,
+        "the snapshot update carrying the approval's options must be broadcast"
+    );
+}
+
 /// In-process loopback: validates the `RemoteControl` gateway end-to-end
 /// without a network. Wraps a real `Application` (mock ACP) in
 /// `AppCoreRemoteControl`, subscribes to update signals, drives an event by

@@ -1570,4 +1570,181 @@ describe("ReviewPanel scoped change sets", () => {
     expect(screen.queryAllByText("src/old.ts")).toHaveLength(0);
     expect(screen.getByRole("button", { name: "还原审查面板" })).toBeTruthy();
   });
+
+  it("reloads change sets as soon as files land in a running turn", async () => {
+    // Regression: the reload used to be keyed on the entry count of
+    // `snapshot.turn_changes`, which the backend only writes when a turn is
+    // finalized. Files landing mid-turn (recorded in `review_changes`, with the
+    // AgentTurn change set already upserted as Pending) therefore never
+    // refreshed the panel — on a resumed session the panel stayed stale until
+    // the user switched away and back.
+    const pendingTurn: ChangeSetSummary = {
+      ...makeChangeSet("live-turn", "AgentTurn", "2026-05-12T04:00:00Z"),
+      message_id: null,
+      owner_key: "user-message:turn-user",
+      status: "Pending",
+    };
+    vi.mocked(sessionListChangeSets)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([pendingTurn]);
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => ({
+      change_set_id,
+      files: [makeSummary(change_set_id, "src/live.ts")],
+    }));
+
+    const idleSnapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "turn-user", role: "User", body: "edit something" }],
+      timeline: [{ Message: "turn-user" }],
+    });
+    const landedSnapshot = makeSnapshot({
+      revision: 2,
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "turn-user", role: "User", body: "edit something" }],
+      timeline: [{ Message: "turn-user" }],
+      // Mid-turn: the turn's edits are recorded, but `turn_changes` (written at
+      // finalize) is still empty.
+      review_changes: [
+        {
+          path: "src/live.ts",
+          change_type: "Modified",
+          old_text: null,
+          new_text: "new\n",
+          added_lines: 1,
+          removed_lines: 0,
+          timestamp: "2026-05-12T04:00:00Z",
+        },
+      ],
+    });
+
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={idleSnapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("上轮对话暂无文件变化")).toBeTruthy(),
+    );
+    expect(screen.queryAllByText("src/live.ts")).toHaveLength(0);
+
+    rerender(
+      <ReviewPanel
+        snapshot={landedSnapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/live.ts").length).toBeGreaterThan(0),
+    );
+  });
+
+  it("reloads a change set's files when the same set gains more files", async () => {
+    // A live turn keeps one change set id while gaining files. The panel used
+    // to record "files loaded" per id forever, so it showed only the first
+    // file that landed for the rest of the turn.
+    const firstLanding: ChangeSetSummary = {
+      ...makeChangeSet("live-turn", "AgentTurn", "2026-05-12T04:00:00Z"),
+      message_id: null,
+      owner_key: "user-message:turn-user",
+      status: "Pending",
+      file_count: 1,
+    };
+    const secondLanding: ChangeSetSummary = {
+      ...firstLanding,
+      updated_at: "2026-05-12T04:05:00Z",
+      file_count: 2,
+      added_lines: 2,
+    };
+    vi.mocked(sessionListChangeSets)
+      .mockResolvedValueOnce([firstLanding])
+      .mockResolvedValue([secondLanding]);
+
+    let fileListCalls = 0;
+    vi.mocked(sessionListChangeSetFiles).mockImplementation(async ({ change_set_id }) => {
+      fileListCalls += 1;
+      return {
+        change_set_id,
+        files:
+          fileListCalls === 1
+            ? [makeSummary(change_set_id, "src/first.ts")]
+            : [makeSummary(change_set_id, "src/first.ts"), makeSummary(change_set_id, "src/second.ts")],
+      };
+    });
+
+    const baseSnapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      messages: [{ id: "turn-user", role: "User", body: "edit something" }],
+      timeline: [{ Message: "turn-user" }],
+      review_changes: [
+        {
+          path: "src/first.ts",
+          change_type: "Modified",
+          old_text: null,
+          new_text: "first\n",
+          added_lines: 1,
+          removed_lines: 0,
+          timestamp: "2026-05-12T04:00:00Z",
+        },
+      ],
+    });
+    const grownSnapshot = makeSnapshot({
+      ...baseSnapshot,
+      revision: 3,
+      review_changes: [
+        ...baseSnapshot.review_changes,
+        {
+          path: "src/second.ts",
+          change_type: "Modified",
+          old_text: null,
+          new_text: "second\n",
+          added_lines: 1,
+          removed_lines: 0,
+          timestamp: "2026-05-12T04:05:00Z",
+        },
+      ],
+    });
+
+    const { rerender } = render(
+      <ReviewPanel
+        snapshot={baseSnapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/first.ts").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("src/second.ts")).toHaveLength(0);
+
+    rerender(
+      <ReviewPanel
+        snapshot={grownSnapshot}
+        refreshing={false}
+        hydrated
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("src/second.ts").length).toBeGreaterThan(0),
+    );
+    expect(fileListCalls).toBeGreaterThanOrEqual(2);
+  });
 });

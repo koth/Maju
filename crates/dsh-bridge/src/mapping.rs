@@ -313,102 +313,109 @@ pub fn map_host_frame(frame: &HostFrame) -> MappedEvents {
     }
 }
 
+/// Map one model-stream chunk of an assistant step into [`ClientEvent`]s.
+///
+/// Shared by the two carriers the harness has used for live model output: the
+/// durable `assistant/chunk` session event (dsh ≤ 0.1.4) and the transient
+/// `assistant-stream` follow frames (dsh 0.1.5+, requested with
+/// `assistantStream: true`). Both must behave identically — the text-delta arm
+/// also marks the step as already streamed, which is what keeps the finalized
+/// `assistant/message` from repeating the reply.
+pub fn map_assistant_chunk(
+    sink: &SessionSink,
+    turn: u64,
+    step: u64,
+    chunk: StreamChunk,
+) -> Vec<ClientEvent> {
+    match chunk {
+        StreamChunk::TextDelta { index, text } => {
+            // History pages contain raw chunk deltas alongside the finalized
+            // `assistant/message`, so remember when this sink already emitted
+            // the step's text and let the finalized block skip it.
+            sink.mark_text_seen(turn, step);
+            // Mojibake trace: fingerprint the raw (pre-repair) text as it
+            // enters the bridge, to compare against the raw WS frame.
+            let mojibake_hits = mojibake::signature_hits(&text);
+            let fffd = text.matches('\u{FFFD}').count();
+            if fffd > 0 || mojibake_hits > 0 {
+                tracing::debug!(
+                    target: "dsh-bridge::mapping",
+                    bytes = text.len(),
+                    fffd,
+                    signature_hits = mojibake_hits,
+                    "assistant chunk mapped with mojibake markers"
+                );
+            }
+            // Repair Latin-1 double-encoded corruption (observed from some
+            // upstreams) across delta boundaries; may legitimately return an
+            // empty string while a sequence accumulates.
+            let repaired = sink.repair_stream_text(turn, step, index, StreamTextKind::Text, &text);
+            if repaired.is_empty() {
+                Vec::new()
+            } else {
+                // Close the current thinking segment before the reply text: dsh
+                // never emits a reasoning-end signal, so without this the
+                // reducer's thinking buffer keeps accumulating every model
+                // call's reasoning for the WHOLE turn (multi-MB on long turns)
+                // instead of one block per reasoning burst.
+                vec![
+                    ClientEvent::ThinkingActivity { active: false },
+                    ClientEvent::MessageChunk {
+                        role: MessageRole::Assistant,
+                        content: repaired,
+                    },
+                ]
+            }
+        }
+        StreamChunk::ReasoningDelta { index, text } => {
+            let repaired =
+                sink.repair_stream_text(turn, step, index, StreamTextKind::Reasoning, &text);
+            let mut out = vec![ClientEvent::ThinkingActivity { active: true }];
+            if !repaired.is_empty() {
+                out.push(ClientEvent::ThinkingChunk { text: repaired });
+            }
+            out
+        }
+        StreamChunk::Usage { usage } => {
+            // One model call surfaces the same `TokenUsage` twice (the terminal
+            // `usage` chunk and the finalized message rollup) and history
+            // replay re-delivers both; emit exactly one TurnDelta per call via
+            // the sink's step claim.
+            if sink.claim_usage_emission(turn, step) {
+                vec![usage_event(&usage)]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Map a `SessionEvent` (+ optional `ToolEventView`) into [`ClientEvent`]s.
 pub fn map_session_event(
     event: &SessionEvent,
     view: Option<&ToolEventView>,
-    _sink: &SessionSink,
+    sink: &SessionSink,
 ) -> Vec<ClientEvent> {
     // History replay rebuilds the transcript from SQLite; a replayed
     // `tool/call` must not re-emit `ToolStarted`, otherwise app-core
     // `persist_event` would overwrite the persisted row back to Running.
     // Record the call args so a later replayed `tool/result` can still
     // synthesize the diff preview.
-    if _sink.is_replaying() && event.type_tag == "tool/call" {
+    if sink.is_replaying() && event.type_tag == "tool/call" {
         let data: Option<ToolCallData> = event.data();
         if let Some(d) = data
             && let Ok(value) = serde_json::from_str::<Value>(&d.arguments)
         {
-            _sink.record_tool_call(d.call_id, d.name, value);
+            sink.record_tool_call(d.call_id, d.name, value);
         }
         return Vec::new();
     }
     match event.type_tag.as_str() {
         "assistant/chunk" => {
             let data: Option<AssistantChunkData> = event.data();
-            // History pages contain raw chunk deltas alongside the finalized
-            // `assistant/message`, so remember when this sink already emitted
-            // the step's text and let the finalized block skip it.
-            if let Some(ref d) = data {
-                if matches!(&d.chunk, StreamChunk::TextDelta { .. }) {
-                    _sink.mark_text_seen(d.turn, d.step);
-                }
-            }
-            match data.map(|d| (d.turn, d.step, d.chunk)) {
-                Some((turn, step, StreamChunk::TextDelta { index, text })) => {
-                    // Mojibake trace: fingerprint the raw (pre-repair) text as it
-                    // enters the bridge, to compare against the raw WS frame.
-                    let mojibake_hits = mojibake::signature_hits(&text);
-                    let fffd = text.matches('\u{FFFD}').count();
-                    if fffd > 0 || mojibake_hits > 0 {
-                        tracing::debug!(
-                            target: "dsh-bridge::mapping",
-                            bytes = text.len(),
-                            fffd,
-                            signature_hits = mojibake_hits,
-                            "assistant chunk mapped with mojibake markers"
-                        );
-                    }
-                    // Repair Latin-1 double-encoded corruption (observed from
-                    // some upstreams) across delta boundaries; may legitimately
-                    // return an empty string while a sequence accumulates.
-                    let repaired =
-                        _sink.repair_stream_text(turn, step, index, StreamTextKind::Text, &text);
-                    if repaired.is_empty() {
-                        Vec::new()
-                    } else {
-                        // Close the current thinking segment before the reply
-                        // text: dsh never emits a reasoning-end signal, so
-                        // without this the reducer's thinking buffer keeps
-                        // accumulating every model call's reasoning for the
-                        // WHOLE turn (multi-MB on long turns) instead of one
-                        // block per reasoning burst.
-                        vec![
-                            ClientEvent::ThinkingActivity { active: false },
-                            ClientEvent::MessageChunk {
-                                role: MessageRole::Assistant,
-                                content: repaired,
-                            },
-                        ]
-                    }
-                }
-                Some((turn, step, StreamChunk::ReasoningDelta { index, text })) => {
-                    let repaired = _sink.repair_stream_text(
-                        turn,
-                        step,
-                        index,
-                        StreamTextKind::Reasoning,
-                        &text,
-                    );
-                    let mut out = vec![ClientEvent::ThinkingActivity { active: true }];
-                    if !repaired.is_empty() {
-                        out.push(ClientEvent::ThinkingChunk { text: repaired });
-                    }
-                    out
-                }
-                Some((turn, step, StreamChunk::Usage { usage })) => {
-                    // One model call surfaces the same `TokenUsage` twice (the
-                    // terminal `usage` chunk and the finalized message rollup)
-                    // and history replay re-delivers both; emit exactly one
-                    // TurnDelta per call via the sink's step claim.
-                    if _sink.claim_usage_emission(turn, step) {
-                        vec![usage_event(&usage)]
-                    } else {
-                        Vec::new()
-                    }
-                }
-                _ => Vec::new(),
-            }
+            data.map(|d| map_assistant_chunk(sink, d.turn, d.step, d.chunk))
+                .unwrap_or_default()
         }
         "assistant/message" => {
             // Live path: the assistant text was already streamed via
@@ -423,7 +430,7 @@ pub fn map_session_event(
                 // Flush any mojibake-repair tails held for this step's block
                 // streams (a corrupted stream can end mid-sequence or below
                 // the pre-engagement threshold).
-                for (kind, tail) in _sink.flush_stream_repairs(data.turn, data.step) {
+                for (kind, tail) in sink.flush_stream_repairs(data.turn, data.step) {
                     match kind {
                         StreamTextKind::Text => out.push(ClientEvent::MessageChunk {
                             role: MessageRole::Assistant,
@@ -434,7 +441,7 @@ pub fn map_session_event(
                         }
                     }
                 }
-                if _sink.is_replaying() && !_sink.text_seen(data.turn, data.step) {
+                if sink.is_replaying() && !sink.text_seen(data.turn, data.step) {
                     for block in &data.message.content {
                         if let ContentBlock::Text { text } = block {
                             out.push(ClientEvent::MessageChunk {
@@ -448,7 +455,7 @@ pub fn map_session_event(
                     // The rollup carries the same call's `TokenUsage` the
                     // terminal `usage` chunk already delivered; the sink claim
                     // keeps it to one TurnDelta per (turn, step).
-                    if _sink.claim_usage_emission(data.turn, data.step) {
+                    if sink.claim_usage_emission(data.turn, data.step) {
                         out.push(usage_event(usage));
                     }
                 }
@@ -461,7 +468,7 @@ pub fn map_session_event(
             // every user message. Rebuilt transcripts (resume into an empty
             // store, fork children) have no other source for the prompts —
             // and the fork cut anchors on them as turn boundaries.
-            if !_sink.is_replaying() {
+            if !sink.is_replaying() {
                 return Vec::new();
             }
             let data: Option<UserMessageData> = event.data();
@@ -487,7 +494,7 @@ pub fn map_session_event(
             };
             let raw_input_value = serde_json::from_str::<Value>(&raw_input).ok();
             if let Some(value) = raw_input_value.clone() {
-                _sink.record_tool_call(call_id.clone(), name.clone(), value);
+                sink.record_tool_call(call_id.clone(), name.clone(), value);
             }
             let (kind, summary) = match view {
                 Some(ToolEventView::Call { view }) => {
@@ -568,7 +575,7 @@ pub fn map_session_event(
                 .unwrap_or_default();
             let mut out = Vec::new();
             let mut had_diff_view = false;
-            let recorded_call = _sink.take_tool_call(&call_id);
+            let recorded_call = sink.take_tool_call(&call_id);
 
             // Diff views → one ToolDiff per file (before ToolCompleted).
             if let Some(ToolEventView::Result { view }) = view {
@@ -623,7 +630,7 @@ pub fn map_session_event(
                     _ => ("completed".to_string(), None, None),
                 };
 
-            if _sink.is_replaying() {
+            if sink.is_replaying() {
                 // History replay only rebuilds the UI transcript. The tool row
                 // already exists in SQLite with its terminal state; re-emitting
                 // `ToolStarted`/`ToolCompleted` here would let app-core
@@ -664,7 +671,18 @@ pub fn map_session_event(
                 .collect();
             vec![ClientEvent::PlanUpdated { entries }]
         }
+        // Turn boundaries are the only reliable "is a turn in flight" signal
+        // the bridge has: the harness emits `api-session/status(<id>, false)`
+        // (agent running→idle) at the end of EVERY turn as well as when a host
+        // failure stops one mid-turn, and only the durable `turn/end` tells the
+        // two apart. Record it so the host-status handler does not turn a
+        // finished turn into an interrupted session.
+        "turn/start" => {
+            sink.set_turn_active(true);
+            Vec::new()
+        }
         "turn/end" => {
+            sink.set_turn_active(false);
             let data: Option<TurnEndData> = event.data();
             let stop_reason = data
                 .as_ref()
@@ -737,14 +755,14 @@ pub fn map_session_event(
             if let Some(data) = data
                 && data.name == "compact"
             {
-                _sink.track_compact_command(data.command_id);
+                sink.track_compact_command(data.command_id);
             }
             Vec::new()
         }
         "command/done" => {
             let data: Option<CommandDoneData> = event.data();
             match data {
-                Some(data) if _sink.take_compact_command(&data.command_id) => {
+                Some(data) if sink.take_compact_command(&data.command_id) => {
                     vec![ClientEvent::ContextCompacted {
                         message: compact_command_outcome_notice(&data.kind, data.text.as_deref()),
                     }]
@@ -1390,12 +1408,18 @@ mod tests {
             serde_json::json!({ "turn": 1, "step": 1, "chunk": { "type": "text-delta", "index": 0, "text": "Hello" } }),
         ));
         let mapped = map_mux_frame(&frame, &sink);
+        // The reply text closes the current thinking segment first: dsh emits
+        // no reasoning-end signal, so without the marker the reducer's thinking
+        // buffer would keep every model call's reasoning for the whole turn.
         assert_eq!(
             mapped.events,
-            vec![ClientEvent::MessageChunk {
-                role: MessageRole::Assistant,
-                content: "Hello".to_string(),
-            }]
+            vec![
+                ClientEvent::ThinkingActivity { active: false },
+                ClientEvent::MessageChunk {
+                    role: MessageRole::Assistant,
+                    content: "Hello".to_string(),
+                }
+            ]
         );
         assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 1);
     }

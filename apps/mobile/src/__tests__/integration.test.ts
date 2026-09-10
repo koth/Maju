@@ -124,6 +124,9 @@ class FakePc {
   readonly handshakeTypes: string[] = [];
   /** GetState requests answered with the up_to_date short-circuit. */
   private getStateShortCircuits = 0;
+  /** The last ResolvePermission request the phone sent (option id + request
+   * id), so tests can assert what was actually approved. */
+  lastResolve: { permission_request_id: string; option_id?: string | null } | null = null;
 
   get shortCircuitedGetStates(): number {
     return this.getStateShortCircuits;
@@ -268,6 +271,10 @@ class FakePc {
       return;
     }
     if (request.op === "resolve_permission") {
+      this.lastResolve = {
+        permission_request_id: request.permission_request_id,
+        option_id: request.option_id ?? null,
+      };
       await this.sendResponse({ op: "resolve_permission", request_id: requestId });
       await this.pushEvent({
         kind: "tool_updated",
@@ -286,6 +293,26 @@ class FakePc {
       permission_options: [
         { id: "allow", label: "Allow once", kind: "allow" },
         { id: "deny", label: "Deny", kind: "deny" },
+      ],
+      permission_decision: null,
+    });
+    await this.pushEvent({ kind: "tool_updated", tool: pending });
+  }
+
+  /** Push a plain allow/deny approval the way the PC forwards Codex's
+   * run/apply_patch prompt: a tool carrying `permission_options` and NO
+   * `permission_input` (the PC sends no `permission_request` frame for it —
+   * only the snapshot patch). */
+  async requestApprovalWithoutInput(callId: string): Promise<void> {
+    const pending = tool(callId, {
+      name: "run_command",
+      kind: "execute",
+      status: "Running",
+      summary: "waiting for approval",
+      permission_input: null,
+      permission_options: [
+        { id: "approved", label: "Yes", kind: "allow_once" },
+        { id: "abort", label: "No, provide feedback", kind: "reject_once" },
       ],
       permission_decision: null,
     });
@@ -367,6 +394,32 @@ describe("integration: phone <-> fake PC over relay", () => {
       return found?.permission_decision === "allowed" ? true : undefined;
     });
     expect(controller.pendingApprovals).toHaveLength(0);
+
+    pc.stopLoop();
+    await controller.disconnect();
+    await pcRun;
+  });
+
+  it("Codex-style approval without a question form surfaces and approves its option", async () => {
+    // Regression: the phone only surfaced approvals that carried a
+    // `permission_input` question form, so Codex's run/apply_patch prompts —
+    // plain allow/deny options pushed as a tool update, with no
+    // `permission_request` frame at all — were invisible and unanswerable.
+    const { controller, pc, pcRun } = await bootstrap();
+    await controller.createSession();
+    await waitFor(() => (controller.snapshot?.session.id === "s1" ? true : undefined));
+
+    await pc.requestApprovalWithoutInput("perm-codex");
+    await waitFor(() =>
+      controller.pendingApprovals.find((a) => a.permissionRequestId === "perm-codex") ?? undefined,
+    );
+    expect(controller.pendingApprovals.some((a) => a.permissionRequestId === "perm-codex")).toBe(true);
+
+    await controller.approvePermission("perm-codex", "approved");
+    expect(pc.lastResolve).toMatchObject({
+      permission_request_id: "perm-codex",
+      option_id: "approved",
+    });
 
     pc.stopLoop();
     await controller.disconnect();

@@ -34,7 +34,8 @@ pub use process::{
     resolve_npm_launch, spawn_dsh_web,
 };
 pub use rpc_types::{
-    ClientResponse, PromptContentPart, PromptMode, SessionCreatePayload, SessionPromptPayload,
+    AnswerProtocol, ClientResponse, CommandsExecuteResult, CommandsExecuteValue, PromptContentPart,
+    PromptMode, SessionCreatePayload, SessionPromptPayload,
 };
 pub use session::run_harness_session;
 pub use settings_gen::{
