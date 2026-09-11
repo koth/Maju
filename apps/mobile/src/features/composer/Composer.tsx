@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator, Keyboard, Platform, Vibration } from "react-native";
+import { useState } from "react";
+import { View, Text, TextInput, Pressable, ActivityIndicator, Vibration } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { styles, colors, spacing, radius } from "../theme";
 
@@ -18,31 +18,16 @@ interface Props {
 // behind a feature flag for the MVP (the prompt content type supports them,
 // but the picker UI is deferred).
 //
-// Keyboard handling is platform-split to avoid double offsets: iOS relies on
-// the KeyboardAvoidingView in ConversationScreen, Android on the default
-// adjustResize window mode + a small manual pad here (some keyboards still
-// overlap the composer edge with resize mode alone).
+// No keyboard math lives here on purpose: the conversation screen owns a single
+// measured lift for the whole column (see useKeyboardAvoidance), so a second,
+// platform-specific pad here used to stack on top of Android's `adjustResize`
+// and float the input a keyboard away from the keyboard.
 export function Composer({ onSend, disabled, error, streaming, onCancel }: Props) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [inputHeight, setInputHeight] = useState(38);
-  const [keyboardPad, setKeyboardPad] = useState(0);
   const insets = useSafeAreaInsets();
-
-  useEffect(() => {
-    if (Platform.OS === "ios") return;
-    const show = Keyboard.addListener("keyboardDidShow", (event) => {
-      setKeyboardPad(Math.max(0, event.endCoordinates.height - insets.bottom) + 8);
-    });
-    const hide = Keyboard.addListener("keyboardDidHide", () => {
-      setKeyboardPad(0);
-    });
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, [insets.bottom]);
 
   const canSend = text.trim().length > 0 && !disabled && !sending;
 
@@ -77,7 +62,7 @@ export function Composer({ onSend, disabled, error, streaming, onCancel }: Props
         backgroundColor: colors.bg,
         borderTopWidth: 1,
         borderTopColor: colors.border,
-        paddingBottom: keyboardPad || (insets.bottom > 0 ? 0 : 8),
+        paddingBottom: insets.bottom > 0 ? 0 : 8,
       }}
     >
       {error ? (

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, ActivityIndicator, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, ActivityIndicator } from "react-native";
 import { useAppController, useSnapshot } from "../../app/AppServicesContext";
 import { ConversationTimeline } from "./ConversationTimeline";
 import { TurnChangesBar } from "./TurnChangesBar";
 import { SessionInfoSheet } from "./SessionInfoSheet";
 import { Composer } from "../composer/Composer";
+import { useKeyboardAvoidance } from "../composer/use-keyboard-avoidance";
 import { PermissionApprovalSheet } from "../permission/PermissionApprovalSheet";
 import { styles, colors, spacing } from "../theme";
 
@@ -84,43 +85,48 @@ export function ConversationScreen({ sessionId, workspaceRoot }: Props) {
   const streaming =
     snapshot?.session.status === "Streaming" || snapshot?.session.status === "WaitingForTool";
 
+  // Keyboard avoidance is measured, not guessed: `pad` is whatever bottom
+  // padding is still owed after the keyboard's height, the window resize the OS
+  // already did for us, and the home-indicator inset are accounted for. Applied
+  // to the screen root so the timeline shrinks with the composer, and it is
+  // exactly the keyboard's height when nothing else has moved — i.e. the
+  // composer's bottom edge lands on the keyboard's top edge with no leftover
+  // strip (see features/composer/keyboard-inset.ts).
+  const { pad, onLayout } = useKeyboardAvoidance();
+
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 88 : 0}
-      enabled={Platform.OS === "ios"}
+    <View
+      style={[styles.screen, pad > 0 ? { paddingBottom: pad } : null]}
+      onLayout={onLayout}
     >
-      <View style={styles.screen}>
-        {snapshot ? (
-          <ConversationTimeline snapshot={snapshot} onStopTool={handleStopTool} />
-        ) : sendError ? (
-          <View style={styles.center}>
-            <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
-              {sendError}
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.center}>
-            <ActivityIndicator color={colors.accent} />
-            <Text style={[styles.textDim, { marginTop: spacing.sm }]}>{"正在同步会话\u2026"}</Text>
-          </View>
-        )}
+      {snapshot ? (
+        <ConversationTimeline snapshot={snapshot} onStopTool={handleStopTool} />
+      ) : sendError ? (
+        <View style={styles.center}>
+          <Text style={[styles.text, { color: colors.danger, textAlign: "center" }]}>
+            {sendError}
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.accent} />
+          <Text style={[styles.textDim, { marginTop: spacing.sm }]}>{"正在同步会话\u2026"}</Text>
+        </View>
+      )}
 
-        {snapshot ? <TurnChangesBar snapshot={snapshot} /> : null}
+      {snapshot ? <TurnChangesBar snapshot={snapshot} /> : null}
 
-        <Composer
-          onSend={handleSend}
-          disabled={!snapshot}
-          error={sendError}
-          streaming={streaming}
-          onCancel={handleCancel}
-        />
+      <Composer
+        onSend={handleSend}
+        disabled={!snapshot}
+        error={sendError}
+        streaming={streaming}
+        onCancel={handleCancel}
+      />
 
-        <SessionInfoSheet />
-        <PermissionApprovalSheet />
-      </View>
-    </KeyboardAvoidingView>
+      <SessionInfoSheet />
+      <PermissionApprovalSheet />
+    </View>
   );
 }
 // end of file
