@@ -111,6 +111,31 @@ Responsibilities:
 - Render tool call summary rows inline with the session.
 - Provide prompt input, mode switches, and session-level controls.
 
+Thinking block (shared by every backend). Rationale text reaches the UI through
+one path only: `ClientEvent::ThinkingActivity { active }` opens/closes the live
+segment and `ClientEvent::ThinkingChunk { text }` streams it; the reducer folds
+the text into a `TimelineItem::Thinking` block, and `ConversationTimeline`
+renders the live block while `thinking_status == Active`. Each backend must feed
+both events:
+
+- **dsh**: `assistant-stream` reasoning deltas → `ThinkingChunk` (`mapping.rs`).
+- **ACP agents** (codex-acp, claude-agent-acp, codebuddy): `agent_thought_chunk`
+  → `ThinkingActivity` + `ThinkingChunk`. Dropping the chunk's text (only
+  emitting the activity flag) renders a bare "思考中" pill with no reasoning,
+  which is exactly how the codex thinking block went missing.
+- **codex needs the *reasoning summary* channel**: `codex-acp` maps
+  `ReasoningContentDelta` → `agent_thought_chunk`, but Codex only emits that
+  event for `response.reasoning_summary_text.delta` (and the `done` variant)
+  carrying a `summary_index`, inside an open `reasoning` output item — raw
+  `reasoning_text` deltas are ignored. Two prerequisites decide whether the
+  deltas exist upstream: the model catalog entry must not write
+  `default_reasoning_summary: "none"` (Codex sends `reasoning.summary` only when
+  this is not `none`; `supports_reasoning_summary_parameter` must be true), and
+  the local Codex API proxy must translate a chat upstream's
+  `choices[].delta.reasoning_content` into those standard Responses reasoning
+  events instead of parking the text in the non-standard `reasoning_content`
+  item field that Codex never reads.
+
 ### Tool Call Interaction
 
 Tool calls are first-class entities.
@@ -282,6 +307,8 @@ Event delivery is unified: `Application` broadcasts lightweight `AppUpdate` sign
 
 Remote-mode permission gating: prompts dispatched from a remote caller set `Application::remote_mode`, which suppresses full-access auto-approval of destructive permissions. The phone must send an explicit `ResolvePermission`; the tool is not executed until approval returns.
 
+Relay projection (`app_core::project_remote_snapshot` / `project_remote_patch`, applied in the Tauri shell's `poll_active_and_get_remote_update`): the phone gets a bounded conversation surface — the last 200 timeline entries, only the messages/tools they reference (plus pending-permission tools), desktop-only fields zeroed, and `thinking_text` stripped (the phone renders the indicator, not the body). **Message bodies travel whole, newest first, within a 1 MiB budget**; only the older messages past it fall back to a 2 KiB head cap, and image bodies keep their own 16 KiB allowance so an attachment thumbnail never arrives truncated mid-base64. The order is load-bearing, not cosmetic: `message_deltas` is an append-only chain that the phone seeds from the snapshot body and validates against `base_len` — the length of the **unprojected** body. A flat per-message cap (the previous 2 KiB policy) silently cut the tail off every long reply *and* desynced that chain, because the phone's capped body could never equal the backend's base length: it rejected each append and resynced instead of streaming the rest, and a resync even replaced a fully streamed body with the capped prefix. Only bodies that no longer fit the budget are truncated, and those are the oldest messages, which never grow again.
+
 Out of scope for this repo: the relay service itself (WS routing + account/subscription DB + payment). The phone companion app now lives in this repo at `apps/mobile` (it was previously out of scope); it consumes `relay-protocol`'s contract via vendored mirror types and byte-aligned crypto. Only the standalone relay service remains external.
 
 ## DeepSeek Harness Bridge (`crates/dsh-bridge`)
@@ -299,7 +326,8 @@ Event-plane contract per harness version — the Typert Remote framing is stable
 - Live model output is **not** a durable event from 0.1.5 on. `assistant/chunk` is gone; text/reasoning arrive as `assistant-stream` frames on `session/follow`, which only a follower that opted in with `assistantStream: true` receives. Chunk frames carry an attempt id and only the `start` frame carries `turn`/`step` (the snapshot's `assistantStream.activeAttempt` covers attaching mid-attempt), and the frames are transient — they must never advance the re-baseline `seq` cursor. The finalized `assistant/message` re-emits no text for a step that already streamed, so a bridge that skips this channel shows neither the reply nor the reasoning.
 - Every logical-stream value is wrapped in an `item` envelope, including the `$events` `ready` frame that carries the `clientId`. That envelope is also the bridge's answer-protocol probe: the same release moved `$events/result` behind the shared Connection RPC interceptor, so the request must be a full `client-request` (`{type,rpcId,method:"$events/result",payload:{args}}`) and the forwarded waterfall resolves with the **bare** answer value (`{answers}` for a question batch, the outcome string for an approval). A bare `{args}` body is refused with `gateway/bad-request: invalid client-request message` before the answer is looked at; the wrapped `{sessionId, answer}` value of 0.1.4 makes `ask_user_question` hand its tool a value it cannot read. Both shapes are selected by `AnswerProtocol` (detected from the ready envelope, corrected by one retry), and both an approval and a question are answered by their forwarded waterfall's `eventId`.
 - Agent lifecycle facts arrive as host remote events (`api-session/status`, `api-session/error`). `api-session/status(<sessionId>, false)` is an agent running→idle transition that also happens at **every** normal turn end, so it only means "the session stopped" while a turn is still in flight (`turn/start` with no `turn/end`).
+- Control-method **args names are descriptor-defined wire fields**, not the request object's field names: the gateway's `assertExactArguments` rejects any missing or extra key with `gateway/arguments-invalid` before the method runs. Endpoints whose single parameter is named `request` (`session/create`, `session/fork`, `session/page`, `session/prompt`, `session/cancel`, `session/selectModel`) must nest the body as `{ args: { request: … } }`; `session/list` uses `_request`; `session/modelCatalog` and `agentPresets/list` take an empty `{}`; `commands/execute` and `agentPresets/select` take their bare wire fields (the latter's Agent lookup is `agentId`, not `sessionId`). The source of truth is the `TYPERT_REMOTE.descriptors` table shipped inside the installed harness packages. A wrong shape fails the call while the caller may never see it — `session.cancel` is dispatched fire-and-forget from `cancel_prompt`, so a bare `{ sessionId }` args object made the desktop stop button do nothing at all (the turn kept streaming while the UI showed cancelled). The mock harness mirrors this exact-args check so tests catch it.
 
 Stream reconnection: on stream end (socket close, or a logical `end`/`error` frame), the host reopens the stream and re-baselines every live session from its `last_seq` (`AtomicU64`) via `session.history`, bounded with `buffer_unordered(4)`; per-session history failures isolate (that session gets `Interrupted`), and a failed reopen fails all sessions. Approvals and questions bridge through the existing `PermissionBroker` plus `RuntimeCommand::ResolveHarnessApproval`, which POSTs the answer over whichever carrier the host speaks: dsh ≥ 0.1.5 forwards both as `$events` waterfalls (answered at `/api/$events/result`, correlated by the waterfall `eventId`, with the bare value the waterfall resolves to), while ≤ 0.1.4 took the wrapped `{sessionId, answer}` value on the same endpoint and answered approvals through `/api/respond` with a `client-response`; a late respond returns `not-pending` (treated as a no-op).
 
-Degradation: per-tool stop is not supported (dsh exposes only whole-turn `session.cancel`); `StopTool` degrades to turn cancel with a UI note. Non-loopback endpoints require a `trustedHosts` harness patch overlay (v1 targets loopback). The optional Kodex-managed `dsh web` spawn (`process.rs`) is scaffolded; v1 expects an explicit `harness_endpoint`. See the `add-dsh-bridge` OpenSpec change for the full design.
+Degradation: per-tool stop is not supported (dsh exposes only whole-turn `session.cancel`); `StopTool` degrades to turn cancel with a UI note, and a rejected cancel is reported as a failed stop instead of a silent no-op. Non-loopback endpoints require a `trustedHosts` harness patch overlay (v1 targets loopback). The optional Kodex-managed `dsh web` spawn (`process.rs`) is scaffolded; v1 expects an explicit `harness_endpoint`. See the `add-dsh-bridge` OpenSpec change for the full design.

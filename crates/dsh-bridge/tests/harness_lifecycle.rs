@@ -649,3 +649,68 @@ async fn fork_session_command_text_anchor_falls_back_to_ordinal_on_miss() {
     let _ = command_tx.send(RuntimeCommand::Shutdown);
     let _ = worker.join();
 }
+
+/// Regression: the stop button used to do nothing.
+///
+/// `RuntimeCommand::CancelPrompt` shipped `{ "sessionId": … }` as the *args*
+/// object, but `session/cancel`'s descriptor declares a single `request`
+/// parameter, so the gateway rejected the call with
+/// `gateway/arguments-invalid: missing "request"` — the turn kept streaming
+/// while the UI had already painted itself as cancelled (app-core's
+/// `cancel_prompt` is fire-and-forget by design, so nothing surfaced the
+/// rejection). The mock host mirrors that exact-args check, so this test fails
+/// if the `request` envelope ever regresses.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_prompt_reaches_the_host_in_the_descriptor_shape() {
+    let mock = MockHarness::start(default_config()).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::CancelPrompt {
+            reply_tx: Some(reply_tx),
+        })
+        .unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("CancelPrompt reply timed out")
+        .expect("the harness must accept the cancel; a rejected stop is what made the button dead");
+
+    let args = mock.cancel_args();
+    assert_eq!(args.len(), 1, "exactly one session.cancel call: {args:?}");
+    assert_eq!(
+        args[0]
+            .pointer("/request/sessionId")
+            .and_then(serde_json::Value::as_str),
+        Some("s-1"),
+        "the cancel request must nest under the descriptor's `request` parameter: {args:?}"
+    );
+    assert_eq!(
+        args[0].as_object().map(|args| args.len()),
+        Some(1),
+        "the args object carries `request` and nothing else: {args:?}"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}

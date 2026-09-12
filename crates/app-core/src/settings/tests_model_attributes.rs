@@ -189,6 +189,26 @@ fn codex_acp_model_catalog_entry_reflects_custom_attributes() {
     let supported = entry["supported_reasoning_levels"].as_array().unwrap();
     assert_eq!(supported.len(), 1);
     assert_eq!(supported[0]["effort"], "high");
+    assert_reasoning_summaries_requested(entry);
+}
+
+/// Codex only sends `reasoning.summary` on the Responses request when the
+/// model's `default_reasoning_summary` is not `none` and its
+/// `supports_reasoning_summary_parameter` is true. Without the summary the
+/// model streams no reasoning text, `codex-acp` sends no
+/// `agent_thought_chunk`, and the session shows no thinking block at all
+/// (only a bare spinner), so both keys are pinned here.
+fn assert_reasoning_summaries_requested(entry: &serde_json::Value) {
+    assert_eq!(
+        entry["supports_reasoning_summary_parameter"].as_bool(),
+        Some(true),
+        "the catalog entry must let Codex request reasoning summaries: {entry}"
+    );
+    assert_eq!(
+        entry["default_reasoning_summary"].as_str(),
+        Some("auto"),
+        "`none` silences the reasoning text the thinking block renders: {entry}"
+    );
 }
 
 #[test]
@@ -225,11 +245,14 @@ fn codex_acp_model_catalog_entry_defaults_remain_when_attributes_missing() {
             TIMIAI_PROVIDER_ID
         ))
     );
-    // No reasoning attribute: catalog stays on the historical `none` shape.
+    // No reasoning attribute: catalog stays on the historical `none` effort
+    // shape (which is about the requested *effort*, not about whether
+    // reasoning text is streamed).
     assert_eq!(entry["default_reasoning_level"], "none");
     let supported = entry["supported_reasoning_levels"].as_array().unwrap();
     assert_eq!(supported.len(), 1);
     assert_eq!(supported[0]["effort"], "none");
+    assert_reasoning_summaries_requested(entry);
 }
 
 #[test]

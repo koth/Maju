@@ -292,7 +292,10 @@ const timelineStyles = StyleSheet.create({
     position: "absolute",
     bottom: spacing.md,
     alignSelf: "center",
-    backgroundColor: colors.surfaceRaised,
+    // Near-black instead of `surfaceRaised` (#1d2132): the pill floats ON TOP
+    // of the message text, and a light chip there was reported as an opaque
+    // white block covering the words it sits over.
+    backgroundColor: "rgba(7,8,15,0.94)",
     borderRadius: radius.pill,
     paddingVertical: spacing.xs + 1,
     paddingHorizontal: spacing.md,

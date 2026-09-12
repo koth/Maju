@@ -729,9 +729,37 @@ fn remote_endpoint(method: &str) -> anyhow::Result<&'static str> {
     }
 }
 
+/// Shape one Remote call's wire body.
+///
+/// The typert gateway validates `args` against the endpoint's **generated
+/// descriptor** and rejects any missing or extra key with
+/// `gateway/arguments-invalid` ("args fields do not match the descriptor"), so
+/// the args keys must be the descriptor's parameter *wire names* — never the
+/// fields the request object happens to carry. Endpoints whose single
+/// parameter is named `request` therefore need one extra nesting level:
+///
+/// | endpoint | descriptor parameters (wire name) | args |
+/// |---|---|---|
+/// | `session/create` `session/fork` `session/page` `session/prompt` `session/cancel` `session/selectModel` | `request` | `{ "request": … }` |
+/// | `session/list` | `_request` | `{ "_request": … }` |
+/// | `session/modelCatalog` `agentPresets/list` | *(none)* | `{}` |
+/// | `commands/execute` `agentPresets/select` | bare wire fields (`agentId`, `line`, …) | the payload itself |
+///
+/// Source of truth: the `TYPERT_REMOTE.descriptors` tables the installed
+/// harness ships (`@deepseek-ai/dsh-api-session-controller/lib/
+/// typert.remote-client.js`, `@deepseek-ai/dsh-agent-presets/lib/
+/// typert.remote-client.js`). `session/cancel` used to fall through to the
+/// default branch and ship `{ sessionId }` bare, which the gateway rejects —
+/// the stop button then did nothing while the turn kept streaming (the RPC
+/// error is invisible: `cancel_prompt` is fire-and-forget).
 fn remote_payload(endpoint: &str, payload: Value) -> Value {
     match endpoint {
-        "session/create" | "session/prompt" | "session/page" | "session/selectModel" => {
+        "session/create"
+        | "session/fork"
+        | "session/page"
+        | "session/prompt"
+        | "session/cancel"
+        | "session/selectModel" => {
             serde_json::json!({ "args": { "request": payload } })
         }
         "session/list" => serde_json::json!({ "args": { "_request": payload } }),
@@ -739,6 +767,9 @@ fn remote_payload(endpoint: &str, payload: Value) -> Value {
         // `assertExactArguments` rejects `{ args: { args: null } }` with
         // `gateway/arguments-invalid` ("unexpected args").
         "session/modelCatalog" | "agentPresets/list" => serde_json::json!({ "args": {} }),
+        // `commands/execute` and `agentPresets/select` declare their wire
+        // fields directly, so their payload structs are already keyed by wire
+        // name (`CommandsExecutePayload`, `AgentPresetSelectPayload`).
         _ => serde_json::json!({ "args": payload }),
     }
 }
@@ -1128,12 +1159,25 @@ mod tests {
     }
 
     #[test]
-    fn remote_payload_agent_presets_select_wraps_bare_fields_once() {
-        // agentPresets/select also rides the default branch: bare fields,
-        // single wrap.
-        let payload = serde_json::json!({ "id": "standard", "selected": [] });
-        let wire = remote_payload("agentPresets/select", payload);
-        assert_eq!(wire["args"]["id"], "standard");
+    fn remote_payload_agent_presets_select_uses_descriptor_wire_names() {
+        // `agentPresets/select` rides the default branch: the descriptor
+        // declares `select(agent: Agent, agentPreset: string)` and the Agent
+        // lookup's wire name is `agentId`, so the session id must travel as
+        // `agentId` — not as the request object's `sessionId`.
+        let payload = crate::rpc_types::AgentPresetSelectPayload {
+            session_id: "session-1".into(),
+            agent_preset: "standard".into(),
+        };
+        let wire = remote_payload(
+            "agentPresets/select",
+            serde_json::to_value(payload).unwrap(),
+        );
+        assert_eq!(wire["args"]["agentId"], "session-1");
+        assert_eq!(wire["args"]["agentPreset"], "standard");
+        assert!(
+            wire["args"].get("sessionId").is_none(),
+            "the bare request field name is rejected by the gateway: {wire}"
+        );
         assert_eq!(wire.as_object().unwrap().len(), 1);
     }
 
@@ -1147,6 +1191,34 @@ mod tests {
         // key inside would be rejected by the gateway's exact-args check.
         let wire = remote_payload("session/modelCatalog", serde_json::json!({}));
         assert_eq!(wire["args"], serde_json::json!({}));
+    }
+
+    /// Regression: the stop button used to ship `{ "sessionId": … }` bare, and
+    /// the gateway answered `missing "request"` — `session/cancel` never
+    /// reached the host, so the turn kept streaming and the button looked dead
+    /// (the RPC error was invisible: `cancel_prompt` is fire-and-forget).
+    #[test]
+    fn remote_payload_session_cancel_nests_under_request() {
+        let payload = SessionCancelPayload {
+            session_id: "session-1".into(),
+        };
+        let wire = remote_payload("session/cancel", serde_json::to_value(payload).unwrap());
+        assert_eq!(wire["args"]["request"]["sessionId"], "session-1");
+        assert!(
+            wire["args"].get("sessionId").is_none(),
+            "the request object must not sit at the args level: {wire}"
+        );
+    }
+
+    #[test]
+    fn remote_payload_session_fork_nests_under_request() {
+        let payload = SessionForkPayload {
+            session_id: "session-1".into(),
+            at_seq: Some(30),
+        };
+        let wire = remote_payload("session/fork", serde_json::to_value(payload).unwrap());
+        assert_eq!(wire["args"]["request"]["sessionId"], "session-1");
+        assert_eq!(wire["args"]["request"]["atSeq"], 30);
     }
 
     fn remote_item(value: Value) -> Message {

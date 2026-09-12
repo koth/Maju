@@ -47,6 +47,15 @@ const BODY_LINE_HEIGHT = 25; // 15 * 1.68, the desktop chat line-height
 const markdownStyles: Record<string, object> = {
   body: { color: mdText, fontSize: BODY_FONT_SIZE, lineHeight: BODY_LINE_HEIGHT },
   paragraph: { marginTop: 0, marginBottom: 12 },
+  // `react-native-markdown-display` ships a LIGHT stylesheet and deep-merges it
+  // under these overrides, so any key we do not set keeps its white default.
+  // The blockquote was the visible one: `backgroundColor: '#F5F5F5'` +
+  // `borderColor: '#CCC'` turned every quote into a light card whose
+  // `mdText`-colored text was unreadable. Transparent + no border matches the
+  // desktop `.md-blockquote` (a bare accent rule, `background: none`).
+  // The other light defaults (`hr` #000000, `code_inline`/`code_block`/`fence`
+  // #CCCCCC + #f5f5f5, `table`/`tr` #000000, `link` underline) are overridden
+  // below for the same reason.
   // Desktop headings render at 1em / weight 580 (~600) — all six levels.
   heading1: { color: mdStrong, fontSize: BODY_FONT_SIZE, fontWeight: "600", marginTop: 22, marginBottom: 10 },
   heading2: { color: mdStrong, fontSize: BODY_FONT_SIZE, fontWeight: "600", marginTop: 22, marginBottom: 10 },
@@ -55,9 +64,12 @@ const markdownStyles: Record<string, object> = {
   heading5: { color: mdStrong, fontSize: BODY_FONT_SIZE, fontWeight: "600", marginTop: 22, marginBottom: 10 },
   heading6: { color: mdStrong, fontSize: BODY_FONT_SIZE, fontWeight: "600", marginTop: 22, marginBottom: 10 },
   // `.md-inline-code`: no pill — color-only emphasis, muted steel-blue.
+  // `borderWidth: 0` on purpose: the library default is a 1px #CCCCCC box.
   code_inline: {
     color: mdCodeText,
     backgroundColor: "transparent",
+    borderWidth: 0,
+    borderColor: "transparent",
     fontFamily: "monospace",
     fontSize: 14, // 0.92em of 15
     fontWeight: "400",
@@ -77,10 +89,12 @@ const markdownStyles: Record<string, object> = {
   s: { textDecorationLine: "line-through" },
   // `.md-link`: accent-hover, no decoration.
   link: { color: colors.accentBright, fontWeight: "400", textDecorationLine: "none" },
-  // `.md-blockquote`: 2px accent(58%) left rule, 8px vertical / 12px inline padding.
+  // `.md-blockquote`: 2px accent(58%) left rule, 8px vertical / 12px inline
+  // padding, and NO background (the library default is a light card).
   blockquote: {
     borderLeftWidth: 2,
     borderLeftColor: mdQuoteBorder,
+    backgroundColor: "transparent",
     paddingLeft: 12,
     paddingRight: 12,
     paddingVertical: 4,
@@ -90,11 +104,17 @@ const markdownStyles: Record<string, object> = {
   // `.md-hr`: 1px top rule, 10px vertical margin.
   hr: { height: 1, backgroundColor: mdTableBorder, marginVertical: 10, flex: 1 },
   // GFM tables styled like `.md-table`: 14px cells, 28px column gutters,
-  // hairline row separators, no outer frame.
-  table: { borderWidth: 0, marginTop: 8, marginBottom: 12 },
+  // hairline row separators, no outer frame (the library default is a black
+  // 1px frame with black row rules).
+  table: { borderWidth: 0, borderColor: "transparent", marginTop: 8, marginBottom: 12 },
   thead: { borderBottomWidth: 1, borderBottomColor: mdTableBorder },
   tbody: {},
-  tr: { borderBottomWidth: 1, borderBottomColor: mdTableBorder, flexDirection: "row" },
+  tr: {
+    borderBottomWidth: 1,
+    borderBottomColor: mdTableBorder,
+    borderColor: "transparent",
+    flexDirection: "row",
+  },
   th: {
     fontWeight: "600",
     color: mdStrong,

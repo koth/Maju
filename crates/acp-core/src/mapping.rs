@@ -1,6 +1,6 @@
 use crate::events::{ClientEvent, SessionConfig};
 use agent_client_protocol::schema::{
-    AvailableCommandInput, ConfigOptionUpdate, ContentBlock, CurrentModeUpdate, Plan,
+    AvailableCommandInput, ConfigOptionUpdate, ContentBlock, ContentChunk, CurrentModeUpdate, Plan,
     PlanEntryPriority as AcpPlanEntryPriority, PlanEntryStatus as AcpPlanEntryStatus,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionInfoUpdate, SessionModeState, SessionModelState,
@@ -60,9 +60,7 @@ pub(crate) fn emit_notification(
             let _ = tx.send(ClientEvent::ThinkingActivity { active: false });
             emit_content(tx, MessageRole::Assistant, chunk.content)
         }
-        SessionUpdate::AgentThoughtChunk(_chunk) => tx
-            .send(ClientEvent::ThinkingActivity { active: true })
-            .map_err(|_| anyhow!("failed to emit thinking activity")),
+        SessionUpdate::AgentThoughtChunk(chunk) => emit_agent_thought(tx, chunk),
         SessionUpdate::ToolCall(tool) => emit_tool_call(tx, tool),
         SessionUpdate::ToolCallUpdate(update) => emit_tool_update(tx, update),
         SessionUpdate::ConfigOptionUpdate(update) => emit_config_option_update(tx, update),
@@ -403,6 +401,29 @@ fn usage_u64_field(value: &Value, keys: &[&str]) -> Option<u64> {
                 .or_else(|| field.as_str().and_then(|value| value.trim().parse().ok()))
         })
     })
+}
+
+/// A streamed reasoning delta (`session/update: agent_thought_chunk`).
+///
+/// The chunk's text used to be dropped here — only `ThinkingActivity { active:
+/// true }` was emitted, so the UI rendered a bare "思考中" spinner with no
+/// content even though the agent had streamed the reasoning. Carry the text as
+/// `ThinkingChunk` so the reasoning block streams like the harness one does.
+/// An empty delta still marks the activity (some agents send a blank chunk as
+/// the segment opener).
+fn emit_agent_thought(tx: &mpsc::Sender<ClientEvent>, chunk: ContentChunk) -> anyhow::Result<()> {
+    let text = match chunk.content {
+        ContentBlock::Text(text) => text.text,
+        other => format!("{:?}", other),
+    };
+
+    tx.send(ClientEvent::ThinkingActivity { active: true })
+        .map_err(|_| anyhow!("failed to emit thinking activity"))?;
+    if text.is_empty() {
+        return Ok(());
+    }
+    tx.send(ClientEvent::ThinkingChunk { text })
+        .map_err(|_| anyhow!("failed to emit thinking chunk"))
 }
 
 fn emit_content(

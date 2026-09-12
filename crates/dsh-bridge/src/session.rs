@@ -336,9 +336,25 @@ pub fn run_harness_session(
                 let payload = SessionCancelPayload {
                     session_id: session_id.clone(),
                 };
+                let started = Instant::now();
                 let result = host
                     .runtime()
                     .block_on(client.session_cancel(Uuid::new_v4().to_string(), &payload));
+                // app-core sends this command fire-and-forget (waiting on the
+                // reply would hold the workspace mutex) and reflects
+                // "cancelled" locally the moment it is queued. This log line is
+                // therefore the ONLY signal that the harness refused the stop:
+                // a silent failure here is what made the stop button look dead
+                // while the turn kept streaming.
+                if let Err(error) = &result {
+                    tracing::warn!(
+                        target: "dsh-bridge::session",
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        session_id = %session_id,
+                        error = %error,
+                        "session.cancel failed; the turn may still be running",
+                    );
+                }
                 inflight.store(false, AtomicOrdering::Release);
                 if let Some(tx) = reply_tx {
                     let _ = tx.send(result.map(|_| ()));
@@ -512,13 +528,26 @@ pub fn run_harness_session(
                 let payload = SessionCancelPayload {
                     session_id: session_id.clone(),
                 };
-                let _ = host
+                let result = host
                     .runtime()
                     .block_on(client.session_cancel(Uuid::new_v4().to_string(), &payload));
-                let _ = reply_tx.send(Ok(vec![ClientEvent::Interrupted {
-                    reason: "per-tool stop is not supported by the harness backend; turn cancelled"
-                        .to_string(),
-                }]));
+                let reason = match &result {
+                    Ok(_) => {
+                        "per-tool stop is not supported by the harness backend; turn cancelled"
+                            .to_string()
+                    }
+                    Err(error) => {
+                        // Never report a stop that the harness rejected as done.
+                        tracing::warn!(
+                            target: "dsh-bridge::session",
+                            session_id = %session_id,
+                            error = %error,
+                            "session.cancel (per-tool stop) failed; the turn may still be running",
+                        );
+                        format!("停止该工具失败：请求取消整轮被 harness 拒绝（{error}）")
+                    }
+                };
+                let _ = reply_tx.send(Ok(vec![ClientEvent::Interrupted { reason }]));
             }
             RuntimeCommand::ForceCompact { reply_tx } => {
                 // Manual compaction: execute the harness `/compact` command

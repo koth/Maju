@@ -3846,8 +3846,18 @@ fn codex_acp_model_catalog_entry(
                 "personality_pragmatic": ""
             }
         },
-        "supports_reasoning_summaries": false,
-        "default_reasoning_summary": "none",
+        // Codex puts `reasoning.summary` on the Responses request only when
+        // this level is not `none` (codex `core::client::build_reasoning`), and
+        // the field's own default is `auto`. Writing `none` here silenced the
+        // reasoning *text*: the model still burned reasoning tokens, but no
+        // summary deltas came back, so `codex-acp` never sent
+        // `agent_thought_chunk` and the session showed no thinking block at all
+        // (the dsh backend streams reasoning deltas and did show one).
+        // `supports_reasoning_summary_parameter` is the field Codex 0.146+
+        // reads; the older `supports_reasoning_summaries` key was ignored,
+        // which left the parameter allowed but never requested.
+        "supports_reasoning_summary_parameter": true,
+        "default_reasoning_summary": "auto",
         "support_verbosity": true,
         "default_verbosity": "low",
         "apply_patch_tool_type": apply_patch_tool_type,

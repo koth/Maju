@@ -371,10 +371,17 @@ pub struct AgentPresetListValue {
     pub presets: Vec<AgentPresetEntry>,
 }
 
-/// `agentPreset.select` request payload (`{ sessionId, agentPreset }`).
+/// `agentPresets/select` request payload.
+///
+/// The descriptor is `select(agent: Agent, agentPreset: string)`: the first
+/// parameter is an Agent *lookup* whose wire name is `agentId`, so the session
+/// id must be serialized as `agentId`. Sending `sessionId` (the request-object
+/// field name of the older, pre-0.1.5 shape) is rejected by the gateway's
+/// exact-args check with `arguments-invalid`, which is why preset switches
+/// reported "agentPreset.select failed" instead of applying.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentPresetSelectPayload {
-    #[serde(rename = "sessionId")]
+    #[serde(rename = "agentId")]
     pub session_id: SessionId,
     #[serde(rename = "agentPreset")]
     pub agent_preset: String,

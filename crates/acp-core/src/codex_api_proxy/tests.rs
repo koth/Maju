@@ -2139,6 +2139,84 @@ fn converts_chat_stream_to_responses_stream() {
     assert!(text.contains("data: [DONE]"));
 }
 
+/// Regression: the codex thinking block never appeared for chat-backed
+/// providers.
+///
+/// The model's thinking arrives as `choices[].delta.reasoning_content`. The
+/// converter collected it but published it only as a non-standard
+/// `reasoning_content` field on the final items, which Codex does not read —
+/// reasoning text reaches a Responses client exclusively through
+/// `response.reasoning_summary_text.delta` (inside an open `reasoning` output
+/// item; without one Codex reports "ReasoningSummaryDelta without active
+/// item"). The ACP layer forwards those deltas as `agent_thought_chunk`, which
+/// is what renders the thinking block.
+#[test]
+fn converts_chat_stream_reasoning_content_into_a_responses_reasoning_summary() {
+    let body = concat!(
+        "data:{\"id\":\"chatcmpl_r\",\"model\":\"deepseek-v4-pro-r1\",\"choices\":[{\"delta\":{\"reasoning_content\":\"We need 17*23\"}}]}\n\n",
+        "data:{\"id\":\"chatcmpl_r\",\"choices\":[{\"delta\":{\"reasoning_content\":\" = 391.\"}}]}\n\n",
+        "data:{\"id\":\"chatcmpl_r\",\"choices\":[{\"delta\":{\"content\":\"391\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    let text = String::from_utf8(chat_sse_to_responses_sse(body.as_bytes())).unwrap();
+
+    // The reasoning item must be announced before the first summary delta.
+    let item_added = text
+        .find("\"type\":\"reasoning\"")
+        .expect("the reasoning output item must be announced");
+    let first_delta = text
+        .find("event: response.reasoning_summary_text.delta")
+        .expect("reasoning deltas must be forwarded");
+    assert!(
+        item_added < first_delta,
+        "the reasoning item has to open before its deltas: {text}"
+    );
+    assert!(text.contains("event: response.reasoning_summary_part.added"));
+    assert!(text.contains("\"summary_index\":0"));
+    assert!(text.contains("\"delta\":\"We need 17*23\""));
+    assert!(text.contains("\"delta\":\" = 391.\""));
+
+    // The reasoning closes before the answer opens, and never leaks into the
+    // assistant text: the stream's only output_text delta is the answer.
+    let reasoning_done = text
+        .find("event: response.reasoning_summary_text.done")
+        .expect("the reasoning summary must be closed");
+    let message_item = text
+        .find("\"id\":\"msg_proxy\"")
+        .expect("the assistant message item must exist");
+    assert!(
+        reasoning_done < message_item,
+        "reasoning closes before the assistant message: {text}"
+    );
+    assert!(text.contains("\"text\":\"We need 17*23 = 391.\""));
+    let output_text_deltas = text
+        .lines()
+        .filter(|line| line.starts_with("event: response.output_text.delta"))
+        .count();
+    assert_eq!(
+        output_text_deltas, 1,
+        "exactly one assistant text delta is expected: {text}"
+    );
+    assert!(text.contains("\"delta\":\"391\""));
+}
+
+/// A reasoning-only turn (no assistant text, no tool call) must still close its
+/// summary — some reasoning models emit nothing else.
+#[test]
+fn chat_stream_reasoning_only_turn_closes_its_summary() {
+    let body = concat!(
+        "data:{\"id\":\"chatcmpl_r\",\"choices\":[{\"delta\":{\"reasoning_content\":\"only thinking\"}}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    let text = String::from_utf8(chat_sse_to_responses_sse(body.as_bytes())).unwrap();
+
+    assert!(text.contains("event: response.reasoning_summary_text.delta"));
+    assert!(text.contains("event: response.reasoning_summary_text.done"));
+    assert!(text.contains("\"text\":\"only thinking\""));
+}
+
 #[test]
 fn converts_flat_chat_stream_tool_call_to_namespaced_responses_stream() {
     let body = concat!(

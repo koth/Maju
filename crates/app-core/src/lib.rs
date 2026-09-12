@@ -107,6 +107,96 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn remote_projection_keeps_the_delta_chain_aligned_with_the_projected_body() {
+        // Regression: the phone seeds its append-only stream store from the
+        // (projected) snapshot body and then validates every `message_deltas`
+        // append against `base_len` — the length of the UNPROJECTED body. While
+        // the projection capped bodies at 2K, any snapshot for a longer message
+        // made the very next delta mismatch, so the phone resynced in a loop
+        // and never rendered the rest of the answer.
+        let dir = tempdir().unwrap();
+        let mut app = test_app(&dir);
+        let mut cursor = UiPatchCursor::default();
+        // Skip the seeded conversation: start from a cursor on the real state.
+        let _ = app.lightweight_ui_update(&mut cursor);
+
+        let long_prefix = "答".repeat(3000);
+        app.ui.messages.push(workspace_model::ChatMessage {
+            id: uuid::Uuid::new_v4(),
+            role: MessageRole::Assistant,
+            body: long_prefix.clone(),
+            created_at: String::new(),
+            is_steer: false,
+        });
+        app.ui.revision += 1;
+
+        let update = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("the new message should produce an update");
+        let patch = match update {
+            UiSnapshotUpdate::Patch(patch) => match patch.messages.first() {
+                Some(message) => message.clone(),
+                None => panic!("the first sighting of a message travels in `messages`"),
+            },
+            UiSnapshotUpdate::Full(snapshot) => snapshot
+                .messages
+                .last()
+                .expect("full snapshot carries the message")
+                .clone(),
+        };
+        let projected = app_core_remote_projection(patch);
+
+        // The phone's local body and the backend's base_len must agree: the
+        // projection must not have shortened the body the delta extends.
+        assert_eq!(
+            projected.body, long_prefix,
+            "the projected body must stay intact for the delta chain"
+        );
+
+        app.ui
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(" 追加的结尾");
+        app.ui.revision += 1;
+
+        let next = app
+            .lightweight_ui_update(&mut cursor)
+            .expect("appending to the body should produce a delta patch");
+        let delta_patch = match next {
+            UiSnapshotUpdate::Patch(patch) => patch,
+            UiSnapshotUpdate::Full(_) => panic!("append should stay incremental"),
+        };
+        let delta = delta_patch
+            .message_deltas
+            .first()
+            .expect("append produces one delta");
+        assert_eq!(delta.append, " 追加的结尾");
+        assert_eq!(
+            delta.base_len,
+            long_prefix.encode_utf16().count() as u64,
+            "base_len is the unprojected base body length"
+        );
+    }
+
+    /// Project a single message body the way the relay path does, to assert the
+    /// phone-side seeding invariant.
+    fn app_core_remote_projection(
+        message: workspace_model::ChatMessage,
+    ) -> workspace_model::ChatMessage {
+        let dir = tempdir().unwrap();
+        let app = test_app(&dir);
+        let mut snapshot = app.lightweight_ui_snapshot();
+        snapshot.messages = vec![message];
+        snapshot.timeline = vec![TimelineItem::Message(snapshot.messages[0].id)];
+        super::project_remote_snapshot(snapshot)            .messages
+            .into_iter()
+            .next()
+            .expect("the projection keeps the referenced message")
+    }
+
+    #[test]
     fn send_prompt_adds_messages_and_tool_updates() {
         let dir = tempdir().unwrap();
         let mut app = test_app(&dir);

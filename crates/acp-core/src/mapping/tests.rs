@@ -605,6 +605,89 @@ fn usage_update_maps_codex_field_aliases() {
     assert_eq!(event.tokens.total_tokens, Some(300));
 }
 #[test]
+fn agent_thought_chunk_streams_its_reasoning_text() {
+    // Regression: the chunk text was dropped and only the activity flag was
+    // emitted, so a codex session showed a bare "思考中" pill with no content
+    // while the harness backend (which forwards reasoning deltas as
+    // ThinkingChunk) showed the actual reasoning. Both must feed the same
+    // reducer path.
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "先读一下 reducer",
+        )))),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ClientEvent::ThinkingActivity { active } => assert!(active),
+        other => panic!("unexpected thinking activity: {other:?}"),
+    }
+    match rx.try_recv().unwrap() {
+        ClientEvent::ThinkingChunk { text } => assert_eq!(text, "先读一下 reducer"),
+        other => panic!("unexpected thinking chunk: {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "the thought chunk emitted extra events"
+    );
+}
+
+#[test]
+fn agent_thought_chunk_without_text_still_marks_the_activity() {
+    // Some agents open a reasoning segment with a blank chunk; the block must
+    // still appear (the UI renders on the activity flag, not on the text).
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "",
+        )))),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ClientEvent::ThinkingActivity { active } => assert!(active),
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(
+        rx.try_recv().is_err(),
+        "an empty delta must not emit a chunk"
+    );
+}
+
+#[test]
+fn agent_message_chunk_emits_the_assistant_reply() {
+    // `agent_message_chunk` is claimed by the CodeBuddy-compatible JSON
+    // interceptor before the typed arm runs (that interceptor keys on the
+    // `sessionUpdate` kind and also serves codex-acp / claude-agent-acp), so
+    // the reply arrives as a plain assistant chunk. The reducer closes the
+    // reasoning segment on that chunk; the typed arm's extra
+    // `ThinkingActivity { active: false }` is unreachable in practice.
+    let (tx, rx) = mpsc::channel();
+    let notification = SessionNotification::new(
+        "session-1",
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            "答案",
+        )))),
+    );
+
+    emit_notification(&tx, "", notification).unwrap();
+
+    match rx.try_recv().unwrap() {
+        ClientEvent::MessageChunk { role, content } => {
+            assert_eq!(role, MessageRole::Assistant);
+            assert_eq!(content, "答案");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn usage_update_maps_context_with_malformed_metadata_and_ignores_cost() {
     let (tx, rx) = mpsc::channel();
     let notification = SessionNotification::new(

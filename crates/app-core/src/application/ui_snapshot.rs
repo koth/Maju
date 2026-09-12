@@ -275,7 +275,28 @@ fn snapshot_path_key(path: &str, workspace_root: &Path) -> String {
 /// through the desktop UI's history paging; the phone has no history pager,
 /// so anything older than this window is unreachable there anyway.
 const REMOTE_TIMELINE_WINDOW: usize = 200;
-/// Per-message body cap for remote payloads (matches the previous behavior).
+/// Total character budget for message bodies in one remote Full snapshot.
+///
+/// Bodies are kept **whole, newest first**, until this budget is spent; only
+/// the older messages beyond it fall back to [`REMOTE_MESSAGE_BODY_CHARS`].
+/// Two reasons the newest bodies must travel intact:
+///
+/// - The phone is a reading surface. A flat per-message cap silently cut the
+///   tail off every long reply (the reported symptom: a 2138-char answer
+///   rendered exactly up to char 2048 followed by the cap marker).
+/// - `message_deltas` is an append-only chain the phone seeds from this body
+///   and then validates against the backend's `base_len` (the length of the
+///   *unprojected* body). A capped body made every later append mismatch and
+///   the phone resynced instead of streaming the rest of the answer.
+///
+/// The budget keeps the frame bounded for pathological sessions while covering
+/// every realistic conversation: the largest non-image body in a 28k-message
+/// store is ~137 KB.
+const REMOTE_MESSAGE_BODY_BUDGET: usize = 1024 * 1024;
+/// Head cap for message bodies that no longer fit the budget. These are the
+/// oldest messages in the window, which never receive streaming deltas again,
+/// so truncating them cannot desync the append chain (matches the historical
+/// behavior).
 const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
 /// Bodies carrying an inline image data URL embed the attachment THUMBNAIL
 /// (a 64x64 canvas PNG, ~2-8KB of base64) and must reach the phone intact:
@@ -332,13 +353,28 @@ pub fn project_remote_snapshot(
             || (t.permission_input.is_some() && t.permission_decision.is_none())
     });
 
-    for message in &mut snapshot.messages {
-        let cap = if message.body.contains("data:image/") {
+    // Bodies: keep the newest ones whole until the budget is spent; cap only
+    // what is left over (oldest-first), so the message the user is actually
+    // reading never arrives truncated.
+    let mut remaining_budget = REMOTE_MESSAGE_BODY_BUDGET;
+    for message in snapshot.messages.iter_mut().rev() {
+        let len = message.body.chars().count();
+        // Image bodies embed the attachment thumbnails the phone renders; they
+        // are not counted against the text budget (see REMOTE_IMAGE_BODY_CHARS)
+        // but still cannot exceed their own cap.
+        let image_body = message.body.contains("data:image/");
+        let allow = if image_body {
             REMOTE_IMAGE_BODY_CHARS
         } else {
-            REMOTE_MESSAGE_BODY_CHARS
+            // The newest body may spend whatever budget is left (a single huge
+            // message still has to render); older ones fall back to the small
+            // historical head once the budget is gone.
+            remaining_budget.max(REMOTE_MESSAGE_BODY_CHARS)
         };
-        cap_string_in_place(&mut message.body, cap);
+        cap_string_in_place(&mut message.body, allow);
+        if !image_body {
+            remaining_budget = remaining_budget.saturating_sub(len.min(allow));
+        }
     }
     for tool in &mut snapshot.tools {
         cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
@@ -573,14 +609,10 @@ mod tests {
     }
 
     #[test]
-    fn remote_projection_caps_bodies_and_zeroes_desktop_only_fields() {
+    fn remote_projection_caps_tool_text_and_zeroes_desktop_only_fields() {
         let snapshot = remote_fixture(3);
         let projected = project_remote_snapshot(snapshot);
 
-        assert!(projected
-            .messages
-            .iter()
-            .all(|m| m.body.len() <= REMOTE_MESSAGE_BODY_CHARS + "\n...".len()));
         assert!(projected
             .tools
             .iter()
@@ -600,6 +632,68 @@ mod tests {
         assert!(projected.thinking_status.is_some());
         assert_eq!(projected.revision, 7);
         assert_eq!(projected.history_total, 3);
+    }
+
+    #[test]
+    fn remote_projection_keeps_the_newest_message_body_whole() {
+        // Regression: the phone rendered long replies up to exactly
+        // `REMOTE_MESSAGE_BODY_CHARS` followed by the cap marker — the tail of
+        // the answer never reached the device. Real message from the report:
+        // 2138 chars, cut right after "**都改".
+        let long_body = "改".repeat(REMOTE_MESSAGE_BODY_CHARS + 90);
+        let mut snapshot = remote_fixture(2);
+        let newest_id = snapshot.messages.last().unwrap().id;
+        snapshot.messages.last_mut().unwrap().body = long_body.clone();
+
+        let projected = project_remote_snapshot(snapshot);
+        let newest = projected
+            .messages
+            .iter()
+            .find(|message| message.id == newest_id)
+            .expect("the newest message survives the window");
+
+        assert_eq!(
+            newest.body, long_body,
+            "the newest body must reach the phone intact"
+        );
+        assert!(!newest.body.contains("\n..."), "no cap marker on the tail");
+    }
+
+    #[test]
+    fn remote_projection_budget_caps_only_the_oldest_bodies() {
+        // Past the budget the projection falls back to the historical head cap,
+        // oldest-first: those messages are no longer growing, so truncating
+        // them cannot desync the phone's append-only delta chain.
+        let chunk = "x".repeat(REMOTE_MESSAGE_BODY_BUDGET / 2);
+        let mut snapshot = remote_fixture(3);
+        for message in &mut snapshot.messages {
+            message.body = chunk.clone();
+        }
+        let ids: Vec<uuid::Uuid> = snapshot.messages.iter().map(|m| m.id).collect();
+
+        let projected = project_remote_snapshot(snapshot);
+        let body_of = |id: uuid::Uuid| {
+            projected
+                .messages
+                .iter()
+                .find(|message| message.id == id)
+                .expect("message survives the window")
+                .body
+                .clone()
+        };
+
+        // Newest: whole (half the budget).
+        assert_eq!(body_of(ids[2]), chunk);
+        // Second: fits the remaining half exactly, so still whole.
+        assert_eq!(body_of(ids[1]), chunk);
+        // Oldest: budget spent, falls back to the head cap + marker.
+        let oldest = body_of(ids[0]);
+        assert!(
+            oldest.starts_with(&"x".repeat(REMOTE_MESSAGE_BODY_CHARS))
+                && oldest.ends_with("\n..."),
+            "the oldest body must fall back to the head cap: {}",
+            oldest.len()
+        );
     }
 
     #[test]

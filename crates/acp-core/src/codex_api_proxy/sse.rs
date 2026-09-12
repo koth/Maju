@@ -3,6 +3,11 @@ use super::*;
 #[cfg(test)]
 use serde_json::Map;
 
+/// Response-item id the converter gives the reasoning summary it synthesizes
+/// from the upstream's `reasoning_content` deltas (Codex tracks reasoning by
+/// item id; `msg_proxy` is the assistant message).
+const REASONING_ITEM_ID: &str = "rs_proxy";
+
 fn remember_stream_reasoning(state: &ChatStreamState) {
     if state.reasoning_content.trim().is_empty() {
         return;
@@ -38,6 +43,14 @@ struct ChatStreamState {
     model: String,
     text: String,
     reasoning_content: String,
+    /// Text of the reasoning summary part currently open. The closing `done`
+    /// event carries the part's own text, so a second reasoning burst (after a
+    /// tool call) does not repeat the first one.
+    reasoning_part_text: String,
+    /// Whether the reasoning output item was announced to the Responses client.
+    /// Codex ignores reasoning deltas that arrive without an active reasoning
+    /// item (`ReasoningSummaryDelta without active item`).
+    reasoning_item_open: bool,
     message_started: bool,
     text_block_started: bool,
     text_block_index: Option<usize>,
@@ -101,6 +114,7 @@ fn process_chat_sse_event(event: &str, output: &mut String, state: &mut ChatStre
     let delta = choice.get("delta").unwrap_or(&Value::Null);
     if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str) {
         state.reasoning_content.push_str(reasoning_content);
+        emit_reasoning_delta(output, state, reasoning_content);
     }
     if let Some(content) = delta.get("content").and_then(Value::as_str) {
         emit_text_delta(output, state, content);
@@ -118,10 +132,111 @@ fn sse_data_line(event: &str) -> Option<&str> {
         .find_map(|line| line.strip_prefix("data:").map(str::trim_start))
 }
 
+/// Forward one upstream `reasoning_content` delta as a **Responses reasoning
+/// summary** event.
+///
+/// Codex only reads reasoning text from the standard Responses event stream:
+/// `response.output_item.added` (item type `reasoning`) opens the item,
+/// `response.reasoning_summary_text.delta` streams it (`ReasoningSummaryDelta`,
+/// which requires an active item and a `summary_index`), and the client
+/// surfaces the text as `agent_thought_chunk` over ACP. Chat-completions
+/// upstreams (timiai, kimi, deepseek, …) send the model's thinking as
+/// `choices[].delta.reasoning_content` instead; this converter used to collect
+/// that text and publish it only in the final item's **non-standard**
+/// `reasoning_content` field, which Codex ignores — so a codex session showed
+/// no thinking block at all while the same model under dsh streamed one.
+fn emit_reasoning_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+    if !state.reasoning_item_open {
+        state.reasoning_item_open = true;
+        state.reasoning_part_text.clear();
+        push_sse(
+            output,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": REASONING_ITEM_ID,
+                    "type": "reasoning",
+                    "summary": []
+                }
+            }),
+        );
+        push_sse(
+            output,
+            "response.reasoning_summary_part.added",
+            json!({
+                "type": "response.reasoning_summary_part.added",
+                "item_id": REASONING_ITEM_ID,
+                "output_index": 0,
+                "summary_index": 0,
+                "part": { "type": "summary_text", "text": "" }
+            }),
+        );
+    }
+    state.reasoning_part_text.push_str(delta);
+    push_sse(
+        output,
+        "response.reasoning_summary_text.delta",
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": REASONING_ITEM_ID,
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": delta
+        }),
+    );
+}
+
+/// Close the reasoning summary opened by [`emit_reasoning_delta`].
+///
+/// The `done` text is what Codex consumes when it runs with sequential-cutoff
+/// summaries (`reasoning_summary_delivery: SequentialCutoff` skips the live
+/// deltas), and the closing item keeps the reasoning in the streamed
+/// transcript. Closing is idempotent: reopening happens on the next delta.
+fn emit_reasoning_done(output: &mut String, state: &mut ChatStreamState) {
+    if !state.reasoning_item_open {
+        return;
+    }
+    state.reasoning_item_open = false;
+    let text = std::mem::take(&mut state.reasoning_part_text);
+    push_sse(
+        output,
+        "response.reasoning_summary_text.done",
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": REASONING_ITEM_ID,
+            "output_index": 0,
+            "summary_index": 0,
+            "text": text
+        }),
+    );
+    push_sse(
+        output,
+        "response.output_item.done",
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": REASONING_ITEM_ID,
+                "type": "reasoning",
+                "summary": [{ "type": "summary_text", "text": text }]
+            }
+        }),
+    );
+}
+
 fn emit_text_delta(output: &mut String, state: &mut ChatStreamState, delta: &str) {
     if delta.is_empty() {
         return;
     }
+
+    // The reasoning summary precedes the answer in the Responses stream; close
+    // it before the assistant message opens so the transcript keeps the order.
+    emit_reasoning_done(output, state);
 
     if !state.message_started {
         state.message_started = true;
@@ -181,6 +296,9 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
     // shown in the UI.
     if !state.message_started {
         state.message_started = true;
+        // A tool call ends the thinking that preceded it: close the reasoning
+        // summary before the message container opens.
+        emit_reasoning_done(output, state);
         push_sse(
             output,
             "response.output_item.added",
@@ -272,6 +390,10 @@ fn emit_tool_call_delta(output: &mut String, state: &mut ChatStreamState, tool_c
 
 fn emit_stream_done(output: &mut String, state: &mut ChatStreamState) {
     log_chat_stream_done("responses", state);
+
+    // Closes the reasoning summary for turns that never produce assistant text
+    // or tool calls — otherwise Codex's active item never sees its close.
+    emit_reasoning_done(output, state);
 
     let mut final_output = Vec::new();
     if state.message_started {

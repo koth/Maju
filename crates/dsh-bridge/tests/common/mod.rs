@@ -164,8 +164,13 @@ struct MockState {
     pub calls: Vec<(String, String)>,
     /// `session.create` payloads received, in order.
     pub creates: Vec<Value>,
-    /// `session.fork` payloads received, in order.
+    /// `session.fork` request objects received, in order — the descriptor's
+    /// `request` parameter, unwrapped from its `{ args: { request: … } }`
+    /// envelope.
     pub forks: Vec<Value>,
+    /// `session.cancel` args objects received, in order (rejected attempts
+    /// included, so tests can pin the `request` envelope the descriptor wants).
+    pub cancel_args: Vec<Value>,
     /// `respond` / `$events/result` payloads received (approval/question
     /// answers). For `$events/result` this is the args object the bridge built,
     /// with the carrier envelope stripped.
@@ -269,6 +274,11 @@ impl MockHarness {
     /// Payloads of the `session.fork` calls received, in order.
     pub fn forks(&self) -> Vec<Value> {
         self.state.lock().unwrap().forks.clone()
+    }
+
+    /// Args objects of the `session.cancel` calls received, in order.
+    pub fn cancel_args(&self) -> Vec<Value> {
+        self.state.lock().unwrap().cancel_args.clone()
     }
 
     pub fn responds(&self) -> Vec<Value> {
@@ -676,7 +686,7 @@ async fn handle_connection(
             }
             if method_name == "session/fork" {
                 let payload = parsed
-                    .pointer("/payload/args")
+                    .pointer("/payload/args/request")
                     .cloned()
                     .unwrap_or(Value::Null);
                 state.lock().unwrap().forks.push(payload);
@@ -685,6 +695,41 @@ async fn handle_connection(
                 // Sent by `run_harness_session` only after the session sink is
                 // registered — used as the frame-hold barrier.
                 state.lock().unwrap().models_served = true;
+            }
+            if method_name == "session/cancel" {
+                state.lock().unwrap().cancel_args.push(
+                    parsed
+                        .pointer("/payload/args")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
+
+            // Mirror the gateway's `assertExactArguments` for the endpoints the
+            // bridge calls. Shipping a request object bare (e.g. `{ sessionId }`
+            // for `session/cancel`) is rejected exactly like this — that is how
+            // the stop button used to fail while reporting nothing.
+            let descriptor_wires: Option<&[&str]> = match method_name.as_str() {
+                "session/cancel" | "session/fork" => Some(&["request"]),
+                "agentPresets/select" => Some(&["agentId", "agentPreset"]),
+                _ => None,
+            };
+            if let Some(expected) = descriptor_wires {
+                let args = parsed
+                    .pointer("/payload/args")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if let Some(detail) = exact_args_rejection(&args, expected) {
+                    let response = gateway_args_invalid_response(
+                        &rpc_id,
+                        &format!(
+                            "typert gateway: {method_name}: args fields do not match the descriptor: {detail}"
+                        ),
+                    );
+                    let body = serde_json::to_vec(&response).unwrap();
+                    write_response(&mut stream, 200, "application/json", &body).await;
+                    return;
+                }
             }
 
             let value = match method_name.as_str() {
@@ -1194,6 +1239,56 @@ pub fn default_config() -> MockHarnessConfig {
         command_attachment_field: "submittedAttachments".to_string(),
         commands_execute_error: None,
     }
+}
+
+/// Mirror the typert gateway's `assertExactArguments`: the args object must
+/// carry exactly the descriptor's parameter wire names. Returns the
+/// `gateway/arguments-invalid` detail the host answers with when it does not.
+fn exact_args_rejection(args: &Value, expected: &[&str]) -> Option<String> {
+    let Some(args) = args.as_object() else {
+        return Some("args must be a plain object".to_string());
+    };
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|key| !args.contains_key(**key))
+        .map(|key| format!("{key:?}"))
+        .collect();
+    let extra: Vec<String> = args
+        .keys()
+        .filter(|key| !expected.contains(&key.as_str()))
+        .map(|key| format!("{key:?}"))
+        .collect();
+    if missing.is_empty() && extra.is_empty() {
+        return None;
+    }
+    let mut clauses = Vec::new();
+    if !missing.is_empty() {
+        clauses.push(format!("missing {}", missing.join(", ")));
+    }
+    if !extra.is_empty() {
+        clauses.push(format!("unexpected {}", extra.join(", ")));
+    }
+    Some(format!(
+        "args fields do not match the descriptor: {}",
+        clauses.join("; ")
+    ))
+}
+
+/// The `gateway/arguments-invalid` `server-response` a real dsh host returns
+/// for an args object its descriptor rejects.
+fn gateway_args_invalid_response(rpc_id: &str, message: &str) -> Value {
+    serde_json::json!({
+        "type": "server-response",
+        "rpcId": rpc_id,
+        "result": {
+            "ok": false,
+            "error": {
+                "code": "gateway/arguments-invalid",
+                "message": message,
+                "details": {}
+            }
+        }
+    })
 }
 
 /// A `SessionEvent` JSON for `session.history` replay.
