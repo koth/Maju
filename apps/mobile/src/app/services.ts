@@ -151,6 +151,13 @@ export class AppController {
     return this.identity ? deviceId(this.identity) : null;
   }
 
+  /** The machine the controller is currently bound to (the active pairing),
+   * or null when none is selected. Drives the machine switcher's "which PC am
+   * I on" chip and its green connected dot. */
+  get activePeerDeviceId(): string | null {
+    return this.activeBound?.peer_device_id ?? null;
+  }
+
   get pendingApprovals(): PendingApproval[] {
     return this.permissions.snapshot();
   }

@@ -979,6 +979,11 @@ export interface RemoteControlStatus {
   connected: boolean;
   device_id?: string;
   pairing_qr?: string;
+  /** Whether the shown pairing code has been registered with the relay. A
+   * rendered QR the relay has never seen can never pair. */
+  pairing_registered: boolean;
+  /** Seconds until the shown pairing code expires (absent with no code). */
+  pairing_expires_in_secs?: number;
   subscription_active?: boolean;
   bound: boolean;
   /** Email of the logged-in account, when a session is stored locally. */

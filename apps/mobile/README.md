@@ -51,6 +51,21 @@ npx expo prebuild           # generate native ios/ android/ projects
 npx expo run:ios            # or run:android
 ```
 
+## App icon
+
+The mobile icon is derived from the desktop brand mark
+(`apps/desktop/src-tauri/icons/maju.png`) so both platforms show the same
+icon. After the brand mark changes, regenerate the Expo source icon and the
+Android mipmaps from the repo root:
+
+```bash
+scripts/generate-mobile-icons.sh   # needs macOS sips + libwebp's cwebp
+```
+
+Then rebuild the app. The `android/` and `ios/` projects are gitignored, so the
+tracked artifact is `assets/icon.png` — keep it in sync with the script rather
+than editing it by hand.
+
 ## Relay endpoint
 
 The relay endpoint is supplied by the PC's pairing QR (`relay_endpoint`). It

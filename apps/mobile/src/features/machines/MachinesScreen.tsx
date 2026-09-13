@@ -14,6 +14,15 @@ import type { BoundDevice } from "../../account/binding";
 import { PairingScreen } from "../pairing/PairingScreen";
 import { EmptyState } from "../ui/EmptyState";
 import { styles, colors, spacing, radius, shadows } from "../theme";
+import {
+  boundDate,
+  machineLabel,
+  machinePhase,
+  machinePhaseLabel,
+  machineTint,
+  relayHost,
+  type MachinePhase,
+} from "./machine-view";
 
 // Machines: the landing screen. Shows every bound PC (one record per scanned
 // QR — the relay keeps one pairing per scan, so several machines can be bound
@@ -21,38 +30,9 @@ import { styles, colors, spacing, radius, shadows } from "../theme";
 // with that machine's pairing token + static key) and lands on the session
 // list; long-pressing offers unbind; "Add PC" opens the QR scanner.
 // Auto-connect on launch was deliberately removed: the user picks a machine.
-
-function shortPeerId(peerDeviceId: string): string {
-  return peerDeviceId.slice(0, 10);
-}
-
-function relayHost(endpoint: string | undefined): string | null {
-  if (!endpoint) return null;
-  try {
-    return new URL(endpoint).host;
-  } catch {
-    return null;
-  }
-}
-
-function boundDate(boundAt: number | undefined): string | null {
-  if (!boundAt) return null;
-  const parsed = new Date(boundAt);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function machineLabel(device: BoundDevice): string {
-  if (device.label && device.label.trim().length > 0) return device.label.trim();
-  return `PC ${shortPeerId(device.peer_device_id)}`;
-}
-
-function avatarTint(seed: string): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  const palette = ["#5b8cff", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#f43f5e", "#a855f7"];
-  return palette[h % palette.length];
-}
+// The currently connected machine carries a green dot + "已连接" (the same
+// indicator the project page switcher shows); quick switching between bound
+// machines also lives in that switcher once a session stack is open.
 
 export function MachinesScreen({
   onOpenDiagnostics,
@@ -86,6 +66,8 @@ export function MachinesScreen({
 
   const connecting = connectingTo !== null && connState !== "disconnected";
   const busy = connectingTo !== null;
+  // The machine the controller is bound to (green dot once the link is live).
+  const activePeer = controller.activePeerDeviceId;
 
   const connect = useCallback(
     async (device: BoundDevice) => {
@@ -160,6 +142,7 @@ export function MachinesScreen({
           <MachineRow
             device={item}
             connecting={connectingTo === item.peer_device_id && (connState === "connecting" || connState === "authenticating" || connState === "paired/e2e")}
+            phase={machinePhase(item.peer_device_id === activePeer, connState)}
             disabled={busy}
             onConnect={() => void connect(item)}
             onUnbind={() => confirmUnbind(item)}
@@ -215,12 +198,14 @@ export function MachinesScreen({
 function MachineRow({
   device,
   connecting,
+  phase,
   disabled,
   onConnect,
   onUnbind,
 }: {
   device: BoundDevice;
   connecting: boolean;
+  phase: MachinePhase;
   disabled: boolean;
   onConnect: () => void;
   onUnbind: () => void;
@@ -228,13 +213,13 @@ function MachineRow({
   const label = machineLabel(device);
   const host = relayHost(device.relay_endpoint);
   const date = boundDate(device.bound_at);
-  const metaParts = [host, date].filter(Boolean).join(" \u00b7 ");
   return (
     <Pressable
       style={({ pressed }) => [
         localStyles.row,
         { opacity: pressed ? 0.75 : disabled && !connecting ? 0.55 : 1 },
         connecting && localStyles.rowConnecting,
+        phase === "connected" && localStyles.rowConnected,
       ]}
       onPress={onConnect}
       onLongPress={onUnbind}
@@ -242,7 +227,7 @@ function MachineRow({
       accessibilityRole="button"
       accessibilityLabel={`Connect to ${label}`}
     >
-      <View style={[localStyles.avatar, { backgroundColor: avatarTint(device.peer_device_id) }]}>
+      <View style={[localStyles.avatar, { backgroundColor: machineTint(device.peer_device_id) }]}>
         <Text style={styles.avatarText}>{label.trim()[0]?.toUpperCase() ?? "P"}</Text>
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -250,14 +235,20 @@ function MachineRow({
           {label}
         </Text>
         <Text style={localStyles.meta} numberOfLines={1}>
-          {host ?? "relay endpoint unknown"}
-          {date ? ` \u00b7 paired ${date}` : ""}
+          {phase === "connected"
+            ? `已连接 \u00b7 ${host ?? "relay"}`
+            : `${host ?? "relay endpoint unknown"}${date ? ` \u00b7 paired ${date}` : ""}`}
         </Text>
       </View>
       {connecting ? (
         <View style={localStyles.connectingWrap}>
           <ActivityIndicator color={colors.accent} size="small" />
           <Text style={localStyles.connectingText}>连接中…</Text>
+        </View>
+      ) : phase === "connected" ? (
+        <View style={localStyles.connectedWrap}>
+          <View style={localStyles.connectedDot} />
+          <Text style={localStyles.connectedText}>{machinePhaseLabel(phase)}</Text>
         </View>
       ) : (
         <Pressable
@@ -295,6 +286,9 @@ const localStyles = StyleSheet.create({
   rowConnecting: {
     borderColor: colors.accent,
   },
+  rowConnected: {
+    borderColor: colors.success,
+  },
   avatar: {
     width: 40,
     height: 40,
@@ -323,6 +317,23 @@ const localStyles = StyleSheet.create({
     color: colors.accent,
     fontSize: 12,
     fontWeight: "600",
+    marginLeft: spacing.sm,
+  },
+  connectedWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginLeft: spacing.sm,
+  },
+  connectedDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.success,
+  },
+  connectedText: {
+    color: colors.success,
+    fontSize: 12,
+    fontWeight: "700",
     marginLeft: spacing.sm,
   },
   unbind: {

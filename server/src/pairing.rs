@@ -80,7 +80,63 @@ pub async fn handle_pairing_initiate(
         send_message(tx, None, &pairing_error("invalid or expired pairing code")).await?;
         return Err(RelayError::InvalidPairingCode);
     };
+
+    // The PC must be ONLINE for a pairing to be usable: the relay forwards the
+    // phone's ephemeral key to the PC, and without it the PC can never derive
+    // the E2E session key. Previously the relay confirmed to the phone anyway,
+    // so the phone reported "paired" against a PC that would never answer a
+    // single request — the "scanned the other PC's QR and nothing ever
+    // happened" failure. Refuse instead, and leave the one-time code unused so
+    // the same QR still works once the PC reconnects to the relay.
+    let Some(pc_tx) = state.connections.get(&pc_device_id) else {
+        tracing::warn!(
+            pc_device_id = %pc_device_id,
+            "pairing initiate: PC offline; refusing and leaving the code usable"
+        );
+        send_pairing_error(
+            tx,
+            "PC is not connected to the relay; check the PC shows 已连接 relay, then scan again",
+        )
+        .await;
+        return Err(RelayError::Other("PC offline during pairing initiate".into()));
+    };
+
     let pairing_token = Uuid::new_v4().to_string();
+    let phone_ephemeral = pi.phone_ephemeral_pubkey.clone().unwrap_or_default();
+    let pc_confirm = Message::PairingConfirm(PairingConfirm {
+        error: None,
+        pairing_token: pairing_token.clone(),
+        session_key_material: phone_ephemeral,
+        pc_device_id: pc_device_id.clone(),
+        phone_device_id: phone_device_id.to_string(),
+        // Forward the phone's wire capabilities so the PC can pick its
+        // outbound ciphertext encoding (e.g. compact ciphertext_b64).
+        capabilities: pi.capabilities.clone(),
+    });
+
+    // Send PC's confirm FIRST so it installs the session key before the phone
+    // (which starts sending encrypted control requests immediately after
+    // receiving its confirm). Reversing this order causes a race: the phone's
+    // first encrypted frame can arrive at the PC before the PC has installed
+    // the key, crashing the driver.
+    if send_message(&pc_tx, None, &pc_confirm).await.is_err() {
+        // Half-dead connection entry: evict it so the PC's reconnect
+        // re-registers cleanly, and keep the code usable for a retry.
+        state.connections.remove(&pc_device_id);
+        tracing::warn!(
+            pc_device_id = %pc_device_id,
+            "pairing initiate: PC send failed; refusing and leaving the code usable"
+        );
+        send_pairing_error(
+            tx,
+            "PC is not connected to the relay; check the PC shows 已连接 relay, then scan again",
+        )
+        .await;
+        return Err(RelayError::Other("PC unreachable during pairing initiate".into()));
+    }
+
+    // The PC owns the key material now; persist the binding and consume the
+    // one-time code.
     state
         .db
         .create_pairing(
@@ -107,39 +163,14 @@ pub async fn handle_pairing_initiate(
         .mark_pairing_code_used(pi.pairing_code.clone())
         .await?;
 
-    let phone_ephemeral = pi.phone_ephemeral_pubkey.clone().unwrap_or_default();
     let phone_confirm = Message::PairingConfirm(PairingConfirm {
         error: None,
-        pairing_token: pairing_token.clone(),
+        pairing_token,
         session_key_material: pi.pc_device_pubkey.clone(),
-        pc_device_id: pc_device_id.clone(),
+        pc_device_id,
         phone_device_id: phone_device_id.to_string(),
-        capabilities: pi.capabilities.clone(),
-    });
-    let pc_confirm = Message::PairingConfirm(PairingConfirm {
-        error: None,
-        pairing_token: pairing_token.clone(),
-        session_key_material: phone_ephemeral,
-        pc_device_id: pc_device_id.clone(),
-        phone_device_id: phone_device_id.to_string(),
-        // Forward the phone's wire capabilities so the PC can pick its
-        // outbound ciphertext encoding (e.g. compact ciphertext_b64).
         capabilities: pi.capabilities,
     });
-
-    // Send PC's confirm FIRST so it installs the session key before the
-    // phone (which starts sending encrypted control requests immediately
-    // after receiving its confirm). Reversing this order causes a race:
-    // the phone's first encrypted frame can arrive at the PC before the
-    // PC has installed the key, crashing the driver.
-    if let Some(pc_tx) = state.connections.get(&pc_device_id) {
-        send_message(&pc_tx, None, &pc_confirm).await?;
-    } else {
-        tracing::warn!(
-            pc_device_id = %pc_device_id,
-            "PC offline during pairing confirm; phone confirmed only (PC will not receive E2E material)"
-        );
-    }
     send_message(tx, None, &phone_confirm).await?;
     Ok(())
 }
@@ -493,6 +524,133 @@ mod tests {
         // Both peers got their confirms.
         let _ = pc_rx.recv().await.unwrap();
         let _ = phone_rx.recv().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initiate_with_offline_pc_replies_error_and_keeps_code_usable() {
+        let state = app_state();
+        state
+            .db
+            .register_device("pc".into(), "pc-ed".into())
+            .await
+            .unwrap();
+        state
+            .db
+            .register_pairing_code("LIVECODE".into(), "pc".into(), 120)
+            .await
+            .unwrap();
+        // The PC registered the code but is NOT currently connected to the
+        // relay (its link dropped after registering). A regenerate-on-reconnect
+        // desktop can be in exactly this state while still showing a QR.
+        let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
+        let result = handle_pairing_initiate(
+            &state,
+            PairingInitiate {
+                pairing_code: "LIVECODE".into(),
+                pc_device_pubkey: "pc-x25519".into(),
+                relay_endpoint: "ws://relay".into(),
+                phone_ephemeral_pubkey: Some("eph".into()),
+                capabilities: Vec::new(),
+            },
+            "phone",
+            &phone_tx,
+        )
+        .await;
+        assert!(result.is_err(), "offline PC must not produce a success");
+
+        let text = phone_rx.recv().await.expect("phone receives an explicit error");
+        let env: Envelope = serde_json::from_str(&text).unwrap();
+        match env.into_message().unwrap() {
+            Message::PairingConfirm(confirm) => {
+                let reason = confirm.error.expect("error reason present");
+                assert!(
+                    reason.contains("not connected to the relay"),
+                    "reason names the real cause: {reason}"
+                );
+            }
+            other => panic!("expected error PairingConfirm, got {other:?}"),
+        }
+
+        // The one-time code must survive the failed attempt so the SAME QR
+        // works once the PC reconnects.
+        assert_eq!(
+            state
+                .db
+                .take_pairing_code("LIVECODE".into())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("pc"),
+            "failed initiate leaves the code unused"
+        );
+    }
+
+    #[tokio::test]
+    async fn initiate_with_online_pc_forwards_to_pc_and_consumes_code() {
+        let state = app_state();
+        state
+            .db
+            .register_device("pc".into(), "pc-ed".into())
+            .await
+            .unwrap();
+        state
+            .db
+            .register_device("phone".into(), "ph-ed".into())
+            .await
+            .unwrap();
+        state
+            .db
+            .register_pairing_code("LIVECODE".into(), "pc".into(), 120)
+            .await
+            .unwrap();
+        let (pc_tx, mut pc_rx) = mpsc::channel::<String>(8);
+        state.connections.insert("pc", 1, pc_tx);
+        let (phone_tx, mut phone_rx) = mpsc::channel::<String>(8);
+
+        handle_pairing_initiate(
+            &state,
+            PairingInitiate {
+                pairing_code: "LIVECODE".into(),
+                pc_device_pubkey: "pc-x25519".into(),
+                relay_endpoint: "ws://relay".into(),
+                phone_ephemeral_pubkey: Some("eph".into()),
+                capabilities: Vec::new(),
+            },
+            "phone",
+            &phone_tx,
+        )
+        .await
+        .unwrap();
+
+        let pc_text = pc_rx.recv().await.expect("PC gets the phone ephemeral key");
+        let pc_env: Envelope = serde_json::from_str(&pc_text).unwrap();
+        match pc_env.into_message().unwrap() {
+            Message::PairingConfirm(confirm) => {
+                assert_eq!(confirm.session_key_material, "eph");
+                assert!(confirm.error.is_none());
+            }
+            other => panic!("expected PairingConfirm to PC, got {other:?}"),
+        }
+
+        let phone_text = phone_rx.recv().await.expect("phone gets its confirm");
+        let phone_env: Envelope = serde_json::from_str(&phone_text).unwrap();
+        match phone_env.into_message().unwrap() {
+            Message::PairingConfirm(confirm) => {
+                assert!(confirm.error.is_none());
+                assert_eq!(confirm.session_key_material, "pc-x25519");
+            }
+            other => panic!("expected PairingConfirm to phone, got {other:?}"),
+        }
+
+        assert!(
+            state
+                .db
+                .take_pairing_code("LIVECODE".into())
+                .await
+                .unwrap()
+                .is_none(),
+            "successful initiate consumes the one-time code"
+        );
     }
 }
 

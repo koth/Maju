@@ -20,6 +20,13 @@ pub struct RemoteControlStatus {
     /// Active pairing QR payload (JSON), if a code is currently minted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pairing_qr: Option<String>,
+    /// Whether the displayed pairing code has been registered with (acked by)
+    /// the relay. A rendered QR is not a usable QR: scanning one the relay has
+    /// never seen fails with "invalid or expired pairing code".
+    pub pairing_registered: bool,
+    /// Seconds until the displayed pairing code expires (`None` with no code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_expires_in_secs: Option<u64>,
     /// Subscription state when bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_active: Option<bool>,

@@ -17,6 +17,30 @@ import { diagnostics } from "../util/diagnostics";
 
 const PAIRING_HANDSHAKE_TIMEOUT_MS = 30_000;
 
+/**
+ * Turn the relay's terse English pairing rejections into an actionable line for
+ * the pairing screen. "invalid or expired pairing code" is by far the most
+ * common one and is entirely the PC's fault (the relay never saw the code the
+ * QR shows), so pointing at the PC is what actually unblocks the user.
+ */
+export function humanizePairingError(raw: string): string {
+  const key = raw.trim().toLowerCase();
+  if (key.includes("invalid or expired pairing code")) {
+    return "二维码已失效：电脑端的二维码过期或未注册到 relay，请在电脑上刷新二维码后重扫";
+  }
+  if (key.includes("not connected to the relay") || key.includes("pc is offline")) {
+    return "目标电脑当前没有连上 relay：请在电脑端确认显示「已连接 relay」后再扫码";
+  }
+  if (key.includes("pairing token unknown")) {
+    return "配对记录已失效：请重新扫描电脑端的二维码";
+  }
+  if (key.includes("does not belong to this device")) {
+    return "该配对属于其他设备：请重新扫描电脑端的二维码";
+  }
+  return raw;
+}
+
+
 /** Wire capabilities this phone advertises at pairing/resume time. The PC
  * reads them from the relay-forwarded PairingConfirm to pick its outbound
  * ciphertext encoding (compact base64 vs legacy number array). */
@@ -82,7 +106,7 @@ export async function runPairingHandshake(
   const confirm = confirmEnv.payload as PairingConfirm;
   if (confirm.error) {
     diagnostics.log("pairing", `initiate rejected: ${confirm.error}`);
-    throw new Error(`配对失败：${confirm.error}`);
+    throw new Error(`配对失败：${humanizePairingError(confirm.error)}`);
   }
   diagnostics.log("pairing", `confirmed pc=${confirm.pc_device_id} phone=${confirm.phone_device_id}`);
 
@@ -135,7 +159,7 @@ export async function runPairingResume(
   const confirm = confirmEnv.payload as PairingConfirm;
   if (confirm.error) {
     diagnostics.log("pairing", `resume rejected: ${confirm.error}`);
-    throw new Error(`恢复连接失败：${confirm.error}`);
+    throw new Error(`恢复连接失败：${humanizePairingError(confirm.error)}`);
   }
   diagnostics.log("pairing", `resume confirmed pc=${confirm.pc_device_id}`);
 

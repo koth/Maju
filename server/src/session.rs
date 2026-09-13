@@ -58,7 +58,14 @@ impl Session {
                     }
                     if let tungstenite::Message::Text(t) = &msg {
                         if let Err(e) = self.handle_text(t.as_str()).await {
-                            tracing::warn!(error = %e, "frame handling error");
+                            // Always name the sender: an unattributed "frame
+                            // handling error" made a bad-client report
+                            // impossible to trace during the pairing outage.
+                            tracing::warn!(
+                                error = %e,
+                                device_id = ?self.device_id,
+                                "frame handling error"
+                            );
                         }
                     }
                 }

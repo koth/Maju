@@ -13,6 +13,7 @@ use relay_client::{
     auth_base_url_from_ws_endpoint, build_qr_payload,
 };
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::Notify;
 
 pub struct RemoteControlManager {
@@ -36,6 +37,14 @@ struct Inner {
     relay_endpoint: String,
     account_session: Option<AccountSession>,
     insecure_tls: bool,
+    /// Wall-clock deadline of the minted pairing code. Tracked next to the
+    /// code so the UI can show a countdown and re-mint before it expires —
+    /// an expired QR stays scannable-looking but can never pair.
+    pairing_expires_at: Option<Instant>,
+    /// Whether the CURRENT minted code has been acked by the relay. Rendered
+    /// QR is not the same as a registered code: showing one before the relay
+    /// has it makes every scan fail with "invalid or expired pairing code".
+    pairing_is_registered: bool,
     /// Set when a freshly minted pairing code has been registered with the
     /// relay; the QR UI waits for this before showing the code as scannable.
     pairing_registered: Option<Arc<Notify>>,
@@ -81,6 +90,8 @@ impl RemoteControlManager {
                 relay_endpoint,
                 insecure_tls,
                 account_session: None,
+                pairing_expires_at: None,
+                pairing_is_registered: false,
                 pairing_registered: None,
             }),
             app_paths,
@@ -179,6 +190,9 @@ impl RemoteControlManager {
             .map_err(|e| format!("encode qr payload: {e}"))?;
         inner.pairing_code = Some(code);
         inner.pairing_qr = Some(json.clone());
+        inner.pairing_expires_at = Some(Instant::now() + DEFAULT_PAIRING_TTL);
+        // A fresh mint is not registered until the driver acks it.
+        inner.pairing_is_registered = false;
         let registered = Arc::new(Notify::new());
         inner.pairing_registered = Some(registered.clone());
         // Wake the driver loop so it re-registers this code with the relay
@@ -201,12 +215,11 @@ impl RemoteControlManager {
     /// Mark the in-flight pairing code as registered with the relay (driver
     /// calls this after the relay acks `PairingRegister`).
     pub fn mark_pairing_registered(&self) {
-        let notify = self
-            .inner
-            .lock()
-            .expect("rc manager mutex poisoned")
-            .pairing_registered
-            .clone();
+        let notify = {
+            let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
+            inner.pairing_is_registered = true;
+            inner.pairing_registered.clone()
+        };
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
@@ -228,12 +241,27 @@ impl RemoteControlManager {
     }
 
     pub fn status(&self) -> RemoteControlStatus {
-        let inner = self.inner.lock().expect("rc manager mutex poisoned");
+        let mut inner = self.inner.lock().expect("rc manager mutex poisoned");
+        // An expired code is dead: drop it (and its "registered" flag) so the
+        // UI never offers a QR the relay would reject.
+        if let Some(deadline) = inner.pairing_expires_at {
+            if Instant::now() >= deadline {
+                inner.pairing_code = None;
+                inner.pairing_qr = None;
+                inner.pairing_expires_at = None;
+                inner.pairing_is_registered = false;
+            }
+        }
+        let expires_in = inner
+            .pairing_expires_at
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs());
         RemoteControlStatus {
             enabled: inner.enabled,
             connected: inner.connected,
             device_id: inner.device_id.clone(),
             pairing_qr: inner.pairing_qr.clone(),
+            pairing_registered: inner.pairing_is_registered,
+            pairing_expires_in_secs: expires_in,
             subscription_active: inner.subscription_active,
             bound: inner.bound,
             account_email: inner.account_session.as_ref().map(|s| s.email.clone()),

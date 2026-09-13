@@ -162,7 +162,9 @@ describe("pairing handshake", () => {
   }),
   );
 
-  await expect(phonePromise).rejects.toThrow("invalid or expired pairing code");
+  // The raw relay reason ("invalid or expired pairing code") is logged for
+  // diagnostics; the user-facing error is humanized into an actionable line.
+  await expect(phonePromise).rejects.toThrow("二维码已失效");
   });
 });
 

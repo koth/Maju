@@ -4,6 +4,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import type { SessionListItem, WorkspaceSessionList } from "../../types";
 import { splitSessionGroups } from "./session-groups";
+import { MachineSwitcher } from "../machines/MachineSwitcher";
 import { styles, colors, spacing, radius, shadows } from "../theme";
 import { EmptyState } from "../ui/EmptyState";
 
@@ -131,6 +132,9 @@ export function SessionListScreen({
 
   useEffect(() => {
     if (connState === "connected") void refresh();
+    // A switch that ends in "disconnected" (handshake failed) must drop the
+    // spinner handleWillSwitch raised, otherwise the list spins forever.
+    else if (connState === "disconnected") setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connState]);
 
@@ -167,6 +171,16 @@ export function SessionListScreen({
 
   const { chats: chatsGroups, projects: projectGroups } = splitSessionGroups(groups);
   const chatsGroup = chatsGroups[0];
+
+  // A machine switch invalidates everything on screen: drop the previous
+  // machine's projects immediately so they never render while the phone is
+  // handshaking with the newly selected PC. The [connState] effect below
+  // repopulates the list once the switch reaches "connected".
+  const handleWillSwitch = useCallback(() => {
+    setGroups([]);
+    setLoading(true);
+    setError(null);
+  }, []);
 
   // 新建 is contextual: on the 聊天 tab it starts a chat in the chats
   // workspace; on the 项目 tab it creates a global (workspace-less) session
@@ -227,7 +241,13 @@ export function SessionListScreen({
 
   return (
     <View style={styles.screen}>
-      <View style={[styles.rowBetween, { paddingHorizontal: spacing.lg, paddingVertical: spacing.md }]}>
+      {/* Which PC this page is showing, with quick switching between bound
+          machines right here (the machines landing screen is out of reach once
+          a connection has been established). */}
+      <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}>
+        <MachineSwitcher onWillSwitch={handleWillSwitch} />
+      </View>
+      <View style={[styles.rowBetween, { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }]}>
         <View style={styles.row}>
           <TabPill label="项目" active={tab === "projects"} onPress={() => setTab("projects")} />
           <TabPill label="聊天" active={tab === "chats"} onPress={() => setTab("chats")} />

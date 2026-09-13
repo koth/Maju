@@ -6,8 +6,11 @@ implementation, with automated vs. needs-native-device status.
 ## Automated (green here)
 
 - `npx tsc --noEmit` — clean
-- `npx vitest run` — 166 tests across 19 files
+- `npx vitest run` — 188 tests across 21 files
 - `src/__tests__/integration.test.ts` — end-to-end over an in-memory relay
+- `src/__tests__/machine-view.test.ts` — machine label/phase helpers behind the
+  project-page machine switcher (only the active + connected PC is "connected",
+  so the green dot never points at a dropped machine)
 - `src/__tests__/permission.test.ts` — approval store, default-deny timeout, and
   the two approval shapes (question form vs. options-only)
 - `src/__tests__/turn-completion.test.ts` — turn-completion watcher transitions/dedupe/suppression
@@ -73,6 +76,10 @@ These require Xcode/Android Studio and a real relay/PC; not automatable here:
 
 - `npx expo prebuild` / `run:ios` / `run:android` build sanity
 - Live camera QR scan against a PC's pairing QR
+- Project-page machine switcher (chip + sheet): switching between bound PCs,
+  green dot on the connected one, and the session list reloading for the newly
+  selected machine — logic is unit-tested (`machine-view.test.ts` + the
+  multi-machine path in `integration.test.ts`), the visuals need a device
 - Keychain/Keystore persistence + app-uninstall clearing (criterion 11)
 - A live relay + bound-account reconnect (best-effort re-key; falls back to
   re-scan if the relay rejects the stored token — see `AppController`)

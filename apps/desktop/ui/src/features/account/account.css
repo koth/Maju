@@ -294,6 +294,13 @@
   background: #ffffff;
 }
 
+/* Not scannable yet (relay down or code not registered): dim it so the panel
+   cannot look "ready" while the status text below says otherwise. */
+.account-qr-canvas.is-unusable {
+  opacity: 0.35;
+  filter: grayscale(1);
+}
+
 .account-pairing-meta {
   display: flex;
   flex-direction: column;
@@ -305,6 +312,12 @@
 .account-pairing-step {
   margin: 0;
   line-height: 1.45;
+}
+
+.account-pairing-warning {
+  margin: 0;
+  line-height: 1.45;
+  color: var(--yellow, #d29922);
 }
 
 .account-pairing-conn {

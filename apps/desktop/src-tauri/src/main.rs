@@ -434,13 +434,50 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 );
                 if let Ok(env) = reg {
                     if conn.send_envelope(&env).await.is_ok() {
-                        // Consume the relay's SubscriptionStatus ack.
-                        let _ = conn.recv_envelope().await;
-                        app_for_loop
-                            .state::<AppState>()
-                            .remote_control()
-                            .mark_pairing_registered();
-                        tracing::info!(target: "remote_control", "pairing code registered with relay");
+                        // Consume the relay's SubscriptionStatus ack. This MUST
+                        // be time-bounded and instance-checked: a plain
+                        // `recv_envelope()` here waited forever for a frame of a
+                        // specific shape, so any interleaved frame (an
+                        // authenticated peer's frame arriving first, a
+                        // keep-alive) parked the driver BEFORE it started
+                        // heartbeating — the connection then died of the
+                        // relay's heartbeat timeout, and the code that was
+                        // registered stayed live while the PC looked offline.
+                        // Registration lives in the relay DB keyed by device
+                        // id, so a slow or missing ack must not cost us the
+                        // connection.
+                        let ack = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            conn.recv_envelope(),
+                        )
+                        .await;
+                        match ack {
+                            Ok(Ok(Some(envelope)))
+                                if matches!(
+                                    envelope.into_message(),
+                                    Ok(Message::SubscriptionStatus(_))
+                                ) =>
+                            {
+                                app_for_loop
+                                    .state::<AppState>()
+                                    .remote_control()
+                                    .mark_pairing_registered();
+                                tracing::info!(target: "remote_control", "pairing code registered with relay");
+                            }
+                            Ok(Ok(_)) => tracing::warn!(
+                                target: "remote_control",
+                                "pairing register ack was not a SubscriptionStatus; continuing"
+                            ),
+                            Ok(Err(e)) => tracing::warn!(
+                                target: "remote_control",
+                                error = %e,
+                                "pairing register ack read failed; continuing"
+                            ),
+                            Err(_) => tracing::warn!(
+                                target: "remote_control",
+                                "pairing register ack timed out; continuing"
+                            ),
+                        }
                     }
                 }
             }

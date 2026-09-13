@@ -528,6 +528,8 @@ describe("integration: phone <-> fake PC over relay", () => {
     const runA1 = pcA1.run();
     await controller.pairFromTransport(phoneA1, qrJson(), false);
     expect(controller.connectionState).toBe("connected");
+    // The active machine drives the switcher's "which PC" chip + green dot.
+    expect(controller.activePeerDeviceId).toBe("pc-dev");
     await controller.disconnect();
     pcA1.stopLoop();
     await runA1;
@@ -563,6 +565,7 @@ describe("integration: phone <-> fake PC over relay", () => {
     nextTransport = phoneA2;
     await controller.connectToBoundDevice("pc-dev");
     expect(controller.connectionState).toBe("connected");
+    expect(controller.activePeerDeviceId).toBe("pc-dev");
     expect(pcA2.handshakeTypes).toEqual(["pairing_resume"]);
     await waitFor(() => (controller.snapshot?.session.id === "init" ? true : undefined));
 
@@ -579,6 +582,7 @@ describe("integration: phone <-> fake PC over relay", () => {
     nextTransport = phoneB2;
     await controller.connectToBoundDevice("pc-b");
     expect(controller.connectionState).toBe("connected");
+    expect(controller.activePeerDeviceId).toBe("pc-b");
     expect(pcB2.handshakeTypes).toEqual(["pairing_resume"]);
     await waitFor(() => (controller.snapshot?.workspace.name === "pc-b-ws" ? true : undefined));
     expect(controller.snapshot?.workspace.name).toBe("pc-b-ws");
@@ -588,6 +592,9 @@ describe("integration: phone <-> fake PC over relay", () => {
     const remaining = await controller.removeMachine("pc-b");
     expect(remaining.map((m) => m.peer_device_id)).toEqual(["pc-dev"]);
     expect(controller.connectionState).toBe("disconnected");
+    // Unbinding the active machine clears the selection: no chip/green dot may
+    // keep pointing at a machine this phone no longer holds.
+    expect(controller.activePeerDeviceId).toBeNull();
     await expect(controller.connectToBoundDevice("pc-b")).rejects.toThrow(/not bound/);
     expect((await controller.listMachines()).map((m) => m.peer_device_id)).toEqual(["pc-dev"]);
 
