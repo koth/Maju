@@ -129,6 +129,9 @@ export interface PairingQrPayload {
   /** Friendly name of the PC (its hostname), when the PC sent one. PCs that
    * predate this field omit it, so treat it as optional. */
   pc_name?: string;
+  /** The PC's OWN network address — deliberately not the relay host, which is
+   * identical for every paired machine. Optional (older PCs omit it). */
+  pc_ip?: string;
 }
 export interface PairingInitiate {
   pairing_code: string;

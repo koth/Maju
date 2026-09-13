@@ -16,10 +16,10 @@ import { EmptyState } from "../ui/EmptyState";
 import { styles, colors, spacing, radius, shadows } from "../theme";
 import {
   boundDate,
+  machineAddress,
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  relayHost,
   type MachinePhase,
 } from "./machine-view";
 
@@ -216,8 +216,15 @@ function MachineRow({
   onUnbind: () => void;
 }) {
   const label = machineLabel(device);
-  const host = relayHost(device.relay_endpoint);
+  const address = machineAddress(device);
   const date = boundDate(device.bound_at);
+  // The PC's OWN address, never the relay host (identical for every machine).
+  const metaParts = [
+    phase === "connected" ? "已连接" : null,
+    address,
+    date ? `配对于 ${date}` : null,
+  ].filter(Boolean);
+  const meta = metaParts.length > 0 ? metaParts.join(" \u00b7 ") : "已配对";
   return (
     <Pressable
       style={({ pressed }) => [
@@ -238,9 +245,7 @@ function MachineRow({
           {label}
         </Text>
         <Text style={localStyles.meta} numberOfLines={1}>
-          {phase === "connected"
-            ? `已连接 \u00b7 ${host ?? "relay"}`
-            : `${host ?? "relay endpoint unknown"}${date ? ` \u00b7 paired ${date}` : ""}`}
+          {meta}
         </Text>
       </View>
       {connecting ? (

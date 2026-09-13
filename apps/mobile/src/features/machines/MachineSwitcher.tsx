@@ -12,10 +12,10 @@ import { useAppController, useConnectionState } from "../../app/AppServicesConte
 import type { BoundDevice } from "../../account/binding";
 import { colors, radius, spacing } from "../theme";
 import {
+  machineAddress,
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  relayHost,
   type MachinePhase,
 } from "./machine-view";
 
@@ -205,10 +205,11 @@ function MachineOption({
   onPress: () => void;
 }) {
   const label = machineLabel(device);
-  const host = relayHost(device.relay_endpoint);
+  // The PC's own address; never the relay host (same for every machine).
+  const address = machineAddress(device);
   const meta = active
-    ? [machinePhaseLabel(phase), host].filter(Boolean).join(" \u00b7 ")
-    : (host ?? "relay endpoint unknown");
+    ? [machinePhaseLabel(phase), address].filter(Boolean).join(" \u00b7 ")
+    : (address ?? "—");
 
   return (
     <Pressable

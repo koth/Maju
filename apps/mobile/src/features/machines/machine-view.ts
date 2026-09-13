@@ -22,14 +22,20 @@ export function machineLabel(
   return `PC ${shortPeerId(device.peer_device_id)}`;
 }
 
-/** Host part of a relay endpoint, or null when missing/unparseable. */
-export function relayHost(endpoint: string | undefined): string | null {
-  if (!endpoint) return null;
-  try {
-    return new URL(endpoint).host;
-  } catch {
-    return null;
-  }
+/**
+ * The address to display for a machine, or null when unknown.
+ *
+ * This is the PC's OWN address as reported in its pairing QR. It must NEVER
+ * fall back to the relay host: every bound machine shares one relay, so
+ * printing that produced two identical rows ("120.48.49.190" for both) and the
+ * list could not be told apart. Records bound before the PC reported an
+ * address (or PCs that do not report one) simply show no address.
+ */
+export function machineAddress(
+  device: Pick<BoundDevice, "peer_ip">,
+): string | null {
+  const ip = device.peer_ip?.trim();
+  return ip && ip.length > 0 ? ip : null;
 }
 
 /** Bound date (month/day) or null when absent/invalid. */

@@ -27,17 +27,18 @@ const PC_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 200 + i);
 /** A second machine's static X25519 secret (multi-machine switch test). */
 const PC2_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 100 + i);
 
-function qrJsonFor(secret: Uint8Array, pcName?: string): string {
+function qrJsonFor(secret: Uint8Array, pcName?: string, pcIp?: string): string {
   return JSON.stringify({
     relay_endpoint: "wss://relay.example.com",
     pairing_code: "PAIR123",
     pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(secret)),
     ...(pcName ? { pc_name: pcName } : {}),
+    ...(pcIp ? { pc_ip: pcIp } : {}),
   });
 }
 
 function qrJson(): string {
-  return qrJsonFor(PC_SECRET, "Studio-Mac");
+  return qrJsonFor(PC_SECRET, "Studio-Mac", "192.168.1.24");
 }
 
 function makeSnapshot(
@@ -533,7 +534,12 @@ describe("integration: phone <-> fake PC over relay", () => {
     expect(controller.activePeerDeviceId).toBe("pc-dev");
     // The PC names itself in its QR; that name must reach the stored record
     // (it is the only human-readable identifier the machines list has).
-    expect((await controller.listMachines())[0].label).toBe("Studio-Mac");
+    const stored = (await controller.listMachines())[0];
+    expect(stored.label).toBe("Studio-Mac");
+    // …together with the PC's OWN address, never the relay host (which is the
+    // same for every machine and made two rows indistinguishable).
+    expect(stored.peer_ip).toBe("192.168.1.24");
+    expect(stored.peer_ip).not.toBe("relay.example.com");
     await controller.disconnect();
     pcA1.stopLoop();
     await runA1;

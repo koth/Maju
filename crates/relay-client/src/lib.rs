@@ -31,6 +31,9 @@ pub use crypto::{SessionKey, decrypt, encrypt};
 pub use connection::{RelayConnection, RelayTransport, WsTransport, dial_plain, spawn_mock_relay};
 pub use driver::{ControlHandler, EventSource, PairingHandler, RelayDriver};
 pub use binding::{BindOutcome, BoundDevice, SubscriptionState};
-pub use account::{AccountSession, LoginClient, auth_base_url_from_ws_endpoint};
+pub use account::{
+    AccountSession, LoginClient, auth_base_url_from_ws_endpoint, rank_local_address,
+    relay_host_port,
+};
 pub use identity::DeviceIdentity;
 pub use pairing::{PairingCode, PairingQrPayload, DEFAULT_PAIRING_TTL, build_qr_payload, ecdh_shared_secret};

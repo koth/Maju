@@ -73,6 +73,12 @@ pub struct PairingQrPayload {
     /// falls back to the id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pc_name: Option<String>,
+    /// The PC's OWN address on its network (the local IP it uses to reach the
+    /// relay). Deliberately not the relay host: that is identical for every
+    /// paired PC, so showing it left the machines list with no way to tell two
+    /// machines apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_ip: Option<String>,
 }
 
 impl PairingQrPayload {
@@ -82,24 +88,29 @@ impl PairingQrPayload {
 }
 
 /// Build the QR payload from a relay endpoint, a freshly minted code, the PC
-/// device public key (base64), and this PC's friendly name (hostname).
+/// device public key (base64), and this PC's friendly name (hostname) + its
+/// own network address.
 pub fn build_qr_payload(
     relay_endpoint: &str,
     code: &PairingCode,
     pc_device_pubkey_b64: &str,
     pc_name: Option<&str>,
+    pc_ip: Option<&str>,
 ) -> PairingQrPayload {
-    // A blank name is the same as no name: the phone's fallback label is
-    // better than an empty string.
-    let pc_name = pc_name
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string);
+    // A blank value is the same as no value: the phone's fallback is better
+    // than an empty string.
+    let clean = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
     PairingQrPayload {
         relay_endpoint: relay_endpoint.to_string(),
         pairing_code: code.code().to_string(),
         pc_device_pubkey: pc_device_pubkey_b64.to_string(),
-        pc_name,
+        pc_name: clean(pc_name),
+        pc_ip: clean(pc_ip),
     }
 }
 
@@ -141,6 +152,7 @@ mod tests {
             &code,
             "pubkey-b64",
             Some("Koth-MacBook"),
+            Some("192.168.1.24"),
         );
         let json = payload.to_json().unwrap();
         let back: PairingQrPayload = serde_json::from_str(&json).unwrap();
@@ -148,16 +160,23 @@ mod tests {
         assert_eq!(back.relay_endpoint, "wss://relay.example.com");
         assert_eq!(back.pairing_code, code.code());
         assert_eq!(back.pc_name.as_deref(), Some("Koth-MacBook"));
+        assert_eq!(back.pc_ip.as_deref(), Some("192.168.1.24"));
+        // The PC's own address, never the relay's — the relay host is the same
+        // for every machine and therefore useless for telling them apart.
+        assert_ne!(back.pc_ip.as_deref(), Some("relay.example.com"));
     }
 
     #[test]
-    fn qr_payload_omits_a_blank_or_missing_pc_name() {
+    fn qr_payload_omits_blank_identity_fields() {
         let code = PairingCode::mint(DEFAULT_PAIRING_TTL);
         for name in [None, Some(""), Some("   ")] {
-            let payload = build_qr_payload("wss://relay.example.com", &code, "pk", name);
+            let payload = build_qr_payload("wss://relay.example.com", &code, "pk", name, None);
             assert_eq!(payload.pc_name, None);
+            assert_eq!(payload.pc_ip, None);
             // Absent, not null: a phone parsing an older payload still works.
-            assert!(!payload.to_json().unwrap().contains("pc_name"));
+            let json = payload.to_json().unwrap();
+            assert!(!json.contains("pc_name"));
+            assert!(!json.contains("pc_ip"));
         }
     }
 

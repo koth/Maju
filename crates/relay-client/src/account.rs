@@ -182,12 +182,134 @@ pub fn auth_base_url_from_ws_endpoint(ws_endpoint: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
+/// Split a relay WebSocket endpoint into its `(host, port)` pair. The port
+/// defaults by scheme (443 for `wss://`, 80 for `ws://`); path/query/fragment
+/// are stripped. Returns `None` for a non-`ws`/`wss` endpoint.
+///
+/// Used by the desktop to work out which local interface it would use to reach
+/// the relay (see `local_egress_ip`), so it must not require a name to resolve
+/// — the caller resolves it.
+pub fn relay_host_port(ws_endpoint: &str) -> Option<(String, u16)> {
+    let (default_port, rest) = if let Some(rest) = ws_endpoint.strip_prefix("wss://") {
+        (443u16, rest)
+    } else if let Some(rest) = ws_endpoint.strip_prefix("ws://") {
+        (80u16, rest)
+    } else {
+        return None;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        return None;
+    }
+    // Bracketed IPv6 literal: `[::1]:8443`.
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        let port = after
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return Some((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => match port.parse::<u16>() {
+            Ok(parsed) => Some((host.to_string(), parsed)),
+            // `host:not-a-port` — treat the whole authority as the host.
+            Err(_) => Some((authority.to_string(), default_port)),
+        },
+        _ => Some((authority.to_string(), default_port)),
+    }
+}
+
+/// Rank a candidate local address for DISPLAY to a user (lower is better), or
+/// `None` when it must never be shown.
+///
+/// The point is to identify a machine to a human: a private LAN address
+/// (`192.168.x.y`) is what people can compare, while VPN/fake-IP egress pools
+/// are shared by every machine behind the same tunnel. Notably Clash-style
+/// TUN mode reports `198.18.0.0/15` (RFC 2544 benchmarking space) as the
+/// route-chosen source address — two PCs behind the same VPN would then show
+/// the identical "IP" again, which is the bug this exists to prevent. Such
+/// addresses are still returned (they are better than nothing) but ranked last
+/// so any real interface address wins.
+pub fn rank_local_address(ip: &str) -> Option<u8> {
+    let parsed: std::net::IpAddr = ip.trim().parse().ok()?;
+    match parsed {
+        std::net::IpAddr::V4(v4) => {
+            if v4.is_loopback() || v4.is_unspecified() || v4.is_link_local() {
+                return None;
+            }
+            let o = v4.octets();
+            let rank = if o[0] == 10 || (o[0] == 192 && o[1] == 168) {
+                0
+            } else if o[0] == 172 && (16..=31).contains(&o[1]) {
+                1
+            } else if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+                9
+            } else {
+                5
+            };
+            Some(rank)
+        }
+        // IPv6 is only a last resort: the phone's row is 12px and an IPv6
+        // address does not fit or read well.
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                None
+            } else {
+                Some(12)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn relay_host_port_defaults_by_scheme_and_strips_path() {
+        assert_eq!(
+            relay_host_port("wss://relay.kodex.app"),
+            Some(("relay.kodex.app".to_string(), 443))
+        );
+        assert_eq!(
+            relay_host_port("ws://120.48.49.190"),
+            Some(("120.48.49.190".to_string(), 80))
+        );
+        assert_eq!(
+            relay_host_port("wss://relay.kodex.app:8443/ws?x=1"),
+            Some(("relay.kodex.app".to_string(), 8443))
+        );
+        assert_eq!(
+            relay_host_port("wss://[2001:db8::1]:9443"),
+            Some(("2001:db8::1".to_string(), 9443))
+        );
+        assert_eq!(relay_host_port("https://relay.kodex.app"), None);
+        assert_eq!(relay_host_port("wss://"), None);
+    }
+
+    #[test]
+    fn local_address_ranking_prefers_private_lan_over_vpn_fake_ip() {
+        // A real Wi-Fi address beats Clash's shared fake-IP egress.
+        let lan = rank_local_address("192.168.3.127").unwrap();
+        let fake = rank_local_address("198.18.0.1").unwrap();
+        assert!(lan < fake, "LAN {lan} should outrank fake-IP {fake}");
+        assert!(rank_local_address("10.1.2.3").unwrap() < rank_local_address("8.8.8.8").unwrap());
+        assert!(rank_local_address("172.16.0.9").unwrap() < rank_local_address("8.8.8.8").unwrap());
+        assert!(rank_local_address("8.8.8.8").unwrap() < fake);
+    }
+
+    #[test]
+    fn local_address_ranking_rejects_unusable_addresses() {
+        assert_eq!(rank_local_address("127.0.0.1"), None);
+        assert_eq!(rank_local_address("0.0.0.0"), None);
+        assert_eq!(rank_local_address("169.254.10.1"), None);
+        assert_eq!(rank_local_address("::1"), None);
+        assert_eq!(rank_local_address("not-an-ip"), None);
+    }
 
     #[test]
     fn auth_base_url_maps_schemes_and_strips_path() {

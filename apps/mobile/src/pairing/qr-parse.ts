@@ -60,11 +60,18 @@ export function parsePairingQr(
   if (pub.length !== PC_PUBKEY_LEN) {
   throw new Error(`pc_device_pubkey is ${pub.length} bytes, expected ${PC_PUBKEY_LEN}`);
   }
-  // Normalize the optional machine name: a non-string or blank value must not
-  // become a garbage label on the machines list.
-  const pcName =
-    typeof payload.pc_name === "string" ? payload.pc_name.trim() : "";
-  return { ...payload, pc_name: pcName.length > 0 ? pcName : undefined };
+  // Normalize the optional identity fields: a non-string or blank value must
+  // not become a garbage label/address on the machines list.
+  const clean = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  };
+  return {
+    ...payload,
+    pc_name: clean(payload.pc_name),
+    pc_ip: clean(payload.pc_ip),
+  };
 }
 
 /** Decode the PC static public key from a parsed QR payload (32 bytes). */

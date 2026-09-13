@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   boundDate,
+  machineAddress,
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  relayHost,
   shortPeerId,
 } from "../features/machines/machine-view";
 import type { ConnectionState } from "../relay/state-machine";
@@ -32,15 +32,18 @@ describe("shortPeerId", () => {
   });
 });
 
-describe("relayHost", () => {
-  it("extracts the host from a relay endpoint", () => {
-    expect(relayHost("wss://relay.example.com:8443/path")).toBe("relay.example.com:8443");
+describe("machineAddress", () => {
+  it("shows the PC's own address, trimmed", () => {
+    expect(machineAddress({ peer_ip: "192.168.1.24" })).toBe("192.168.1.24");
+    expect(machineAddress({ peer_ip: "  10.0.0.7 " })).toBe("10.0.0.7");
   });
 
-  it("returns null for missing or unparseable endpoints", () => {
-    expect(relayHost(undefined)).toBeNull();
-    expect(relayHost("")).toBeNull();
-    expect(relayHost("not a url")).toBeNull();
+  it("shows nothing when the PC never reported an address", () => {
+    // Never the relay host: it is identical for every machine, which is what
+    // made two bound PCs render as indistinguishable rows.
+    expect(machineAddress({})).toBeNull();
+    expect(machineAddress({ peer_ip: "" })).toBeNull();
+    expect(machineAddress({ peer_ip: "   " })).toBeNull();
   });
 });
 

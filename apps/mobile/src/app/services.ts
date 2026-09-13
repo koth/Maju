@@ -216,6 +216,9 @@ export class AppController {
       // The PC names itself in its QR; without it the machines list can only
       // show a device-id prefix, which is unrecognizable across several PCs.
       label: qr.pc_name,
+      // The PC's own address, NOT the relay host: every machine shares the
+      // relay host, so displaying it made the list indistinguishable.
+      peer_ip: qr.pc_ip,
       bound_at: Date.now(),
     };
     // Multi-machine: every scan produces its own pairing token, so machines

@@ -17,6 +17,10 @@ export interface BoundDevice {
   peer_static_pubkey_b64?: string;
   /** Relay endpoint from the original scan, used to redial this machine. */
   relay_endpoint?: string;
+  /** The PC's OWN network address as reported in its QR (never the relay
+   * host, which is identical for every machine). Optional: records bound
+   * before this field existed, and PCs that do not report one. */
+  peer_ip?: string;
   /** Friendly machine name shown in the machines list (optional). */
   label?: string;
   /** Epoch ms when this machine was bound (optional, for the list). */

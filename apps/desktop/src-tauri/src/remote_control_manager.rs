@@ -10,7 +10,7 @@
 use crate::commands::remote_control::RemoteControlStatus;
 use relay_client::{
     AccountSession, DeviceIdentity, LoginClient, PairingCode, DEFAULT_PAIRING_TTL,
-    auth_base_url_from_ws_endpoint, build_qr_payload,
+    auth_base_url_from_ws_endpoint, build_qr_payload, relay_host_port,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -76,14 +76,102 @@ fn local_machine_name() -> Option<String> {
     sanitize_machine_name(&raw)
 }
 
-/// Strip a trailing FQDN dot / stray whitespace and cap the length so the QR
-/// payload stays small and the phone's row stays readable.
+/// Strip the mDNS suffix (macOS reports `Koths-MacBook-Pro.local`), a trailing
+/// FQDN dot, and stray whitespace, then cap the length so the QR payload stays
+/// small and the phone's row stays readable.
 fn sanitize_machine_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('.');
+    let trimmed = if trimmed.to_ascii_lowercase().ends_with(".local") {
+        &trimmed[..trimmed.len() - ".local".len()]
+    } else {
+        trimmed
+    };
+    let trimmed = trimmed.trim_end_matches('.');
     if trimmed.is_empty() {
         return None;
     }
     Some(trimmed.chars().take(48).collect())
+}
+
+/// This PC's OWN address on the network, as shown to the phone.
+///
+/// The machines list used to print the relay's host, which is the same string
+/// for every paired PC (and every user) — two machines were literally
+/// indistinguishable. The useful identifier is where THIS computer sits, so
+/// candidates are gathered and the most human-meaningful one wins:
+///
+///  1. every address on a real local interface (`ifconfig` / `hostname -I`),
+///  2. the source address the OS would use to reach the relay (UDP connect —
+///     sends nothing),
+///
+/// then ranked by [`relay_client::rank_local_address`]. Step 2 matters because
+/// a VPN in TUN mode takes over the default route, so it alone would report the
+/// tunnel's fake-IP (`198.18.0.1`) which every machine behind that VPN shares.
+fn local_network_address(relay_endpoint: &str) -> Option<String> {
+    let mut candidates = platform_lan_addresses();
+    if let Some(egress) = local_egress_ip(relay_endpoint) {
+        candidates.push(egress);
+    }
+    candidates
+        .into_iter()
+        .filter_map(|ip| relay_client::rank_local_address(&ip).map(|rank| (rank, ip)))
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, ip)| ip)
+}
+
+/// Interface addresses reported by the OS, best-effort. Empty on platforms
+/// where probing is unreliable (Windows falls back to the egress probe).
+fn platform_lan_addresses() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // `ifconfig` prints one `inet <addr> netmask …` line per IPv4 address;
+        // this catches Wi-Fi/Ethernet AND tunnel interfaces in one shot, so the
+        // ranking step can pick the real one.
+        return run_command("ifconfig", &[])
+            .map(|out| {
+                out.lines()
+                    .filter_map(|line| {
+                        let line = line.trim();
+                        let mut parts = line.strip_prefix("inet ")?.split_whitespace();
+                        parts.next().map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return run_command("hostname", &["-I"])
+            .map(|out| out.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Vec::new()
+    }
+}
+
+/// The local address the OS picks to reach the relay. A UDP `connect` performs
+/// a routing-table lookup only — no packet leaves the machine.
+fn local_egress_ip(relay_endpoint: &str) -> Option<String> {
+    let (host, port) = relay_host_port(relay_endpoint)?;
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect((host.as_str(), port)).ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+/// Run a command and return its trimmed stdout, or `None` on any failure.
+fn run_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 impl RemoteControlManager {
@@ -225,6 +313,7 @@ impl RemoteControlManager {
             &code,
             &identity.public_b64(),
             local_machine_name().as_deref(),
+            local_network_address(&inner.relay_endpoint).as_deref(),
         );
         let json = payload
             .to_json()
