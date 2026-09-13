@@ -10,12 +10,11 @@ import {
 } from "react-native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import type { BoundDevice } from "../../account/binding";
-import { colors, radius, shadows, spacing, styles } from "../theme";
+import { colors, radius, spacing } from "../theme";
 import {
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  machineTint,
   relayHost,
   type MachinePhase,
 } from "./machine-view";
@@ -27,6 +26,11 @@ import {
 // machine with a green dot while the link is live; tapping it lists every
 // bound machine and switches in place (fresh E2E handshake, session list
 // reloads for the newly selected machine).
+//
+// Presentation is deliberately plain: the chip is a quiet pill (no accent
+// border), the sheet is a flat list of rows separated by hairlines, and the
+// only color is the connection dot. A per-row colored avatar made the list
+// look like a toy.
 //
 // Stateless data-wise: the bound list is re-read from the controller whenever
 // the sheet opens, and the active machine is read from the controller on each
@@ -117,7 +121,7 @@ export function MachineSwitcher({ onWillSwitch }: { onWillSwitch?: () => void })
   return (
     <>
       <Pressable
-        style={({ pressed }) => [localStyles.chip, { opacity: pressed ? 0.75 : 1 }]}
+        style={({ pressed }) => [localStyles.chip, { opacity: pressed ? 0.7 : 1 }]}
         onPress={openSheet}
         accessibilityRole="button"
         accessibilityLabel={`当前电脑 ${activeLabel}，点按切换`}
@@ -126,7 +130,7 @@ export function MachineSwitcher({ onWillSwitch }: { onWillSwitch?: () => void })
         <Text style={localStyles.chipLabel} numberOfLines={1}>
           {activeLabel}
         </Text>
-        <Text style={localStyles.chipChevron}>{"\u25BE"}</Text>
+        <Text style={localStyles.chipChevron}>{"\u2304"}</Text>
       </Pressable>
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
@@ -140,12 +144,12 @@ export function MachineSwitcher({ onWillSwitch }: { onWillSwitch?: () => void })
               </Pressable>
             </View>
             <Text style={modalStyles.subtitle}>
-              已配对的电脑。点按切换到它的会话，绿色圆点表示当前已连接。
+              已配对的电脑。点按切换到它的会话，绿点表示当前已连接。
             </Text>
 
             {loading && devices.length === 0 ? (
               <View style={modalStyles.center}>
-                <ActivityIndicator color={colors.accent} />
+                <ActivityIndicator color={colors.textDim} />
               </View>
             ) : devices.length === 0 ? (
               <Text style={modalStyles.empty}>
@@ -157,19 +161,21 @@ export function MachineSwitcher({ onWillSwitch }: { onWillSwitch?: () => void })
                 nestedScrollEnabled
                 showsVerticalScrollIndicator={false}
               >
-                {devices.map((device) => {
+                {devices.map((device, index) => {
                   const isActive = device.peer_device_id === activePeer;
                   const phase = machinePhase(isActive, connState);
                   return (
-                    <MachineOption
-                      key={device.peer_device_id}
-                      device={device}
-                      active={isActive}
-                      phase={phase}
-                      switching={switchingTo === device.peer_device_id}
-                      disabled={switchingTo !== null}
-                      onPress={() => void switchTo(device)}
-                    />
+                    <View key={device.peer_device_id}>
+                      {index > 0 ? <View style={modalStyles.separator} /> : null}
+                      <MachineOption
+                        device={device}
+                        active={isActive}
+                        phase={phase}
+                        switching={switchingTo === device.peer_device_id}
+                        disabled={switchingTo !== null}
+                        onPress={() => void switchTo(device)}
+                      />
+                    </View>
                   );
                 })}
               </ScrollView>
@@ -208,8 +214,7 @@ function MachineOption({
     <Pressable
       style={({ pressed }) => [
         optionStyles.row,
-        active && optionStyles.rowActive,
-        { opacity: disabled && !switching ? 0.5 : pressed ? 0.75 : 1 },
+        { opacity: disabled && !switching ? 0.45 : pressed ? 0.7 : 1 },
       ]}
       onPress={onPress}
       disabled={disabled}
@@ -217,69 +222,75 @@ function MachineOption({
       accessibilityState={{ selected: active }}
       accessibilityLabel={`${label}${active ? "，当前电脑" : ""}`}
     >
-      <View style={[optionStyles.avatar, { backgroundColor: machineTint(device.peer_device_id) }]}>
-        <Text style={styles.avatarText}>{label.trim()[0]?.toUpperCase() ?? "P"}</Text>
-      </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <View style={localStyles.nameRow}>
-          <Text style={optionStyles.name} numberOfLines={1}>
-            {label}
-          </Text>
-          {active ? <View style={[localStyles.dot, { backgroundColor: PHASE_DOT[phase] }]} /> : null}
-        </View>
-        <Text style={optionStyles.meta} numberOfLines={1}>
-          {meta}
+      <View style={localStyles.nameRow}>
+        {active ? (
+          <View style={[localStyles.dot, { backgroundColor: PHASE_DOT[phase] }]} />
+        ) : (
+          <View style={localStyles.dotSpacer} />
+        )}
+        <Text style={[optionStyles.name, active && { color: colors.text }]} numberOfLines={1}>
+          {label}
         </Text>
       </View>
-      {switching ? (
-        <ActivityIndicator color={colors.accent} size="small" />
-      ) : active && phase === "connected" ? (
-        <Text style={optionStyles.check}>{"\u2713"}</Text>
-      ) : null}
+      <View style={optionStyles.trailing}>
+        {switching ? (
+          <ActivityIndicator color={colors.textDim} size="small" />
+        ) : (
+          <>
+            <Text style={optionStyles.meta} numberOfLines={1}>
+              {meta}
+            </Text>
+            {active && phase === "connected" ? (
+              <Text style={optionStyles.check}>{"\u2713"}</Text>
+            ) : null}
+          </>
+        )}
+      </View>
     </Pressable>
   );
 }
 
 const localStyles = StyleSheet.create({
   chip: {
-    alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
-    maxWidth: "78%",
+    flexShrink: 1,
+    maxWidth: "70%",
     paddingVertical: spacing.xs + 2,
     paddingHorizontal: spacing.md,
     borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: colors.border,
     backgroundColor: colors.surfaceAlt,
   },
   dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     marginRight: spacing.sm,
   },
+  dotSpacer: { width: 7, marginRight: spacing.sm },
   chipLabel: {
     color: colors.text,
     fontSize: 13,
-    fontWeight: "700",
+    fontWeight: "600",
     flexShrink: 1,
   },
   chipChevron: {
-    color: colors.textDim,
-    fontSize: 10,
+    color: colors.textFaint,
+    fontSize: 12,
     marginLeft: spacing.sm,
   },
   nameRow: {
     flexDirection: "row",
     alignItems: "center",
+    flex: 1,
+    minWidth: 0,
   },
 });
 
 const modalStyles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: colors.scrim,
     alignItems: "center",
     justifyContent: "center",
     padding: spacing.lg,
@@ -288,12 +299,9 @@ const modalStyles = StyleSheet.create({
     width: "100%",
     maxWidth: 420,
     maxHeight: "82%",
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+    borderRadius: radius.xl,
     padding: spacing.lg,
-    ...shadows.raised,
   },
   titleRow: {
     flexDirection: "row",
@@ -303,10 +311,10 @@ const modalStyles = StyleSheet.create({
   title: {
     color: colors.text,
     fontSize: 16,
-    fontWeight: "800",
+    fontWeight: "700",
   },
   close: {
-    color: colors.textDim,
+    color: colors.textFaint,
     fontSize: 16,
     paddingHorizontal: spacing.xs,
   },
@@ -317,18 +325,18 @@ const modalStyles = StyleSheet.create({
     marginTop: spacing.xs,
     marginBottom: spacing.sm,
   },
-  body: {
-    flexGrow: 0,
-  },
-  center: {
-    paddingVertical: spacing.xl,
-    alignItems: "center",
-  },
+  body: { flexGrow: 0 },
+  center: { paddingVertical: spacing.xl, alignItems: "center" },
   empty: {
     color: colors.textDim,
     fontSize: 13,
     lineHeight: 19,
     paddingVertical: spacing.md,
+  },
+  separator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.border,
+    marginLeft: spacing.md + 7 + spacing.sm,
   },
   error: {
     color: colors.danger,
@@ -342,41 +350,31 @@ const optionStyles = StyleSheet.create({
   row: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: "transparent",
-    paddingVertical: spacing.sm + 2,
+    paddingVertical: spacing.md,
     paddingHorizontal: spacing.md,
-    marginTop: spacing.xs,
-  },
-  rowActive: {
-    borderColor: colors.accent,
-    backgroundColor: colors.surfaceRaised,
-  },
-  avatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: spacing.md,
+    borderRadius: radius.md,
   },
   name: {
-    color: colors.text,
+    color: colors.textDim,
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "500",
+    flexShrink: 1,
+  },
+  trailing: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginLeft: spacing.sm,
     flexShrink: 1,
   },
   meta: {
     color: colors.textFaint,
     fontSize: 12,
-    marginTop: 2,
   },
   check: {
-    color: colors.success,
-    fontSize: 16,
-    fontWeight: "800",
+    color: colors.accent,
+    fontSize: 15,
+    fontWeight: "700",
     marginLeft: spacing.sm,
   },
 });
+// end of file

@@ -126,6 +126,9 @@ export interface PairingQrPayload {
   relay_endpoint: string;
   pairing_code: string;
   pc_device_pubkey: string;
+  /** Friendly name of the PC (its hostname), when the PC sent one. PCs that
+   * predate this field omit it, so treat it as optional. */
+  pc_name?: string;
 }
 export interface PairingInitiate {
   pairing_code: string;

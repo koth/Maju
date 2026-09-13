@@ -27,16 +27,17 @@ const PC_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 200 + i);
 /** A second machine's static X25519 secret (multi-machine switch test). */
 const PC2_SECRET = Uint8Array.from({ length: 32 }, (_, i) => 100 + i);
 
-function qrJsonFor(secret: Uint8Array): string {
+function qrJsonFor(secret: Uint8Array, pcName?: string): string {
   return JSON.stringify({
     relay_endpoint: "wss://relay.example.com",
     pairing_code: "PAIR123",
     pc_device_pubkey: encodeBase64UrlNoPad(getPublicKey(secret)),
+    ...(pcName ? { pc_name: pcName } : {}),
   });
 }
 
 function qrJson(): string {
-  return qrJsonFor(PC_SECRET);
+  return qrJsonFor(PC_SECRET, "Studio-Mac");
 }
 
 function makeSnapshot(
@@ -530,6 +531,9 @@ describe("integration: phone <-> fake PC over relay", () => {
     expect(controller.connectionState).toBe("connected");
     // The active machine drives the switcher's "which PC" chip + green dot.
     expect(controller.activePeerDeviceId).toBe("pc-dev");
+    // The PC names itself in its QR; that name must reach the stored record
+    // (it is the only human-readable identifier the machines list has).
+    expect((await controller.listMachines())[0].label).toBe("Studio-Mac");
     await controller.disconnect();
     pcA1.stopLoop();
     await runA1;

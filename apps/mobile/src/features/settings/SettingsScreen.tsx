@@ -72,23 +72,30 @@ export function SettingsScreen({
   const subStatus = subscription.active
     ? `active · ${subscription.plan ?? "—"}`
     : "free / inactive";
-  const connTint =
-    connState === "connected"
-      ? { color: colors.success, bg: colors.successTint, border: colors.success }
-      : { color: colors.warn, bg: colors.warnTint, border: colors.warn };
+  const connected = connState === "connected";
 
   return (
     <View style={styles.screen}>
       <View style={{ padding: spacing.lg }}>
-        <Text style={styles.title}>Settings</Text>
-        <Text style={styles.subtitle}>Manage the link between this device and your Maju PC.</Text>
+        <Text style={[styles.subtitle, { marginTop: spacing.sm }]}>
+          管理这台手机与 Maju 电脑之间的连接。
+        </Text>
 
-        <Text style={styles.sectionHeader}>Connection</Text>
+        <Text style={styles.sectionHeader}>连接</Text>
         <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.textDim}>Status</Text>
-            <View style={[styles.chip, { backgroundColor: connTint.bg, borderColor: connTint.border }]}>
-              <Text style={{ color: connTint.color, fontSize: 11, fontWeight: "700" }}>{connState}</Text>
+            <Text style={styles.textDim}>状态</Text>
+            <View style={styles.row}>
+              <View
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 3.5,
+                  marginRight: spacing.sm,
+                  backgroundColor: connected ? colors.success : colors.warn,
+                }}
+              />
+              <Text style={{ color: colors.text, fontSize: 14, fontWeight: "500" }}>{connState}</Text>
             </View>
           </View>
         </View>
@@ -147,44 +154,44 @@ export function SettingsScreen({
           </Text>
         </View>
 
-        <Text style={styles.sectionHeader}>Device</Text>
+        <Text style={styles.sectionHeader}>设备</Text>
         <View style={styles.card}>
-          <Text style={styles.textDim}>Device id</Text>
+          <Text style={styles.textDim}>设备 ID</Text>
           <Text style={[styles.mono, { marginTop: spacing.xs, fontSize: 12, color: colors.text }]}>
             {controller.deviceIdValue ?? "(generating)"}
           </Text>
         </View>
 
-        <Text style={styles.sectionHeader}>Subscription</Text>
+        <Text style={styles.sectionHeader}>订阅</Text>
         <View style={styles.card}>
-          <Text style={styles.textDim}>Plan</Text>
+          <Text style={styles.textDim}>套餐</Text>
           <Text style={[styles.text, { marginTop: spacing.xs, fontWeight: "600" }]}>{subStatus}</Text>
           {subscription.expiresAt ? (
             <Text style={[styles.textFaint, { marginTop: spacing.xs }]}>
-              {`expires ${new Date(subscription.expiresAt).toLocaleDateString()}`}
+              {`到期 ${new Date(subscription.expiresAt).toLocaleDateString()}`}
             </Text>
           ) : null}
         </View>
 
         <Pressable
-          style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.lg, borderColor: colors.danger, opacity: pressed ? 0.7 : 1 }]}
+          style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.lg, opacity: pressed ? 0.7 : 1 }]}
           onPress={unbind}
         >
-          <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>Unbind all machines</Text>
+          <Text style={[styles.text, { color: colors.danger, fontWeight: "600" }]}>解绑所有设备</Text>
         </Pressable>
         {onOpenDiagnostics ? (
           <Pressable
             style={({ pressed }) => [styles.buttonGhost, { marginTop: spacing.sm, opacity: pressed ? 0.7 : 1 }]}
             onPress={onOpenDiagnostics}
           >
-            <Text style={[styles.text, { fontWeight: "600" }]}>Diagnostics log</Text>
+            <Text style={[styles.text, { fontWeight: "600" }]}>诊断日志</Text>
           </Pressable>
         ) : null}
         <Pressable
           style={({ pressed }) => [styles.buttonDanger, { marginTop: spacing.sm, opacity: pressed ? 0.9 : 1 }]}
           onPress={kill}
         >
-          <Text style={styles.buttonText}>Disconnect (kill switch)</Text>
+          <Text style={styles.buttonText}>断开连接</Text>
         </Pressable>
       </View>
     </View>
@@ -209,8 +216,8 @@ function AlertToggle({
         value={value}
         disabled={disabled}
         onValueChange={onChange}
-        trackColor={{ false: colors.borderStrong, true: colors.accentDim }}
-        thumbColor={value ? colors.accent : colors.textFaint}
+        trackColor={{ false: colors.borderStrong, true: colors.text }}
+        thumbColor={value ? colors.bg : colors.surfaceRaised}
       />
     </View>
   );

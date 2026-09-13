@@ -70,26 +70,36 @@ export function AlertBannerHost({
           onOpen?.(ctx);
         }}
         style={({ pressed }) => ({
-          backgroundColor: colors.surface,
-          borderColor: completed ? colors.success : colors.warn,
-          borderWidth: 1,
-          borderRadius: radius.md,
+          backgroundColor: colors.surfaceRaised,
+          borderRadius: radius.lg,
           padding: spacing.md,
           opacity: pressed ? 0.85 : 1,
+          flexDirection: "row",
+          alignItems: "center",
           shadowColor: "#000",
-          shadowOpacity: 0.35,
-          shadowRadius: 12,
-          shadowOffset: { width: 0, height: 4 },
-          elevation: 8,
+          shadowOpacity: 0.5,
+          shadowRadius: 20,
+          shadowOffset: { width: 0, height: 8 },
+          elevation: 10,
         })}
       >
-        <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }} numberOfLines={1}>
-          {completed ? "✅ " : "⚠️ "}
-          {banner.ctx.sessionTitle || "会话"}
-        </Text>
-        <Text style={{ color: colors.textDim, fontSize: 12, marginTop: 2 }}>
-          {completed ? "本轮已完成，点击查看结果" : "本轮已中断，点击查看详情"}
-        </Text>
+        <View
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 3.5,
+            marginRight: spacing.sm,
+            backgroundColor: completed ? colors.success : colors.warn,
+          }}
+        />
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }} numberOfLines={1}>
+            {banner.ctx.sessionTitle || "会话"}
+          </Text>
+          <Text style={{ color: colors.textDim, fontSize: 12, marginTop: 2 }}>
+            {completed ? "本轮已完成，点击查看结果" : "本轮已中断，点击查看详情"}
+          </Text>
+        </View>
       </Pressable>
     </View>
   );

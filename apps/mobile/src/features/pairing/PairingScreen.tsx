@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator, ScrollView, Platform } from "react-native";
+import { View, Text, TextInput, Pressable, ActivityIndicator, ScrollView, Platform, StyleSheet } from "react-native";
 import { CameraView, useCameraPermissions, scanFromURLAsync } from "expo-camera";
 import type { BarcodeScanningResult } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
@@ -7,7 +7,7 @@ import { useAppController, useConnectionState } from "../../app/AppServicesConte
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WsTransport } from "../../relay/transport";
 import { parsePairingQr } from "../../pairing/qr-parse";
-import { styles, colors, spacing, radius, shadows } from "../theme";
+import { styles, colors, spacing, radius } from "../theme";
 
 type Phase = "idle" | "dialing" | "authenticating" | "pairing" | "connected" | "error";
 
@@ -101,44 +101,32 @@ export function PairingScreen({
           hitSlop={10}
           style={({ pressed }) => ({
             alignSelf: "flex-start",
-            paddingHorizontal: spacing.sm,
             paddingVertical: spacing.xs,
-            borderRadius: 999,
-            backgroundColor: pressed ? colors.accentTint : "transparent",
+            opacity: pressed ? 0.6 : 1,
             marginBottom: spacing.xs,
           })}
+          accessibilityRole="button"
+          accessibilityLabel="返回设备列表"
         >
-          <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>{"\u2039"} Machines</Text>
+          <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "500" }}>{"\u2039"} 设备</Text>
         </Pressable>
       ) : null}
       <View style={{ alignItems: "center", marginTop: spacing.xl, marginBottom: spacing.xl }}>
-        <View
-          style={{
-            width: 64,
-            height: 64,
-            borderRadius: 20,
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: colors.accentDim,
-            borderWidth: 1,
-            borderColor: colors.borderStrong,
-            ...shadows.glow,
-          }}
-        >
-          <Text style={{ color: colors.accent, fontSize: 30, fontWeight: "800" }}>M</Text>
+        <View style={pairStyles.mark}>
+          <Text style={pairStyles.markText}>M</Text>
         </View>
         <Text style={[styles.title, { textAlign: "center", marginTop: spacing.lg, marginBottom: spacing.xs }]}>
-          Pair with Maju PC
+          配对 Maju 电脑
         </Text>
         <Text style={[styles.subtitle, { textAlign: "center", marginBottom: 0, maxWidth: 320 }]}>
-          Scan the QR shown on your computer to link this device. Pairing runs an end-to-end encrypted handshake (X25519 + ChaCha20-Poly1305).
+          扫描电脑上显示的二维码即可绑定。配对过程端到端加密（X25519 + ChaCha20-Poly1305）。
         </Text>
       </View>
 
       {!permission || permission.status !== "granted" ? (
         <View style={[styles.card, { alignItems: "center" }]}>
           <Text style={[styles.text, { textAlign: "center", marginBottom: spacing.md }]}>
-            Camera permission is required to scan the QR code.
+            需要相机权限才能扫描二维码。
           </Text>
           <Pressable
             style={({ pressed }) => [styles.button, { opacity: pressed ? 0.9 : 1, minWidth: 180 }]}
@@ -148,26 +136,14 @@ export function PairingScreen({
           </Pressable>
         </View>
       ) : (
-        <View style={[styles.card, { padding: 0, overflow: "hidden", height: 280, borderColor: colors.borderStrong, ...shadows.raised }]}>
+        <View style={pairStyles.camera}>
           <CameraView
             facing="back"
             barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
             onBarcodeScanned={onBarcodeScanned}
             style={{ flex: 1 }}
           />
-          <View
-            pointerEvents="none"
-            style={{
-              position: "absolute",
-              top: spacing.lg,
-              left: spacing.lg,
-              right: spacing.lg,
-              bottom: spacing.lg,
-              borderRadius: radius.lg,
-              borderWidth: 2,
-              borderColor: "rgba(255,255,255,0.35)",
-            }}
-          />
+          <View pointerEvents="none" style={pairStyles.cameraFrame} />
         </View>
       )}
 
@@ -200,21 +176,15 @@ export function PairingScreen({
       </Pressable>
 
       <View style={{ marginTop: spacing.xl, alignItems: "center" }}>
-        {busy && <ActivityIndicator color={colors.accent} />}
-        <Text style={styles.status}>{phase === "idle" ? `state: ${connState}` : `phase: ${phase}`}</Text>
-        {error && (
-          <View style={[styles.chip, { marginTop: spacing.sm, backgroundColor: colors.dangerTint, borderColor: colors.danger }]}>
-            <Text style={{ color: colors.danger, fontSize: 12 }}>{error}</Text>
-          </View>
-        )}
+        {busy && <ActivityIndicator color={colors.textDim} />}
+        {error ? (
+          <Text style={[styles.textFaint, { color: colors.danger, textAlign: "center", lineHeight: 18 }]}>
+            {error}
+          </Text>
+        ) : null}
         {phase === "connected" && (
           <Text style={[styles.text, { color: colors.success, marginTop: spacing.sm }]}>
-            Paired — end-to-end secure.
-          </Text>
-        )}
-        {Platform.OS !== "web" && (
-          <Text style={[styles.textDim, { marginTop: spacing.md, textAlign: "center" }]}>
-            {controller.deviceIdValue ? `device: ${controller.deviceIdValue.slice(0, 12)}…` : "generating device id…"}
+            配对成功，已建立端到端加密连接。
           </Text>
         )}
         {onOpenDiagnostics ? (
@@ -222,11 +192,40 @@ export function PairingScreen({
             style={({ pressed }) => ({ marginTop: spacing.md, padding: spacing.sm, opacity: pressed ? 0.7 : 1 })}
             onPress={onOpenDiagnostics}
           >
-            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>查看诊断日志</Text>
+            <Text style={[styles.text, { color: colors.textFaint, fontSize: 13 }]}>查看诊断日志</Text>
           </Pressable>
         ) : null}
       </View>
     </ScrollView>
   );
 }
+
+const pairStyles = StyleSheet.create({
+  // A plain glyph mark. The bordered accent square with a glow read as a
+  // widget rather than a brand mark.
+  mark: {
+    width: 60,
+    height: 60,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceAlt,
+  },
+  markText: { color: colors.text, fontSize: 26, fontWeight: "700" },
+  camera: {
+    overflow: "hidden",
+    height: 280,
+    borderRadius: radius.lg,
+  },
+  cameraFrame: {
+    position: "absolute",
+    top: spacing.lg,
+    left: spacing.lg,
+    right: spacing.lg,
+    bottom: spacing.lg,
+    borderRadius: radius.md,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.35)",
+  },
+});
 // end of file

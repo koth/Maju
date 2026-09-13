@@ -19,7 +19,7 @@ import {
   type NumberedDiffRow,
 } from "../tooling/line-diff";
 import { DIFF_CONTEXT_LINES } from "../tooling/compact-diff";
-import { colors, spacing } from "../theme";
+import { colors, spacing, radius } from "../theme";
 
 // Full-screen diff viewer opened by tapping a file in the turn-changes bar —
 // the mobile counterpart of the desktop review panel's multi-file diff:
@@ -388,7 +388,7 @@ const marqueeStyles = StyleSheet.create({
 const sheetStyles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.bg,
     paddingTop: spacing.xl,
     paddingHorizontal: spacing.sm,
   },
@@ -397,18 +397,18 @@ const sheetStyles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: spacing.sm,
   },
   back: {
     color: colors.accent,
     fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "600",
     width: 52,
   },
   headerTitle: {
     color: colors.text,
     fontSize: 14,
-    fontWeight: "800",
+    fontWeight: "600",
   },
   offscreen: {
     position: "absolute",
@@ -422,37 +422,35 @@ const sheetStyles = StyleSheet.create({
   },
   section: {
     marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderRadius: radius.md,
     overflow: "hidden",
   },
   sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.xs + 2,
-    paddingVertical: spacing.xs + 2,
-    paddingHorizontal: spacing.xs + 2,
-    backgroundColor: colors.surfaceAlt,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    backgroundColor: colors.surface,
   },
   sectionHeaderPressed: {
-    backgroundColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
   },
   chevron: {
-    color: colors.textDim,
+    color: colors.textFaint,
     fontSize: 13,
   },
   chevronOpen: {
     transform: [{ rotate: "90deg" }],
   },
   sectionPath: {
-    color: colors.text,
+    color: colors.textDim,
     fontSize: 12,
     fontFamily: "monospace",
   },
   count: {
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
     fontVariant: ["tabular-nums"],
   },
 });

@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { View, Text, TextInput, Pressable, ActivityIndicator, Vibration } from "react-native";
+import { View, Text, TextInput, Pressable, ActivityIndicator, Vibration, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { styles, colors, spacing, radius } from "../theme";
+import { colors, spacing, radius } from "../theme";
 
 interface Props {
   onSend: (text: string) => void | Promise<void>;
@@ -60,28 +60,21 @@ export function Composer({ onSend, disabled, error, streaming, onCancel }: Props
     <View
       style={{
         backgroundColor: colors.bg,
-        borderTopWidth: 1,
-        borderTopColor: colors.border,
         paddingBottom: insets.bottom > 0 ? 0 : 8,
       }}
     >
       {error ? (
-        <View style={{ paddingHorizontal: spacing.md, paddingTop: spacing.xs + 2 }}>
-          <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
-            <Text style={{ color: colors.danger, fontSize: 12 }}>{error}</Text>
-          </View>
-        </View>
+        <Text style={composerStyles.error} numberOfLines={2}>
+          {error}
+        </Text>
       ) : null}
-      <View style={{ flexDirection: "row", alignItems: "flex-end", padding: spacing.sm, gap: spacing.sm }}>
+      <View style={composerStyles.row}>
         <TextInput
           style={[
-            styles.input,
+            composerStyles.input,
             {
-              flex: 1,
-              height: Math.max(46, Math.min(inputHeight + 8, 140)),
-              borderRadius: inputHeight <= 50 ? 23 : radius.lg,
-              paddingHorizontal: spacing.lg,
-              fontSize: 15,
+              height: Math.max(44, Math.min(inputHeight + 8, 140)),
+              borderRadius: inputHeight <= 46 ? 22 : radius.lg,
             },
           ]}
           placeholder={"给智能体发消息\u2026"}
@@ -94,41 +87,24 @@ export function Composer({ onSend, disabled, error, streaming, onCancel }: Props
         />
         {streaming && onCancel ? (
           <Pressable
-            style={({ pressed }) => [
-              styles.pillButton,
-              {
-                width: 46,
-                height: 46,
-                alignSelf: "flex-end",
-                backgroundColor: colors.dangerTint,
-                borderWidth: 1,
-                borderColor: colors.danger,
-                shadowOpacity: 0,
-                elevation: 0,
-                opacity: pressed ? 0.8 : 1,
-              },
-            ]}
+            style={({ pressed }) => [composerStyles.circle, composerStyles.circleStop, { opacity: pressed ? 0.8 : 1 }]}
             disabled={canceling}
             onPress={handleCancel}
             accessibilityRole="button"
             accessibilityLabel="停止智能体"
           >
             {canceling ? (
-              <ActivityIndicator color={colors.danger} size="small" />
+              <ActivityIndicator color={colors.text} size="small" />
             ) : (
-              <View style={{ width: 14, height: 14, borderRadius: 3, backgroundColor: colors.danger }} />
+              <View style={composerStyles.stopSquare} />
             )}
           </Pressable>
         ) : null}
         <Pressable
           style={({ pressed }) => [
-            styles.pillButton,
-            {
-              width: 46,
-              height: 46,
-              alignSelf: "flex-end",
-              opacity: canSend ? (pressed ? 0.85 : 1) : 0.4,
-            },
+            composerStyles.circle,
+            canSend ? composerStyles.circleSend : composerStyles.circleDisabled,
+            { opacity: pressed && canSend ? 0.85 : 1 },
           ]}
           disabled={!canSend}
           onPress={handleSend}
@@ -136,13 +112,54 @@ export function Composer({ onSend, disabled, error, streaming, onCancel }: Props
           accessibilityLabel="发送消息"
         >
           {sending ? (
-            <ActivityIndicator color="#fff" size="small" />
+            <ActivityIndicator color={colors.bg} size="small" />
           ) : (
-            <Text style={{ color: "#fff", fontSize: 18, fontWeight: "800", lineHeight: 20 }}>{"\u2191"}</Text>
+            <Text style={[composerStyles.arrow, { color: canSend ? colors.bg : colors.textFaint }]}>{"\u2191"}</Text>
           )}
         </Pressable>
       </View>
     </View>
   );
 }
+
+// Chat-style composer: one filled rounded field plus two circular buttons.
+// No top divider and no boxed input — the field's fill already separates it
+// from the timeline, and a border on top of that read as heavy chrome.
+const composerStyles = StyleSheet.create({
+  row: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    gap: spacing.sm,
+  },
+  input: {
+    flex: 1,
+    color: colors.text,
+    backgroundColor: colors.surfaceAlt,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm + 2,
+    paddingBottom: spacing.sm + 2,
+    fontSize: 15,
+  },
+  circle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  circleSend: { backgroundColor: colors.text },
+  circleStop: { backgroundColor: colors.surfaceRaised },
+  circleDisabled: { backgroundColor: colors.surfaceAlt },
+  arrow: { fontSize: 18, fontWeight: "700", lineHeight: 20 },
+  stopSquare: { width: 12, height: 12, borderRadius: 3, backgroundColor: colors.text },
+  error: {
+    color: colors.danger,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
+  },
+});
 // end of file

@@ -260,13 +260,13 @@ function UserImageStrip({ images }: { images: UserMessageImage[] }) {
 }
 
 const timelineStyles = StyleSheet.create({
-  separator: { height: spacing.sm },
+  separator: { height: spacing.md },
   bubbleWrap: { width: "100%" },
-  bubble: { maxWidth: "88%", borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2, marginTop: spacing.xs },
-  bubbleUser: { backgroundColor: colors.accentDim, borderBottomRightRadius: radius.sm, borderWidth: 1, borderColor: "rgba(91,140,255,0.25)" },
-  // Assistant replies: NO box. Full-width plain container on the timeline bg —
-  // the markdown palette (MarkdownBody) is already tuned for the app bg, and
-  // tool cards above/below stay flush-aligned with the reply text.
+  // User messages: one flat filled bubble, no border, no tail. Assistant
+  // replies stay boxless (they are the page, not a card) — the fill alone
+  // distinguishes the two sides.
+  bubble: { maxWidth: "84%", borderRadius: radius.lg, paddingHorizontal: spacing.md, paddingVertical: spacing.sm + 2, marginTop: spacing.xs },
+  bubbleUser: { backgroundColor: colors.surfaceAlt },
   assistantBody: { alignSelf: "stretch", marginTop: spacing.xs },
   // Attached-image thumbnails: square center-crop previews (cover = the
   // shorter edge fills, the longer edge is cropped to its middle), mirroring
@@ -276,8 +276,6 @@ const timelineStyles = StyleSheet.create({
     width: 96,
     height: 96,
     borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
     backgroundColor: colors.surfaceAlt,
   },
   previewBackdrop: {
@@ -292,22 +290,20 @@ const timelineStyles = StyleSheet.create({
     position: "absolute",
     bottom: spacing.md,
     alignSelf: "center",
-    // Near-black instead of `surfaceRaised` (#1d2132): the pill floats ON TOP
-    // of the message text, and a light chip there was reported as an opaque
-    // white block covering the words it sits over.
-    backgroundColor: "rgba(7,8,15,0.94)",
+    // Opaque near-black rather than a surface step: the pill floats ON TOP of
+    // message text, and a lighter fill there read as a block covering the
+    // words it sits over.
+    backgroundColor: "rgba(20,20,20,0.96)",
     borderRadius: radius.pill,
-    paddingVertical: spacing.xs + 1,
+    paddingVertical: spacing.xs + 2,
     paddingHorizontal: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
     shadowColor: "#000",
-    shadowOpacity: 0.4,
+    shadowOpacity: 0.45,
     shadowRadius: 10,
     shadowOffset: { width: 0, height: 4 },
     elevation: 5,
   },
-  jumpText: { color: colors.accentBright, fontSize: 12, fontWeight: "700" },
+  jumpText: { color: colors.textDim, fontSize: 12, fontWeight: "600" },
 });
 
 export const ConversationTimeline = memo(ConversationTimelineImpl);

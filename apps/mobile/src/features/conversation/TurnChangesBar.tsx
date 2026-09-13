@@ -96,40 +96,43 @@ export const TurnChangesBar = memo(function TurnChangesBar({ snapshot }: { snaps
 });
 
 const barStyles = StyleSheet.create({
+  // A thin strip above the composer: hairline separation + plain text. It used
+  // to be a filled panel, which stacked another surface between the timeline
+  // and the input.
   wrap: {
-    borderTopWidth: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.bg,
     maxHeight: 240,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: spacing.sm - 2,
-    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
   },
   headerPressed: {
     backgroundColor: colors.surface,
   },
   label: {
-    color: colors.text,
+    color: colors.textDim,
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   meta: {
-    color: colors.textDim,
+    color: colors.textFaint,
     fontSize: 12,
     marginLeft: spacing.sm,
     flexShrink: 1,
   },
   count: {
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
     fontVariant: ["tabular-nums"],
     marginLeft: spacing.sm,
   },
   chevron: {
-    color: colors.textDim,
+    color: colors.textFaint,
     fontSize: 13,
     marginLeft: "auto",
     paddingLeft: spacing.sm,
@@ -140,15 +143,13 @@ const barStyles = StyleSheet.create({
   },
   list: {
     maxHeight: 200,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.lg,
     paddingBottom: spacing.sm,
   },
   fileRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: spacing.xs - 1,
-    paddingHorizontal: spacing.xs,
-    marginHorizontal: -spacing.xs,
+    paddingVertical: spacing.xs + 1,
     borderRadius: 6,
     gap: spacing.sm,
   },

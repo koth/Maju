@@ -6,7 +6,7 @@ implementation, with automated vs. needs-native-device status.
 ## Automated (green here)
 
 - `npx tsc --noEmit` — clean
-- `npx vitest run` — 188 tests across 21 files
+- `npx vitest run` — 191 tests across 22 files
 - `src/__tests__/integration.test.ts` — end-to-end over an in-memory relay
 - `src/__tests__/machine-view.test.ts` — machine label/phase helpers behind the
   project-page machine switcher (only the active + connected PC is "connected",

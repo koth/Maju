@@ -5,7 +5,7 @@ import { useAppController, useConnectionState } from "../../app/AppServicesConte
 import type { SessionListItem, WorkspaceSessionList } from "../../types";
 import { splitSessionGroups } from "./session-groups";
 import { MachineSwitcher } from "../machines/MachineSwitcher";
-import { styles, colors, spacing, radius, shadows } from "../theme";
+import { styles, typeScale, colors, spacing, radius } from "../theme";
 import { EmptyState } from "../ui/EmptyState";
 
 // Lists sessions from `ListSessions`. The project-less chats workspace
@@ -16,6 +16,12 @@ import { EmptyState } from "../ui/EmptyState";
 // workspace); expanding one reveals its session list. Pull-to-refresh
 // re-issues `ListSessions`; the expand/collapse map is hoisted here so
 // background refreshes never reset it.
+//
+// Presentation (ChatGPT-leaning): the header carries only two things — which
+// PC this list belongs to (left) and the primary 新建 action (right). Tabs are
+// plain text with an accent underline, not bordered pills, and the project /
+// session rows are flat full-width rows separated by hairlines instead of a
+// bordered card per item (a card per row is what made the list read as noise).
 
 type Group = WorkspaceSessionList;
 type Tab = "chats" | "projects";
@@ -77,32 +83,25 @@ function statusLabel(status: string): string {
   }
 }
 
-function statusTint(status: string): { color: string; bg: string; border: string } {
+/** Status is plain colored text, not a tinted pill: only the two abnormal
+ * states earn a color, idle stays neutral (it is the default, so coloring it
+ * just adds noise to every row). */
+function statusColor(status: string): string {
   switch (status) {
     case "Streaming":
     case "WaitingForTool":
-      return { color: colors.success, bg: colors.successTint, border: colors.success };
+      return colors.success;
     case "Interrupted":
-      return { color: colors.danger, bg: colors.dangerTint, border: colors.danger };
+      return colors.danger;
     default:
-      return { color: colors.textDim, bg: colors.surfaceAlt, border: colors.border };
+      return colors.textFaint;
   }
-}
-
-function avatarGradientColor(name: string): string {
-  // Deterministic accent-ish hue per project so avatars read distinct.
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  const palette = ["#5b8cff", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#f43f5e", "#a855f7"];
-  return palette[h % palette.length];
 }
 
 export function SessionListScreen({
   onOpenSession,
-  onOpenSettings,
 }: {
   onOpenSession: (sessionId: string, title: string, workspaceRoot?: string | null) => void;
-  onOpenSettings: () => void;
 }) {
   const controller = useAppController();
   const connState = useConnectionState();
@@ -239,50 +238,44 @@ export function SessionListScreen({
     }
   }
 
+  const busy = creatingFor !== null;
+
   return (
     <View style={styles.screen}>
-      {/* Which PC this page is showing, with quick switching between bound
-          machines right here (the machines landing screen is out of reach once
-          a connection has been established). */}
-      <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}>
+      {/* Header: which PC (left) + the primary action (right). Settings lives in
+          the native header — repeating it here made the row read as four
+          equally-weighted tabs. */}
+      <View style={localStyles.header}>
         <MachineSwitcher onWillSwitch={handleWillSwitch} />
+        <Pressable
+          style={({ pressed }) => [
+            localStyles.newButton,
+            { opacity: !connected ? 0.4 : pressed ? 0.85 : 1 },
+          ]}
+          onPress={() => void createFromHeader()}
+          disabled={busy || !connected}
+          accessibilityRole="button"
+          accessibilityLabel="新建会话"
+        >
+          {busy || !connected ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <Text style={localStyles.newButtonText}>新建</Text>
+          )}
+        </Pressable>
       </View>
-      <View style={[styles.rowBetween, { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }]}>
-        <View style={styles.row}>
-          <TabPill label="项目" active={tab === "projects"} onPress={() => setTab("projects")} />
-          <TabPill label="聊天" active={tab === "chats"} onPress={() => setTab("chats")} />
-        </View>
-        <View style={styles.row}>
-          <Pressable
-            style={({ pressed }) => [localStyles.headButton, { opacity: pressed ? 0.7 : 1 }]}
-            onPress={onOpenSettings}
-            hitSlop={8}
-          >
-            <Text style={[styles.text, { fontSize: 14, fontWeight: "600" }]}>设置</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [
-              localStyles.newButton,
-              { opacity: pressed ? 0.9 : connected ? 1 : 0.45 },
-            ]}
-            onPress={() => void createFromHeader()}
-            disabled={creatingFor !== null || !connected}
-          >
-            {creatingFor !== null || !connected ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={styles.buttonText}>新建</Text>
-            )}
-          </Pressable>
-        </View>
+
+      <View style={localStyles.tabs}>
+        <TabButton label="项目" active={tab === "projects"} onPress={() => setTab("projects")} />
+        <TabButton label="聊天" active={tab === "chats"} onPress={() => setTab("chats")} />
       </View>
 
       <View style={styles.hairline} />
 
       <FlatList
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingTop: spacing.sm, paddingBottom: spacing.xl }}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={refresh} tintColor={colors.accent} />}
+        contentContainerStyle={{ paddingBottom: spacing.xl }}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={refresh} tintColor={colors.textDim} />}
         data={rows}
         keyExtractor={(item) => item.key}
         renderItem={({ item }) =>
@@ -308,7 +301,7 @@ export function SessionListScreen({
         }
         ListEmptyComponent={
           loading ? (
-            <View style={styles.center}><ActivityIndicator color={colors.accent} /></View>
+            <View style={localStyles.emptyLoading}><ActivityIndicator color={colors.textDim} /></View>
           ) : tab === "chats" ? (
             <EmptyState
               glyph={"\u{1F4AC}"}
@@ -338,8 +331,10 @@ export function SessionListScreen({
   );
 }
 
-// Segmented-control pill for the 聊天/项目 tabs.
-function TabPill({
+// Tabs are text + a 2px accent underline. A bordered pill around each tab is
+// pure chrome: two pills plus the action button made the header look like
+// four peer controls.
+function TabButton({
   label,
   active,
   onPress,
@@ -350,16 +345,13 @@ function TabPill({
 }) {
   return (
     <Pressable
-      style={({ pressed }) => [
-        localStyles.tabPill,
-        active ? localStyles.tabPillActive : null,
-        { opacity: pressed ? 0.75 : 1 },
-      ]}
+      style={({ pressed }) => [localStyles.tab, { opacity: pressed ? 0.7 : 1 }]}
       onPress={onPress}
       accessibilityRole="tab"
       accessibilityState={{ selected: active }}
     >
-      <Text style={[localStyles.tabText, active ? localStyles.tabTextActive : null]}>{label}</Text>
+      <Text style={[localStyles.tabText, active && localStyles.tabTextActive]}>{label}</Text>
+      <View style={[localStyles.tabUnderline, active && localStyles.tabUnderlineActive]} />
     </Pressable>
   );
 }
@@ -383,22 +375,23 @@ function WorkspaceRow({
   const remote = group.workspace.location?.kind === "remote_linux";
   const dormant = remote && !group.connected;
   const initial = (group.workspace.name.trim()[0] ?? "?").toUpperCase();
-  const tint = avatarGradientColor(group.workspace.name);
+  // Offline is the steady state, so it is NOT printed per row — only remote
+  // offline (which the user must act on) earns copy.
+  const meta = group.connected
+    ? `${group.sessions.length} 个会话`
+    : remote
+      ? "远程 · 离线"
+      : null;
   return (
-    <View
-      style={[
-        localStyles.projectCard,
-        group.is_active ? { borderColor: colors.accent, ...shadows.card } : null,
-      ]}
-    >
+    <View>
       <Pressable
-        style={({ pressed }) => [localStyles.projectRow, { opacity: pressed ? 0.8 : 1 }]}
+        style={({ pressed }) => [localStyles.projectRow, pressed && localStyles.rowPressed]}
         onPress={onToggle}
         accessibilityRole="button"
         accessibilityState={{ expanded }}
       >
-        <View style={[localStyles.projectAvatar, { backgroundColor: tint }]}>
-          <Text style={styles.avatarText}>{initial}</Text>
+        <View style={localStyles.glyph}>
+          <Text style={localStyles.glyphText}>{initial}</Text>
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
           <View style={styles.row}>
@@ -407,15 +400,8 @@ function WorkspaceRow({
             </Text>
             {running && !dormant ? <View style={localStyles.runningDot} /> : null}
           </View>
-          <Text style={localStyles.projectMeta} numberOfLines={1}>
-            {group.connected
-              ? `${group.sessions.length} 个会话`
-              : remote
-                ? "远程 \u00b7 离线"
-                : "离线"}
-          </Text>
+          {meta ? <Text style={localStyles.projectMeta} numberOfLines={1}>{meta}</Text> : null}
         </View>
-        <AnimatedChevron expanded={expanded} />
         {!remote ? (
           <Pressable
             style={({ pressed }) => [localStyles.plusButton, { opacity: pressed ? 0.6 : 1 }]}
@@ -425,15 +411,19 @@ function WorkspaceRow({
               onCreate();
             }}
             disabled={!group.connected || creating}
+            accessibilityRole="button"
+            accessibilityLabel={`在 ${group.workspace.name} 新建会话`}
           >
             {creating ? (
-              <ActivityIndicator color={colors.accent} size="small" />
+              <ActivityIndicator color={colors.textDim} size="small" />
             ) : (
-              <Text style={localStyles.plusText}>+</Text>
+              <Text style={[localStyles.plusText, !group.connected && { color: colors.textFaint }]}>+</Text>
             )}
           </Pressable>
         ) : null}
+        <AnimatedChevron expanded={expanded} />
       </Pressable>
+      <View style={styles.hairlineInset} />
     </View>
   );
 }
@@ -467,23 +457,25 @@ function SessionRow({
   onPress?: () => void;
 }) {
   const time = formatRelativeTime(session.updated_at || session.created_at);
-  const tint = statusTint(session.status);
   return (
     <Pressable
-      style={({ pressed }) => [localStyles.sessionRow, active && localStyles.sessionActive, { opacity: pressed ? 0.7 : 1 }]}
+      style={({ pressed }) => [localStyles.sessionRow, pressed && localStyles.rowPressed]}
       onPress={onPress}
       disabled={!onPress}
     >
       {active ? <View style={localStyles.activeBar} /> : null}
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={[styles.text, { fontWeight: "600", fontSize: 15 }]} numberOfLines={1}>
+        <Text
+          style={[localStyles.sessionTitle, active && { color: colors.accentBright }]}
+          numberOfLines={1}
+        >
           {session.title}
         </Text>
-        <View style={[styles.row, { marginTop: 4 }]}>
-          <View style={[styles.chip, { backgroundColor: tint.bg, borderColor: tint.border }]}>
-            <Text style={{ color: tint.color, fontSize: 11, fontWeight: "600" }}>{statusLabel(session.status)}</Text>
-          </View>
-          {time ? <Text style={[styles.textFaint, { marginLeft: spacing.sm }]}>{time}</Text> : null}
+        <View style={[styles.row, { marginTop: 3 }]}>
+          <Text style={[typeScale.meta, { color: statusColor(session.status) }]}>
+            {statusLabel(session.status)}
+          </Text>
+          {time ? <Text style={[typeScale.meta, { color: colors.textFaint, marginLeft: spacing.sm }]}>{time}</Text> : null}
         </View>
       </View>
     </Pressable>
@@ -491,34 +483,14 @@ function SessionRow({
 }
 
 const localStyles = StyleSheet.create({
-  tabPill: {
-    paddingVertical: spacing.xs + 1,
-    paddingHorizontal: spacing.md + 2,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: "transparent",
-    marginRight: spacing.sm,
-  },
-  tabPillActive: {
-    backgroundColor: colors.accentTint,
-    borderColor: colors.accent,
-  },
-  tabText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.textDim,
-  },
-  tabTextActive: {
-    color: colors.accent,
-  },
-  headButton: {
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.surface,
-    marginRight: spacing.sm,
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.md,
   },
   newButton: {
     backgroundColor: colors.accent,
@@ -527,97 +499,79 @@ const localStyles = StyleSheet.create({
     paddingHorizontal: spacing.lg + 4,
     alignItems: "center",
     justifyContent: "center",
-    minWidth: 56,
+    minWidth: 64,
     minHeight: 36,
-    ...shadows.glow,
   },
-  projectCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    marginHorizontal: spacing.sm,
-    marginTop: spacing.xs,
-    marginBottom: spacing.xs,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: "hidden",
+  newButtonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+
+  tabs: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: spacing.xl,
+    paddingHorizontal: spacing.lg,
   },
+  tab: { paddingBottom: spacing.sm },
+  tabText: { fontSize: 16, fontWeight: "600", color: colors.textFaint },
+  tabTextActive: { color: colors.text },
+  tabUnderline: { height: 2, borderRadius: 1, marginTop: spacing.sm, backgroundColor: "transparent" },
+  tabUnderlineActive: { backgroundColor: colors.accent },
+
+  rowPressed: { backgroundColor: colors.surface },
+
   projectRow: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: spacing.md,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.lg,
+    gap: spacing.md,
   },
-  projectAvatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 12,
+  glyph: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: spacing.md,
+    backgroundColor: colors.surfaceAlt,
   },
-  projectName: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: "700",
-    flexShrink: 1,
-  },
-  projectMeta: {
-    color: colors.textFaint,
-    fontSize: 12,
-    marginTop: 2,
-  },
-  chevron: {
-    color: colors.textDim,
-    fontSize: 13,
-    width: 16,
-    marginLeft: spacing.sm,
-  },
+  glyphText: { color: colors.textDim, fontWeight: "600", fontSize: 14 },
+  projectName: { color: colors.text, fontSize: 15, fontWeight: "500", flexShrink: 1 },
+  projectMeta: { color: colors.textFaint, fontSize: 12, marginTop: 2 },
   runningDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     backgroundColor: colors.success,
     marginLeft: spacing.sm,
   },
+  chevron: { color: colors.textFaint, fontSize: 15, width: 14, textAlign: "center" },
   plusButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
+    width: 28,
+    height: 28,
+    borderRadius: radius.sm,
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
-    backgroundColor: colors.surfaceAlt,
-    marginLeft: spacing.sm,
   },
-  plusText: {
-    color: colors.text,
-    fontSize: 18,
-    lineHeight: 20,
-  },
+  plusText: { color: colors.textDim, fontSize: 20, lineHeight: 22 },
+
   sessionRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.md,
     paddingVertical: spacing.sm + 2,
-    paddingHorizontal: spacing.md,
-    marginHorizontal: spacing.md,
-    marginTop: spacing.xs,
-    borderWidth: 1,
-    borderColor: "transparent",
+    paddingLeft: spacing.lg + 32 + spacing.md,
+    paddingRight: spacing.lg,
   },
-  sessionActive: {
-    borderColor: colors.accent,
-    backgroundColor: colors.surface,
-  },
+  sessionTitle: { color: colors.textDim, fontSize: 14, fontWeight: "400" },
   activeBar: {
-    width: 4,
-    height: 26,
-    borderRadius: 2,
+    position: "absolute",
+    left: spacing.lg + 10,
+    top: spacing.sm + 4,
+    bottom: spacing.sm + 4,
+    width: 2,
+    borderRadius: 1,
     backgroundColor: colors.accent,
-    marginRight: spacing.sm,
   },
+
+  emptyLoading: { paddingVertical: spacing.xxl, alignItems: "center" },
   hint: {
     color: colors.textFaint,
     fontSize: 12,

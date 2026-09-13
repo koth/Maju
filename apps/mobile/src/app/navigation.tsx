@@ -37,18 +37,18 @@ function ConversationHeaderTitle({ title }: { title: string }) {
     ? colors.success
     : status === "Interrupted"
       ? colors.danger
-      : colors.textDim;
+      : colors.textFaint;
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
-      <Text numberOfLines={1} style={{ color: colors.text, fontSize: 16, fontWeight: "700" }}>
+      <Text numberOfLines={1} style={{ color: colors.text, fontSize: 16, fontWeight: "600" }}>
         {title}
       </Text>
       <Text
         style={{
           color: tint,
           fontSize: 10,
-          fontWeight: "700",
-          letterSpacing: 0.5,
+          fontWeight: "500",
+          letterSpacing: 0.2,
           marginTop: 1,
         }}
       >
@@ -62,9 +62,9 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
   return (
     <Stack.Navigator
       screenOptions={{
-        headerStyle: { backgroundColor: colors.surface },
+        headerStyle: { backgroundColor: colors.bg },
         headerTintColor: colors.text,
-        headerTitleStyle: { color: colors.text, fontWeight: "700", fontSize: 17 },
+        headerTitleStyle: { color: colors.text, fontWeight: "600", fontSize: 17 },
         headerShadowVisible: false,
         contentStyle: { backgroundColor: colors.bg },
       }}
@@ -80,12 +80,12 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
               style={({ pressed }) => ({
                 paddingHorizontal: spacing.sm,
                 paddingVertical: spacing.xs,
-                borderRadius: 999,
-                backgroundColor: pressed ? colors.accentTint : "transparent",
-                opacity: pressed ? 0.85 : 1,
+                opacity: pressed ? 0.6 : 1,
               })}
+              accessibilityRole="button"
+              accessibilityLabel="设置"
             >
-              <Text style={{ color: colors.accent, fontSize: 15, fontWeight: "600" }}>设置</Text>
+              <Text style={{ color: colors.textDim, fontSize: 15, fontWeight: "500" }}>设置</Text>
             </Pressable>
           ),
         })}
@@ -95,7 +95,6 @@ function MainStack({ onRescan }: { onRescan: () => void }) {
             onOpenSession={(sessionId, title, workspaceRoot) =>
               navigation.navigate("Conversation", { sessionId, title, workspaceRoot })
             }
-            onOpenSettings={() => navigation.navigate("Settings")}
           />
         )}
       </Stack.Screen>
@@ -179,7 +178,7 @@ export function Navigation() {
             config. Explicit opaque dark bar keeps the window below it.
             (When we migrate to targetSdk 36 / forced edge-to-edge, drop this
             in favor of safe-area insets.) */}
-        <StatusBar style="light" translucent={false} backgroundColor="#11131f" />
+        <StatusBar style="light" translucent={false} backgroundColor={colors.bg} />
         <AppServicesProvider>
           <Root />
           {/* Global turn-completion banner: overlays every screen; tapping it

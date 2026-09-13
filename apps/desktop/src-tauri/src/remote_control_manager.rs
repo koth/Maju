@@ -50,6 +50,42 @@ struct Inner {
     pairing_registered: Option<Arc<Notify>>,
 }
 
+/// Best-effort friendly name for this PC, carried in the pairing QR so the
+/// phone can label the bound machine with something a human recognizes
+/// ("Koth-MacBook") instead of its device-id prefix ("PC UTNAZ0ask1").
+///
+/// Deliberately dependency-free: the OS env vars first, then the `hostname`
+/// binary (present on macOS/Linux/Windows), each trimmed and length-capped.
+/// Returns `None` when nothing usable is found — the phone then keeps its own
+/// fallback label.
+fn local_machine_name() -> Option<String> {
+    // COMPUTERNAME is the Windows spelling; HOSTNAME is exported by many
+    // shells/Linux images. Neither is guaranteed, hence the binary fallback.
+    for key in ["COMPUTERNAME", "HOSTNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            if let Some(name) = sanitize_machine_name(&value) {
+                return Some(name);
+            }
+        }
+    }
+    let output = std::process::Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    sanitize_machine_name(&raw)
+}
+
+/// Strip a trailing FQDN dot / stray whitespace and cap the length so the QR
+/// payload stays small and the phone's row stays readable.
+fn sanitize_machine_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(48).collect())
+}
+
 impl RemoteControlManager {
     pub fn new(app_paths: app_core::AppPaths) -> Self {
         let enabled = std::env::var("KODEX_REMOTE_CONTROL")
@@ -184,7 +220,12 @@ impl RemoteControlManager {
             .map_err(|e| format!("load device identity: {e}"))?;
         let code = PairingCode::mint(DEFAULT_PAIRING_TTL);
         tracing::info!(target: "remote_control", code = %code.code(), "mint pairing code");
-        let payload = build_qr_payload(&inner.relay_endpoint, &code, &identity.public_b64());
+        let payload = build_qr_payload(
+            &inner.relay_endpoint,
+            &code,
+            &identity.public_b64(),
+            local_machine_name().as_deref(),
+        );
         let json = payload
             .to_json()
             .map_err(|e| format!("encode qr payload: {e}"))?;

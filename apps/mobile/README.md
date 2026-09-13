@@ -66,6 +66,25 @@ Then rebuild the app. The `android/` and `ios/` projects are gitignored, so the
 tracked artifact is `assets/icon.png` — keep it in sync with the script rather
 than editing it by hand.
 
+## Design system
+
+`src/features/theme.ts` is the single source of truth for the visual language.
+The rules it encodes (and that screen work must follow):
+
+1. **One accent.** Blue is only for interactive/active state — active tab,
+   focused input, running indicator, primary action. Everything else neutral.
+2. **No chrome by default.** Lists are separated by `styles.hairline` /
+   `hairlineInset` and whitespace, never by a bordered card per row. A bordered
+   box is for genuinely floating surfaces (sheets, banners) only.
+3. **Status is text or a dot**, not a tinted pill: pass a semantic color on a
+   `<Text>` (or a small `View` dot) instead of building a colored chip.
+4. **Depth is luminance**, not shadow: step `bg → surface → surfaceAlt →
+   surfaceRaised`. `shadows` is empty for rows/cards on purpose.
+
+Use `typeScale` for type sizes and the `styles` primitives (`row`, `card`,
+`input`, `button`, `buttonGhost`, `sheet`, `hairlineInset`) before inventing a
+one-off `StyleSheet` — per-screen one-offs are how the UI drifted apart before.
+
 ## Relay endpoint
 
 The relay endpoint is supplied by the PC's pairing QR (`relay_endpoint`). It

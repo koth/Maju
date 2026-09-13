@@ -19,7 +19,6 @@ import {
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  machineTint,
   relayHost,
   type MachinePhase,
 } from "./machine-view";
@@ -135,9 +134,10 @@ export function MachinesScreen({
 
       <FlatList
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingTop: spacing.sm, paddingBottom: spacing.xl }}
+        contentContainerStyle={{ paddingBottom: spacing.xl }}
         data={devices}
         keyExtractor={(item) => item.peer_device_id}
+        ItemSeparatorComponent={RowSeparator}
         renderItem={({ item }) => (
           <MachineRow
             device={item}
@@ -151,7 +151,7 @@ export function MachinesScreen({
         ListEmptyComponent={
           loading ? (
             <View style={styles.center}>
-              <ActivityIndicator color={colors.accent} />
+              <ActivityIndicator color={colors.textDim} />
             </View>
           ) : (
             <EmptyState
@@ -179,20 +179,25 @@ export function MachinesScreen({
           ]}
           disabled={busy}
           onPress={() => setAdding(true)}
+          accessibilityRole="button"
         >
-          <Text style={styles.buttonText}>+ 配对新电脑</Text>
+          <Text style={styles.buttonText}>配对新电脑</Text>
         </Pressable>
         {onOpenDiagnostics ? (
           <Pressable
             style={({ pressed }) => ({ alignSelf: "center", marginTop: spacing.md, padding: spacing.sm, opacity: pressed ? 0.7 : 1 })}
             onPress={onOpenDiagnostics}
           >
-            <Text style={[styles.text, { color: colors.textDim, fontSize: 13 }]}>查看诊断日志</Text>
+            <Text style={[styles.text, { color: colors.textFaint, fontSize: 13 }]}>查看诊断日志</Text>
           </Pressable>
         ) : null}
       </View>
     </View>
   );
+}
+
+function RowSeparator() {
+  return <View style={styles.hairlineInset} />;
 }
 
 function MachineRow({
@@ -217,9 +222,7 @@ function MachineRow({
     <Pressable
       style={({ pressed }) => [
         localStyles.row,
-        { opacity: pressed ? 0.75 : disabled && !connecting ? 0.55 : 1 },
-        connecting && localStyles.rowConnecting,
-        phase === "connected" && localStyles.rowConnected,
+        { opacity: pressed ? 0.7 : disabled && !connecting ? 0.5 : 1 },
       ]}
       onPress={onConnect}
       onLongPress={onUnbind}
@@ -227,7 +230,7 @@ function MachineRow({
       accessibilityRole="button"
       accessibilityLabel={`Connect to ${label}`}
     >
-      <View style={[localStyles.avatar, { backgroundColor: machineTint(device.peer_device_id) }]}>
+      <View style={localStyles.avatar}>
         <Text style={styles.avatarText}>{label.trim()[0]?.toUpperCase() ?? "P"}</Text>
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
@@ -270,37 +273,27 @@ function MachineRow({
 }
 
 const localStyles = StyleSheet.create({
+  // Flat full-width row: no card, no border (see theme.ts design rule 2).
+  // Connection state is carried by text/dot on the trailing edge.
   row: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingVertical: spacing.md + 2,
-    paddingHorizontal: spacing.md,
-    marginHorizontal: spacing.sm,
-    marginTop: spacing.xs,
-    ...shadows.card,
-  },
-  rowConnecting: {
-    borderColor: colors.accent,
-  },
-  rowConnected: {
-    borderColor: colors.success,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
   },
   avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
     marginRight: spacing.md,
+    backgroundColor: colors.surfaceAlt,
   },
   name: {
     color: colors.text,
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "500",
     flexShrink: 1,
   },
   meta: {
@@ -314,9 +307,8 @@ const localStyles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   connectingText: {
-    color: colors.accent,
+    color: colors.textDim,
     fontSize: 12,
-    fontWeight: "600",
     marginLeft: spacing.sm,
   },
   connectedWrap: {
@@ -325,23 +317,21 @@ const localStyles = StyleSheet.create({
     marginLeft: spacing.sm,
   },
   connectedDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
     backgroundColor: colors.success,
   },
   connectedText: {
     color: colors.success,
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
     marginLeft: spacing.sm,
   },
   unbind: {
     paddingVertical: spacing.xs + 2,
     paddingHorizontal: spacing.md,
     borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: colors.borderStrong,
     backgroundColor: colors.surfaceAlt,
     marginLeft: spacing.sm,
   },

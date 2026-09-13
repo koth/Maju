@@ -32,23 +32,6 @@ export function relayHost(endpoint: string | undefined): string | null {
   }
 }
 
-/** Deterministic accent hue per machine so avatars read distinct. */
-export function machineTint(seed: string): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  const palette = [
-    "#5b8cff",
-    "#8b5cf6",
-    "#ec4899",
-    "#f59e0b",
-    "#10b981",
-    "#06b6d4",
-    "#f43f5e",
-    "#a855f7",
-  ];
-  return palette[h % palette.length];
-}
-
 /** Bound date (month/day) or null when absent/invalid. */
 export function boundDate(boundAt: number | undefined): string | null {
   if (!boundAt) return null;

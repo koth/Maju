@@ -51,21 +51,19 @@ export function ThinkingIndicator({ text = "思考中\u2026" }: { text?: string 
 }
 
 const thinkingStyles = {
+  // No pill and no border: three quiet dots next to faint text. A boxed
+  // container around a transient state added a competing surface to every
+  // streaming turn.
   pill: {
     flexDirection: "row" as const,
     alignItems: "center" as const,
     gap: spacing.sm,
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: 999,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
     marginTop: spacing.xs,
-    borderWidth: 1,
-    borderColor: colors.border,
     alignSelf: "flex-start" as const,
   },
   dotRow: { flexDirection: "row" as const, gap: 4 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.accent },
-  text: { color: colors.textDim, fontSize: 13, fontStyle: "italic" as const },
+  dot: { width: 5, height: 5, borderRadius: 2.5, backgroundColor: colors.textDim },
+  text: { color: colors.textFaint, fontSize: 13 },
 };
 // end of file

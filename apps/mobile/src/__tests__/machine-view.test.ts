@@ -4,7 +4,6 @@ import {
   machineLabel,
   machinePhase,
   machinePhaseLabel,
-  machineTint,
   relayHost,
   shortPeerId,
 } from "../features/machines/machine-view";
@@ -42,18 +41,6 @@ describe("relayHost", () => {
     expect(relayHost(undefined)).toBeNull();
     expect(relayHost("")).toBeNull();
     expect(relayHost("not a url")).toBeNull();
-  });
-});
-
-describe("machineTint", () => {
-  it("is deterministic per seed", () => {
-    expect(machineTint("peer-a")).toBe(machineTint("peer-a"));
-  });
-
-  it("always returns a palette hex", () => {
-    for (const seed of ["", "a", "peer-b", "0123456789abcdef"]) {
-      expect(machineTint(seed)).toMatch(/^#[0-9a-f]{6}$/i);
-    }
   });
 });
 

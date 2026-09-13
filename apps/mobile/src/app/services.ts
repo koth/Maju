@@ -213,6 +213,9 @@ export class AppController {
       peer_device_id: result.pcDeviceId,
       peer_static_pubkey_b64: result.pcStaticPubkeyB64,
       relay_endpoint: qr.relay_endpoint,
+      // The PC names itself in its QR; without it the machines list can only
+      // show a device-id prefix, which is unrecognizable across several PCs.
+      label: qr.pc_name,
       bound_at: Date.now(),
     };
     // Multi-machine: every scan produces its own pairing token, so machines

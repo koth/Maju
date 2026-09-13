@@ -3,7 +3,7 @@ import { View, Text, TextInput, Pressable, Modal, ScrollView, StyleSheet } from 
 import { useAppController, useSnapshot, usePendingApprovals } from "../../app/AppServicesContext";
 import { isDestructive, allowOptionId } from "../../session/permission";
 import type { PermissionInputResponse } from "../../types";
-import { styles, colors, spacing, radius, shadows } from "../theme";
+import { styles, colors, spacing, radius } from "../theme";
 
 // Default-deny permission approval. The phone is the SOLE approval gate for
 // destructive remote operations: no "allow" is preselected, and destructive
@@ -99,15 +99,13 @@ export function PermissionApprovalSheet() {
   return (
     <Modal visible transparent animationType="slide" onRequestClose={() => controller.denyPermission(approval.permissionRequestId)}>
       <View style={{ flex: 1, justifyContent: "flex-end", backgroundColor: colors.scrim }}>
-        <View style={{ backgroundColor: colors.surface, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, maxHeight: "85%", borderWidth: 1, borderColor: colors.border, ...shadows.raised }}>
-          <View style={{ alignSelf: "center", width: 40, height: 5, borderRadius: 3, backgroundColor: colors.borderStrong, marginTop: spacing.sm }} />
+        <View style={{ backgroundColor: colors.surfaceRaised, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, maxHeight: "85%" }}>
+          <View style={{ alignSelf: "center", width: 36, height: 4, borderRadius: 2, backgroundColor: colors.borderStrong, marginTop: spacing.sm }} />
           <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingTop: spacing.md }}>
             <View style={styles.rowBetween}>
-              <Text style={[styles.text, { fontWeight: "800", fontSize: 17 }]}>请求授权</Text>
+              <Text style={[styles.text, { fontWeight: "700", fontSize: 17 }]}>请求授权</Text>
               {destructive ? (
-                <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger }]}>
-                  <Text style={{ color: colors.danger, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }}>Destructive</Text>
-                </View>
+                <Text style={{ color: colors.danger, fontSize: 12, fontWeight: "600" }}>写操作</Text>
               ) : null}
             </View>
 
@@ -186,9 +184,9 @@ export function PermissionApprovalSheet() {
 
             {requireConfirm ? (
               <View style={{ marginTop: spacing.lg }}>
-                <View style={[styles.chip, { backgroundColor: colors.dangerTint, borderColor: colors.danger, alignSelf: "flex-start" }]}>
-                  <Text style={{ color: colors.danger, fontSize: 12 }}>此操作可能修改你的工作区,确认后放行。</Text>
-                </View>
+                <Text style={{ color: colors.warn, fontSize: 12, lineHeight: 17 }}>
+                  此操作可能修改你的工作区,确认后放行。
+                </Text>
                 {optionChoice.length > 0 ? (
                   <View style={{ marginTop: spacing.sm }}>
                     {optionChoice.map((option) => {
@@ -278,23 +276,22 @@ export function PermissionApprovalSheet() {
 }
 
 const sheetStyles = StyleSheet.create({
+  // Option rows: no outline. Selection is the only thing that changes the
+  // surface, so an unchecked list reads as plain rows, not a grid of boxes.
   optionRow: {
     flexDirection: "row",
     alignItems: "flex-start",
     gap: spacing.sm,
-    paddingVertical: spacing.xs + 1,
+    paddingVertical: spacing.sm,
     paddingHorizontal: spacing.sm,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderRadius: radius.md,
     marginTop: spacing.xs,
   },
   optionRowPressed: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surface,
   },
   optionRowChecked: {
-    borderColor: colors.accent,
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surface,
   },
   check: {
     width: 16,
@@ -311,6 +308,7 @@ const sheetStyles = StyleSheet.create({
   },
   checkRadio: {
     borderRadius: 8,
+    borderColor: colors.accent,
   },
   checkDot: {
     width: 8,

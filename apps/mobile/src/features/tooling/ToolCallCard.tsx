@@ -227,16 +227,16 @@ const cardStyles = StyleSheet.create({
     minWidth: 0,
   },
   headerPressed: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surface,
   },
   bullet: {
-    fontSize: 8,
+    fontSize: 7,
     marginRight: spacing.sm,
   },
   verb: {
     color: colors.text,
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "500",
     marginRight: spacing.sm,
     flexShrink: 0,
   },
@@ -248,7 +248,7 @@ const cardStyles = StyleSheet.create({
   },
   diffStats: {
     fontSize: 12,
-    fontWeight: "600",
+    fontWeight: "500",
     marginLeft: spacing.sm,
     fontVariant: ["tabular-nums"],
   },
@@ -262,16 +262,15 @@ const cardStyles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: colors.danger,
+    backgroundColor: colors.surfaceAlt,
   },
   stopText: {
     color: colors.danger,
     fontSize: 11,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   detail: {
-    paddingLeft: 20,
+    paddingLeft: 18,
     paddingTop: spacing.xs,
     paddingBottom: spacing.xs,
   },
@@ -289,8 +288,8 @@ const cardStyles = StyleSheet.create({
   },
   diffFile: {
     marginTop: spacing.xs,
-    backgroundColor: colors.surfaceAlt,
-    borderRadius: radius.sm,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
     padding: spacing.sm,
   },
   diffLine: {

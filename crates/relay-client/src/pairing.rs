@@ -67,6 +67,12 @@ pub struct PairingQrPayload {
     pub relay_endpoint: String,
     pub pairing_code: String,
     pub pc_device_pubkey: String,
+    /// Friendly name of this PC (its hostname). Carried so the phone can label
+    /// the bound machine with something recognizable instead of a device-id
+    /// prefix like "PC UTNAZ0ask1". Optional: older PCs omit it and the phone
+    /// falls back to the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_name: Option<String>,
 }
 
 impl PairingQrPayload {
@@ -75,17 +81,25 @@ impl PairingQrPayload {
     }
 }
 
-/// Build the QR payload from a relay endpoint, a freshly minted code, and the
-/// PC device public key (base64).
+/// Build the QR payload from a relay endpoint, a freshly minted code, the PC
+/// device public key (base64), and this PC's friendly name (hostname).
 pub fn build_qr_payload(
     relay_endpoint: &str,
     code: &PairingCode,
     pc_device_pubkey_b64: &str,
+    pc_name: Option<&str>,
 ) -> PairingQrPayload {
+    // A blank name is the same as no name: the phone's fallback label is
+    // better than an empty string.
+    let pc_name = pc_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
     PairingQrPayload {
         relay_endpoint: relay_endpoint.to_string(),
         pairing_code: code.code().to_string(),
         pc_device_pubkey: pc_device_pubkey_b64.to_string(),
+        pc_name,
     }
 }
 
@@ -122,12 +136,37 @@ mod tests {
     #[test]
     fn qr_payload_roundtrips() {
         let code = PairingCode::mint(DEFAULT_PAIRING_TTL);
-        let payload = build_qr_payload("wss://relay.example.com", &code, "pubkey-b64");
+        let payload = build_qr_payload(
+            "wss://relay.example.com",
+            &code,
+            "pubkey-b64",
+            Some("Koth-MacBook"),
+        );
         let json = payload.to_json().unwrap();
         let back: PairingQrPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, payload);
         assert_eq!(back.relay_endpoint, "wss://relay.example.com");
         assert_eq!(back.pairing_code, code.code());
+        assert_eq!(back.pc_name.as_deref(), Some("Koth-MacBook"));
+    }
+
+    #[test]
+    fn qr_payload_omits_a_blank_or_missing_pc_name() {
+        let code = PairingCode::mint(DEFAULT_PAIRING_TTL);
+        for name in [None, Some(""), Some("   ")] {
+            let payload = build_qr_payload("wss://relay.example.com", &code, "pk", name);
+            assert_eq!(payload.pc_name, None);
+            // Absent, not null: a phone parsing an older payload still works.
+            assert!(!payload.to_json().unwrap().contains("pc_name"));
+        }
+    }
+
+    #[test]
+    fn qr_payload_backfills_a_pc_name_from_an_older_pc() {
+        // A QR minted by a PC that predates `pc_name` must still parse.
+        let json = r#"{"relay_endpoint":"wss://r","pairing_code":"ABCD","pc_device_pubkey":"pk"}"#;
+        let payload: PairingQrPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.pc_name, None);
     }
 
     #[test]

@@ -25,21 +25,18 @@ import { repairCompactMarkdown } from "./repair-compact-markdown";
 // heavy deps) — fenced code is plain mono, like the desktop with highlighting
 // disabled. Inline file-path links stay non-interactive (no editor to open).
 
-// Colors resolved from the desktop dark-theme custom properties
-// (.msg-content-assistant block in ConversationTimeline.css):
-// --md-text → textDim, --md-strong → text, --md-code-text → #9db8d6,
-// --md-code-block-bg → color-mix(app-bg 88%, surface-bg) ≈ #080911,
-// --md-code-border → accent 20%, --md-table-border → border 48%,
-// blockquote border → accent 58%, code header → color-mix(surface 55%, app-bg).
+// Colors resolved from the app palette. Code blocks sit one step above the
+// canvas (surfaceAlt) instead of a separate blue-black, and rules use the
+// neutral hairline so inline code/blocks stop tinting the whole reply blue.
 const mdText = colors.textDim;
 const mdStrong = colors.text;
 const mdSoft = colors.textFaint;
-const mdCodeText = "#9db8d6";
-const mdCodeBlockBg = "#080911";
-const mdCodeHeaderBg = "#0c0e18";
-const mdCodeBorder = "rgba(91,140,255,0.2)";
-const mdTableBorder = "rgba(35,40,56,0.48)";
-const mdQuoteBorder = "rgba(91,140,255,0.58)";
+const mdCodeText = "#c9b8a8";
+const mdCodeBlockBg = colors.surfaceAlt;
+const mdCodeHeaderBg = colors.surfaceRaised;
+const mdCodeBorder = colors.border;
+const mdTableBorder = colors.border;
+const mdQuoteBorder = colors.borderStrong;
 
 const BODY_FONT_SIZE = 15;
 const BODY_LINE_HEIGHT = 25; // 15 * 1.68, the desktop chat line-height

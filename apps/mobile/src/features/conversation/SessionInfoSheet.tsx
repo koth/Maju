@@ -201,7 +201,7 @@ const sheetStyles = StyleSheet.create({
   },
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: colors.scrim,
     alignItems: "center",
     justifyContent: "center",
     padding: spacing.lg,
@@ -210,10 +210,8 @@ const sheetStyles = StyleSheet.create({
     width: "100%",
     maxWidth: 420,
     maxHeight: "82%",
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.xl,
     padding: spacing.lg,
   },
   // Scrollable body: grows with content, caps at the card's maxHeight.
