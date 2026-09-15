@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitUserMessageBody } from "../features/conversation/user-message-images";
+import { hasInlineImage, splitUserMessageBody } from "../features/conversation/user-message-images";
 
 // Mirrors the desktop ConversationTimeline.test.tsx image-splitting cases:
 // image markdown is pulled out of the user body so the markdown renderer
@@ -58,5 +58,30 @@ describe("splitUserMessageBody", () => {
     const { text, images } = splitUserMessageBody(body);
     expect(text).toBe(body);
     expect(images).toEqual([]);
+  });
+
+  it("splits the generated-image block the PC appends to an assistant reply", () => {
+    // The PC appends `![生成的图片](data:...)` to the assistant body after a
+    // successful generate_image/edit_image. Rendering that through markdown
+    // showed megabytes of base64 on the phone.
+    const body =
+      "图片已经生成好了。\n\n![生成的图片](data:image/png;base64,iVBORw0KGgoAAAA)";
+    const { text, images } = splitUserMessageBody(body);
+    expect(text).toBe("图片已经生成好了。");
+    expect(images).toEqual([
+      { alt: "生成的图片", src: "data:image/png;base64,iVBORw0KGgoAAAA" },
+    ]);
+  });
+
+  it("detects inline images without touching ordinary bodies", () => {
+    // The bubble only runs the splitter on bodies that carry an image block,
+    // so blank-line collapsing never rewrites prose or fenced code.
+    expect(hasInlineImage("普通回复，没有图片")).toBe(false);
+    expect(hasInlineImage("```ts\nconst a = 1;\n\n\n\nconst b = 2;\n```")).toBe(false);
+    expect(hasInlineImage("![图](data:image/png;base64,aaaa)")).toBe(true);
+    // A `g`-flagged regex would leave `lastIndex` behind; alternating calls must
+    // keep reporting the same answer.
+    expect(hasInlineImage("![图](data:image/png;base64,aaaa)")).toBe(true);
+    expect(hasInlineImage("没有图片")).toBe(false);
   });
 });

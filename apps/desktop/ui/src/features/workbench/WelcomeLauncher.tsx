@@ -21,6 +21,56 @@ interface Props {
   onOpenSettings: (options?: WelcomeSettingsOpenOptions) => void;
 }
 
+// ANSI-Shadow wordmark. Each letter is stored as its own glyph so the rows can
+// be joined with a single space — hand-written banners drift out of alignment
+// the moment one glyph gains a column, which is what made the previous mark
+// read as a pile of squares. Rendered monospace at a fluid size so the 39-column
+// mark always fits the launcher column.
+const WORDMARK = (() => {
+  const glyphs: string[][] = [
+    // M
+    [
+      "███╗   ███╗",
+      "████╗ ████║",
+      "██╔████╔██║",
+      "██║╚██╔╝██║",
+      "██║ ╚═╝ ██║",
+      "╚═╝     ╚═╝",
+    ],
+    // A
+    [
+      " █████╗ ",
+      "██╔══██╗",
+      "███████║",
+      "██╔══██║",
+      "██║  ██║",
+      "╚═╝  ╚═╝",
+    ],
+    // J
+    [
+      "     ██╗",
+      "     ██║",
+      "     ██║",
+      "██   ██║",
+      "╚█████╔╝",
+      " ╚════╝ ",
+    ],
+    // U
+    [
+      "██╗   ██╗",
+      "██║   ██║",
+      "██║   ██║",
+      "██║   ██║",
+      "╚██████╔╝",
+      " ╚═════╝ ",
+    ],
+  ];
+  const rows = glyphs[0].map((_row, rowIndex) =>
+    glyphs.map((glyph) => glyph[rowIndex]).join(" "),
+  );
+  return rows.join("\n");
+})();
+
 type InitialSetupKind = "codex_byok";
 
 interface WelcomeSettingsOpenOptions {
@@ -266,13 +316,8 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
       </div>
       <div className="welcome-content">
         <div className="welcome-brand">
-          <pre className="welcome-ascii">
-{`███ ███  ████   ██████  ██  ██ 
-███████ ██  ██     ██   ██  ██ 
-██ █ ██ ██████     ██   ██  ██ 
-██   ██ ██  ██  █  ██   ██  ██ 
-██   ██ ██  ██   █████   █████ 
-                               `}
+          <pre className="welcome-ascii" role="img" aria-label="Maju">
+{WORDMARK}
           </pre>
           <p className="welcome-subtitle">码具，码农的趁手好工具</p>
         </div>
@@ -299,8 +344,11 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
 
         <section className="welcome-launcher" aria-label="打开工作区">
           <div className="welcome-launcher-copy">
-            <span className="welcome-kicker">选择工作区</span>
+            <span className="welcome-kicker">开始</span>
             <h1>打开一个工作区</h1>
+            <p className="welcome-launcher-hint">
+              从本地磁盘挑一个文件夹，或通过 SSH 连接远程主机。
+            </p>
           </div>
           <div className="welcome-actions">
             <button
@@ -341,37 +389,53 @@ export function WelcomeLauncher({ onWorkspaceOpened, onOpenSettings }: Props) {
 
         {recents.length > 0 && (
           <div className="welcome-recents">
-            <h2 className="welcome-recents-title">近期工作区</h2>
+            <div className="welcome-recents-head">
+              <h2 className="welcome-recents-title">近期工作区</h2>
+              <span className="welcome-recents-count">{recents.length}</span>
+            </div>
             <ul className="welcome-recents-list">
-              {recents.map((r) => (
-                <li
-                  key={r.path}
-                  className={`welcome-recent-item ${!r.exists ? "not-found" : ""}`}
-                >
-                  <button
-                    className="welcome-recent-btn"
-                    onClick={() => handleOpenRecent(r.path)}
-                    disabled={!r.exists || loading || showByokOnboarding}
-                    title={showByokOnboarding ? "请先在设置中配置模型来源" : undefined}
+              {recents.map((r) => {
+                const target = r.remote ? remoteDisplayPath(r.remote) : r.path;
+                const isRemote = Boolean(r.remote);
+                return (
+                  <li
+                    key={r.path}
+                    className={`welcome-recent-item ${!r.exists ? "not-found" : ""}`}
                   >
-                    <span className="recent-name">{folderName(r.path)}</span>
-                    <span className="recent-path">{r.remote ? remoteDisplayPath(r.remote) : r.path}</span>
-                    {!r.exists && (
-                      <span className="recent-missing">未找到</span>
-                    )}
-                  </button>
-                  <button
-                    className="welcome-remove-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveRecent(r.path);
-                    }}
-                    title="从最近列表中移除"
-                  >
-                    x
-                  </button>
-                </li>
-              ))}
+                    <button
+                      className="welcome-recent-btn"
+                      onClick={() => handleOpenRecent(r.path)}
+                      disabled={!r.exists || loading || showByokOnboarding}
+                      title={showByokOnboarding ? "请先在设置中配置模型来源" : undefined}
+                    >
+                      <span className="welcome-recent-icon" aria-hidden="true">
+                        {isRemote ? <RemoteHostIcon /> : <LocalFolderIcon />}
+                      </span>
+                      <span className="recent-meta">
+                        <span className="recent-name">{folderName(r.path)}</span>
+                        <span className="recent-path" title={target}>{target}</span>
+                      </span>
+                      {!r.exists && (
+                        <span className="recent-missing">未找到</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="welcome-remove-btn"
+                      aria-label="从最近列表中移除"
+                      title="从最近列表中移除"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRemoveRecent(r.path);
+                      }}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8" />
+                      </svg>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

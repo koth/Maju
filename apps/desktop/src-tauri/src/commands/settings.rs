@@ -153,6 +153,24 @@ pub fn settings_save_commit_assistant_settings(
         .map_err(|e| e.to_string())
 }
 
+/// Persist the session-title model selection (provider + model from the
+/// configured BYOK catalog). dsh uses it to pin the model that generates each
+/// session's title instead of inheriting the session's own route, which fails
+/// on models that cannot answer inside the title budget.
+///
+/// The pair is all-or-nothing — dsh rejects a half-configured route — so an
+/// empty provider AND an empty model clears the override and restores dsh's
+/// default. Passing only one is an error.
+#[tauri::command]
+pub fn settings_save_session_title_settings(
+    provider: String,
+    model: String,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_session_title_settings(&paths, &provider, &model)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn settings_get_remote_profiles() -> Result<RemoteMachineProfilesSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;

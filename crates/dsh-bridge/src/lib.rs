@@ -39,8 +39,9 @@ pub use rpc_types::{
 };
 pub use session::run_harness_session;
 pub use settings_gen::{
-    DshDefaultModel, DshModelEntry, DshProviderRoute, DshSettingsConfig, key_env_for_provider,
-    write_settings,
+    DshDefaultModel, DshModelEntry, DshProviderRoute, DshSettingsConfig, HarnessMcpServer,
+    HarnessPatchConfig, key_env_for_provider, patch_path_for_root, render_harness_patch,
+    settings_path_for_root, write_harness_patch, write_settings,
 };
 pub use transport::HttpClient;
 

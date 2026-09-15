@@ -13,11 +13,11 @@
 .review-tabs {
   display: flex;
   flex-shrink: 0;
-  align-items: center;
+  align-items: stretch;
   height: calc(var(--thread-header-height) - 10px);
   min-width: 0;
   gap: 4px;
-  padding: 0 0 7px;
+  padding: 0;
   border: 0;
   border-bottom: 1px solid var(--border-subtle);
   border-radius: 0;
@@ -31,14 +31,15 @@
   justify-content: center;
   gap: 5px;
   min-width: 0;
-  min-height: 30px;
   padding: 0 8px;
-  border-radius: 6px;
   border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-soft);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
@@ -63,13 +64,14 @@
 
 .review-tab:hover {
   color: var(--text-strong);
-  background: var(--interactive-hover);
+  background: transparent;
 }
 
 .review-tab-active {
   color: var(--text-strong);
   background: transparent;
-  font-weight: 560;
+  border-bottom-color: var(--text-strong);
+  font-weight: 500;
 }
 
 .review-tab-active:hover {
@@ -82,23 +84,25 @@
   min-width: 0;
   max-width: 180px;
   align-items: center;
-  height: 30px;
   padding: 0 8px 0 5px;
-  border-radius: 6px;
-  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--text-soft);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
 }
 
 .review-open-file-tab:hover {
   color: var(--text-strong);
-  background: var(--interactive-hover);
+  background: transparent;
 }
 
 .review-open-file-tab.review-tab-active {
   color: var(--text-strong);
   background: transparent;
-  font-weight: 560;
+  border-bottom-color: var(--text-strong);
+  font-weight: 500;
 }
 
 .review-file-tab-close {
@@ -111,7 +115,7 @@
   margin-right: 5px;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-strong);
   cursor: pointer;
@@ -129,8 +133,8 @@
   display: grid;
   place-items: center;
   opacity: 0;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
   line-height: 1;
   transition: opacity var(--transition-fast);
 }
@@ -173,16 +177,17 @@
 .review-panel-toggle-btn {
   display: grid;
   flex: 0 0 28px;
+  align-self: center;
   place-items: center;
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-size-ui);
 }
 
 .review-refresh-btn svg,
@@ -296,8 +301,8 @@
 }
 
 .review-meta {
-  font-size: 12px;
-  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  color: var(--text-soft);
   padding: 0 4px;
 }
 
@@ -338,8 +343,8 @@
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-chat);
-  font-size: 13px;
-  font-weight: 560;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   outline: none;
   cursor: pointer;
 }
@@ -351,7 +356,7 @@
 
 .review-scope-chevron {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1;
 }
 
@@ -363,21 +368,21 @@
   min-width: 100px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--surface-muted-bg);
-  box-shadow: 0 10px 28px color-mix(in srgb, #000 26%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow-elevated);
 }
 
 .review-scope-option {
   display: block;
   width: 100%;
-  min-height: 28px;
+  min-height: 32px;
   padding: 0 10px;
   border: 0;
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -392,14 +397,14 @@
   display: inline-flex;
   gap: 5px;
   align-items: center;
-  font-size: 13px;
-  font-weight: 560;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
 }
 
 .review-empty-state {
   padding: 14px 6px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .review-session-list {
@@ -421,12 +426,15 @@
 }
 
 .review-change-card.is-focused .review-change-header {
-  background: color-mix(in srgb, var(--accent) 10%, var(--app-bg));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+  background: var(--interactive-selected);
+  box-shadow: none;
 }
 
+/* The ::before carries the selection tint AND the sticky header's opaque
+   backdrop (it bleeds 1px past the header so scrolled rows cannot show
+   through), so it must stay opaque — hence the token mix, not the alpha. */
 .review-change-card.is-focused .review-change-header::before {
-  background: color-mix(in srgb, var(--accent) 10%, var(--app-bg));
+  background: color-mix(in srgb, var(--text-strong) 10%, var(--app-bg));
 }
 
 .review-change-header {
@@ -467,7 +475,7 @@
 }
 
 .review-change-header:focus-visible {
-  outline: 1px solid var(--accent-hover);
+  outline: 1px solid var(--border-focus);
   outline-offset: -1px;
 }
 
@@ -484,8 +492,8 @@
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
 }
 
 .review-change-path:hover {
@@ -497,8 +505,8 @@
   gap: 5px;
   flex-shrink: 0;
   margin-left: 2px;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
 }
 
 .review-change-toggle {
@@ -510,12 +518,12 @@
   flex-shrink: 0;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   pointer-events: none;
   font-family: var(--font-chat);
-  font-size: 16px;
+  font-size: var(--font-size-body);
   line-height: 1;
 }
 
@@ -533,7 +541,7 @@
   border-top: 0;
   background: var(--app-bg);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1.5;
   outline: none;
   overscroll-behavior-x: contain;
@@ -557,7 +565,7 @@
 .review-inline-diff::-webkit-scrollbar-thumb {
   min-width: 36px;
   border: 2px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background-color: var(--review-diff-scrollbar-thumb);
   background-clip: content-box;
 }
@@ -602,7 +610,7 @@
   background: var(--app-bg);
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .review-pierre-diff pre {
@@ -615,7 +623,7 @@
   padding: 10px 12px;
   color: var(--text-soft);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 :root[data-theme="light"] .review-inline-diff,
@@ -626,11 +634,11 @@
 :root[data-theme="light"] .review-pierre-diff {
   color-scheme: light;
   --diffs-light-bg: var(--app-bg);
-  --diffs-light: #24292f;
+  --diffs-light: var(--text-strong);
   --diffs-bg-context-override: var(--app-bg);
   --diffs-bg-buffer-override: var(--app-bg);
-  --diffs-bg-separator-override: #f1f2f3;
-  --diffs-fg-number-override: #6e7781;
+  --diffs-bg-separator-override: var(--border-subtle);
+  --diffs-fg-number-override: var(--text-soft);
   --diffs-addition-color-override: #1a7f37;
   --diffs-deletion-color-override: #cf222e;
   --diffs-fg-number-addition-override: #1a7f37;
@@ -641,7 +649,7 @@
   --diffs-bg-deletion-number-override: #cf222e;
   --diffs-bg-addition-emphasis-override: rgba(26, 127, 55, 0.1);
   --diffs-bg-deletion-emphasis-override: rgba(207, 34, 46, 0.1);
-  --diffs-bg-hover-override: rgba(31, 35, 40, 0.08);
+  --diffs-bg-hover-override: var(--interactive-hover);
   --diffs-gap-inline: 0px;
   --diffs-gap-block: 0px;
   --diffs-font-size: 12px;
@@ -655,13 +663,13 @@
   min-height: 44px;
   padding: 0 6px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .review-loading-dot {
   width: 6px;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--text-soft);
   box-shadow: none;
 }
@@ -674,17 +682,17 @@
   width: 100%;
   min-height: 34px;
   padding: 0 10px;
-  border-radius: 7px;
-  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
   background: var(--surface-muted-bg);
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   outline: none;
 }
 
 .review-filter-input:focus {
-  border-color: var(--accent-hover);
+  border-color: var(--border-focus);
   box-shadow: none;
 }
 
@@ -714,14 +722,14 @@
 }
 
 .review-group-arrow {
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   color: var(--text-soft);
 }
 
 .review-group-title {
-  font-size: 12px;
-  font-weight: 550;
-  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-soft);
 }
 
 .review-group-header-action {
@@ -731,12 +739,12 @@
   gap: 4px;
   height: 22px;
   padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--surface-bg);
+  color: var(--text-muted);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   letter-spacing: 0.01em;
   opacity: 0;
@@ -760,14 +768,14 @@
 }
 
 .review-group-header-action:hover {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  background: var(--surface-alt-bg);
+  border-color: var(--border-strong);
 }
 
 .review-group-header-action:focus-visible {
   outline: none;
-  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--border-subtle);
 }
 
 .review-group:focus-within > .review-group-header .review-group-header-action {
@@ -792,10 +800,10 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 34px;
-  padding: 5px 9px;
+  min-height: 32px;
+  padding: 0 8px;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 
 .review-file-row:hover {
@@ -812,8 +820,8 @@
 .review-file-path {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   color: var(--text-strong);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -828,12 +836,12 @@
 
 .review-stat-added {
   color: var(--success);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .review-stat-removed {
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .review-untracked-tree {
@@ -846,19 +854,20 @@
 .review-untracked-row {
   display: flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 32px;
   gap: 6px;
-  border-radius: 6px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .review-group-compact .review-untracked-row {
-  min-height: 27px;
+  min-height: 28px;
   gap: 5px;
-  border-radius: 7px;
-  font-size: 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
 }
 
 .review-untracked-row:hover {
@@ -867,7 +876,8 @@
 }
 
 .review-untracked-row.is-active {
-  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
+  background: var(--interactive-selected);
+  border-color: transparent;
   color: var(--text-strong);
 }
 
@@ -876,7 +886,7 @@
   flex-shrink: 0;
   color: var(--text-soft);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   text-align: center;
 }
 
@@ -913,10 +923,10 @@
   margin: 4px 0;
   padding: 6px 8px;
   border: 1px solid var(--danger-soft);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1.35;
 }
 
@@ -925,10 +935,10 @@
   z-index: 10000;
   min-width: 176px;
   padding: 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   background: var(--surface-bg);
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--shadow-elevated);
 }
 
 .review-file-context-menu button {
@@ -936,11 +946,11 @@
   width: 100%;
   padding: 7px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   text-align: left;
   cursor: pointer;
 }
@@ -962,7 +972,7 @@
   vertical-align: -1px;
   border: 2px solid color-mix(in srgb, var(--text-muted) 26%, transparent);
   border-top-color: var(--text-muted);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   animation: review-menu-spin 0.8s linear infinite;
 }
 
@@ -980,24 +990,17 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: color-mix(in srgb, #000 52%, transparent);
+  background: rgba(0, 0, 0, 0.52);
   backdrop-filter: blur(2px);
 }
 
 .review-commit-dialog {
   width: min(420px, calc(100vw - 48px));
   padding: 18px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  border-radius: 16px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-bg) 92%, var(--accent) 8%),
-      var(--surface-bg) 42%
-    );
-  box-shadow:
-    0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset,
-    0 24px 64px rgba(0, 0, 0, 0.46);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow-elevated);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1014,9 +1017,9 @@
   place-items: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted-bg);
+  color: var(--text-strong);
   flex-shrink: 0;
 }
 
@@ -1028,14 +1031,14 @@
 }
 
 .review-commit-dialog-title {
-  font-size: 14px;
-  font-weight: 650;
+  font-size: var(--font-size-ui);
+  font-weight: 600;
   color: var(--text-strong);
   letter-spacing: 0.01em;
 }
 
 .review-commit-dialog-subtitle {
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1.35;
   color: var(--text-soft);
 }
@@ -1047,7 +1050,7 @@
 }
 
 .review-commit-dialog-label {
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--text-muted);
@@ -1063,17 +1066,14 @@
   min-width: 0;
   height: 36px;
   padding: 0 12px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  background: color-mix(in srgb, var(--surface-bg) 72%, #000 8%);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 3%, transparent);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-muted-bg);
 }
 
 .review-commit-dialog-input-row .review-commit-message-input:focus {
-  border-color: color-mix(in srgb, var(--accent) 62%, var(--border-strong));
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, #fff 3%, transparent),
-    0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--border-focus);
+  box-shadow: none;
 }
 
 .review-commit-ai-button {
@@ -1085,20 +1085,20 @@
   min-width: 72px;
   height: 36px;
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--surface-hover) 86%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .review-commit-ai-button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 14%, var(--surface-hover));
-  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-strong));
+  background: var(--surface-alt-bg);
+  border-color: var(--border-strong);
   color: var(--text-strong);
 }
 
@@ -1117,7 +1117,7 @@
 .review-commit-dialog-hint {
   min-width: 0;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
 }
 
 .review-commit-dialog-actions {
@@ -1131,11 +1131,11 @@
   align-items: center;
   gap: 7px;
   padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--border-subtle) 88%, transparent);
-  background: color-mix(in srgb, var(--surface-hover) 80%, transparent);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-muted-bg);
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1.4;
   word-break: break-all;
 }
@@ -1143,24 +1143,25 @@
 .review-commit-dialog-cancel {
   padding: 0 14px;
   height: 34px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
   cursor: pointer;
 }
 
 .review-commit-dialog-cancel:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: var(--interactive-hover);
 }
 
 .review-commit-dialog .review-commit-button {
   height: 34px;
   min-width: 76px;
   padding: 0 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .review-diff-tree {
@@ -1173,18 +1174,19 @@
 .review-diff-row {
   display: flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 32px;
   gap: 6px;
-  border-radius: 6px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .review-group-compact .review-diff-row {
-  min-height: 27px;
+  min-height: 28px;
   gap: 5px;
-  border-radius: 7px;
-  font-size: 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
 }
 
 .review-diff-dir {
@@ -1206,7 +1208,8 @@
 }
 
 .review-diff-file.is-active {
-  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
+  background: var(--interactive-selected);
+  border-color: transparent;
 }
 
 .review-diff-name {
@@ -1215,7 +1218,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .review-group-compact .review-diff-name {
@@ -1234,15 +1237,15 @@
   justify-content: center;
   flex-shrink: 0;
   min-width: 36px;
-  height: 20px;
+  height: 22px;
   margin-left: 4px;
   padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--surface-bg) 78%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-bg);
   color: var(--text-strong);
-  font-size: 10.5px;
-  font-weight: 650;
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
@@ -1257,8 +1260,8 @@
 }
 
 .review-row-action:hover {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-strong));
-  background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface-bg));
+  border-color: var(--border-strong);
+  background: var(--surface-alt-bg);
   color: var(--text-strong);
 }
 
@@ -1293,15 +1296,15 @@
   gap: 8px;
   height: 34px;
   padding: 0 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted-bg);
   color: var(--text-soft);
 }
 
 .review-git-filetree-search:focus-within {
-  border-color: color-mix(in srgb, var(--border-strong) 78%, transparent);
-  background: color-mix(in srgb, var(--surface-bg) 52%, transparent);
+  border-color: var(--border-focus);
+  background: var(--surface-muted-bg);
 }
 
 .review-git-filetree-search-icon {
@@ -1323,7 +1326,7 @@
   background: transparent;
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .review-git-filetree-search-input::placeholder {
@@ -1340,53 +1343,53 @@
 :root[data-theme="light"] .review-tab-panel-file-editor,
 :root[data-theme="light"] .review-tab-panel-diff-editor,
 :root[data-theme="light"] .review-editor-filetree {
-  background: #ffffff;
+  background: var(--app-bg);
 }
 
 :root[data-theme="light"] .review-editor-filetree {
-  border-left-color: #eeeeee;
+  border-left-color: var(--border-subtle);
 }
 
 :root[data-theme="light"] .review-git-filetree {
-  background: #ffffff;
-  color: #5f6368;
+  background: var(--app-bg);
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .review-git-filetree-search {
-  border-color: #eeeeee;
-  border-radius: 10px;
-  background: #ffffff;
-  color: #9aa0a6;
+  border-color: var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted-bg);
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .review-git-filetree-search:focus-within {
-  border-color: #d6d9de;
-  background: #ffffff;
+  border-color: var(--border-focus);
+  background: var(--surface-muted-bg);
 }
 
 :root[data-theme="light"] .review-git-filetree-search-input {
-  color: #202124;
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .review-git-filetree-search-input::placeholder {
-  color: #9aa0a6;
+  color: var(--text-soft);
 }
 
 .review-commit-message-input {
   flex: 1 1 auto;
   min-width: 0;
   padding: 6px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .review-commit-message-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--border-focus);
 }
 
 .review-commit-message-input:disabled {
@@ -1399,9 +1402,9 @@
   border: 0;
   border-radius: 6px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   cursor: pointer;
 }

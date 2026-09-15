@@ -24,8 +24,8 @@ use serde_json::Value;
 
 use crate::rpc_types::{
     AnswerProtocol, ApprovalOutcomeWire, ApprovalResponsePayload, AskUserQuestionAnswerItemWire,
-    AskUserQuestionAnswerWire, QuestionResponsePayload, RemoteEventOutcome, RemoteEventResultArgs,
-    RpcId,
+    AskUserQuestionAnswerWire, QuestionResponsePayload, RemoteEventOutcome, RemoteEventRejection,
+    RemoteEventResultArgs, RpcId,
 };
 
 /// One answer ready to send, rendered for the protocol in use.
@@ -186,6 +186,18 @@ impl PendingApprovals {
                 Self::waterfall_args(remote_event_client_id?, event_id, value)
                     .map(AnswerRequest::Waterfall)
             }
+            // The user dismissed the question batch. dsh resolves a cancelled
+            // ask by *rejecting* the waterfall, not by answering it: its own Web
+            // client rejects with `UserQuestionError`/`ASK_CANCELLED`, and the
+            // harness then fails the `ask_user_question` call (the model gets an
+            // abort reason) and clears the pending entry. Sending anything else
+            // here leaves the ask pending, so the question panel kept coming
+            // back after 取消.
+            (PendingApprovalKind::Question, HarnessApprovalResult::QuestionCancelled) => {
+                let event_id = self.waterfall_event_id(rpc_id)?;
+                Self::waterfall_rejection_args(remote_event_client_id?, event_id)
+                    .map(AnswerRequest::Waterfall)
+            }
             // Kind/result mismatch — the UI sent the wrong shape for this id.
             _ => None,
         }
@@ -204,9 +216,24 @@ impl PendingApprovals {
         serde_json::to_value(RemoteEventResultArgs {
             client_id,
             event_id,
-            outcome: RemoteEventOutcome {
-                kind: "result",
-                value,
+            outcome: RemoteEventOutcome::Result { value },
+        })
+        .ok()
+    }
+
+    /// The `$events/result` args that refuse one waterfall, using the exact
+    /// error dsh's own question UI rejects with so the harness maps it to the
+    /// same `ask_user_question` abort instead of treating it as a bad answer.
+    fn waterfall_rejection_args(client_id: String, event_id: String) -> Option<Value> {
+        serde_json::to_value(RemoteEventResultArgs {
+            client_id,
+            event_id,
+            outcome: RemoteEventOutcome::Rejected {
+                error: RemoteEventRejection {
+                    name: "UserQuestionError".to_string(),
+                    message: "the user cancelled ask_user_question".to_string(),
+                    code: Some("ASK_CANCELLED".to_string()),
+                },
             },
         })
         .ok()

@@ -1102,7 +1102,9 @@ fn sanitize_acp_error_text_strips_log_target_when_line_starts_with_timestamp() {
 }
 
 fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::PathBuf) {
-    let service = crate::image_mcp::ImageMcpService::new(
+    let handle = std::sync::Arc::new(crate::image_mcp::start_image_mcp_server().unwrap());
+    let lease = crate::image_mcp::ImageMcpLease::register(
+        handle,
         workspace_model::ImageCapabilities {
             native_view: false,
             native_generate: false,
@@ -1116,8 +1118,7 @@ fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::
             generate_api_key: None,
         },
     );
-    let handle = crate::image_mcp::start_image_mcp_server(service).unwrap();
-    app.image_mcp = Some(handle);
+    app.image_mcp = Some(lease);
     app.ui.image_capabilities.native_view = false;
     app.ui.image_capabilities.view_fallback = true;
     app.ui.prompt_capabilities.image = true;

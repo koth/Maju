@@ -13,14 +13,14 @@ export const APP_THEMES: AppThemeDefinition[] = [
   {
     id: "graphite",
     label: "深色",
-    description: "冷静石墨底 + 钢蓝强调，适合长时间编码。",
-    swatches: ["#0c0d0f", "#16181c", "#7aa2c7"],
+    description: "中性深灰三层表面 + 纯白强调，去掉一切色相装饰。",
+    swatches: ["#171717", "#212121", "#ffffff"],
   },
   {
     id: "light",
     label: "浅色",
-    description: "明亮低噪的冷灰界面。",
-    swatches: ["#f7f8fa", "#e9ecef", "#3f6f97"],
+    description: "白底 + 近黑强调，同一套几何与字号。",
+    swatches: ["#f9f9f9", "#ffffff", "#0d0d0d"],
   },
 ];
 

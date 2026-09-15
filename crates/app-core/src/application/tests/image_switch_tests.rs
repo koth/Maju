@@ -17,7 +17,9 @@ fn text_only_caps() -> ImageCapabilities {
 }
 
 fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::PathBuf) {
-    let service = crate::image_mcp::ImageMcpService::new(
+    let handle = std::sync::Arc::new(crate::image_mcp::start_image_mcp_server().unwrap());
+    let lease = crate::image_mcp::ImageMcpLease::register(
+        handle,
         text_only_caps(),
         crate::image_mcp::ImageMcpConfig {
             workspace_root,
@@ -26,8 +28,7 @@ fn attach_text_only_image_mcp(app: &mut Application, workspace_root: std::path::
             generate_api_key: None,
         },
     );
-    let handle = crate::image_mcp::start_image_mcp_server(service).unwrap();
-    app.image_mcp = Some(handle);
+    app.image_mcp = Some(lease);
     app.ui.prompt_capabilities.image = false;
 }
 

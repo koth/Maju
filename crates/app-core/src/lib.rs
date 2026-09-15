@@ -9,6 +9,7 @@ mod image_capability;
 mod image_mcp;
 mod paths;
 mod reducer;
+mod shared_mcp;
 pub mod remote_bootstrap;
 mod remote_control;
 pub mod remote_profiles;

@@ -80,20 +80,9 @@
 
 .mention-menu-item.is-active {
   position: relative;
-  background: color-mix(in srgb, var(--accent-hover) 14%, transparent);
-  border-color: color-mix(in srgb, var(--accent-hover) 30%, transparent);
+  background: var(--interactive-selected);
+  border-color: transparent;
   color: var(--text-strong);
-}
-
-.mention-menu-item.is-active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--accent-hover);
 }
 
 .mention-menu-icon {
@@ -117,7 +106,7 @@
 .mention-menu-name mark {
   background: transparent;
   color: var(--accent-hover);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .mention-menu-path {
@@ -173,7 +162,7 @@
   align-items: center;
   gap: 4px;
   color: var(--text-soft);
-  font-size: 10.5px;
+  font-size: var(--font-size-2xs);
 }
 
 .mention-menu-hint kbd {
@@ -187,7 +176,7 @@
   background: var(--surface-muted-bg, color-mix(in srgb, var(--text-strong) 5%, transparent));
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   line-height: 1;
 }
 

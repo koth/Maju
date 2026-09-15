@@ -12,10 +12,10 @@
   width: min(760px, calc(100vw - 48px));
   max-height: min(720px, calc(100vh - 48px));
   overflow: auto;
-  background: var(--surface-bg, #151b24);
-  border: 1px solid var(--border-strong, #2a3542);
-  border-radius: var(--radius-xl, 18px);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+  background: var(--surface-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-elevated);
   color: var(--text-strong);
 }
 
@@ -39,6 +39,7 @@
 .settings-section h3,
 .agent-card h4 {
   margin: 0;
+  font-weight: 600;
 }
 
 .settings-header h2 {
@@ -50,17 +51,16 @@
   width: 34px;
   height: 34px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: rgba(215, 225, 223, 0.03);
-  color: var(--text-muted);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt-bg);
+  color: var(--text-strong);
   cursor: pointer;
   font-size: 22px;
   line-height: 1;
 }
 
 .settings-close:hover,
-.settings-secondary-btn:hover,
-.settings-primary-btn:hover {
+.settings-secondary-btn:hover {
   background: var(--interactive-hover);
   color: var(--text-strong);
 }
@@ -79,26 +79,35 @@
 .settings-section p,
 .agent-card p {
   margin: 6px 0 0;
-  color: var(--text-muted);
+  color: var(--text-soft);
   font-size: 12px;
 }
 
 .settings-primary-btn,
 .settings-secondary-btn {
-  min-height: 30px;
+  min-height: 32px;
   padding: 0 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: rgba(215, 225, 223, 0.026);
-  color: var(--text-muted);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-strong);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
 }
 
+/* Primary action: accent fill must always pair with --accent-ink, because
+   --accent is white in dark mode and near-black in light mode. */
 .settings-primary-btn {
-  border-color: var(--interactive-selected-border);
-  background: var(--interactive-selected);
-  color: var(--text-strong);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.settings-primary-btn:hover {
+  border-color: transparent;
+  background: var(--accent-hover);
+  color: var(--accent-ink);
 }
 
 .settings-primary-btn:disabled,
@@ -113,18 +122,18 @@
 .settings-success {
   margin-bottom: 12px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm, 8px);
+  border-radius: var(--radius-sm);
   font-size: 12px;
 }
 
 .settings-status {
-  color: var(--text-muted);
-  background: rgba(215, 225, 223, 0.03);
+  color: var(--text-soft);
+  background: var(--surface-muted-bg);
 }
 
 .settings-warning {
   color: var(--warning);
-  background: var(--warning-soft, rgba(229, 168, 75, 0.12));
+  background: var(--warning-soft);
 }
 
 .settings-error {
@@ -132,7 +141,7 @@
   flex-direction: column;
   gap: 6px;
   color: var(--danger);
-  background: var(--danger-soft, rgba(229, 90, 90, 0.12));
+  background: var(--danger-soft);
 }
 
 .settings-success {
@@ -140,7 +149,7 @@
   flex-direction: column;
   gap: 6px;
   color: var(--success);
-  background: var(--success-soft, rgba(106, 168, 159, 0.14));
+  background: var(--success-soft);
 }
 
 .agent-list {
@@ -156,8 +165,8 @@
   gap: 16px;
   padding: 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg, 12px);
-  background: rgba(215, 225, 223, 0.02);
+  border-radius: var(--radius-lg);
+  background: transparent;
 }
 
 .agent-card.is-selected {
@@ -179,24 +188,24 @@
 .agent-badge,
 .agent-status {
   padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-2xs);
+  font-weight: 500;
 }
 
 .agent-badge {
   color: var(--accent);
-  background: rgba(106, 168, 159, 0.14);
+  background: var(--surface-alt-bg);
 }
 
 .agent-status.is-installed {
   color: var(--success);
-  background: var(--success-soft, rgba(106, 168, 159, 0.14));
+  background: var(--success-soft);
 }
 
 .agent-status.is-missing {
   color: var(--warning);
-  background: var(--warning-soft, rgba(229, 168, 75, 0.12));
+  background: var(--warning-soft);
 }
 
 .agent-path {

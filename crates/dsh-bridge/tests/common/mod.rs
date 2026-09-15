@@ -601,39 +601,64 @@ async fn handle_connection(
                 } else if reject {
                     (false, "bad-response".to_string())
                 } else if let Some(questions) = state_guard.pending_questions.get(event_id) {
-                    // 0.1.5 resolves with the bare answer; ≤ 0.1.4 wrapped it.
-                    let answers = value
-                        .and_then(|v| v.pointer("/answer/answers").or_else(|| v.get("answers")))
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    let matches = answers.len() == questions.len()
-                        && answers.iter().zip(questions.iter()).all(|(a, q)| {
-                            let qid = q.get("id").and_then(Value::as_str).unwrap_or("");
-                            let aid = a.get("id").and_then(Value::as_str).unwrap_or("");
-                            if aid != qid {
-                                return false;
-                            }
-                            let selected: Vec<&str> = a
-                                .get("selected")
-                                .and_then(Value::as_array)
-                                .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-                                .unwrap_or_default();
-                            let labels: Vec<&str> = q
-                                .get("options")
-                                .and_then(Value::as_array)
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|o| o.get("label").and_then(Value::as_str))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            selected.iter().all(|s| labels.contains(s))
-                        });
-                    if matches {
-                        (true, String::new())
+                    // A rejected outcome is how a cancel resolves a question
+                    // waterfall: the gateway's parseRemoteEventResult accepts
+                    // `{ kind: "rejected", error: { name, message } }`, and dsh
+                    // turns it into the tool's own abort error. It carries no
+                    // value, so it must short-circuit the answer schema check.
+                    let outcome_kind = args
+                        .pointer("/outcome/kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if outcome_kind == "rejected" {
+                        let name = args
+                            .pointer("/outcome/error/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let message = args
+                            .pointer("/outcome/error/message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if name.is_empty() || message.is_empty() {
+                            (false, "invalid Remote event rejection".to_string())
+                        } else {
+                            (true, String::new())
+                        }
                     } else {
-                        (false, "bad-response".to_string())
+                        // 0.1.5 resolves with the bare answer; ≤ 0.1.4 wrapped it.
+                        let answers = value
+                            .and_then(|v| v.pointer("/answer/answers").or_else(|| v.get("answers")))
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        let matches = answers.len() == questions.len()
+                            && answers.iter().zip(questions.iter()).all(|(a, q)| {
+                                let qid = q.get("id").and_then(Value::as_str).unwrap_or("");
+                                let aid = a.get("id").and_then(Value::as_str).unwrap_or("");
+                                if aid != qid {
+                                    return false;
+                                }
+                                let selected: Vec<&str> = a
+                                    .get("selected")
+                                    .and_then(Value::as_array)
+                                    .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                                    .unwrap_or_default();
+                                let labels: Vec<&str> = q
+                                    .get("options")
+                                    .and_then(Value::as_array)
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|o| o.get("label").and_then(Value::as_str))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                selected.iter().all(|s| labels.contains(s))
+                            });
+                        if matches {
+                            (true, String::new())
+                        } else {
+                            (false, "bad-response".to_string())
+                        }
                     }
                 } else if state_guard.pending_approvals.contains_key(event_id) {
                     // An approval waterfall resolves with the bare closed

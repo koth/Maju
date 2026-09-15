@@ -13,29 +13,17 @@
 .confirm-dialog {
   width: min(400px, calc(100vw - 48px));
   padding: 18px;
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  border-radius: 16px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-bg) 92%, var(--accent) 8%),
-      var(--surface-bg) 42%
-    );
-  box-shadow:
-    0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset,
-    0 24px 64px rgba(0, 0, 0, 0.46);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow-elevated);
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
 .confirm-dialog.is-danger {
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-bg) 90%, var(--danger) 10%),
-      var(--surface-bg) 46%
-    );
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border-subtle));
 }
 
 .confirm-dialog-header {
@@ -49,9 +37,9 @@
   place-items: center;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt-bg);
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 
@@ -70,7 +58,7 @@
 
 .confirm-dialog-title {
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-strong);
   letter-spacing: 0.01em;
 }
@@ -104,7 +92,7 @@
   height: 34px;
   min-width: 76px;
   padding: 0 14px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font: inherit;
   font-size: 12px;
   font-weight: 600;
@@ -117,8 +105,8 @@
 }
 
 .confirm-dialog-button-secondary {
-  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
-  background: color-mix(in srgb, var(--surface-bg) 78%, #000 8%);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-alt-bg);
   color: var(--text-muted);
 }
 
@@ -130,7 +118,7 @@
 .confirm-dialog-button-primary {
   border: 0;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
 }
 
 .confirm-dialog-button-primary:not(:disabled):hover {
@@ -145,12 +133,6 @@
   background: color-mix(in srgb, var(--danger) 86%, #000 14%);
 }
 
-:root[data-theme="light"] .confirm-dialog {
-  box-shadow:
-    0 1px 0 color-mix(in srgb, #fff 70%, transparent) inset,
-    0 24px 64px rgba(15, 23, 42, 0.16);
-}
-
 :root[data-theme="light"] .confirm-dialog-detail {
-  background: color-mix(in srgb, var(--surface-bg) 88%, #000 4%);
+  background: var(--surface-muted-bg);
 }

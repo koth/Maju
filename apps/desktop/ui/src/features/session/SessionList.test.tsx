@@ -989,11 +989,146 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       />,
     );
 
-    // The inactive "Other" workspace defaults to collapsed; its running
-    // session surfaces as an aggregate indicator on the workspace header.
+    // The inactive "Other" workspace defaults to collapsed. Its running session
+    // surfaces on the header's single status dot, which pulses — there is no
+    // second dot next to the folder icon.
     const indicator = await screen.findByLabelText("有会话进行中");
-    expect(indicator).toHaveClass("is-progress");
+    expect(indicator).toHaveClass("sl-workspace-state");
     expect(indicator.closest(".sl-workspace-section")).toHaveClass("has-collapsed-running");
+  });
+
+  it("previews the five most recent sessions and reveals the rest on demand", async () => {
+    const sessions = Array.from({ length: 8 }, (_, index) =>
+      sessionItem({
+        id: `session-${index}`,
+        title: `Session ${index}`,
+        // Newest first once sortSessions() orders by updated_at.
+        updated_at: `2026-05-${String(30 - index).padStart(2, "0")}T00:00:00Z`,
+      }),
+    );
+    vi.mocked(sessionList).mockResolvedValue(workspaceWithSessions(sessions));
+
+    render(
+      <SessionList
+        activeSessionId="session-0"
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("Session 0")).toBeInTheDocument();
+    expect(screen.getByText("Session 4")).toBeInTheDocument();
+    expect(screen.queryByText("Session 5")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开显示" }));
+    expect(await screen.findByText("Session 7")).toBeInTheDocument();
+    // Everything fits in the first reveal, so the toggle is done for good.
+    expect(screen.queryByRole("button", { name: "展开显示" })).not.toBeInTheDocument();
+  });
+
+  it("reveals double the previous batch on each expand click", async () => {
+    const sessions = Array.from({ length: 40 }, (_, index) =>
+      sessionItem({
+        id: `session-${index}`,
+        title: `Session ${index}`,
+        // Strictly descending timestamps: index 0 is the most recent session.
+        updated_at: new Date(Date.UTC(2026, 3, 1) - index * 86_400_000).toISOString(),
+      }),
+    );
+    vi.mocked(sessionList).mockResolvedValue(workspaceWithSessions(sessions));
+
+    render(
+      <SessionList
+        activeSessionId=""
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Session 0");
+
+    // 5 by default, then +10, then +20, then +40 until the list runs out.
+    fireEvent.click(screen.getByRole("button", { name: "展开显示" }));
+    expect(await screen.findByText("Session 14")).toBeInTheDocument();
+    expect(screen.queryByText("Session 15")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开显示" }));
+    expect(await screen.findByText("Session 34")).toBeInTheDocument();
+    expect(screen.queryByText("Session 35")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开显示" }));
+    expect(await screen.findByText("Session 39")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "展开显示" })).not.toBeInTheDocument();
+  });
+
+  it("resets an expanded project back to the preview when it is collapsed", async () => {
+    const sessions = Array.from({ length: 8 }, (_, index) =>
+      sessionItem({
+        id: `session-${index}`,
+        title: `Session ${index}`,
+        updated_at: `2026-05-${String(30 - index).padStart(2, "0")}T00:00:00Z`,
+      }),
+    );
+    vi.mocked(sessionList).mockResolvedValue(workspaceWithSessions(sessions));
+
+    render(
+      <SessionList
+        activeSessionId="session-0"
+        activeSessionTitle=""
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "展开显示" }));
+    expect(await screen.findByText("Session 7")).toBeInTheDocument();
+
+    // Collapse the project, then open it again: the preview is the default.
+    fireEvent.click(screen.getByRole("button", { name: "折叠 Kodex 的会话列表" }));
+    await waitFor(() => expect(screen.queryByText("Session 7")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "展开 Kodex 的会话列表" }));
+
+    expect(await screen.findByText("Session 0")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开显示" })).toBeInTheDocument();
+    expect(screen.queryByText("Session 5")).not.toBeInTheDocument();
+  });
+
+  it("keeps the open session visible when it falls outside the preview", async () => {
+    const sessions = Array.from({ length: 8 }, (_, index) =>
+      sessionItem({
+        id: `session-${index}`,
+        title: `Session ${index}`,
+        updated_at: `2026-05-${String(30 - index).padStart(2, "0")}T00:00:00Z`,
+      }),
+    );
+    vi.mocked(sessionList).mockResolvedValue(workspaceWithSessions(sessions));
+
+    render(
+      <SessionList
+        activeSessionId="session-7"
+        activeSessionTitle="Session 7"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    // The oldest session is open, so it stays on screen next to the preview.
+    expect(await screen.findByText("Session 7")).toBeInTheDocument();
+    expect(screen.queryByText("Session 5")).not.toBeInTheDocument();
   });
 
   it("refreshes background session indicators when session status events arrive", async () => {

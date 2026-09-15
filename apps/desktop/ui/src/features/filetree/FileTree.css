@@ -1,6 +1,6 @@
 .filetree {
-  --filetree-indent-base: 8px;
-  --filetree-indent-step: 16px;
+  --filetree-indent-base: 6px;
+  --filetree-indent-step: 14px;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -16,7 +16,7 @@
   gap: 8px;
   padding: 8px 12px;
   font-size: 11px;
-  font-weight: 550;
+  font-weight: 600;
   color: var(--text-muted);
   letter-spacing: 0;
   border-bottom: 1px solid var(--border);
@@ -63,7 +63,7 @@
 }
 
 .filetree-inline {
-  --filetree-indent-base: 4px;
+  --filetree-indent-base: 6px;
   --filetree-indent-step: 14px;
   padding: 10px 10px 12px 12px;
   color: var(--text-muted);
@@ -83,7 +83,7 @@
   height: 34px;
   padding: 0 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
   color: var(--text-soft);
 }
@@ -112,7 +112,7 @@
   width: 30px;
   height: 30px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
   cursor: pointer;
@@ -122,7 +122,7 @@
   width: 34px;
   height: 34px;
   border-color: var(--border-subtle);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface-bg) 38%, transparent);
 }
 
@@ -165,7 +165,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  min-height: 26px;
+  padding-right: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
   color: var(--text-muted);
@@ -176,12 +178,12 @@
 }
 
 .filetree-inline .filetree-node {
-  height: 27px;
+  min-height: 26px;
   margin: 1px 0;
   gap: 5px;
-  border-radius: 7px;
-  color: color-mix(in srgb, var(--text-strong) 88%, transparent);
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 .filetree-node:hover {
@@ -189,7 +191,7 @@
 }
 
 .filetree-inline .filetree-node:hover {
-  background: color-mix(in srgb, var(--text-strong) 8%, transparent);
+  background: var(--interactive-hover);
 }
 
 .filetree-node.is-selected {
@@ -198,7 +200,7 @@
 }
 
 .filetree-inline .filetree-node.is-selected {
-  background: color-mix(in srgb, var(--text-strong) 11%, transparent);
+  background: var(--interactive-selected);
   color: var(--text-strong);
 }
 
@@ -236,6 +238,10 @@
   height: 16px;
   flex-shrink: 0;
   object-fit: contain;
+  /* Bundled file icons are coloured images, so `currentColor` cannot reach
+     them: desaturate to the same quiet register as `--text-soft`. */
+  filter: grayscale(1);
+  opacity: 0.8;
 }
 
 .filetree-inline .filetree-icon {
@@ -254,7 +260,7 @@
   height: 22px;
   padding: 0 6px;
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   outline: none;
   background: var(--app-bg);
   color: var(--text-strong);
@@ -262,7 +268,7 @@
 }
 
 .filetree-dir .filetree-name {
-  font-weight: 550;
+  font-weight: 500;
   color: var(--text-strong);
 }
 
@@ -288,9 +294,9 @@
 .filetree-inline-error {
   margin: 6px 8px;
   padding: 6px 8px;
-  border: 1px solid rgba(255, 114, 94, 0.24);
-  border-radius: 6px;
-  background: rgba(255, 114, 94, 0.08);
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
   color: var(--danger);
   font-size: 12px;
 }
@@ -302,9 +308,9 @@
   min-width: 180px;
   padding: 4px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--surface-bg);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--shadow-elevated);
   font-family: var(--font-chat);
 }
 
@@ -314,7 +320,7 @@
   min-height: 28px;
   padding: 0 9px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font: inherit;
@@ -333,7 +339,7 @@
 }
 
 .filetree-context-menu button.filetree-menu-danger:hover {
-  background: rgba(255, 114, 94, 0.1);
+  background: var(--danger-soft);
   color: var(--danger);
 }
 
@@ -343,82 +349,82 @@
 }
 
 :root[data-theme="light"] .filetree-inline {
-  background: #ffffff;
-  color: #4b5563;
+  background: var(--app-bg);
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .filetree-search {
-  border-color: #eeeeee;
-  border-radius: 10px;
-  background: #ffffff;
-  color: #9aa0a6;
+  border-color: var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .filetree-inline .filetree-refresh-button {
-  border-color: #eeeeee;
-  background: #ffffff;
-  color: #9aa0a6;
+  border-color: var(--border-subtle);
+  background: var(--surface-bg);
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .filetree-refresh-button:hover:not(:disabled) {
-  background: #f5f5f5;
-  color: #202124;
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .filetree-search:focus-within {
-  border-color: #d6d9de;
-  background: #ffffff;
+  border-color: var(--border-strong);
+  background: var(--surface-alt-bg);
 }
 
 :root[data-theme="light"] .filetree-search-input {
-  color: #202124;
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .filetree-search-input::placeholder {
-  color: #9aa0a6;
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .filetree-node,
 :root[data-theme="light"] .filetree-inline .filetree-node {
-  color: #3f4750;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .filetree-node:hover,
 :root[data-theme="light"] .filetree-inline .filetree-node:hover {
-  background: #f1f1ef;
+  background: var(--interactive-hover);
 }
 
 :root[data-theme="light"] .filetree-node.is-selected,
 :root[data-theme="light"] .filetree-inline .filetree-node.is-selected {
-  background: #e6e6e3;
-  color: #202124;
+  background: var(--interactive-selected);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .filetree-chevron,
 :root[data-theme="light"] .filetree-inline .filetree-chevron {
-  color: #70767d;
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .filetree-dir .filetree-name,
 :root[data-theme="light"] .filetree-file.is-selected .filetree-name {
-  color: #202124;
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .filetree-file .filetree-name {
-  color: #4f555c;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .filetree-context-menu {
-  border-color: #e5e5e5;
-  background: #ffffff;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12);
+  border-color: var(--border);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow-elevated);
 }
 
 :root[data-theme="light"] .filetree-context-menu button {
-  color: #4f555c;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .filetree-context-menu button:hover:not(:disabled) {
-  background: #f5f5f5;
-  color: #202124;
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }

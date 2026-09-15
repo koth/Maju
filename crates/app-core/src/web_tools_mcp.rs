@@ -1,3 +1,13 @@
+//! `kodex-web-tools` local MCP server: the configured web-tools provider
+//! exposed to agents as `web_search` / `web_fetch`.
+//!
+//! Mirrors [`crate::image_mcp`]: one `127.0.0.1` JSON-RPC server on `/mcp`
+//! serves **every** session (assistant channels and the DeepSeek Harness).
+//! Each session registers its own provider client behind its own
+//! `x-kodex-web-tools-token`, so a settings change applies to the sessions that
+//! start after it without disturbing the ones already running, and no session
+//! can address another's registration.
+
 use crate::web_tools::{
     WebFetchRequest, WebSearchRequest, WebToolsConfig, WebToolsError, WebToolsService,
     error_to_json, response_to_value,
@@ -11,9 +21,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -21,11 +33,44 @@ use uuid::Uuid;
 
 type BoxBody = Full<Bytes>;
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
+const TOKEN_HEADER: &str = "x-kodex-web-tools-token";
 const TOOLS_RESOURCE_URI: &str = "kodex-web-tools://tools";
+
+/// Per-token registry of the provider clients behind each session.
+#[derive(Clone, Default)]
+pub struct WebToolsMcpService {
+    sessions: Arc<Mutex<HashMap<String, WebToolsService>>>,
+}
+
+impl WebToolsMcpService {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build and register one session's provider client, returning its token.
+    pub fn register_session(&self, config: WebToolsConfig) -> anyhow::Result<String> {
+        let service = WebToolsService::new(config)?;
+        let token = Uuid::new_v4().to_string();
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(token.clone(), service);
+        }
+        Ok(token)
+    }
+
+    pub fn unregister_session(&self, token: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(token);
+        }
+    }
+
+    pub fn session(&self, token: &str) -> Option<WebToolsService> {
+        self.sessions.lock().ok()?.get(token).cloned()
+    }
+}
 
 pub struct WebToolsMcpHandle {
     url: String,
-    token: String,
+    service: WebToolsMcpService,
     shutdown_tx: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -35,8 +80,13 @@ impl WebToolsMcpHandle {
         &self.url
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
+    /// Register one session's provider config and return its token.
+    pub fn register_session(&self, config: WebToolsConfig) -> anyhow::Result<String> {
+        self.service.register_session(config)
+    }
+
+    pub fn unregister_session(&self, token: &str) {
+        self.service.unregister_session(token);
     }
 }
 
@@ -51,20 +101,48 @@ impl Drop for WebToolsMcpHandle {
     }
 }
 
-pub fn start_web_tools_mcp_server(config: WebToolsConfig) -> anyhow::Result<WebToolsMcpHandle> {
-    let service = WebToolsService::new(config)?;
+/// One session's registration on a web-tools MCP server, usually the shared
+/// one. Dropping the lease unregisters the token; the handle outlives it.
+pub struct WebToolsLease {
+    handle: Arc<WebToolsMcpHandle>,
+    token: String,
+}
+
+impl WebToolsLease {
+    pub fn register(handle: Arc<WebToolsMcpHandle>, config: WebToolsConfig) -> anyhow::Result<Self> {
+        let token = handle.register_session(config)?;
+        Ok(Self { handle, token })
+    }
+
+    pub fn url(&self) -> &str {
+        self.handle.url()
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl Drop for WebToolsLease {
+    fn drop(&mut self) {
+        self.handle.unregister_session(&self.token);
+    }
+}
+
+/// Start a private web-tools MCP server with no registered session. Prefer the
+/// shared instance ([`crate::shared_mcp`]); this exists for tests and for
+/// callers that must stay isolated from the process-wide singleton.
+pub fn start_web_tools_mcp_server() -> anyhow::Result<WebToolsMcpHandle> {
+    let service = WebToolsMcpService::new();
     start_web_tools_mcp_server_with_service(service)
 }
 
 pub fn start_web_tools_mcp_server_with_service(
-    service: WebToolsService,
+    service: WebToolsMcpService,
 ) -> anyhow::Result<WebToolsMcpHandle> {
-    let token = Uuid::new_v4().to_string();
-    let session_id = Uuid::new_v4().to_string();
     let (addr_tx, addr_rx) = mpsc::sync_channel::<anyhow::Result<SocketAddr>>(1);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let thread_token = token.clone();
-    let thread_session_id = session_id.clone();
+    let thread_service = service.clone();
     let thread = thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -92,20 +170,13 @@ pub fn start_web_tools_mcp_server_with_service(
                 }
             };
             let _ = addr_tx.send(Ok(addr));
-            run_server(
-                listener,
-                service,
-                thread_token,
-                thread_session_id,
-                shutdown_rx,
-            )
-            .await;
+            run_server(listener, thread_service, shutdown_rx).await;
         });
     });
     let addr = addr_rx.recv().map_err(|error| anyhow::anyhow!(error))??;
     Ok(WebToolsMcpHandle {
         url: format!("http://{addr}/mcp"),
-        token,
+        service,
         shutdown_tx: Some(shutdown_tx),
         thread: Some(thread),
     })
@@ -113,9 +184,7 @@ pub fn start_web_tools_mcp_server_with_service(
 
 async fn run_server(
     listener: TcpListener,
-    service: WebToolsService,
-    token: String,
-    session_id: String,
+    service: WebToolsMcpService,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -126,18 +195,11 @@ async fn run_server(
                     continue;
                 };
                 let service = service.clone();
-                let token = token.clone();
-                let session_id = session_id.clone();
                 tokio::task::spawn(async move {
                     let io = TokioIo::new(stream);
                     let _ = http1::Builder::new()
                         .serve_connection(io, service_fn(move |request| {
-                            handle_http_request(
-                                request,
-                                service.clone(),
-                                token.clone(),
-                                session_id.clone(),
-                            )
+                            handle_http_request(request, service.clone())
                         }))
                         .await;
                 });
@@ -148,19 +210,25 @@ async fn run_server(
 
 async fn handle_http_request(
     request: Request<Incoming>,
-    service: WebToolsService,
-    token: String,
-    session_id: String,
+    service: WebToolsMcpService,
 ) -> Result<Response<BoxBody>, Infallible> {
     if request.method() != Method::POST || request.uri().path() != "/mcp" {
         return Ok(response(StatusCode::NOT_FOUND, "Not found"));
     }
-    if !authorized(&request, &token) {
+    // The token names the session, so it is also the MCP session id: each
+    // client gets its own and may never present another session's id.
+    let Some(token) = request_token(&request) else {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized"}),
         ));
-    }
+    };
+    let Some(session) = service.session(&token) else {
+        return Ok(json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": "unauthorized"}),
+        ));
+    };
     let request_session_id = request
         .headers()
         .get(MCP_SESSION_ID_HEADER)
@@ -184,38 +252,38 @@ async fn handle_http_request(
             ));
         }
     };
-    if json_rpc_requires_session(&payload)
-        && request_session_id.as_deref() != Some(session_id.as_str())
-    {
+    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str()) {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
         ));
     }
-    let result = handle_json_rpc(payload, service).await;
+    let result = handle_json_rpc(payload, session).await;
     Ok(match result {
         JsonRpcHttpResult::Response(payload) => {
-            json_response_with_session(StatusCode::OK, payload, Some(&session_id))
+            json_response_with_session(StatusCode::OK, payload, Some(&token))
         }
         JsonRpcHttpResult::Accepted => {
-            empty_response_with_session(StatusCode::ACCEPTED, Some(&session_id))
+            empty_response_with_session(StatusCode::ACCEPTED, Some(&token))
         }
     })
 }
 
-fn authorized(request: &Request<Incoming>, token: &str) -> bool {
-    let header_token = request
+/// The session token carried by one request, from the Kodex header or a bearer
+/// authorization.
+fn request_token(request: &Request<Incoming>) -> Option<String> {
+    if let Some(token) = request
         .headers()
-        .get("x-kodex-web-tools-token")
-        .and_then(|value| value.to_str().ok());
-    if header_token == Some(token) {
-        return true;
+        .get(TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(token.to_string());
     }
-    request
+    let header = request
         .headers()
         .get(hyper::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == format!("Bearer {token}"))
+        .and_then(|value| value.to_str().ok())?;
+    header.strip_prefix("Bearer ").map(str::to_string)
 }
 
 enum JsonRpcHttpResult {
@@ -477,16 +545,38 @@ mod tests {
         format!("http://127.0.0.1:{}", addr.port())
     }
 
-    fn mcp_service() -> WebToolsService {
+    fn mcp_config() -> WebToolsConfig {
         let mut config = WebToolsConfig::brave("secret");
         config.allow_private_network = true;
-        WebToolsService::new(config).unwrap()
+        config
     }
 
-    async fn initialize_mcp_session(
-        client: &reqwest::Client,
-        handle: &WebToolsMcpHandle,
-    ) -> String {
+    /// A private server with one registered session, exposing the same surface
+    /// the tests were written against (`url`/`token`).
+    struct TestServer {
+        handle: Arc<WebToolsMcpHandle>,
+        token: String,
+    }
+
+    impl TestServer {
+        fn url(&self) -> &str {
+            self.handle.url()
+        }
+
+        fn token(&self) -> &str {
+            &self.token
+        }
+    }
+
+    fn start_test_server() -> TestServer {
+        let handle = Arc::new(
+            start_web_tools_mcp_server_with_service(WebToolsMcpService::new()).unwrap(),
+        );
+        let token = handle.register_session(mcp_config()).unwrap();
+        TestServer { handle, token }
+    }
+
+    async fn initialize_mcp_session(client: &reqwest::Client, handle: &TestServer) -> String {
         let response = client
             .post(handle.url())
             .header("x-kodex-web-tools-token", handle.token())
@@ -523,7 +613,7 @@ mod tests {
 
     #[test]
     fn mcp_streamable_http_handshake_accepts_initialized_notification() {
-        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let handle = start_test_server();
         let status = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize_mcp_session(&client, &handle).await;
@@ -547,7 +637,7 @@ mod tests {
 
     #[test]
     fn mcp_lists_tools_with_token() {
-        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let handle = start_test_server();
         let response: Value = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize_mcp_session(&client, &handle).await;
@@ -571,7 +661,7 @@ mod tests {
 
     #[test]
     fn mcp_resources_expose_mounted_tools() {
-        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let handle = start_test_server();
         let names = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize_mcp_session(&client, &handle).await;
@@ -621,7 +711,7 @@ mod tests {
 
     #[test]
     fn mcp_rejects_missing_token() {
-        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let handle = start_test_server();
         let response = run_async(async {
             reqwest::Client::new()
                 .post(handle.url())
@@ -637,7 +727,7 @@ mod tests {
     #[test]
     fn mcp_calls_web_fetch_tool() {
         let page_url = local_page_server();
-        let handle = start_web_tools_mcp_server_with_service(mcp_service()).unwrap();
+        let handle = start_test_server();
         let response: Value = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize_mcp_session(&client, &handle).await;

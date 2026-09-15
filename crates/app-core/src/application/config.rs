@@ -115,6 +115,79 @@ mod harness_question_tests {
         assert_eq!(wire[0].question_id, "second");
         assert_eq!(wire[1].question_id, "first");
     }
+
+    fn response(entries: &[(&str, &str)]) -> workspace_model::PermissionInputResponse {
+        let mut answers = BTreeMap::new();
+        for (id, value) in entries {
+            answers.insert((*id).to_string(), vec![(*value).to_string()]);
+        }
+        workspace_model::PermissionInputResponse { answers }
+    }
+
+    #[test]
+    fn dismissing_a_question_batch_cancels_it() {
+        // Regression: 取消 used to fall through to an approval rejection, which
+        // the bridge refuses for a question id — the ask stayed pending and the
+        // panel came back on the next snapshot.
+        let questions = vec![question("q1", vec![option("A"), option("B")])];
+        assert!(matches!(
+            harness_permission_result("q1", &questions, Some("cancel"), None),
+            HarnessApprovalResult::QuestionCancelled
+        ));
+        // A remote client that sends neither answers nor an option id cancels too.
+        assert!(matches!(
+            harness_permission_result("q1", &questions, None, None),
+            HarnessApprovalResult::QuestionCancelled
+        ));
+        // So does an empty answer batch.
+        let empty = workspace_model::PermissionInputResponse::default();
+        assert!(matches!(
+            harness_permission_result("q1", &questions, Some("submit"), Some(&empty)),
+            HarnessApprovalResult::QuestionCancelled
+        ));
+    }
+
+    #[test]
+    fn answering_a_question_batch_still_returns_answers() {
+        let questions = vec![question("q1", vec![option("A"), option("B")])];
+        let response = response(&[("q1", "A")]);
+
+        match harness_permission_result("q1", &questions, Some("submit"), Some(&response)) {
+            HarnessApprovalResult::Question { answers } => {
+                assert_eq!(answers.len(), 1);
+                assert_eq!(answers[0].question_id, "q1");
+                assert_eq!(answers[0].selected, vec!["A".to_string()]);
+            }
+            other => panic!("expected question answers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approvals_keep_their_outcome() {
+        // No questions on the request: the option id decides, and cancelling
+        // still means a rejection (approvals are answered, not aborted).
+        assert!(matches!(
+            harness_permission_result("p1", &[], Some("allowed-once"), None),
+            HarnessApprovalResult::Approval {
+                outcome: HarnessApprovalOutcome::AllowedOnce,
+                ..
+            }
+        ));
+        assert!(matches!(
+            harness_permission_result("p1", &[], Some("rejected"), None),
+            HarnessApprovalResult::Approval {
+                outcome: HarnessApprovalOutcome::Rejected,
+                ..
+            }
+        ));
+        assert!(matches!(
+            harness_permission_result("p1", &[], None, None),
+            HarnessApprovalResult::Approval {
+                outcome: HarnessApprovalOutcome::Rejected,
+                ..
+            }
+        ));
+    }
 }
 
 impl Application {
@@ -388,39 +461,15 @@ impl Application {
         option_id: Option<&str>,
         input_response: Option<workspace_model::PermissionInputResponse>,
     ) -> HarnessApprovalResult {
-        if let Some(response) = input_response
-            && !response.answers.is_empty()
-        {
-            // The composer flattens a custom/free-text answer into the same
-            // `answers[question.id]` string array as selected option labels
-            // (single-select replaces the selection; multi-select appends).
-            // The harness `matchesQuestions` gate, however, requires option
-            // labels in `selected` and free text in `custom` -- a non-label in
-            // `selected` (notably every optionless question) is rejected as
-            // `bad-response`, so the question never resolves and the turn
-            // hangs. Partition each answer against the request's own option
-            // labels, and emit answers in question order (the harness matches
-            // `answers[i].id === questions[i].id` by index).
-            let questions = self
-                .ui
-                .tools
-                .iter()
-                .find(|tool| tool.call_id == request_id)
-                .and_then(|tool| tool.permission_input.as_ref())
-                .map(|input| input.questions.clone())
-                .unwrap_or_default();
-            return HarnessApprovalResult::Question {
-                answers: partition_question_answers(&questions, &response.answers),
-            };
-        }
-        let outcome = match option_id.unwrap_or("rejected") {
-            "allowed-once" => HarnessApprovalOutcome::AllowedOnce,
-            _ => HarnessApprovalOutcome::Rejected,
-        };
-        HarnessApprovalResult::Approval {
-            approval_id: request_id.to_string(),
-            outcome,
-        }
+        let questions = self
+            .ui
+            .tools
+            .iter()
+            .find(|tool| tool.call_id == request_id)
+            .and_then(|tool| tool.permission_input.as_ref())
+            .map(|input| input.questions.clone())
+            .unwrap_or_default();
+        harness_permission_result(request_id, &questions, option_id, input_response.as_ref())
     }
 
     pub(super) fn auto_resolve_full_access_permission_if_applicable(
@@ -1338,8 +1387,41 @@ mod tests {
     }
 }
 
-/// Partition a composer `PermissionInputResponse` into harness wire answers.
+/// Decide the harness result for one resolved permission request.
 ///
+/// A question batch is recognized by the request's own question list, and the
+/// only way to answer it is an answer batch. Dismissing it (the composer's
+/// 取消, or a remote client that sends no answers at all) must therefore cancel
+/// the ask: the bridge matches the result kind against the pending entry, so an
+/// `Approval` result for a question id is refused outright and nothing is ever
+/// posted — which left the question pending and the panel popping back up.
+fn harness_permission_result(
+    request_id: &str,
+    questions: &[workspace_model::PermissionInputQuestion],
+    option_id: Option<&str>,
+    input_response: Option<&workspace_model::PermissionInputResponse>,
+) -> HarnessApprovalResult {
+    if !questions.is_empty() {
+        let answers = input_response
+            .filter(|response| !response.answers.is_empty())
+            .map(|response| partition_question_answers(questions, &response.answers))
+            .unwrap_or_default();
+        if answers.is_empty() {
+            return HarnessApprovalResult::QuestionCancelled;
+        }
+        return HarnessApprovalResult::Question { answers };
+    }
+    let outcome = match option_id.unwrap_or("rejected") {
+        "allowed-once" => HarnessApprovalOutcome::AllowedOnce,
+        _ => HarnessApprovalOutcome::Rejected,
+    };
+    HarnessApprovalResult::Approval {
+        approval_id: request_id.to_string(),
+        outcome,
+    }
+}
+
+/// Partition a composer `PermissionInputResponse` into harness wire answers.
 /// The composer collapses selected labels and free text into one string array
 /// per question; the harness `matchesQuestions` gate (api-proxy) requires
 /// option labels in `selected` and free text in `custom`. Values that match a

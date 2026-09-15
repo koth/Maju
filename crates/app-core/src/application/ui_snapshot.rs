@@ -232,6 +232,24 @@ fn cap_string_in_place(value: &mut String, max_chars: usize) {
     *value = capped;
 }
 
+/// Replace a body's inline image blocks with a note, keeping the prose before
+/// the first one.
+///
+/// Used when an image body cannot travel whole: a truncated `data:` URL is worse
+/// than no image at all, because the phone renders the leftover base64 as text.
+/// The desktop reads the same message from its own unprojected snapshot, so only
+/// the phone sees the note.
+fn omit_inline_images(body: &str) -> String {
+    let Some(first) = body.find("![") else {
+        return REMOTE_IMAGE_OMITTED_NOTE.to_string();
+    };
+    let prose = body[..first].trim_end();
+    if prose.is_empty() {
+        return REMOTE_IMAGE_OMITTED_NOTE.to_string();
+    }
+    format!("{prose}\n\n{REMOTE_IMAGE_OMITTED_NOTE}")
+}
+
 fn looks_like_bogus_whole_file_preview(preview: &ToolDiffPreview) -> bool {
     let mut added = 0usize;
     let mut removed = 0usize;
@@ -298,14 +316,31 @@ const REMOTE_MESSAGE_BODY_BUDGET: usize = 1024 * 1024;
 /// so truncating them cannot desync the append chain (matches the historical
 /// behavior).
 const REMOTE_MESSAGE_BODY_CHARS: usize = 2 * 1024;
-/// Bodies carrying an inline image data URL embed the attachment THUMBNAIL
-/// (a 64x64 canvas PNG, ~2-8KB of base64) and must reach the phone intact:
-/// truncating mid-base64 leaves an unterminated markdown image the phone can
-/// neither parse nor render — it shows raw base64 text instead. The original
-/// file never enters the payload (it stays a `file://` title for the desktop
-/// preview), so this allowance is bounded in practice; the cap only guards
-/// against pathological bodies.
-const REMOTE_IMAGE_BODY_CHARS: usize = 16 * 1024;
+/// Bodies carrying an inline image data URL embed base64 the phone must receive
+/// **whole**: truncating mid-base64 leaves an unterminated markdown image the
+/// phone can neither parse nor render, so it shows raw base64 text instead of a
+/// picture.
+///
+/// Two producers share this shape and they are very different in size:
+///
+/// - a user attachment embeds a 64x64 canvas thumbnail (~2-8KB of base64) and
+///   keeps the original file as a `file://` title, and
+/// - a generated image (`extract_generated_image_markdown`) embeds the
+///   provider's file, which is a full-size PNG — measured at 0.8-2.1MB on disk,
+///   so 1.1-2.8MB of base64.
+///
+/// The allowance therefore has to cover the generated case; the old 16KB limit
+/// truncated every generated image. Truncation is never the fallback anymore
+/// (see [`REMOTE_IMAGE_BODY_BUDGET`]).
+const REMOTE_IMAGE_BODY_CHARS: usize = 3 * 1024 * 1024;
+/// Cumulative allowance for image bodies in one Full snapshot, newest first.
+/// An image body that no longer fits is replaced by a note rather than being
+/// truncated mid-base64. This keeps one snapshot bounded even in a session with
+/// many generated images, while the picture the user is actually looking at
+/// (the newest one) always travels intact.
+const REMOTE_IMAGE_BODY_BUDGET: usize = 6 * 1024 * 1024;
+/// Placeholder for an image body that had to be dropped from a remote payload.
+const REMOTE_IMAGE_OMITTED_NOTE: &str = "[图片过大，请在电脑端查看]";
 /// Per-tool free-text cap for remote payloads.
 const REMOTE_TOOL_TEXT_CHARS: usize = 2 * 1024;
 
@@ -357,24 +392,28 @@ pub fn project_remote_snapshot(
     // what is left over (oldest-first), so the message the user is actually
     // reading never arrives truncated.
     let mut remaining_budget = REMOTE_MESSAGE_BODY_BUDGET;
+    let mut remaining_image_budget = REMOTE_IMAGE_BODY_BUDGET;
     for message in snapshot.messages.iter_mut().rev() {
         let len = message.body.chars().count();
-        // Image bodies embed the attachment thumbnails the phone renders; they
-        // are not counted against the text budget (see REMOTE_IMAGE_BODY_CHARS)
-        // but still cannot exceed their own cap.
-        let image_body = message.body.contains("data:image/");
-        let allow = if image_body {
-            REMOTE_IMAGE_BODY_CHARS
-        } else {
-            // The newest body may spend whatever budget is left (a single huge
-            // message still has to render); older ones fall back to the small
-            // historical head once the budget is gone.
-            remaining_budget.max(REMOTE_MESSAGE_BODY_CHARS)
-        };
-        cap_string_in_place(&mut message.body, allow);
-        if !image_body {
-            remaining_budget = remaining_budget.saturating_sub(len.min(allow));
+        // Image bodies embed base64 the phone parses in full. They do not draw
+        // on the text budget, but they have their own: a body that fits is sent
+        // whole, and one that does not is dropped with a note — truncating it
+        // would leave an unterminated markdown image, which is exactly the
+        // "the phone shows raw base64" bug this allowance exists to prevent.
+        if message.body.contains("data:image/") {
+            if len <= REMOTE_IMAGE_BODY_CHARS && len <= remaining_image_budget {
+                remaining_image_budget -= len;
+            } else {
+                message.body = omit_inline_images(&message.body);
+            }
+            continue;
         }
+        // The newest body may spend whatever budget is left (a single huge
+        // message still has to render); older ones fall back to the small
+        // historical head once the budget is gone.
+        let allow = remaining_budget.max(REMOTE_MESSAGE_BODY_CHARS);
+        cap_string_in_place(&mut message.body, allow);
+        remaining_budget = remaining_budget.saturating_sub(len.min(allow));
     }
     for tool in &mut snapshot.tools {
         cap_string_in_place(&mut tool.summary, REMOTE_TOOL_TEXT_CHARS);
@@ -714,15 +753,57 @@ mod tests {
     }
 
     #[test]
+    fn remote_projection_keeps_a_generated_image_body_intact() {
+        // The reported bug: a generated image is embedded as the provider's
+        // full-size PNG (0.8-2.1MB on disk in real sessions), and the old 16KB
+        // image allowance truncated it mid-base64 — an unterminated markdown
+        // image, so the phone rendered raw base64 text instead of the picture.
+        let png_base64 = "iVBORw0KGgo".repeat(180_000); // ~1.8MB of base64
+        let image_body = format!("画好了\n\n![生成的图片](data:image/png;base64,{png_base64})");
+        let mut snapshot = remote_fixture(1);
+        snapshot.messages[0].body = image_body.clone();
+
+        let projected = project_remote_snapshot(snapshot);
+        assert_eq!(projected.messages[0].body, image_body);
+        assert!(
+            projected.messages[0].body.len() > 16 * 1024,
+            "a generated image must not be truncated to the old thumbnail allowance"
+        );
+    }
+
+    #[test]
+    fn remote_projection_omits_images_beyond_the_image_budget_instead_of_truncating() {
+        // Three generated images at ~2.5MB of base64 each: the newest two fit
+        // the image budget and travel whole, the oldest is dropped with a note —
+        // never a half data URL, which the phone would render as base64 text.
+        let png_base64 = "A".repeat(2_500_000);
+        let image = |label: &str| format!("{label}\n\n![生成的图片](data:image/png;base64,{png_base64})");
+        let mut snapshot = remote_fixture(3);
+        snapshot.messages[0].body = image("第一张");
+        snapshot.messages[1].body = image("第二张");
+        snapshot.messages[2].body = image("第三张");
+
+        let projected = project_remote_snapshot(snapshot);
+        assert!(projected.messages[2].body.contains("data:image/"), "newest stays whole");
+        assert!(projected.messages[1].body.contains("data:image/"), "second stays whole");
+        let omitted = &projected.messages[0].body;
+        assert!(!omitted.contains("data:image/"), "no half data URL may ship");
+        assert!(omitted.contains(REMOTE_IMAGE_OMITTED_NOTE));
+        assert!(omitted.starts_with("第一张"), "the prose survives");
+    }
+
+    #[test]
     fn remote_projection_still_caps_pathological_image_bodies() {
+        // Larger than one image is ever allowed to be: the whole block is
+        // dropped rather than truncated mid-base64.
         let image_body = format!(
             "![Image: huge.jpg](data:image/png;base64,{})",
-            "A".repeat(REMOTE_IMAGE_BODY_CHARS * 2)
+            "A".repeat(REMOTE_IMAGE_BODY_CHARS + 1024)
         );
         let mut snapshot = remote_fixture(1);
         snapshot.messages[0].body = image_body;
         let projected = project_remote_snapshot(snapshot);
-        assert!(projected.messages[0].body.len() <= REMOTE_IMAGE_BODY_CHARS + "\n...".len());
+        assert_eq!(projected.messages[0].body, REMOTE_IMAGE_OMITTED_NOTE);
     }
 
     #[test]

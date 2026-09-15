@@ -119,7 +119,8 @@ impl Application {
             .unwrap_or_else(|| ui.session.model.clone());
 
         // DeepSeek Harness: bring up `dsh web` and hand the endpoint to the
-        // harness backend instead of spawning an ACP subprocess.
+        // harness backend instead of spawning an ACP subprocess. The bring-up
+        // also mounts Kodex's local MCP servers on that process.
         let harness_endpoint = if crate::settings::is_deepseek_harness_command(&agent_command) {
             Some(
                 crate::dsh_bringup::dsh_bringup()

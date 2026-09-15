@@ -5,7 +5,11 @@ import { MarkdownBody } from "./MarkdownBody";
 import { ToolCallCard } from "../tooling/ToolCallCard";
 import { ThinkingIndicator } from "../ui/ThinkingIndicator";
 import { EmptyState } from "../ui/EmptyState";
-import { splitUserMessageBody, type UserMessageImage } from "./user-message-images";
+import {
+  hasInlineImage,
+  splitUserMessageBody,
+  type InlineMessageImage,
+} from "./user-message-images";
 import { styles, colors, spacing, radius } from "../theme";
 
 interface Props {
@@ -175,28 +179,25 @@ const EmptyTimeline = (
 // re-parsing every mounted markdown body (which oscillated row heights and
 // re-triggered the bottom chase on phones).
 //
-// Image attachments: user prompts embed images as `![alt](data:...;base64,...)`
-// blocks. Rendering those through markdown shows the raw base64 on phones, so
-// — mirroring the desktop — image-only blocks are pulled out into a thumbnail
-// strip above the text bubble (square center-crop previews) and the remaining
-// text renders through markdown.
+// Inline images: both roles embed `![alt](data:...;base64,...)` blocks — the
+// user's attachments and, for the assistant, the `generate_image` /
+// `edit_image` result the PC appends to the reply. Rendering those through
+// markdown shows the raw base64 on phones, so — mirroring the desktop — the
+// blocks are pulled out into a thumbnail strip above the body (square
+// center-crop previews) and the remaining text renders through markdown.
 const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "User";
   const isSteer = !!message.is_steer;
 
-  let text = message.body;
-  let images: UserMessageImage[] = [];
-  if (isUser && !isSteer) {
-    const split = splitUserMessageBody(message.body);
-    text = split.text;
-    images = split.images;
-  } else if (isSteer) {
-    text = splitUserMessageBody(message.body).text || message.body;
-  }
+  // Only bodies that actually carry an image block go through the splitter: it
+  // trims and collapses blank lines, which must not touch ordinary prose.
+  const split = hasInlineImage(message.body) ? splitUserMessageBody(message.body) : null;
+  const text = split ? split.text : message.body;
+  const images = split?.images ?? [];
 
   return (
     <View style={[timelineStyles.bubbleWrap, isUser ? { alignItems: "flex-end" } : { alignItems: "flex-start" }]}>
-      {images.length > 0 ? <UserImageStrip images={images} /> : null}
+      {images.length > 0 ? <MessageImageStrip images={images} /> : null}
       {text.trim().length > 0 ? (
         isUser ? (
           <View style={[timelineStyles.bubble, timelineStyles.bubbleUser, isSteer && { opacity: 0.6 }]}>
@@ -218,13 +219,14 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
   );
 });
 
-// Thumbnail strip for a user message's attached images: square center-crop
-// previews (resizeMode "cover" crops the longer edge to the middle — same
-// presentation as the desktop `.msg-user-image` object-fit: cover). Tapping a
-// thumbnail opens the full image (contain) in a dismissible overlay, matching
-// the desktop preview dialog.
-function UserImageStrip({ images }: { images: UserMessageImage[] }) {
-  const [preview, setPreview] = useState<UserMessageImage | null>(null);
+// Thumbnail strip for a message's inline images — the user's attachments and
+// the assistant's generated pictures share it: square center-crop previews
+// (resizeMode "cover" crops the longer edge to the middle — same presentation
+// as the desktop `.msg-user-image` object-fit: cover). Tapping a thumbnail
+// opens the full image (contain) in a dismissible overlay, matching the desktop
+// preview dialog.
+function MessageImageStrip({ images }: { images: InlineMessageImage[] }) {
+  const [preview, setPreview] = useState<InlineMessageImage | null>(null);
   const close = useCallback(() => setPreview(null), []);
   return (
     <>

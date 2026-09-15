@@ -689,6 +689,16 @@ export async function settingsSaveCommitAssistantSettings(
   });
 }
 
+export async function settingsSaveSessionTitleSettings(
+  provider: string,
+  model: string,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_session_title_settings", {
+    provider,
+    model,
+  });
+}
+
 export async function settingsSaveImageGenerateApiKey(
   apiKey: string,
 ): Promise<AgentSettingsSnapshot> {

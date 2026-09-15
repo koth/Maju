@@ -105,6 +105,13 @@ pub enum HarnessApprovalResult {
     Approval { approval_id: String, outcome: HarnessApprovalOutcome },
     /// Question answer batch (one answer per question id).
     Question { answers: Vec<HarnessQuestionAnswer> },
+    /// The user dismissed the question batch without answering. dsh cancels an
+    /// `ask_user_question` by *rejecting* its `$events` waterfall (its own Web
+    /// client rejects with `UserQuestionError`/`ASK_CANCELLED`), which clears the
+    /// pending ask and hands the model an abort reason. Answering a cancelled
+    /// batch with an approval rejection is a kind mismatch the bridge refuses to
+    /// post, which left the asking turn hung and the panel re-appearing.
+    QuestionCancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

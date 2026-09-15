@@ -291,6 +291,10 @@ This gives us clear ownership for:
 - Keep Monaco-specific code out of generic state modules.
 - Keep Git operations outside frontend code.
 - Keep canonical session, review, and patch state in Rust services.
+- Keep visual styling on the token layer: `apps/desktop/ui/src/theme.css` is the
+  only place colours, radii, and the type scale are defined. Feature
+  stylesheets consume tokens and never introduce hues. See
+  [`docs/design-language.md`](/docs/design-language.md) for the system.
 
 ## Remote-Control Plane (Mobile)
 
@@ -331,3 +335,12 @@ Event-plane contract per harness version — the Typert Remote framing is stable
 Stream reconnection: on stream end (socket close, or a logical `end`/`error` frame), the host reopens the stream and re-baselines every live session from its `last_seq` (`AtomicU64`) via `session.history`, bounded with `buffer_unordered(4)`; per-session history failures isolate (that session gets `Interrupted`), and a failed reopen fails all sessions. Approvals and questions bridge through the existing `PermissionBroker` plus `RuntimeCommand::ResolveHarnessApproval`, which POSTs the answer over whichever carrier the host speaks: dsh ≥ 0.1.5 forwards both as `$events` waterfalls (answered at `/api/$events/result`, correlated by the waterfall `eventId`, with the bare value the waterfall resolves to), while ≤ 0.1.4 took the wrapped `{sessionId, answer}` value on the same endpoint and answered approvals through `/api/respond` with a `client-response`; a late respond returns `not-pending` (treated as a no-op).
 
 Degradation: per-tool stop is not supported (dsh exposes only whole-turn `session.cancel`); `StopTool` degrades to turn cancel with a UI note, and a rejected cancel is reported as a failed stop instead of a silent no-op. Non-loopback endpoints require a `trustedHosts` harness patch overlay (v1 targets loopback). The optional Kodex-managed `dsh web` spawn (`process.rs`) is scaffolded; v1 expects an explicit `harness_endpoint`. See the `add-dsh-bridge` OpenSpec change for the full design.
+
+### Local MCP servers (web tools + image capability)
+
+Kodex runs two loopback MCP servers — `kodex-web-tools` (the web-tools provider configured in Settings) and `kodex-image` (`view_image` / `generate_image` / `edit_image`, plus the prompt-level attachment degradation) — and hands them to agents two different ways:
+
+- **ACP channels** (`codex-acp`, `kodex-claude`): the URL + token travel in `SessionConfig.mcp_servers` (`acp-core::http_mcp_server`).
+- **DeepSeek Harness**: `dsh web` ignores ACP MCP config, so the servers are mounted as `@deepseek-ai/dsh-mcp-client` rows in Kodex's `--patch` overlay (`~/.kodex/dsh/kodex.patch.yml`, rendered by `dsh-bridge`'s `render_harness_patch`; the tools then appear as `mcp__kodex_web_tools__*` / `mcp__kodex_image__*`). The rows are written at bring-up, so the servers are started before `dsh web` spawns (`dsh_bringup::ensure_harness_endpoint`) and live exactly as long as that process.
+
+Ownership (`app-core/src/shared_mcp.rs`): **one process per server for the whole app**, not one per session. Sessions hold *leases* — `WebToolsLease` / `ImageMcpLease` — which register a token on the shared server and unregister on drop. Everything session-specific lives behind that token: the web-tools provider client (so a settings change reaches the sessions started after it without disturbing running ones) and the image capability set + workspace root (so `tools/list` stays trimmed per model and generated images still land in that session's workspace). The image server's view cache is shared across sessions on purpose — the same picture is described once. The harness keeps one lease for its process (`HarnessExposedMcp`), since every dsh session shares the tools it mounted.

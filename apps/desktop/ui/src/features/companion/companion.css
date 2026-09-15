@@ -204,7 +204,7 @@
 .companion-settings-title {
   margin: 0 0 4px;
   font-size: 15px;
-  font-weight: 640;
+  font-weight: 600;
   color: var(--text-strong);
 }
 
@@ -257,6 +257,9 @@
 
 .companion-switch input:checked + .companion-switch-track .companion-switch-thumb {
   transform: translateX(16px);
+  /* Inverted knob: the checked track is the accent fill, so the knob must
+     read against it in both themes. */
+  background: var(--accent-ink);
 }
 
 .companion-switch input:focus-visible + .companion-switch-track {
@@ -287,7 +290,7 @@
 
 .companion-setting-label {
   font-size: 11px;
-  font-weight: 680;
+  font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-soft);
@@ -341,7 +344,7 @@
 
 .companion-intensity-label {
   font-size: 13px;
-  font-weight: 620;
+  font-weight: 600;
   color: var(--text-strong);
 }
 
@@ -404,7 +407,7 @@
 
 .companion-scale-value {
   font-size: 12px;
-  font-weight: 620;
+  font-weight: 600;
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
 }

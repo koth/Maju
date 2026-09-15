@@ -1950,6 +1950,37 @@ pub struct CommitAssistantSettingsStatus {
     pub model: String,
     pub configured: bool,
 }
+
+/// Model that generates each DeepSeek Harness session's title.
+///
+/// dsh titles a session with a small auxiliary LLM request. By default that
+/// request inherits whatever route the session's first main turn used, which
+/// fails on routes whose model cannot produce an answer inside the shipped
+/// 64-token budget (a reasoning model spends the whole budget on its preamble
+/// and returns empty content). When generation fails, dsh keeps the
+/// deterministic fallback title — the first human message truncated to 40
+/// bytes, i.e. the raw prompt. Pinning a `provider` + `model` pair here routes
+/// title generation to a model known to work.
+///
+/// Both fields empty = keep dsh's default (inherit the session route). dsh
+/// rejects a half-configured pair, so the two are always saved and cleared
+/// together.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionTitleSettings {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// UI-facing session-title status. `configured` reports whether a
+/// provider+model pair is set and the provider actually resolves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionTitleSettingsStatus {
+    pub provider: String,
+    pub model: String,
+    pub configured: bool,
+}
 /// Unified image capability fallback settings. When `enabled`/`auto_enable`
 /// are true and a native image capability is missing, the `kodex-image` MCP
 /// server is injected with the corresponding fallback tool(s).
@@ -2003,6 +2034,10 @@ pub struct AppSettings {
     /// `None` = dsh deployment default.
     #[serde(default)]
     pub dsh_default_preset: Option<String>,
+    /// Model that generates dsh session titles. Empty pair = inherit the
+    /// session's own route (dsh default).
+    #[serde(default)]
+    pub session_title: SessionTitleSettings,
 }
 
 fn default_acp_port() -> u16 {
@@ -2091,6 +2126,8 @@ pub struct AgentSettingsSnapshot {
     pub image: ImageSettingsStatus,
     #[serde(default)]
     pub commit_assistant: CommitAssistantSettingsStatus,
+    #[serde(default)]
+    pub session_title: SessionTitleSettingsStatus,
 }
 
 /// Result of an explicit DeepSeek Harness update check.

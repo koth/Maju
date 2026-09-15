@@ -18,14 +18,30 @@
 use crate::AppPaths;
 use crate::settings::{build_dsh_settings_config, dsh_provider_keys, ensure_dsh_proxy_routing};
 use dsh_bridge::{
-    DshChild, HarnessHost, HarnessHostRegistry, SpawnDshWebConfig, reap_orphaned_dsh_web,
-    spawn_dsh_web, write_settings,
+    DshChild, HarnessHost, HarnessHostRegistry, HarnessMcpServer, HarnessPatchConfig,
+    SpawnDshWebConfig, reap_orphaned_dsh_web, spawn_dsh_web, write_harness_patch, write_settings,
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Process-wide bring-up singleton. Initialized once by the desktop shell so
 /// the harness backend and `Application` share the same host registry.
 static BRINGUP: OnceLock<Arc<DshBringup>> = OnceLock::new();
+
+/// Kodex's local MCP servers as mounted on a `dsh web` process.
+///
+/// The rows are what `dsh-mcp-client` reads from the `--patch` overlay; the
+/// handles are what keeps each server alive. They are owned by the managed host
+/// so the servers live exactly as long as the `dsh web` process that talks to
+/// them (`dsh` connects at boot, so the servers must already be listening
+/// before the spawn).
+#[derive(Default)]
+pub struct HarnessExposedMcp {
+    pub rows: Vec<HarnessMcpServer>,
+    /// Held only for its `Drop`: dropping the lease unregisters this harness
+    /// process's sessions from the shared servers.
+    pub web_tools: Option<crate::web_tools_mcp::WebToolsLease>,
+    pub image: Option<crate::image_mcp::ImageMcpLease>,
+}
 
 /// Initialize the process-wide bring-up singleton. The registry is shared with
 /// the ACP harness backend (`acp_core::set_harness_backend`), so a spawned
@@ -61,6 +77,10 @@ pub struct DshBringup {
 struct ManagedHost {
     endpoint: String,
     host: Arc<HarnessHost>,
+    /// Kodex-local MCP servers mounted on this host. Field is never read: it
+    /// exists so the servers stop when the `dsh web` process they serve is
+    /// torn down.
+    _exposed_mcp: HarnessExposedMcp,
 }
 
 impl DshBringup {
@@ -95,10 +115,11 @@ impl DshBringup {
 
     /// Ensure a `dsh web` process is running and return its loopback endpoint.
     ///
-    /// On first call: write `settings.yaml`, spawn `dsh web --port 0`, wait for
+    /// On first call: start Kodex's local MCP servers, write `settings.yaml` and
+    /// the patch overlay that mounts them, spawn `dsh web --port 0`, wait for
     /// the readiness line, attach the child to the shared host, and cache the
     /// endpoint. Subsequent calls reuse the cached endpoint as long as the host
-    /// is still alive.
+    /// is still alive (and keep the MCP servers it was brought up with).
     pub fn ensure_harness_endpoint(&self, paths: &AppPaths) -> Result<String, String> {
         if let Some(managed) = self
             .managed
@@ -110,6 +131,13 @@ impl DshBringup {
             return Ok(managed.endpoint.clone());
         }
 
+        // 0. Start Kodex's local MCP servers and collect the rows that mount
+        //    them on the harness. They must be listening before the spawn —
+        //    `dsh-mcp-client` connects during boot — and they live exactly as
+        //    long as this `dsh web` process. A server that fails to start
+        //    degrades to "fewer tools", never to a failed bring-up.
+        let exposed_mcp = crate::application::sessions::harness_exposed_mcp(paths);
+
         // 1. Write ~/.kodex/dsh/settings.yaml from the BYOK provider catalog.
         //    First ensure the local codex_api_proxy is running and knows every
         //    configured source provider, so the harness's chat/completions
@@ -118,6 +146,17 @@ impl DshBringup {
         let config = build_dsh_settings_config(paths).map_err(|e| e.to_string())?;
         write_settings(&paths.dsh_settings_path(), &config)
             .map_err(|e| format!("failed to write dsh settings.yaml: {e}"))?;
+
+        // 1.05 Write the Kodex-owned cordis patch overlay. `settings.yaml` only
+        //      carries the two sections Kodex owns; bundle-row plugin config
+        //      (the session-title token budget, the optional pinned route, and
+        //      the local MCP servers) has to travel as a `--patch` overlay
+        //      applied after the profile layer.
+        let title_route = crate::settings::session_title_route(paths);
+        let patch_config = HarnessPatchConfig::with_title_route(title_route)
+            .with_mcp_servers(exposed_mcp.rows.clone());
+        write_harness_patch(&paths.dsh_patch_path(), &patch_config)
+            .map_err(|e| format!("failed to write dsh patch overlay: {e}"))?;
 
         // 1.1 Reclaim `dsh web` processes orphaned by a previous crashed run
         //     BEFORE spawning the replacement: a crash/force-quit runs no
@@ -141,6 +180,7 @@ impl DshBringup {
                 ("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string()),
                 ("DSH_PERMISSION_MODE".to_string(), "danger-full-access".to_string()),
             ],
+            patch_overlay: Some(paths.dsh_patch_path().display().to_string()),
         };
         let (endpoint, child) = self
             .runtime
@@ -155,13 +195,16 @@ impl DshBringup {
             .map_err(|e| e.to_string())?;
         host.attach_child(child);
 
-        // 4. Cache the managed host so subsequent sessions reuse it.
+        // 4. Cache the managed host so subsequent sessions reuse it. The
+        //    exposed MCP servers ride along: dropping this entry (shutdown, or
+        //    a dead host replaced by the next bring-up) stops them.
         *self
             .managed
             .lock()
             .map_err(|_| "dsh bringup lock poisoned")? = Some(ManagedHost {
             endpoint: endpoint.clone(),
             host,
+            _exposed_mcp: exposed_mcp,
         });
         Ok(endpoint)
     }

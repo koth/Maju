@@ -498,6 +498,7 @@ impl Default for LanguageServerRegistry {
                 image: workspace_model::ImageSettings::default(),
                 commit_assistant: workspace_model::CommitAssistantSettings::default(),
                 dsh_default_preset: None,
+                session_title: workspace_model::SessionTitleSettings::default(),
             })
             .into_iter()
             .map(LanguageServerSpec::from)

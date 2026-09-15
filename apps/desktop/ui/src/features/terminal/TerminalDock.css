@@ -9,7 +9,7 @@
   border: 0;
   border-top: 1px solid var(--border-subtle);
   border-radius: 0;
-  background: #151616;
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   box-shadow: none;
   transition: height var(--transition-fast), border-color var(--transition-fast);
@@ -42,7 +42,7 @@
   left: 50%;
   width: 72px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--border-strong) 58%, transparent);
   opacity: 0;
   transform: translateX(-50%);
@@ -61,13 +61,13 @@ body.is-resizing-terminal-dock {
 
 .terminal-dock-header {
   display: flex;
-  min-height: 36px;
+  min-height: 34px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 0 8px;
   border-bottom: 1px solid var(--border-subtle);
-  background: #181919;
+  background: var(--app-bg);
 }
 
 .terminal-tab-strip,
@@ -90,15 +90,16 @@ body.is-resizing-terminal-dock {
 
 .terminal-tab {
   display: inline-flex;
-  height: 28px;
+  height: 34px;
   flex: 0 1 260px;
   max-width: min(360px, 42vw);
   min-width: 0;
   align-items: center;
   gap: 0;
   padding: 0 4px 0 0;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--text-soft);
   font: inherit;
@@ -106,8 +107,8 @@ body.is-resizing-terminal-dock {
 }
 
 .terminal-tab.is-active {
-  border-color: color-mix(in srgb, var(--border-subtle) 68%, transparent);
-  background: #232525;
+  border-bottom-color: var(--text-strong);
+  background: transparent;
   color: var(--text-strong);
 }
 
@@ -116,7 +117,7 @@ body.is-resizing-terminal-dock {
 }
 
 .terminal-tab:hover {
-  background: #242626;
+  background: var(--interactive-hover);
 }
 
 button.terminal-tab {
@@ -148,7 +149,7 @@ button.terminal-tab {
   flex-shrink: 0;
   place-items: center;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -156,7 +157,7 @@ button.terminal-tab {
 }
 
 .terminal-tab-close:hover {
-  background: color-mix(in srgb, var(--interactive-hover) 78%, transparent);
+  background: var(--interactive-hover);
   color: var(--text-strong);
   opacity: 1;
 }
@@ -183,18 +184,18 @@ button.terminal-tab {
   overflow: hidden;
   font-family: var(--font-chat);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .terminal-icon-action {
   display: inline-grid;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   place-items: center;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -228,7 +229,7 @@ button.terminal-tab {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #151616;
+  background: var(--surface-muted-bg);
   caret-color: transparent;
 }
 
@@ -238,7 +239,7 @@ button.terminal-tab {
   min-height: 0;
   overflow: hidden;
   padding: 8px 9px 10px;
-  background: #151616;
+  background: var(--surface-muted-bg);
   caret-color: transparent;
   cursor: text;
   outline: none;
@@ -254,43 +255,43 @@ button.terminal-tab {
 }
 
 :root[data-theme="light"] .terminal-dock {
-  border-top-color: #e6e8eb;
-  background: #ffffff;
-  color: #24292f;
+  border-top-color: var(--border-subtle);
+  background: var(--surface-muted-bg);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .terminal-dock-header {
-  border-bottom-color: #eceef0;
-  background: #ffffff;
+  border-bottom-color: var(--border-subtle);
+  background: var(--app-bg);
 }
 
 :root[data-theme="light"] .terminal-tab {
-  color: #59636e;
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .terminal-tab.is-active {
-  border-color: #e6e8eb;
-  background: #f4f4f4;
-  color: #24292f;
+  border-bottom-color: var(--text-strong);
+  background: transparent;
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .terminal-tab:hover {
-  background: #f6f8fa;
-  color: #24292f;
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .terminal-icon-action {
-  color: #6e7781;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .terminal-icon-action:hover:not(:disabled) {
-  background: #f6f8fa;
-  color: #24292f;
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .terminal-dock-viewports,
 :root[data-theme="light"] .terminal-dock-viewport {
-  background: #ffffff;
+  background: var(--surface-muted-bg);
 }
 
 .terminal-dock-viewport canvas {

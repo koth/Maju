@@ -4,7 +4,9 @@
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: var(--surface-muted-bg);
+  border: 0;
+  background: var(--app-bg);
+  color: var(--text-strong);
 }
 
 .editor-view.is-breadcrumb-toolbar {
@@ -27,10 +29,10 @@
   gap: 12px;
   padding: 0 12px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--surface-bg);
-  color: var(--text-muted);
+  background: var(--app-bg);
+  color: var(--text-soft);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .editor-view.is-fullscreen .editor-toolbar {
@@ -38,9 +40,9 @@
   z-index: 3;
   min-height: 48px;
   padding-inline: 18px;
-  border-bottom-color: var(--border);
-  background: var(--surface-bg);
-  box-shadow: 0 1px 0 var(--border-subtle);
+  border-bottom-color: var(--border-subtle);
+  background: var(--app-bg);
+  box-shadow: none;
 }
 
 .editor-view.is-breadcrumb-toolbar .editor-toolbar {
@@ -82,7 +84,7 @@
   gap: 8px;
   overflow: hidden;
   color: var(--text-soft);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
@@ -102,7 +104,7 @@
   min-width: 0;
   flex-shrink: 1;
   color: var(--text-strong);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .editor-breadcrumb-label {
@@ -124,18 +126,18 @@
 .editor-fullscreen-mode {
   flex-shrink: 0;
   color: var(--text-strong);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
 }
 
 .editor-dirty-pill,
 .editor-muted-pill {
   flex-shrink: 0;
   padding: 2px 7px;
-  border-radius: 6px;
-  background: rgba(215, 225, 223, 0.06);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt-bg);
   color: var(--warning);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
 }
 
@@ -156,7 +158,7 @@
 
 .editor-conflict-text {
   color: var(--warning);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 
@@ -164,11 +166,11 @@
   min-height: 26px;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   cursor: pointer;
 }
 
@@ -189,7 +191,7 @@
   min-width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-soft);
   font-family: var(--font-mono);
   font-size: 17px;
@@ -261,12 +263,12 @@
 .editor-fullscreen-shortcut {
   padding-left: 2px;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 500;
 }
 
 .editor-action-btn.is-danger {
-  border-color: rgba(255, 114, 94, 0.34);
+  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
   color: var(--danger);
 }
 
@@ -277,17 +279,17 @@
 
 .editor-conflict-banner {
   padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 190, 92, 0.18);
-  background: rgba(255, 190, 92, 0.08);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 18%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
   color: var(--warning);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .editor-content {
   padding: 16px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   color: var(--text-strong);
   white-space: pre-wrap;
@@ -312,7 +314,7 @@
   max-width: min(100%, 1440px);
   max-height: 100%;
   object-fit: contain;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   box-shadow: none;
 }
 
@@ -323,7 +325,7 @@
   padding: 28px clamp(16px, 5vw, 56px) 64px;
   color: var(--text-muted);
   font-family: var(--font-chat);
-  font-size: 14px;
+  font-size: var(--font-size-ui);
   line-height: 1.7;
   overflow-wrap: break-word;
 }
@@ -344,7 +346,7 @@
   max-width: 100%;
   height: auto;
   max-height: 70vh;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   object-fit: contain;
 }
 
@@ -354,14 +356,14 @@
 
 .editor-html-preview {
   display: flex;
-  background: #ffffff;
+  background: var(--app-bg);
 }
 
 .editor-html-frame {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #ffffff;
+  background: var(--app-bg);
 }
 
 .editor-loading,
@@ -371,16 +373,18 @@
   justify-content: center;
   height: 100%;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .editor-error {
   color: var(--danger);
 }
 
+/* Functional search hit: the only place a hue is allowed in the editor chrome,
+ * and it stays on the semantic danger token. */
 .search-highlight {
-  background: rgba(255, 80, 80, 0.25);
-  border: 1px solid rgba(255, 80, 80, 0.6);
+  background: color-mix(in srgb, var(--danger) 25%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent);
   border-radius: 2px;
 }
 
@@ -388,43 +392,43 @@
 :root[data-theme="light"] .editor-view.is-breadcrumb-toolbar,
 :root[data-theme="light"] .editor-view.is-fullscreen,
 :root[data-theme="light"] .editor-preview {
-  background: #ffffff;
+  background: var(--app-bg);
 }
 
 :root[data-theme="light"] .editor-toolbar,
 :root[data-theme="light"] .editor-view.is-breadcrumb-toolbar .editor-toolbar,
 :root[data-theme="light"] .editor-view.is-fullscreen .editor-toolbar {
-  border-bottom-color: #e5e5e3;
-  background: #ffffff;
+  border-bottom-color: var(--border-subtle);
+  background: var(--app-bg);
   box-shadow: none;
-  color: #4b5563;
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .editor-breadcrumbs,
 :root[data-theme="light"] .editor-toolbar-path {
-  color: #5f6670;
+  color: var(--text-soft);
 }
 
 :root[data-theme="light"] .editor-breadcrumb-item:not(.is-current),
 :root[data-theme="light"] .editor-breadcrumb-separator {
-  color: #6f757c;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .editor-breadcrumb-item.is-current,
 :root[data-theme="light"] .editor-fullscreen-mode {
-  color: #202124;
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .editor-action-btn,
 :root[data-theme="light"] .editor-icon-btn {
-  color: #4b5563;
+  color: var(--text-muted);
 }
 
 :root[data-theme="light"] .editor-action-btn:hover:not(:disabled),
 :root[data-theme="light"] .editor-icon-btn:hover,
 :root[data-theme="light"] .editor-filetree-toggle.is-active {
-  background: #ececea;
-  color: #202124;
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 :root[data-theme="light"] .editor-view .monaco-editor .scroll-decoration,

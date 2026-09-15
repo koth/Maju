@@ -4,13 +4,16 @@
 //! bound to `/mcp`, authenticated with an `x-kodex-image-token` header. The
 //! server exposes up to three tools — `view_image`, `generate_image`,
 //! `edit_image` — but `tools/list` is dynamically trimmed to only the tools
-//! whose native counterpart is missing for the current session
-//! (`ImageCapabilities`). `tools/call` rejects any tool not in the current
-//! trimmed set.
+//! whose native counterpart is missing for the session that is asking
+//! (`ImageCapabilities`). `tools/call` rejects any tool not in that trimmed set.
 //!
-//! `ImageCapabilities` is held behind a shared, lockable cell so that a model
-//! switch can update the offered tool set without restarting the server
-//! (subsequent `tools/list` calls recompute the trimmed set).
+//! **One process serves every session.** The assistant channels and the
+//! DeepSeek Harness all point at the same server
+//! ([`crate::shared_mcp`]); what differs per session is the registration
+//! behind its own token: its capability set (so trimming stays per model) and
+//! its [`ImageMcpConfig`] (so generated images land in that session's
+//! workspace). `view_cache` is deliberately shared across sessions — the same
+//! image is described once, not once per session.
 //!
 //! The server also advertises a `kodex-image://tools` resource describing the
 //! currently mounted tool set, so client-side `list_mcp_resources` /
@@ -26,6 +29,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,8 +46,7 @@ const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 const TOKEN_HEADER: &str = "x-kodex-image-token";
 const TOOLS_RESOURCE_URI: &str = "kodex-image://tools";
 
-/// Configuration carried by the image MCP service. Phase 5 wires the real
-/// `ImageApi` (real multimodal understanding + OpenAI-compatible generation).
+/// Configuration carried by one session's image MCP registration.
 #[derive(Clone)]
 pub struct ImageMcpConfig {
     pub workspace_root: PathBuf,
@@ -52,38 +55,92 @@ pub struct ImageMcpConfig {
     pub generate_api_key: Option<String>,
 }
 
-/// Clonable service state shared across connections. `caps` is mutable so the
-/// offered tool set can be updated on model switch.
+/// One registered session: the capabilities its `tools/list` is trimmed by and
+/// the config its tool calls run with.
+#[derive(Clone)]
+pub struct ImageSessionState {
+    caps: ImageCapabilities,
+    config: Arc<ImageMcpConfig>,
+}
+
+impl ImageSessionState {
+    pub fn capabilities(&self) -> ImageCapabilities {
+        self.caps
+    }
+
+    pub fn config(&self) -> &ImageMcpConfig {
+        &self.config
+    }
+}
+
+/// Shared server state: the per-token session registry plus the cross-session
+/// view cache.
 #[derive(Clone)]
 pub struct ImageMcpService {
-    caps: Arc<Mutex<ImageCapabilities>>,
-    config: Arc<ImageMcpConfig>,
+    sessions: Arc<Mutex<HashMap<String, ImageSessionState>>>,
     view_cache: Arc<Mutex<ViewCache>>,
 }
 
+impl Default for ImageMcpService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImageMcpService {
-    pub fn new(caps: ImageCapabilities, config: ImageMcpConfig) -> Self {
+    /// An empty server. Sessions register through [`Self::register_session`].
+    pub fn new() -> Self {
         Self {
-            caps: Arc::new(Mutex::new(caps)),
-            config: Arc::new(config),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             view_cache: Arc::new(Mutex::new(ViewCache::default())),
         }
     }
 
-    fn capabilities(&self) -> ImageCapabilities {
-        self.caps.lock().map(|guard| *guard).unwrap_or_default()
+    /// Register one session and return its token.
+    pub fn register_session(&self, caps: ImageCapabilities, config: ImageMcpConfig) -> String {
+        let token = Uuid::new_v4().to_string();
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(
+                token.clone(),
+                ImageSessionState {
+                    caps,
+                    config: Arc::new(config),
+                },
+            );
+        }
+        token
     }
 
-    fn update_capabilities(&self, caps: ImageCapabilities) {
-        if let Ok(mut guard) = self.caps.lock() {
-            *guard = caps;
+    /// Drop one session's registration. Unknown tokens are ignored.
+    pub fn unregister_session(&self, token: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(token);
         }
+    }
+
+    /// Replace one session's capabilities (model switch) without restarting the
+    /// server; a later `tools/list` for that token reflects the new set.
+    pub fn update_capabilities(&self, token: &str, caps: ImageCapabilities) {
+        if let Ok(mut sessions) = self.sessions.lock()
+            && let Some(session) = sessions.get_mut(token)
+        {
+            session.caps = caps;
+        }
+    }
+
+    /// The session behind one token, or `None` when the token is unknown.
+    pub fn session(&self, token: &str) -> Option<ImageSessionState> {
+        self.sessions.lock().ok()?.get(token).cloned()
+    }
+
+    /// Cross-session view cache, shared by every registration.
+    pub fn view_cache(&self) -> Arc<Mutex<ViewCache>> {
+        self.view_cache.clone()
     }
 }
 
 pub struct ImageMcpHandle {
     url: String,
-    token: String,
     service: ImageMcpService,
     shutdown_tx: Option<oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -94,33 +151,27 @@ impl ImageMcpHandle {
         &self.url
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
+    /// Register one session on this server and return its token.
+    pub fn register_session(&self, caps: ImageCapabilities, config: ImageMcpConfig) -> String {
+        self.service.register_session(caps, config)
     }
 
-    /// Update the offered tool set without restarting the server. Subsequent
-    /// `tools/list` calls reflect the new capabilities.
-    pub fn update_capabilities(&self, caps: ImageCapabilities) {
-        self.service.update_capabilities(caps);
+    pub fn unregister_session(&self, token: &str) {
+        self.service.unregister_session(token);
     }
 
-    /// Current resolved image capabilities for the session. Exposed for
-    /// diagnostics / future UI surfacing; not consumed on the hot path today.
-    #[allow(dead_code)]
-    pub fn capabilities(&self) -> ImageCapabilities {
-        self.service.capabilities()
+    pub fn update_capabilities(&self, token: &str, caps: ImageCapabilities) {
+        self.service.update_capabilities(token, caps);
     }
 
-    /// The `ImageMcpConfig` carried by this handle, so prompt-level
-    /// intercept can construct an `ImageApi` for automatic `view_image` calls.
-    pub fn config(&self) -> ImageMcpConfig {
-        (*self.service.config).clone()
+    /// The capabilities registered for one session token.
+    pub fn capabilities(&self, token: &str) -> Option<ImageCapabilities> {
+        self.service.session(token).map(|state| state.capabilities())
     }
 
-    /// Shared view cache so prompt-level intercept shares cached results with
-    /// the MCP `view_image` tool.
+    /// Shared cross-session view cache.
     pub fn view_cache(&self) -> Arc<Mutex<ViewCache>> {
-        self.service.view_cache.clone()
+        self.service.view_cache()
     }
 }
 
@@ -135,13 +186,74 @@ impl Drop for ImageMcpHandle {
     }
 }
 
-pub fn start_image_mcp_server(service: ImageMcpService) -> anyhow::Result<ImageMcpHandle> {
-    let token = Uuid::new_v4().to_string();
-    let session_id = Uuid::new_v4().to_string();
+/// One session's registration on an image MCP server, usually the shared one.
+///
+/// Dropping the lease unregisters the session token, so a session that ends
+/// stops being addressable on the shared server while every other session keeps
+/// working. The handle is kept alive by the lease so a lease can never outlive
+/// the server it points at.
+pub struct ImageMcpLease {
+    handle: Arc<ImageMcpHandle>,
+    token: String,
+    config: ImageMcpConfig,
+}
+
+impl ImageMcpLease {
+    /// Register `config`/`caps` on `handle` and return the lease.
+    pub fn register(
+        handle: Arc<ImageMcpHandle>,
+        caps: ImageCapabilities,
+        config: ImageMcpConfig,
+    ) -> Self {
+        let token = handle.register_session(caps, config.clone());
+        Self {
+            handle,
+            token,
+            config,
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        self.handle.url()
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// This session's config, for prompt-level `view_image` degradation.
+    pub fn config(&self) -> ImageMcpConfig {
+        self.config.clone()
+    }
+
+    /// The shared view cache, so prompt-level degradation and the MCP tool
+    /// share results.
+    pub fn view_cache(&self) -> Arc<Mutex<ViewCache>> {
+        self.handle.view_cache()
+    }
+
+    pub fn update_capabilities(&self, caps: ImageCapabilities) {
+        self.handle.update_capabilities(&self.token, caps);
+    }
+
+    /// This session's registered capabilities.
+    pub fn capabilities(&self) -> ImageCapabilities {
+        self.handle
+            .capabilities(&self.token)
+            .unwrap_or_else(|| ImageCapabilities::default())
+    }
+}
+
+impl Drop for ImageMcpLease {
+    fn drop(&mut self) {
+        self.handle.unregister_session(&self.token);
+    }
+}
+
+pub fn start_image_mcp_server() -> anyhow::Result<ImageMcpHandle> {
     let (addr_tx, addr_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<SocketAddr>>(1);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let thread_token = token.clone();
-    let thread_session_id = session_id.clone();
+    let service = ImageMcpService::new();
     let thread_service = service.clone();
     let thread = thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -170,20 +282,12 @@ pub fn start_image_mcp_server(service: ImageMcpService) -> anyhow::Result<ImageM
                 }
             };
             let _ = addr_tx.send(Ok(addr));
-            run_server(
-                listener,
-                thread_service,
-                thread_token,
-                thread_session_id,
-                shutdown_rx,
-            )
-            .await;
+            run_server(listener, thread_service, shutdown_rx).await;
         });
     });
     let addr = addr_rx.recv().map_err(|error| anyhow::anyhow!(error))??;
     Ok(ImageMcpHandle {
         url: format!("http://{addr}/mcp"),
-        token,
         service,
         shutdown_tx: Some(shutdown_tx),
         thread: Some(thread),
@@ -193,8 +297,6 @@ pub fn start_image_mcp_server(service: ImageMcpService) -> anyhow::Result<ImageM
 async fn run_server(
     listener: TcpListener,
     service: ImageMcpService,
-    token: String,
-    session_id: String,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -205,18 +307,11 @@ async fn run_server(
                     continue;
                 };
                 let service = service.clone();
-                let token = token.clone();
-                let session_id = session_id.clone();
                 tokio::task::spawn(async move {
                     let io = TokioIo::new(stream);
                     let _ = http1::Builder::new()
                         .serve_connection(io, service_fn(move |request| {
-                            handle_http_request(
-                                request,
-                                service.clone(),
-                                token.clone(),
-                                session_id.clone(),
-                            )
+                            handle_http_request(request, service.clone())
                         }))
                         .await;
                 });
@@ -230,18 +325,25 @@ type BoxBody = Full<Bytes>;
 async fn handle_http_request(
     request: Request<Incoming>,
     service: ImageMcpService,
-    token: String,
-    session_id: String,
 ) -> Result<Response<BoxBody>, Infallible> {
     if request.method() != Method::POST || request.uri().path() != "/mcp" {
         return Ok(response(StatusCode::NOT_FOUND, "Not found"));
     }
-    if !authorized(&request, &token) {
+    // The token names the session, so it is also the MCP session id: every
+    // client (one per assistant session, one per harness process) gets its own,
+    // and a request may never carry another session's id.
+    let Some(token) = request_token(&request) else {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized"}),
         ));
-    }
+    };
+    let Some(session) = service.session(&token) else {
+        return Ok(json_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": "unauthorized"}),
+        ));
+    };
     let request_session_id = request
         .headers()
         .get(MCP_SESSION_ID_HEADER)
@@ -265,38 +367,38 @@ async fn handle_http_request(
             ));
         }
     };
-    if json_rpc_requires_session(&payload)
-        && request_session_id.as_deref() != Some(session_id.as_str())
-    {
+    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str()) {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
         ));
     }
-    let result = handle_json_rpc(payload, service).await;
+    let result = handle_json_rpc(payload, service, session).await;
     Ok(match result {
         JsonRpcHttpResult::Response(payload) => {
-            json_response_with_session(StatusCode::OK, payload, Some(&session_id))
+            json_response_with_session(StatusCode::OK, payload, Some(&token))
         }
         JsonRpcHttpResult::Accepted => {
-            empty_response_with_session(StatusCode::ACCEPTED, Some(&session_id))
+            empty_response_with_session(StatusCode::ACCEPTED, Some(&token))
         }
     })
 }
 
-fn authorized(request: &Request<Incoming>, token: &str) -> bool {
-    let header_token = request
+/// The session token carried by one request, from the Kodex header or a bearer
+/// authorization.
+fn request_token(request: &Request<Incoming>) -> Option<String> {
+    if let Some(token) = request
         .headers()
         .get(TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if header_token == Some(token) {
-        return true;
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(token.to_string());
     }
-    request
+    let header = request
         .headers()
         .get(hyper::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == format!("Bearer {token}"))
+        .and_then(|value| value.to_str().ok())?;
+    header.strip_prefix("Bearer ").map(str::to_string)
 }
 
 enum JsonRpcHttpResult {
@@ -304,11 +406,17 @@ enum JsonRpcHttpResult {
     Accepted,
 }
 
-async fn handle_json_rpc(payload: Value, service: ImageMcpService) -> JsonRpcHttpResult {
+async fn handle_json_rpc(
+    payload: Value,
+    service: ImageMcpService,
+    session: ImageSessionState,
+) -> JsonRpcHttpResult {
     if let Some(batch) = payload.as_array() {
         let mut responses = Vec::new();
         for item in batch {
-            if let Some(response) = handle_json_rpc_call(item.clone(), service.clone()).await {
+            if let Some(response) =
+                handle_json_rpc_call(item.clone(), service.clone(), session.clone()).await
+            {
                 responses.push(response);
             }
         }
@@ -318,13 +426,17 @@ async fn handle_json_rpc(payload: Value, service: ImageMcpService) -> JsonRpcHtt
             JsonRpcHttpResult::Response(Value::Array(responses))
         };
     }
-    match handle_json_rpc_call(payload, service).await {
+    match handle_json_rpc_call(payload, service, session).await {
         Some(response) => JsonRpcHttpResult::Response(response),
         None => JsonRpcHttpResult::Accepted,
     }
 }
 
-async fn handle_json_rpc_call(payload: Value, service: ImageMcpService) -> Option<Value> {
+async fn handle_json_rpc_call(
+    payload: Value,
+    service: ImageMcpService,
+    session: ImageSessionState,
+) -> Option<Value> {
     let id = payload.get("id").cloned().unwrap_or(Value::Null);
     let method = payload
         .get("method")
@@ -333,26 +445,26 @@ async fn handle_json_rpc_call(payload: Value, service: ImageMcpService) -> Optio
     if method.starts_with("notifications/") {
         return None;
     }
+    let caps = session.capabilities();
     let result = match method {
         "initialize" => Ok(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "kodex-image", "version": env!("CARGO_PKG_VERSION")}
         })),
-        "tools/list" => {
-            let caps = service.capabilities();
-            Ok(json!({"tools": trimmed_tool_schemas(&caps)}))
-        }
+        "tools/list" => Ok(json!({"tools": trimmed_tool_schemas(&caps)})),
         "tools/call" => {
-            handle_tool_call(payload.get("params").cloned().unwrap_or_default(), service).await
+            let result =
+                handle_tool_call(payload.get("params").cloned().unwrap_or_default(), &service, &session)
+                    .await;
+            return Some(json_rpc_call_result(id, result));
         }
-        "resources/list" => {
-            let caps = service.capabilities();
-            Ok(json!({"resources": [tool_manifest_resource(&caps)]}))
-        }
+        "resources/list" => Ok(json!({"resources": [tool_manifest_resource()]})),
         "resources/templates" => Ok(json!({"resourceTemplates": []})),
         "resources/read" => {
-            handle_resource_read(payload.get("params").cloned().unwrap_or_default(), service)
+            let result =
+                handle_resource_read(payload.get("params").cloned().unwrap_or_default(), &caps);
+            return Some(json_rpc_call_result(id, result));
         }
         _ => Err(json_rpc_error(
             -32601,
@@ -360,15 +472,19 @@ async fn handle_json_rpc_call(payload: Value, service: ImageMcpService) -> Optio
         )),
     };
 
-    Some(match result {
+    Some(json_rpc_call_result(id, result))
+}
+
+fn json_rpc_call_result(id: Value, result: Result<Value, Value>) -> Value {
+    match result {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
-    })
+    }
 }
 
 /// The resource advertised by `resources/list`: a single manifest describing
 /// the currently mounted image tools, trimmed to the session's capabilities.
-fn tool_manifest_resource(caps: &ImageCapabilities) -> Value {
+fn tool_manifest_resource() -> Value {
     json!({
         "uri": TOOLS_RESOURCE_URI,
         "name": "kodex-image mounted tools",
@@ -377,7 +493,7 @@ fn tool_manifest_resource(caps: &ImageCapabilities) -> Value {
     })
 }
 
-fn handle_resource_read(params: Value, service: ImageMcpService) -> Result<Value, Value> {
+fn handle_resource_read(params: Value, caps: &ImageCapabilities) -> Result<Value, Value> {
     let uri = params
         .get("uri")
         .and_then(Value::as_str)
@@ -385,8 +501,7 @@ fn handle_resource_read(params: Value, service: ImageMcpService) -> Result<Value
     if uri != TOOLS_RESOURCE_URI {
         return Err(json_rpc_error(-32002, format!("Resource not found: {uri}")));
     }
-    let caps = service.capabilities();
-    let text = serde_json::to_string_pretty(&trimmed_tool_schemas(&caps))
+    let text = serde_json::to_string_pretty(&trimmed_tool_schemas(caps))
         .unwrap_or_else(|_| "[]".to_string());
     Ok(json!({
         "contents": [{
@@ -462,12 +577,16 @@ fn tool_schema(name: &str) -> Option<Value> {
     })
 }
 
-async fn handle_tool_call(params: Value, service: ImageMcpService) -> Result<Value, Value> {
+async fn handle_tool_call(
+    params: Value,
+    service: &ImageMcpService,
+    session: &ImageSessionState,
+) -> Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| json_rpc_error(-32602, "Missing tool name"))?;
-    let caps = service.capabilities();
+    let caps = session.capabilities();
     if !offered_tools(&caps).contains(&name) {
         return Err(json_rpc_error(
             -32602,
@@ -478,7 +597,7 @@ async fn handle_tool_call(params: Value, service: ImageMcpService) -> Result<Val
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let api = ImageApi::new((*service.config).clone(), service.view_cache.clone());
+    let api = ImageApi::new(session.config().clone(), service.view_cache());
     let result = match name {
         "view_image" => api.view_image(&arguments).await,
         "generate_image" => api.generate_image(&arguments).await,
@@ -569,19 +688,43 @@ mod tests {
             .block_on(future)
     }
 
-    fn service(caps: ImageCapabilities) -> ImageMcpService {
-        ImageMcpService::new(
-            caps,
-            ImageMcpConfig {
-                workspace_root: std::env::temp_dir(),
-                settings: ImageSettings::default(),
-                view_api_key: None,
-                generate_api_key: None,
-            },
-        )
+    fn config() -> ImageMcpConfig {
+        ImageMcpConfig {
+            workspace_root: std::env::temp_dir(),
+            settings: ImageSettings::default(),
+            view_api_key: None,
+            generate_api_key: None,
+        }
     }
 
-    async fn initialize(client: &reqwest::Client, handle: &ImageMcpHandle) -> String {
+    /// A private server with one registered session, exposing the same surface
+    /// the tests were written against (`url`/`token`/`update_capabilities`).
+    struct TestServer {
+        handle: Arc<ImageMcpHandle>,
+        token: String,
+    }
+
+    impl TestServer {
+        fn url(&self) -> &str {
+            self.handle.url()
+        }
+
+        fn token(&self) -> &str {
+            &self.token
+        }
+
+        fn update_capabilities(&self, caps: ImageCapabilities) {
+            self.handle.update_capabilities(&self.token, caps);
+        }
+    }
+
+    fn service(caps: ImageCapabilities) -> TestServer {
+        let handle = Arc::new(start_image_mcp_server().unwrap());
+        let token = handle.register_session(caps, config());
+        TestServer { handle, token }
+    }
+
+    async fn initialize(client: &reqwest::Client, handle: &TestServer) -> String {
         let response = client
             .post(handle.url())
             .header(TOKEN_HEADER, handle.token())
@@ -617,7 +760,7 @@ mod tests {
 
     async fn list_tools(
         client: &reqwest::Client,
-        handle: &ImageMcpHandle,
+        handle: &TestServer,
         session_id: &str,
     ) -> Vec<String> {
         let response: Value = client
@@ -641,13 +784,12 @@ mod tests {
 
     #[test]
     fn lists_only_missing_tools_for_text_only_byok() {
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: false,
             native_generate: false,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let tools = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -660,13 +802,12 @@ mod tests {
 
     #[test]
     fn omits_view_and_generate_when_native_available() {
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: true,
             native_generate: true,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let tools = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -679,7 +820,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_token() {
-        let handle = start_image_mcp_server(service(ImageCapabilities::default())).unwrap();
+        let handle = service(ImageCapabilities::default());
         let status = run_async(async {
             reqwest::Client::new()
                 .post(handle.url())
@@ -694,13 +835,12 @@ mod tests {
 
     #[test]
     fn rejects_tool_not_in_trimmed_set() {
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: true,
             native_generate: true,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let response: Value = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -730,13 +870,12 @@ mod tests {
 
     #[test]
     fn resources_list_exposes_mounted_tools_manifest() {
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: true,
             native_generate: false,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let tools_in_manifest = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -788,7 +927,7 @@ mod tests {
 
     #[test]
     fn resources_read_rejects_unknown_uri() {
-        let handle = start_image_mcp_server(service(ImageCapabilities::default())).unwrap();
+        let handle = service(ImageCapabilities::default());
         let error: Value = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -814,13 +953,12 @@ mod tests {
 
     #[test]
     fn update_capabilities_recomputes_tools_list() {
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: true,
             native_generate: true,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let tools = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -842,13 +980,12 @@ mod tests {
         // Mirrors `Application::reapply_image_capabilities`: a model switch
         // updates `ImageCapabilities` in place and a subsequent `tools/list`
         // recomputes the trimmed set without restarting the server.
-        let handle = start_image_mcp_server(service(ImageCapabilities {
+        let handle = service(ImageCapabilities {
             native_view: false,
             native_generate: false,
             native_edit: false,
             view_fallback: false,
-        }))
-        .unwrap();
+        });
         let (text_only, multimodal) = run_async(async {
             let client = reqwest::Client::new();
             let session_id = initialize(&client, &handle).await;
@@ -882,6 +1019,100 @@ mod tests {
         assert!(!multimodal.contains(&"view_image".to_string()));
         assert!(!multimodal.contains(&"generate_image".to_string()));
         assert!(multimodal.contains(&"edit_image".to_string()));
+    }
+
+    #[test]
+    fn one_server_serves_two_sessions_with_their_own_tool_sets() {
+        // The whole point of sharing the process: two sessions on ONE server,
+        // each addressable only by its own token, each with its own trimmed
+        // tool set (and its own config for tool calls).
+        let handle = Arc::new(start_image_mcp_server().unwrap());
+        let text_only_token = handle.register_session(
+            ImageCapabilities {
+                native_view: false,
+                native_generate: false,
+                native_edit: false,
+                view_fallback: true,
+            },
+            config(),
+        );
+        let multimodal_token = handle.register_session(
+            ImageCapabilities {
+                native_view: true,
+                native_generate: true,
+                native_edit: false,
+                view_fallback: true,
+            },
+            config(),
+        );
+        let url = handle.url().to_string();
+
+        let (text_only, multimodal) = run_async(async {
+            let client = reqwest::Client::new();
+            let list = |token: String| {
+                let client = client.clone();
+                let url = url.clone();
+                async move {
+                    let session_id = client
+                        .post(&url)
+                        .header(TOKEN_HEADER, &token)
+                        .json(&json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {"protocolVersion": "2025-11-25", "capabilities": {}}
+                        }))
+                        .send()
+                        .await
+                        .unwrap()
+                        .headers()
+                        .get(MCP_SESSION_ID_HEADER)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string();
+                    let response: Value = client
+                        .post(&url)
+                        .header(TOKEN_HEADER, &token)
+                        .header(MCP_SESSION_ID_HEADER, &session_id)
+                        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    response["result"]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|tool| tool["name"].as_str().unwrap().to_string())
+                        .collect::<Vec<_>>()
+                }
+            };
+            (list(text_only_token.clone()).await, list(multimodal_token.clone()).await)
+        });
+
+        assert!(text_only.contains(&"view_image".to_string()));
+        assert!(text_only.contains(&"generate_image".to_string()));
+        // The multimodal session keeps its own trimming on the same server.
+        assert!(!multimodal.contains(&"view_image".to_string()));
+        assert!(!multimodal.contains(&"generate_image".to_string()));
+        assert!(multimodal.contains(&"edit_image".to_string()));
+
+        // A token that was never registered (or already unregistered) is refused.
+        handle.unregister_session(&multimodal_token);
+        let status = run_async(async {
+            reqwest::Client::new()
+                .post(&url)
+                .header(TOKEN_HEADER, &multimodal_token)
+                .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        });
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     // Keep an unused import warning suppressor for `Write` parity with the web

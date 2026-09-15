@@ -934,6 +934,19 @@ export interface AppSettings {
   claude: ClaudeProviderSettings;
   web_tools: WebToolsSettings;
   dsh_default_preset?: string | null;
+  /** Model that generates dsh session titles. Empty pair = inherit the session route. */
+  session_title?: SessionTitleSettings;
+}
+
+/**
+ * Model that generates each DeepSeek Harness session's title. dsh otherwise
+ * inherits the session's own route, which fails on models that cannot answer
+ * inside the title token budget — dsh then keeps its fallback title, i.e. the
+ * raw first prompt truncated to 40 bytes.
+ */
+export interface SessionTitleSettings {
+  provider: string;
+  model: string;
 }
 
 export interface ClaudeProviderSettings {
@@ -1004,6 +1017,14 @@ export interface AgentSettingsSnapshot {
   web_tools: WebToolsSettingsStatus;
   image?: ImageSettingsStatus;
   commit_assistant?: CommitAssistantSettingsStatus;
+  session_title?: SessionTitleSettingsStatus;
+}
+
+export interface SessionTitleSettingsStatus {
+  provider: string;
+  model: string;
+  /** True when a resolvable provider+model pair is set. */
+  configured: boolean;
 }
 
 export interface CommitAssistantSettingsStatus {

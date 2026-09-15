@@ -263,6 +263,98 @@ fn web_tools_mcp_injection_respects_settings_key_and_session_kind() {
     assert!(handle.is_none());
 }
 
+#[test]
+fn harness_exposed_mcp_mounts_the_configured_local_servers() {
+    // dsh has no ACP MCP seam, so Kodex mounts its local MCP servers as
+    // `dsh-mcp-client` rows in the `--patch` overlay. This covers the gate and
+    // the row wiring; the patch rendering itself is covered in `dsh-bridge`.
+    let dir = tempfile::tempdir().unwrap();
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
+
+    // Nothing configured: no rows, and no servers kept alive.
+    let exposed = super::sessions::harness_exposed_mcp(&app_paths);
+    assert!(exposed.rows.is_empty());
+    assert!(exposed.web_tools.is_none());
+    assert!(exposed.image.is_none());
+
+    crate::settings::save_web_tools_settings(&app_paths, true, "brave").unwrap();
+    let exposed = super::sessions::harness_exposed_mcp(&app_paths);
+    assert!(
+        exposed.rows.is_empty(),
+        "missing provider key must not mount the web tools server"
+    );
+    assert!(exposed.web_tools.is_none());
+
+    crate::settings::save_web_tools_provider_key(&app_paths, "brave", "test-secret").unwrap();
+    let exposed = super::sessions::harness_exposed_mcp(&app_paths);
+    assert_eq!(exposed.rows.len(), 1, "web tools only until image is enabled");
+    let row = &exposed.rows[0];
+    assert_eq!(row.id, "kodex-web-tools-mcp");
+    assert_eq!(row.server_name, "kodex_web_tools");
+    assert_eq!(row.header_name, "x-kodex-web-tools-token");
+    assert!(row.url.starts_with("http://127.0.0.1:"));
+    assert!(!row.header_value.is_empty());
+    // The handle is what keeps the server listening for the harness process.
+    let web_handle = exposed.web_tools.expect("handle must be kept alive");
+    assert_eq!(web_handle.url(), row.url);
+
+    // Image fallback enabled with a multimodal view model: second row.
+    crate::settings::save_image_view_settings(&app_paths, true, "kimi_code", "kimi-for-coding")
+        .unwrap();
+    let exposed = super::sessions::harness_exposed_mcp(&app_paths);
+    let ids: Vec<&str> = exposed.rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, vec!["kodex-web-tools-mcp", "kodex-image-mcp"]);
+    assert_eq!(exposed.rows[1].server_name, "kodex_image");
+    assert_eq!(exposed.rows[1].header_name, "x-kodex-image-token");
+    assert!(exposed.image.is_some());
+}
+
+#[test]
+fn every_session_shares_one_server_per_tool_set() {
+    // The assistant channels and the harness must all point at the SAME
+    // `kodex-web-tools` / `kodex-image` process — one thread, one view cache —
+    // while each session keeps its own token (and so its own provider client,
+    // capability trimming, and workspace root).
+    let dir = tempfile::tempdir().unwrap();
+    let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
+    crate::settings::save_web_tools_settings(&app_paths, true, "brave").unwrap();
+    crate::settings::save_web_tools_provider_key(&app_paths, "brave", "test-secret").unwrap();
+    crate::settings::save_image_view_settings(&app_paths, true, "kimi_code", "kimi-for-coding")
+        .unwrap();
+
+    // One assistant session (ACP) and the harness.
+    let (_, acp_web) = super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    let acp_web = acp_web.expect("configured web tools must register a session");
+    let (_, acp_image, _) = super::sessions::prepare_image_mcp(
+        &app_paths,
+        "codex-acp",
+        "deepseek-v4-pro",
+        "/tmp/workspace",
+        false,
+    )
+    .unwrap();
+    let acp_image = acp_image.expect("enabled image settings must register a session");
+
+    let harness = super::sessions::harness_exposed_mcp(&app_paths);
+    let harness_web = harness
+        .rows
+        .iter()
+        .find(|row| row.id == "kodex-web-tools-mcp")
+        .expect("harness web tools row");
+    let harness_image = harness
+        .rows
+        .iter()
+        .find(|row| row.id == "kodex-image-mcp")
+        .expect("harness image row");
+
+    // Same processes...
+    assert_eq!(harness_web.url, acp_web.url());
+    assert_eq!(harness_image.url, acp_image.url());
+    // ...different sessions on them.
+    assert_ne!(harness_web.header_value, acp_web.token());
+    assert_ne!(harness_image.header_value, acp_image.token());
+}
+
 fn remote_workspace_fixture() -> RemoteLinuxWorkspace {
     RemoteLinuxWorkspace {
         profile_id: None,

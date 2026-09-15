@@ -55,7 +55,7 @@ use workspace_model::{
     ClaudeProviderSettingsStatus, CodexAcpSettingsStatus, CodexConnectionMode,
     CommitAssistantSettingsStatus, CustomProviderInput, CustomProviderProtocol,
     ImageGenerateProtocol, ImageGenerateSettings, ImageSettings, ImageSettingsStatus,
-    WebToolsSettings, WebToolsSettingsStatus,
+    SessionTitleSettingsStatus, WebToolsSettings, WebToolsSettingsStatus,
 };
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -744,6 +744,7 @@ fn default_settings() -> AppSettings {
         image: workspace_model::ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
     }
 }
 
@@ -875,6 +876,15 @@ fn commit_assistant_model_is_available(
     provider: &str,
     model: &str,
 ) -> bool {
+    byok_model_is_available(paths, provider, model)
+}
+
+/// Whether `provider` is a configured Codex-family BYOK source and `model` is
+/// in its catalog. Shared by every auxiliary-LLM feature that picks a model
+/// from the same catalog the composer offers (commit assistant, session
+/// titles), so none of them can be pointed at a model they cannot
+/// authenticate against.
+fn byok_model_is_available(paths: &AppPaths, provider: &str, model: &str) -> bool {
     let selected_profile_id = selected_codex_provider_profile_id(paths, &load_app_settings(paths));
     provider_profiles(paths, AgentProviderFamily::Codex, &selected_profile_id)
         .iter()
@@ -913,16 +923,75 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
     let settings = load_app_settings(paths);
     let agents = agent_statuses(paths, settings.selected_agent);
     let commit_assistant = commit_assistant_settings_status(paths, &settings);
+    let session_title = session_title_settings_status(paths, &settings);
     AgentSettingsSnapshot {
         web_tools: web_tools_settings_status(paths, &settings),
         image: image_settings_status(paths, &settings),
         commit_assistant,
+        session_title,
         settings,
         agents,
         env_override: std::env::var("ACP_AGENT_COMMAND").ok(),
         codex_acp: codex_acp_settings_status(paths),
         claude: claude_provider_settings_status(paths),
     }
+}
+
+/// Resolve the session-title model status. `configured` requires both a
+/// provider and a model that resolve in the configured BYOK catalog; an
+/// unconfigured pair surfaces as `configured: false`, which the dsh bring-up
+/// reads as "let dsh inherit the session's own route".
+pub fn session_title_settings_status(
+    paths: &AppPaths,
+    settings: &AppSettings,
+) -> SessionTitleSettingsStatus {
+    let provider = settings.session_title.provider.trim().to_string();
+    let model = settings.session_title.model.trim().to_string();
+    let configured =
+        !provider.is_empty() && !model.is_empty() && byok_model_is_available(paths, &provider, &model);
+    SessionTitleSettingsStatus {
+        provider,
+        model,
+        configured,
+    }
+}
+
+/// The configured session-title route, or `None` when dsh should inherit the
+/// session's own route. Consumed by the harness bring-up when it renders the
+/// Kodex patch overlay.
+pub fn session_title_route(paths: &AppPaths) -> Option<(String, String)> {
+    let settings = load_app_settings(paths);
+    let status = session_title_settings_status(paths, &settings);
+    status.configured.then_some((status.provider, status.model))
+}
+
+/// Persist the session-title model selection.
+///
+/// The pair is all-or-nothing for two reasons: dsh's title provider rejects a
+/// half-configured route (`provider and model must be supplied together`), and
+/// clearing one field alone would leave the overlay in a state that cannot
+/// boot. Passing an empty provider AND an empty model clears the override so
+/// title generation falls back to dsh's default (the session's own route).
+pub fn save_session_title_settings(
+    paths: &AppPaths,
+    provider: &str,
+    model: &str,
+) -> Result<AgentSettingsSnapshot> {
+    let provider = provider.trim().to_string();
+    let model = model.trim().to_string();
+    if provider.is_empty() != model.is_empty() {
+        anyhow::bail!("session title requires both a provider and a model");
+    }
+    if !provider.is_empty() && !byok_model_is_available(paths, &provider, &model) {
+        anyhow::bail!(
+            "session title model \"{model}\" is not available for provider \"{provider}\"; pick a model from the provider's configured catalog"
+        );
+    }
+    let mut settings = load_app_settings(paths);
+    settings.session_title.provider = provider;
+    settings.session_title.model = model;
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
 }
 
 pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettingsSnapshot> {
@@ -945,6 +1014,7 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         image: existing.image,
         commit_assistant: existing.commit_assistant,
         dsh_default_preset: existing.dsh_default_preset,
+        session_title: existing.session_title,
     };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))

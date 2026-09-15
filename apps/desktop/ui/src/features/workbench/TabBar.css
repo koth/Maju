@@ -49,10 +49,13 @@
   min-height: 36px;
   padding: 0 12px;
   border: 0;
+  /* Active indicator: a bare 2px rule, no accent tint. */
+  border-bottom: 2px solid transparent;
   border-radius: 0;
   background: transparent;
-  font-size: var(--font-size-shell-meta);
-  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-soft);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -66,29 +69,15 @@
   max-width: 96px;
 }
 
-.tab-item::after {
-  position: absolute;
-  right: 10px;
-  bottom: 0;
-  left: 10px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: transparent;
-  content: "";
-}
-
 .tab-item:hover {
   color: var(--text-strong);
-  background: color-mix(in srgb, var(--surface-hover) 46%, transparent);
+  background: var(--surface-hover);
 }
 
 .tab-active {
-  background: color-mix(in srgb, var(--surface-hover) 34%, transparent);
-  color: color-mix(in srgb, var(--text-strong) 84%, var(--text-muted));
-}
-
-.tab-active::after {
-  background: color-mix(in srgb, var(--accent-hover) 55%, var(--text-soft));
+  background: var(--surface-hover);
+  border-bottom-color: var(--text-strong);
+  color: var(--text-strong);
 }
 
 .tab-label {
@@ -111,15 +100,15 @@
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   margin-right: -4px;
   padding: 0;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   cursor: pointer;
   line-height: 1;
   opacity: 0;
@@ -132,8 +121,8 @@
 }
 
 .tab-close:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: var(--interactive-hover);
+  color: var(--text-strong);
 }
 
 .tab-scroll-btn {
@@ -150,7 +139,7 @@
   background: color-mix(in srgb, var(--app-bg) 90%, transparent);
   color: var(--text-soft);
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: var(--font-size-ui);
   font-weight: 600;
   cursor: pointer;
   transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);

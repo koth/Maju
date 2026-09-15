@@ -229,6 +229,202 @@ pub fn settings_path_for_root(root: &Path) -> PathBuf {
     root.join("dsh").join("settings.yaml")
 }
 
+/// Resolve the Kodex-owned dsh patch-overlay path for a Kodex data root.
+/// Mirrors `AppPaths::dsh_patch_path`.
+pub fn patch_path_for_root(root: &Path) -> PathBuf {
+    root.join("dsh").join("kodex.patch.yml")
+}
+
+/// Which model generates a dsh session title.
+///
+/// dsh titles a session with a small auxiliary LLM request; by default that
+/// request inherits whatever route the session's first main turn used. That
+/// fails on routes whose model cannot answer inside the shipped 64-token
+/// budget, and dsh then keeps its deterministic fallback title (the first human
+/// message truncated to 40 bytes — i.e. the raw prompt). Pinning a pair here
+/// routes title generation to a model known to work.
+///
+/// One external MCP server Kodex exposes to the harness.
+///
+/// The ACP channels receive Kodex's local MCP servers through
+/// `SessionConfig.mcp_servers`; `dsh web` has no such seam (it ignores ACP MCP
+/// config), so the same servers are mounted as `@deepseek-ai/dsh-mcp-client`
+/// rows in the Kodex-owned `--patch` overlay instead. The harness then calls
+/// them as native tools named `mcp__<server_name>__<tool>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessMcpServer {
+    /// Loader row id; must be unique across the composed tree.
+    pub id: String,
+    /// Tool namespace: `[A-Za-z0-9_-]{1,32}`, unique inside one scope.
+    pub server_name: String,
+    /// Streamable-HTTP endpoint of a Kodex-owned loopback MCP server.
+    pub url: String,
+    /// Auth header the local server requires, and its per-server token.
+    pub header_name: String,
+    pub header_value: String,
+}
+
+/// `None` = keep dsh's default (inherit the session route). dsh rejects a
+/// half-configured pair, so both fields are always present or both absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarnessPatchConfig {
+    pub title_provider: Option<String>,
+    pub title_model: Option<String>,
+    /// Local MCP servers to mount for every harness session. Empty = mount
+    /// none (dsh's own built-in tools are unaffected either way).
+    pub mcp_servers: Vec<HarnessMcpServer>,
+}
+
+impl HarnessPatchConfig {
+    /// Build from the settings' optional `(provider, model)` pair, dropping a
+    /// half-configured pair or one with a blank half.
+    pub fn with_title_route(route: Option<(String, String)>) -> Self {
+        let (provider, model) = match route {
+            Some((provider, model)) => (provider.trim().to_string(), model.trim().to_string()),
+            None => (String::new(), String::new()),
+        };
+        if provider.is_empty() || model.is_empty() {
+            return Self::default();
+        }
+        Self {
+            title_provider: Some(provider),
+            title_model: Some(model),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    /// Attach the local MCP servers the harness should mount.
+    pub fn with_mcp_servers(mut self, servers: Vec<HarnessMcpServer>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+}
+
+/// Shipped `session-title-llm` budget. Raised from dsh's 64: a reasoning model
+/// spends the whole 64-token budget on its `reasoning_content` preamble and
+/// returns an empty `content` with `finish_reason: length`, which the title
+/// provider reads as invalid output. 2048 leaves room for the preamble plus
+/// the title.
+const TITLE_MAX_OUTPUT_TOKENS: u32 = 2048;
+
+/// Quote a scalar for a double-quoted YAML flow scalar.
+fn yaml_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Render the Kodex-owned dsh patch overlay, applied with `--patch` AFTER the
+/// profile layer (bundle patches + the user's own `cordis.patch.yml`).
+///
+/// `settings.yaml` can only carry the two sections Kodex owns (`llm-pi-ai`,
+/// `agent-default-model`); plugin configuration lives in the cordis patch
+/// stack instead, so anything Kodex needs to change inside a bundle row has to
+/// travel as an overlay like this one.
+///
+/// **An id-targeted entry replaces the targeted row's whole `config`, it does
+/// not merge.** Every field the row declares must therefore be restated here in
+/// full — dropping one silently reverts it to "unset" and the plugin's schema
+/// rejects the boot.
+///
+/// `- insert:` entries add rows instead of overriding one, which is how Kodex
+/// mounts the local MCP servers (`kodex-web-tools`, `kodex-image`) for every
+/// harness session: `dsh-mcp-client` registers their tools on the host tool
+/// registry, so each session inherits them as `mcp__<server>__<tool>`.
+pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
+    // One array entry per line rather than one `\`-continued literal: a missing
+    // continuation silently leaks the source indentation into the output, and
+    // an indented YAML comment is still a *valid* comment, so no parse test
+    // catches it.
+    let header = [
+        "# Managed by Kodex — regenerated on every bring-up. Edit Kodex, not this file.",
+        "#",
+        "# An id-targeted entry REPLACES the row's whole `config` (it does not merge), so",
+        "# every field of an overridden row is restated here in full.",
+        "#",
+        "# session-title-llm: the shipped `maxOutputTokens: 64` is exhausted by the",
+        "# reasoning preamble on the reasoning models Kodex routes to, which leaves an",
+        "# empty `content` and makes the title provider keep the 40-byte fallback title",
+        "# (the raw first prompt). The optional provider/model pair pins title",
+        "# generation to a route configured in Settings → DeepSeek Harness →",
+        "# 会话标题模型; without it the provider inherits the session's own route.",
+        "#",
+        "# The trailing `insert:` block mounts Kodex's own local MCP servers so harness",
+        "# sessions get the tools configured in Kodex Settings: the web tools provider",
+        "# (kodex-web-tools) and the image capability server (kodex-image). The ACP",
+        "# channels receive these through `SessionConfig.mcpServers`; `dsh web` ignores",
+        "# that config, so the rows below are the only channel it has.",
+    ];
+
+    let mut out = String::with_capacity(512);
+    for line in header {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("- id: session-title-llm\n");
+    out.push_str("  config:\n");
+    out.push_str("    targetWords: 5\n");
+    out.push_str("    targetCjkCharacters: 10\n");
+    out.push_str("    maxInputBytes: 4096\n");
+    out.push_str(&format!("    maxOutputTokens: {TITLE_MAX_OUTPUT_TOKENS}\n"));
+    out.push_str("    timeoutMs: 60000\n");
+    if let (Some(provider), Some(model)) = (&config.title_provider, &config.title_model) {
+        out.push_str(&format!("    provider: {}\n", yaml_quote(provider)));
+        out.push_str(&format!("    model: {}\n", yaml_quote(model)));
+    }
+
+    if !config.mcp_servers.is_empty() {
+        out.push_str("- insert:\n");
+        for server in &config.mcp_servers {
+            out.push_str(&format!("    - id: {}\n", yaml_quote(&server.id)));
+            out.push_str("      name: '@deepseek-ai/dsh-mcp-client'\n");
+            out.push_str("      config:\n");
+            out.push_str(&format!(
+                "        serverName: {}\n",
+                yaml_quote(&server.server_name)
+            ));
+            out.push_str("        transport: streamable-http\n");
+            out.push_str(&format!("        url: {}\n", yaml_quote(&server.url)));
+            out.push_str("        headers:\n");
+            out.push_str(&format!(
+                "          {}: {}\n",
+                server.header_name,
+                yaml_quote(&server.header_value)
+            ));
+        }
+    }
+    out
+}
+
+/// Write the Kodex-owned dsh patch overlay to `path`. The parent directory is
+/// created if missing, and an unchanged overlay is left alone so repeated
+/// bring-ups do not rewrite the file.
+pub fn write_harness_patch(path: &Path, config: &HarnessPatchConfig) -> anyhow::Result<()> {
+    let rendered = render_harness_patch(config);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create dsh patch dir {}", parent.display())
+        })?;
+    }
+    let existing = std::fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(rendered.as_str()) {
+        return Ok(());
+    }
+    std::fs::write(path, &rendered)
+        .with_context(|| format!("failed to write dsh patch overlay {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +676,213 @@ mod tests {
         // The old deepseek route is gone (the section is replaced wholesale).
         assert!(!text.contains("KODEX_DSH_DEEPSEEK_KEY"));
         assert!(text.contains("model: kimi-k3"));
+    }
+
+    // ---- harness patch overlay ----
+
+    /// Parse the rendered overlay and return the `session-title-llm` entry's
+    /// `config` mapping. Parsing rather than string-matching proves the YAML is
+    /// loadable by dsh's loader, which is the failure that matters.
+    fn parsed_title_config(config: &HarnessPatchConfig) -> serde_yaml::Value {
+        let text = render_harness_patch(config);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rendered overlay is not valid YAML: {e}\n{text}"));
+        let entries = doc.as_sequence().expect("overlay must be a top-level array");
+        assert_eq!(entries.len(), 1, "exactly one patch entry");
+        let entry = &entries[0];
+        assert_eq!(
+            entry.get("id").and_then(|v| v.as_str()),
+            Some("session-title-llm")
+        );
+        entry
+            .get("config")
+            .cloned()
+            .expect("the entry must carry a config")
+    }
+
+    #[test]
+    fn harness_patch_restates_the_whole_title_config() {
+        let config = parsed_title_config(&HarnessPatchConfig::default());
+        // An id-targeted patch REPLACES the row's config, so every field the
+        // bundle row declares must be present or dsh's schema rejects the boot.
+        for key in [
+            "targetWords",
+            "targetCjkCharacters",
+            "maxInputBytes",
+            "maxOutputTokens",
+            "timeoutMs",
+        ] {
+            assert!(config.get(key).is_some(), "missing restated field {key}");
+        }
+        assert_eq!(
+            config.get("maxOutputTokens").and_then(|v| v.as_u64()),
+            Some(u64::from(TITLE_MAX_OUTPUT_TOKENS))
+        );
+        assert!(
+            TITLE_MAX_OUTPUT_TOKENS > 64,
+            "must exceed dsh's shipped 64-token budget"
+        );
+        // No route configured => the provider inherits the session's own route.
+        assert!(config.get("provider").is_none());
+        assert!(config.get("model").is_none());
+    }
+
+    #[test]
+    fn harness_patch_pins_the_configured_title_route() {
+        let config = parsed_title_config(&HarnessPatchConfig {
+            title_provider: Some("kimi_code".into()),
+            // A model id with a slash must survive YAML round-tripping.
+            title_model: Some("cline-pass/deepseek-v4.1-flash".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            config.get("provider").and_then(|v| v.as_str()),
+            Some("kimi_code")
+        );
+        assert_eq!(
+            config.get("model").and_then(|v| v.as_str()),
+            Some("cline-pass/deepseek-v4.1-flash")
+        );
+    }
+
+    #[test]
+    fn harness_patch_quotes_scalars_that_would_break_yaml() {
+        // dsh rejects a half-configured pair, so a crafted id must not be able
+        // to inject structure either.
+        let config = parsed_title_config(&HarnessPatchConfig {
+            title_provider: Some("weird: provider".into()),
+            title_model: Some("mo\"del #x".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            config.get("provider").and_then(|v| v.as_str()),
+            Some("weird: provider")
+        );
+        assert_eq!(
+            config.get("model").and_then(|v| v.as_str()),
+            Some("mo\"del #x")
+        );
+    }
+
+    #[test]
+    fn harness_patch_mounts_the_configured_mcp_servers() {
+        let config = HarnessPatchConfig::default().with_mcp_servers(vec![HarnessMcpServer {
+            id: "kodex-web-tools-mcp".into(),
+            server_name: "kodex_web_tools".into(),
+            url: "http://127.0.0.1:54321/mcp".into(),
+            header_name: "x-kodex-web-tools-token".into(),
+            header_value: "tok:en #1".into(),
+        }]);
+        let text = render_harness_patch(&config);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rendered overlay is not valid YAML: {e}\n{text}"));
+        let entries = doc.as_sequence().expect("overlay must be a top-level array");
+        assert_eq!(entries.len(), 2, "title override + one insert block");
+
+        // The insert block is what dsh's loader turns into mcp-client rows.
+        let inserted = entries[1]
+            .get("insert")
+            .and_then(|v| v.as_sequence())
+            .expect("second entry must be an insert list");
+        assert_eq!(inserted.len(), 1);
+        let row = &inserted[0];
+        assert_eq!(
+            row.get("name").and_then(|v| v.as_str()),
+            Some("@deepseek-ai/dsh-mcp-client")
+        );
+        let row_config = row.get("config").expect("row config");
+        assert_eq!(
+            row_config.get("serverName").and_then(|v| v.as_str()),
+            Some("kodex_web_tools")
+        );
+        assert_eq!(
+            row_config.get("transport").and_then(|v| v.as_str()),
+            Some("streamable-http")
+        );
+        assert_eq!(
+            row_config.get("url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:54321/mcp")
+        );
+        // A crafted token must not be able to inject YAML structure.
+        assert_eq!(
+            row_config
+                .get("headers")
+                .and_then(|v| v.get("x-kodex-web-tools-token"))
+                .and_then(|v| v.as_str()),
+            Some("tok:en #1")
+        );
+    }
+
+    #[test]
+    fn harness_patch_omits_the_insert_block_without_mcp_servers() {
+        // dsh loads the overlay on every boot; with nothing to mount there must
+        // be no second entry at all (the header merely documents the block).
+        let text = render_harness_patch(&HarnessPatchConfig::default());
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        let entries = doc.as_sequence().expect("overlay must be a top-level array");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].get("id").is_some());
+        assert!(entries[0].get("insert").is_none());
+    }
+
+    #[test]
+    fn with_title_route_drops_half_configured_pairs() {
+        assert_eq!(
+            HarnessPatchConfig::with_title_route(Some(("kimi_code".into(), "k3".into()))),
+            HarnessPatchConfig {
+                title_provider: Some("kimi_code".into()),
+                title_model: Some("k3".into()),
+                mcp_servers: Vec::new(),
+            }
+        );
+        for half in [
+            None,
+            Some((String::new(), "k3".into())),
+            Some(("kimi_code".into(), String::new())),
+            Some(("  ".into(), "k3".into())),
+        ] {
+            assert_eq!(
+                HarnessPatchConfig::with_title_route(half),
+                HarnessPatchConfig::default(),
+                "a half-configured route must be dropped, never half-written"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_patch_comment_lines_are_not_indented() {
+        // Regression: a missing `\` continuation in the literal leaked the
+        // Rust source indentation into an output comment. YAML accepts an
+        // indented comment, so the parse-based tests above cannot see it.
+        let text = render_harness_patch(&HarnessPatchConfig::default());
+        for line in text.lines() {
+            assert!(
+                !(line.starts_with(' ') && line.trim_start().starts_with('#')),
+                "indented comment line — broken string continuation: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_harness_patch_creates_parent_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("kodex.patch.yml");
+        let config = HarnessPatchConfig::with_title_route(Some((
+            "kimi_code".into(),
+            "k3".into(),
+        )));
+        write_harness_patch(&path, &config).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("maxOutputTokens: 2048"));
+
+        // Regenerating is a no-op, and a changed route rewrites the file.
+        write_harness_patch(&path, &config).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+
+        let cleared = HarnessPatchConfig::default();
+        write_harness_patch(&path, &cleared).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_ne!(second, first);
+        assert!(!second.contains("provider:"));
     }
 }

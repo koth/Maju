@@ -59,8 +59,8 @@
 }
 
 .badge-modified {
-  color: var(--accent);
-  background: var(--accent-soft);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .badge-deleted {

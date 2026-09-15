@@ -36,7 +36,7 @@
 .remote-open-title {
   color: var(--text-strong);
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .remote-open-context {
@@ -74,7 +74,7 @@
   background: var(--interactive-selected);
   color: var(--text-strong);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .remote-open-step-head > div {
@@ -168,13 +168,13 @@
 .remote-open-machine-option strong {
   color: var(--text-strong);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .remote-open-machine-option small {
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
 }
 
 .remote-open-machine-option:hover:not(:disabled) {
@@ -221,12 +221,12 @@
 .remote-open-agent-option strong {
   color: var(--text-strong);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .remote-open-agent-option small {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
 }
 
 .remote-open-agent-option:hover:not(:disabled) {
@@ -257,7 +257,7 @@
   cursor: pointer;
   font: inherit;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .remote-open-primary {
@@ -370,7 +370,7 @@
 .remote-open-wait-copy strong {
   color: var(--text-strong);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .remote-open-wait-copy span {
@@ -432,7 +432,7 @@
 .remote-open-progress-item small {
   width: 100%;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: var(--font-size-2xs);
   line-height: 1.35;
   overflow-wrap: anywhere;
 }

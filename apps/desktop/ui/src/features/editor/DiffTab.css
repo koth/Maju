@@ -12,8 +12,10 @@
   justify-content: space-between;
   height: 40px;
   padding: 0 16px;
-  background: var(--panel-bg);
-  border-bottom: 1px solid var(--border);
+  background: var(--app-bg);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-soft);
+  font-size: var(--font-size-xs);
   flex-shrink: 0;
 }
 
@@ -24,7 +26,7 @@
   padding: 0 10px 0 14px;
   background: var(--app-bg);
   border-bottom-color: var(--border-subtle);
-  color: var(--text-muted);
+  color: var(--text-soft);
   font-family: var(--font-chat);
 }
 
@@ -38,16 +40,18 @@
 
 .dt-file-name {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--text-strong);
 }
 
 .dt-badge {
-  font-size: 10px;
-  font-weight: 600;
   padding: 2px 6px;
-  border-radius: 5px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt-bg);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0;
 }
@@ -58,8 +62,8 @@
 }
 
 .dt-badge-modified {
-  color: var(--accent);
-  background: var(--accent-soft);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .dt-badge-deleted {
@@ -84,7 +88,7 @@
   gap: 8px;
   overflow: hidden;
   color: var(--text-soft);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   white-space: nowrap;
 }
 
@@ -104,7 +108,7 @@
   min-width: 0;
   flex-shrink: 1;
   color: var(--text-strong);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .dt-breadcrumb-label {
@@ -129,7 +133,7 @@
   height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -155,10 +159,10 @@
 .dt-mode-btn {
   padding: 3px 10px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -173,7 +177,7 @@
 
 .dt-path {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--font-size-2xs);
   color: var(--text-soft);
   max-width: 400px;
   overflow: hidden;
@@ -184,7 +188,7 @@
 .dt-stats {
   display: flex;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
 }
 
@@ -213,7 +217,7 @@
   overflow: auto;
   background: var(--app-bg);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   line-height: 1.5;
   overscroll-behavior: contain;
   scrollbar-color: var(--review-diff-scrollbar-thumb) transparent;
@@ -282,7 +286,7 @@
   background: var(--app-bg);
   color: var(--text-strong);
   font-family: var(--font-chat);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .dt-pierre-diff pre {
@@ -326,7 +330,7 @@
   justify-content: center;
   height: 100%;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .dt-unavailable {
@@ -336,7 +340,7 @@
   height: 100%;
   padding: 24px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   line-height: 1.6;
   text-align: center;
 }

@@ -73,6 +73,32 @@ impl AppPaths {
         self.dsh_dir().join("settings.yaml")
     }
 
+    /// `~/.kodex/dsh/kodex.patch.yml` — the Kodex-owned cordis patch overlay
+    /// passed to `dsh web` as `--patch`. `settings.yaml` can only carry the two
+    /// sections Kodex owns, so bundle-row plugin configuration (e.g. the
+    /// session-title token budget) travels here. Regenerated on every
+    /// bring-up; the user's own `profiles/<name>/cordis.patch.yml` is left
+    /// untouched because this overlay is applied *after* it.
+    pub fn dsh_patch_path(&self) -> PathBuf {
+        self.dsh_dir().join("kodex.patch.yml")
+    }
+
+    /// Root the harness-exposed `kodex-image` MCP server writes generated
+    /// images under.
+    ///
+    /// The harness host is shared by every `dsh` session (and every
+    /// workspace), so that server cannot use a session workspace root the way
+    /// the ACP path does. `ImageApi` appends `.kodex/generated-images` to
+    /// whatever root it is given, so passing this root's parent lands the
+    /// output inside Kodex's own data directory
+    /// (`~/.kodex/generated-images`).
+    pub fn harness_image_output_root(&self) -> PathBuf {
+        self.root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.clone())
+    }
+
     pub fn ensure_root(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)
             .with_context(|| format!("创建 Kodex 数据根目录 {} 失败", self.root.display()))

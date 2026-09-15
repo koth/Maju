@@ -181,6 +181,21 @@ describe("WelcomeLauncher BYOK onboarding", () => {
     vi.clearAllMocks();
   });
 
+  it("renders an aligned ASCII wordmark", async () => {
+    vi.mocked(workspaceGetRecent).mockResolvedValue([]);
+    const { container } = render(
+      <WelcomeLauncher onWorkspaceOpened={vi.fn()} onOpenSettings={vi.fn()} />,
+    );
+
+    const pre = container.querySelector(".welcome-ascii");
+    expect(pre).not.toBeNull();
+    const lines = (pre?.textContent ?? "").split("\n");
+    expect(lines).toHaveLength(6);
+    // Every row is the same width, otherwise the banner reads as a pile of
+    // blocks instead of letterforms.
+    expect(new Set(lines.map((line) => line.length)).size).toBe(1);
+  });
+
   it("boots straight into settings when no provider is configured", async () => {
     vi.mocked(workspaceGetRecent).mockResolvedValue([]);
     const onOpenSettings = vi.fn();

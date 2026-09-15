@@ -10,8 +10,8 @@ struct PreparedSessionRuntime {
     /// DeepSeek Harness default agent preset for a new session (from settings).
     /// `None` for non-harness agents.
     agent_preset: Option<String>,
-    web_tools_mcp: Option<crate::web_tools_mcp::WebToolsMcpHandle>,
-    image_mcp: Option<crate::image_mcp::ImageMcpHandle>,
+    web_tools_mcp: Option<crate::web_tools_mcp::WebToolsLease>,
+    image_mcp: Option<crate::image_mcp::ImageMcpLease>,
     image_capabilities: workspace_model::ImageCapabilities,
 }
 
@@ -41,7 +41,7 @@ pub(super) fn prepare_web_tools_mcp(
 ) -> Result<
     (
         Vec<acp_core::McpServer>,
-        Option<crate::web_tools_mcp::WebToolsMcpHandle>,
+        Option<crate::web_tools_mcp::WebToolsLease>,
     ),
     String,
 > {
@@ -54,13 +54,46 @@ pub(super) fn prepare_web_tools_mcp(
         );
         return Ok((Vec::new(), None));
     }
+    let Some(lease) = web_tools_lease(app_paths)? else {
+        return Ok((Vec::new(), None));
+    };
+    let server = acp_core::http_mcp_server(
+        "kodex-web-tools",
+        lease.url().to_string(),
+        [(
+            "x-kodex-web-tools-token".to_string(),
+            lease.token().to_string(),
+        )],
+    );
+    Ok((vec![server], Some(lease)))
+}
+
+/// Register this session's provider client on the shared `kodex-web-tools`
+/// server. `Ok(None)` = web tools disabled or missing the provider key, which
+/// is not an error.
+pub(crate) fn web_tools_lease(
+    app_paths: &AppPaths,
+) -> Result<Option<crate::web_tools_mcp::WebToolsLease>, String> {
+    let Some(config) = web_tools_config(app_paths)? else {
+        return Ok(None);
+    };
+    let lease = crate::shared_mcp::shared_mcp()
+        .web_tools_lease(config)
+        .map_err(|error| format!("failed to start Kodex web tools MCP server: {error}"))?;
+    crate::startup_perf::mark("web_tools_mcp/ready", format!("url={}", lease.url()));
+    Ok(Some(lease))
+}
+
+/// The configured web-tools provider, or `None` when the feature is off or its
+/// API key is missing.
+fn web_tools_config(app_paths: &AppPaths) -> Result<Option<crate::web_tools::WebToolsConfig>, String> {
     let settings = crate::settings::load_app_settings(app_paths);
     if !settings.web_tools.enabled {
         crate::startup_perf::mark(
             "web_tools_mcp/disabled",
             format!("provider={}", settings.web_tools.provider),
         );
-        return Ok((Vec::new(), None));
+        return Ok(None);
     }
     let Some(api_key) =
         crate::settings::web_tools_provider_secret(app_paths, &settings.web_tools.provider)
@@ -69,37 +102,15 @@ pub(super) fn prepare_web_tools_mcp(
             "web_tools_mcp/missing_secret",
             format!("provider={}", settings.web_tools.provider),
         );
-        return Ok((Vec::new(), None));
+        return Ok(None);
     };
     crate::startup_perf::mark(
         "web_tools_mcp/start",
-        format!(
-            "provider={} is_codex={} is_claude={}",
-            settings.web_tools.provider, is_codex, is_claude
-        ),
+        format!("provider={}", settings.web_tools.provider),
     );
-    let config =
-        crate::web_tools::WebToolsConfig::for_provider(&settings.web_tools.provider, api_key)
-            .map_err(|error| format!("failed to prepare Kodex web tools provider: {error}"))?;
-    let handle = crate::web_tools_mcp::start_web_tools_mcp_server(config)
-        .map_err(|error| format!("failed to start Kodex web tools MCP server: {error}"))?;
-    let mcp_server = acp_core::http_mcp_server(
-        "kodex-web-tools",
-        handle.url().to_string(),
-        [(
-            "x-kodex-web-tools-token".to_string(),
-            handle.token().to_string(),
-        )],
-    );
-    crate::startup_perf::mark(
-        "web_tools_mcp/ready",
-        format!(
-            "provider={} url={} servers=1",
-            settings.web_tools.provider,
-            handle.url()
-        ),
-    );
-    Ok((vec![mcp_server], Some(handle)))
+    crate::web_tools::WebToolsConfig::for_provider(&settings.web_tools.provider, api_key)
+        .map(Some)
+        .map_err(|error| format!("failed to prepare Kodex web tools provider: {error}"))
 }
 
 /// Prepare the unified `kodex-image` MCP server for a session.
@@ -119,7 +130,7 @@ pub(super) fn prepare_image_mcp(
 ) -> Result<
     (
         Vec<acp_core::McpServer>,
-        Option<crate::image_mcp::ImageMcpHandle>,
+        Option<crate::image_mcp::ImageMcpLease>,
         workspace_model::ImageCapabilities,
     ),
     String,
@@ -135,7 +146,7 @@ pub(super) fn prepare_image_mcp(
     } else {
         None
     };
-    let mut caps = crate::image_capability::resolve_image_capabilities(
+    let caps = crate::image_capability::resolve_image_capabilities(
         model,
         provider.as_deref(),
         agent_command,
@@ -143,13 +154,68 @@ pub(super) fn prepare_image_mcp(
     if remote_session || !(is_codex || is_claude || is_harness) {
         return Ok((Vec::new(), None, caps));
     }
+    let Some((lease, attached_caps)) = image_lease(app_paths, workspace_root, caps)? else {
+        return Ok((Vec::new(), None, caps));
+    };
+    let server = acp_core::http_mcp_server(
+        "kodex-image",
+        lease.url().to_string(),
+        [(
+            "x-kodex-image-token".to_string(),
+            lease.token().to_string(),
+        )],
+    );
+    Ok((vec![server], Some(lease), attached_caps))
+}
+
+/// Register this session's capabilities and config on the shared `kodex-image`
+/// server.
+///
+/// `Ok(None)` = image support disabled in settings, which is not an error. On
+/// success the returned capabilities have `view_fallback` set: the lease is
+/// registered, so a text-only model's attachments can be degraded through
+/// `view_image`.
+fn image_lease(
+    app_paths: &AppPaths,
+    workspace_root: &str,
+    caps: workspace_model::ImageCapabilities,
+) -> Result<Option<(crate::image_mcp::ImageMcpLease, workspace_model::ImageCapabilities)>, String> {
+    let Some(config) = image_mcp_config(app_paths, workspace_root)? else {
+        return Ok(None);
+    };
+    // The registration exists: a `view_image` fallback is available, so image
+    // attachments are allowed even for text-only models (degraded through
+    // `view_image` before reaching the model).
+    let mut attached = caps;
+    attached.view_fallback = true;
+    let lease = crate::shared_mcp::shared_mcp()
+        .image_lease(attached, config)
+        .map_err(|error| format!("failed to start Kodex image MCP server: {error}"))?;
+    crate::startup_perf::mark(
+        "image_mcp/ready",
+        format!(
+            "workspace_root={workspace_root} native_view={} native_generate={} url={}",
+            attached.native_view,
+            attached.native_generate,
+            lease.url()
+        ),
+    );
+    Ok(Some((lease, attached)))
+}
+
+/// The session's image MCP config, or `None` when image support is disabled in
+/// settings.
+fn image_mcp_config(
+    app_paths: &AppPaths,
+    workspace_root: &str,
+) -> Result<Option<crate::image_mcp::ImageMcpConfig>, String> {
     let settings = crate::settings::load_app_settings(app_paths);
     if !settings.image.enabled {
         crate::startup_perf::mark(
             "image_mcp/disabled",
             format!("enabled={}", settings.image.enabled),
         );
-        return Ok((Vec::new(), None, caps));
+        return Ok(None);
     }
     crate::settings::validate_image_settings(&settings.image)
         .map_err(|error| format!("invalid image settings: {error}"))?;
@@ -157,39 +223,89 @@ pub(super) fn prepare_image_mcp(
         crate::settings::image_view_provider_secret(app_paths, &settings.image.view.provider);
     let generate_api_key =
         crate::settings::image_generate_api_key(app_paths, &settings.image.generate);
-    let config = crate::image_mcp::ImageMcpConfig {
+    Ok(Some(crate::image_mcp::ImageMcpConfig {
         workspace_root: std::path::PathBuf::from(workspace_root),
         settings: settings.image.clone(),
         view_api_key,
         generate_api_key,
+    }))
+}
+
+/// Register the local MCP servers Kodex exposes to `dsh web`, and build the
+/// `dsh-mcp-client` rows that mount them.
+///
+/// The ACP channels receive these servers through `SessionConfig.mcp_servers`.
+/// The harness has no such seam — `dsh web` ignores ACP MCP config — so the
+/// rows travel through Kodex's `--patch` overlay instead (see
+/// [`crate::dsh_bringup`]), pointing at the *same* shared servers.
+///
+/// The harness process serves every dsh session, so its image registration
+/// cannot be trimmed per session model the way an ACP session's is: it
+/// advertises everything the configured image settings can serve and lets the
+/// model choose. Generated images land under Kodex's data root
+/// ([`AppPaths::harness_image_output_root`]), not a session workspace.
+///
+/// Both servers are optional and a failure to start one only removes its tools.
+pub(crate) fn harness_exposed_mcp(app_paths: &AppPaths) -> crate::dsh_bringup::HarnessExposedMcp {
+    let mut exposed = crate::dsh_bringup::HarnessExposedMcp::default();
+
+    match web_tools_lease(app_paths) {
+        Ok(Some(lease)) => {
+            exposed.rows.push(dsh_mcp_row(
+                "kodex-web-tools-mcp",
+                "kodex_web_tools",
+                lease.url(),
+                "x-kodex-web-tools-token",
+                lease.token(),
+            ));
+            exposed.web_tools = Some(lease);
+        }
+        Ok(None) => {}
+        Err(error) => crate::startup_perf::mark("dsh/web_tools_mcp_failed", error),
+    }
+
+    // The harness reaches models through Kodex's own BYOK routes, so nothing on
+    // that side can view, generate, or edit an image natively: offer every tool
+    // the image settings can serve.
+    let caps = workspace_model::ImageCapabilities {
+        native_view: false,
+        native_generate: false,
+        native_edit: false,
+        view_fallback: false,
     };
-    // The MCP server is attached: a `view_image` fallback is now available,
-    // so image attachments are allowed even for text-only models (degraded
-    // through `view_image` before reaching the model).
-    caps.view_fallback = true;
-    let service = crate::image_mcp::ImageMcpService::new(caps, config);
-    let handle = crate::image_mcp::start_image_mcp_server(service)
-        .map_err(|error| format!("failed to start Kodex image MCP server: {error}"))?;
-    let mcp_server = acp_core::http_mcp_server(
-        "kodex-image",
-        handle.url().to_string(),
-        [(
-            "x-kodex-image-token".to_string(),
-            handle.token().to_string(),
-        )],
-    );
-    crate::startup_perf::mark(
-        "image_mcp/ready",
-        format!(
-            "model={} provider={} native_view={} native_generate={} url={}",
-            model,
-            provider.as_deref().unwrap_or(""),
-            caps.native_view,
-            caps.native_generate,
-            handle.url()
-        ),
-    );
-    Ok((vec![mcp_server], Some(handle), caps))
+    let output_root = app_paths.harness_image_output_root();
+    match image_lease(app_paths, &output_root.display().to_string(), caps) {
+        Ok(Some((lease, _caps))) => {
+            exposed.rows.push(dsh_mcp_row(
+                "kodex-image-mcp",
+                "kodex_image",
+                lease.url(),
+                "x-kodex-image-token",
+                lease.token(),
+            ));
+            exposed.image = Some(lease);
+        }
+        Ok(None) => {}
+        Err(error) => crate::startup_perf::mark("dsh/image_mcp_failed", error),
+    }
+
+    exposed
+}
+
+fn dsh_mcp_row(
+    id: &str,
+    server_name: &str,
+    url: &str,
+    header_name: &str,
+    header_value: &str,
+) -> dsh_bridge::HarnessMcpServer {
+    dsh_bridge::HarnessMcpServer {
+        id: id.to_string(),
+        server_name: server_name.to_string(),
+        url: url.to_string(),
+        header_name: header_name.to_string(),
+        header_value: header_value.to_string(),
+    }
 }
 
 fn remote_machine_profile_from_workspace(
@@ -387,19 +503,22 @@ impl Application {
         // DeepSeek Harness: no ACP subprocess, no codex/web-tools MCP.
         // Kodex writes the dsh settings document, spawns `dsh web`, and the
         // returned endpoint selects the harness backend via
-        // `SessionConfig.harness_endpoint`. The `kodex-image` MCP fallback is
-        // still attached (when image settings are enabled) so text-only harness
-        // models (e.g. DeepSeek) accept image attachments degraded through the
-        // view model — mirroring the codex text-only path. The MCP server is
-        // not added to `mcp_servers` because the harness ignores ACP MCP
-        // config; app-core uses the handle directly for prompt degradation.
+        // `SessionConfig.harness_endpoint`. `mcp_servers` stays empty because
+        // `dsh web` ignores ACP MCP config; the same local servers are mounted
+        // on the harness process through Kodex's `--patch` overlay instead
+        // (`harness_exposed_mcp`), and the `kodex-image` handle is *also* kept
+        // per session so text-only models accept attachments degraded through
+        // the view model — mirroring the codex text-only path.
         if crate::settings::is_deepseek_harness_command(agent_command) {
-            let harness_endpoint =
-                crate::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&self.app_paths)?;
             let workspace_root = workspace_root_override
                 .clone()
                 .filter(|root| !root.is_empty())
                 .unwrap_or_else(|| self.session_config_workspace_root(None));
+            // Kodex's local MCP servers are mounted on the harness process by
+            // the bring-up itself (one set per `dsh web`, reused by every
+            // session), so nothing extra is passed here.
+            let harness_endpoint =
+                crate::dsh_bringup::dsh_bringup().ensure_harness_endpoint(&self.app_paths)?;
             // Per-session preset override wins over the global `dsh_default_preset`
             // setting; fall back to the configured default when none is supplied.
             // When RESUMING, the stored preset is passed through so the UI can

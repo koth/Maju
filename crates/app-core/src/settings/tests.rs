@@ -249,6 +249,7 @@ fn settings_round_trip() {
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -351,6 +352,7 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -393,6 +395,7 @@ model_provider = "timiai"
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
     };
 
     save_app_settings(&paths, &settings).unwrap();
@@ -664,6 +667,7 @@ fn codebuddy_secret_appears_in_byok_model_catalog_with_correct_label() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -774,6 +778,7 @@ fn codebuddy_emit_model_provider_map_pins_local_proxy_base_url_chat_completions(
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1014,6 +1019,7 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1129,6 +1135,7 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1187,6 +1194,7 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1228,6 +1236,7 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -2134,6 +2143,7 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -2225,6 +2235,7 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -2759,6 +2770,7 @@ fn env_override_wins_over_persisted_selection() {
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
+        session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -3106,4 +3118,53 @@ fn commit_assistant_settings_validate_availability_and_support_clearing() {
     assert!(!snapshot.commit_assistant.configured);
     assert!(snapshot.commit_assistant.provider.is_empty());
     assert!(snapshot.commit_assistant.model.is_empty());
+}
+
+#[test]
+fn session_title_settings_validate_availability_and_support_clearing() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let paths = AppPaths::from_root(dir.path().join(".kodex"));
+
+    save_agent_provider_secret(&paths, AgentProviderFamily::Codex, "deepseek", "sk-test").unwrap();
+    save_provider_models(
+        &paths,
+        "deepseek",
+        vec![workspace_model::ModelAttributesInput::from_slug("deepseek-chat")],
+    )
+    .unwrap();
+
+    // Unset selection = dsh inherits the session's own route.
+    let settings = load_app_settings(&paths);
+    let status = session_title_settings_status(&paths, &settings);
+    assert!(!status.configured);
+    assert!(status.provider.is_empty());
+    assert!(status.model.is_empty());
+    assert_eq!(session_title_route(&paths), None);
+
+    // An unknown model, an unconfigured provider, and a half-empty pair are all
+    // rejected: dsh refuses a half-configured route, so writing one would leave
+    // an overlay that cannot boot.
+    assert!(save_session_title_settings(&paths, "deepseek", "gpt-5.5").is_err());
+    assert!(save_session_title_settings(&paths, "nope", "deepseek-chat").is_err());
+    assert!(save_session_title_settings(&paths, "deepseek", "").is_err());
+    assert!(save_session_title_settings(&paths, "", "deepseek-chat").is_err());
+
+    // A valid pair persists and round-trips through the route accessor the
+    // harness bring-up reads.
+    let snapshot = save_session_title_settings(&paths, "deepseek", "deepseek-chat").unwrap();
+    assert!(snapshot.session_title.configured);
+    assert_eq!(snapshot.session_title.provider, "deepseek");
+    assert_eq!(snapshot.session_title.model, "deepseek-chat");
+    assert_eq!(
+        session_title_route(&paths),
+        Some(("deepseek".to_string(), "deepseek-chat".to_string()))
+    );
+
+    // Clearing with an empty pair restores dsh's default (inherit the route).
+    let snapshot = save_session_title_settings(&paths, "", "").unwrap();
+    assert!(!snapshot.session_title.configured);
+    assert!(snapshot.session_title.provider.is_empty());
+    assert!(snapshot.session_title.model.is_empty());
+    assert_eq!(session_title_route(&paths), None);
 }

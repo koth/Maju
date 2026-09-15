@@ -72,6 +72,7 @@ import {
   settingsSaveImageGenerateSettings,
   settingsSaveImageViewSettings,
   settingsSaveCommitAssistantSettings,
+  settingsSaveSessionTitleSettings,
   settingsValidateRemoteProfile,
   sessionDeleteAllArchived,
   sessionDeleteArchived,
@@ -106,6 +107,7 @@ export type SettingsPane =
   | "web"
   | "image"
   | "commit"
+  | "sessionTitle"
   | "companion"
   | "archive"
   | "remote"
@@ -701,6 +703,13 @@ export function SettingsPage({
   >(null);
   const [commitDraftProvider, setCommitDraftProvider] = useState("");
   const [commitDraftModel, setCommitDraftModel] = useState("");
+  const [busySessionTitle, setBusySessionTitle] = useState(false);
+  const [sessionTitleMessage, setSessionTitleMessage] = useState<string | null>(
+    null,
+  );
+  const [sessionTitleDraftProvider, setSessionTitleDraftProvider] =
+    useState("");
+  const [sessionTitleDraftModel, setSessionTitleDraftModel] = useState("");
   const [imageMessage, setImageMessage] = useState<string | null>(null);
   const [imageViewDraftProvider, setImageViewDraftProvider] = useState("");
   const [imageViewDraftModel, setImageViewDraftModel] = useState("");
@@ -1806,6 +1815,80 @@ export function SettingsPage({
       setBusyCommitAssistant(false);
     }
   }, [commitDraftProvider, commitDraftModel]);
+
+  // Sync session-title drafts from the snapshot.
+  useEffect(() => {
+    if (!snapshot?.session_title) return;
+    setSessionTitleDraftProvider(snapshot.session_title.provider);
+    setSessionTitleDraftModel(snapshot.session_title.model);
+  }, [snapshot?.session_title?.provider, snapshot?.session_title?.model]);
+
+  // Title-generation models follow the *draft* provider so the picker updates
+  // as soon as the user switches provider, before saving.
+  const sessionTitleModelOptions = useMemo(() => {
+    if (!snapshot || !sessionTitleDraftProvider) return [];
+    return (
+      snapshot.codex_acp.profiles.find(
+        (profile) => profile.id === sessionTitleDraftProvider,
+      )?.models ?? []
+    );
+  }, [snapshot, sessionTitleDraftProvider]);
+
+  // Providers offered for title generation: only those with a resolved key,
+  // plus the saved one so a provider that lost its key stays displayable.
+  const sessionTitleProviderOptions = useMemo(() => {
+    if (!snapshot) return [{ value: "", label: "自动（跟随会话模型）" }];
+    const byokProfiles = selectableByokSourceProfiles(
+      snapshot.codex_acp.profiles,
+      byokProfileId,
+    ).filter((profile) => profile.configured);
+    const saved = snapshot.session_title?.provider ?? "";
+    const savedMissing =
+      !!saved && !byokProfiles.some((profile) => profile.id === saved);
+    return [
+      { value: "", label: "自动（跟随会话模型）" },
+      ...byokProfiles.map((profile) => ({
+        value: profile.id,
+        label: profile.label,
+      })),
+      ...(savedMissing
+        ? [
+            {
+              value: saved,
+              label: `${providerLabel(snapshot.codex_acp.profiles, saved)}（未配置）`,
+            },
+          ]
+        : []),
+    ];
+  }, [snapshot, byokProfileId]);
+
+  const sessionTitleDirty =
+    sessionTitleDraftProvider !== (snapshot?.session_title?.provider ?? "") ||
+    sessionTitleDraftModel !== (snapshot?.session_title?.model ?? "");
+
+  const handleSaveSessionTitle = useCallback(async () => {
+    setBusySessionTitle(true);
+    setSessionTitleMessage(null);
+    setError(null);
+    try {
+      // Empty provider means "跟随会话模型" — clear the override so dsh inherits
+      // the session's own route again.
+      const provider = sessionTitleDraftProvider.trim();
+      const model = provider ? sessionTitleDraftModel.trim() : "";
+      const next = await settingsSaveSessionTitleSettings(provider, model);
+      setSnapshot(next);
+      setSessionTitleMessage(
+        provider
+          ? "标题模型已保存，下一个新会话生效"
+          : "已恢复为跟随会话模型",
+      );
+    } catch (e) {
+      setError(String(e));
+      setSessionTitleMessage(String(e));
+    } finally {
+      setBusySessionTitle(false);
+    }
+  }, [sessionTitleDraftProvider, sessionTitleDraftModel]);
 
   // Image view models must follow the *draft* provider so the picker updates
   // as soon as the user changes the provider dropdown, before saving. The
@@ -3215,6 +3298,115 @@ export function SettingsPage({
     );
   };
 
+  /**
+   * Session-title model pane.
+   *
+   * dsh titles a session with its own small auxiliary request. By default that
+   * request inherits the route of the session's first main turn; on the
+   * reasoning models Kodex routes to, the shipped output budget was consumed
+   * entirely by the reasoning preamble, the provider saw empty content, and the
+   * session kept dsh's deterministic fallback title — the first human message
+   * truncated to 40 bytes, i.e. the raw prompt. Kodex raises that budget via its
+   * `--patch` overlay; this pane pins the route so title generation does not
+   * depend on whichever model a given conversation happens to use.
+   */
+  const renderSessionTitleSection = () => {
+    const status = snapshot?.session_title;
+    const byokProfiles = selectableByokSourceProfiles(
+      snapshot?.codex_acp.profiles ?? [],
+      byokProfileId,
+    ).filter((profile) => profile.configured);
+    return (
+      <section className="settings-section settings-capability-section">
+        <div className="settings-general-card settings-capability-intro">
+          <h2 className="settings-section-title">会话标题</h2>
+          <p className="settings-section-desc">
+            DeepSeek Harness 用一个独立的小请求为每个会话生成标题，这条请求默认
+            <b>继承该会话自己的模型</b>。推理模型会把输出预算全花在推理前言上，
+            导致标题请求返回空内容、被判定为失败，会话于是退回
+            「原始提问截断」的标题。在这里固定一个模型即可绕开。
+          </p>
+        </div>
+        <div className="settings-provider-config settings-capability-card">
+          <div className="settings-provider-config-head">
+            <div>
+              <span>标题生成模型</span>
+              <p>
+                从已配置的 BYOK provider 模型目录中选择。建议选一个<b>非推理模型</b>
+                （例如 kimi_code / k3），它能在很小的输出预算内直接给出标题。
+              </p>
+            </div>
+            <span
+              className={`settings-provider-active ${
+                status?.configured ? "is-configured" : ""
+              }`}
+            >
+              {status?.configured ? "已固定" : "跟随会话模型"}
+            </span>
+          </div>
+          <label className="settings-field settings-provider-source-field">
+            <span>模型来源（BYOK provider）</span>
+            <SettingsSelect
+              ariaLabel="session_title_provider"
+              value={sessionTitleDraftProvider}
+              disabled={busySessionTitle}
+              placeholder="— 跟随会话模型 —"
+              options={sessionTitleProviderOptions}
+              onChange={(next) => {
+                setSessionTitleDraftProvider(next);
+                setSessionTitleDraftModel("");
+              }}
+            />
+          </label>
+          <label className="settings-field settings-provider-source-field">
+            <span>标题模型</span>
+            <SettingsSelect
+              ariaLabel="session_title_model"
+              value={sessionTitleDraftModel}
+              disabled={busySessionTitle || !sessionTitleDraftProvider}
+              placeholder="— 选择模型 —"
+              options={sessionTitleModelOptions.map((model: string) => ({
+                value: model,
+                label: model,
+              }))}
+              onChange={setSessionTitleDraftModel}
+            />
+          </label>
+          {!byokProfiles.length && (
+            <div className="settings-warning">
+              还没有已配置 API key 的 BYOK provider，请先在「通用 → 模型池」里配置。
+            </div>
+          )}
+          <div className="settings-provider-config-actions">
+            {sessionTitleMessage && (
+              <span className="settings-provider-config-message">
+                {sessionTitleMessage}
+              </span>
+            )}
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={
+                busySessionTitle ||
+                !sessionTitleDirty ||
+                (!!sessionTitleDraftProvider && !sessionTitleDraftModel)
+              }
+              onClick={handleSaveSessionTitle}
+            >
+              {busySessionTitle ? "保存中..." : "保存标题模型"}
+            </button>
+          </div>
+          <p className="settings-dsh-preset-hint">
+            留空「模型来源」= 恢复跟随会话模型。保存后对<b>新建会话</b>生效；
+            已有会话的标题是历史事件，dsh 不会回溯重算。
+            Kodex 已把标题请求的输出预算从 dsh 默认的 64 提到 2048（经
+            <code>--patch</code> 覆盖层），因此推理模型路由也能正常出标题。
+          </p>
+        </div>
+      </section>
+    );
+  };
+
   const renderArchivePane = () => {
     const workspaceOptions = archivedWorkspaceOptions(archivedSessions);
     const normalizedSearch = archivedSearch.trim().toLowerCase();
@@ -4440,6 +4632,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "sessionTitle" ? "is-active" : ""}`}
+            onClick={() => setActivePane("sessionTitle")}
+          >
+            会话标题
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "archive" ? "is-active" : ""}`}
             onClick={() => setActivePane("archive")}
           >
@@ -4774,6 +4973,32 @@ export function SettingsPage({
                               </span>
                             )}
                           </div>
+                          <div className="settings-field settings-dsh-preset-field">
+                            <span>会话标题模型</span>
+                            <p className="settings-dsh-preset-hint">
+                              标题由哪个模型生成，已移到独立的「会话标题」页配置。
+                            </p>
+                            <div className="settings-provider-detail">
+                              <span
+                                className={`settings-row-badge ${
+                                  snapshot.session_title?.configured
+                                    ? "is-installed"
+                                    : "is-missing"
+                                }`}
+                              >
+                                {snapshot.session_title?.configured
+                                  ? "已配置"
+                                  : "跟随会话模型"}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              className="settings-btn"
+                              onClick={() => setActivePane("sessionTitle")}
+                            >
+                              打开「会话标题」设置
+                            </button>
+                          </div>
                         </div>
                         {renderByokPool()}
                       </>
@@ -4803,6 +5028,7 @@ export function SettingsPage({
         {activePane === "image" && renderImageSection()}
 
         {activePane === "commit" && renderCommitAssistantSection()}
+        {activePane === "sessionTitle" && renderSessionTitleSection()}
 
         {activePane === "remote" && renderRemotePane()}
 
@@ -5384,6 +5610,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "web") return "Web 工具";
   if (pane === "image") return "图像能力";
   if (pane === "commit") return "Commit 助手";
+  if (pane === "sessionTitle") return "会话标题";
   if (pane === "usage") return "用量";
   if (pane === "lsp") return "LSP";
   if (pane === "codebuddy") return "CodeBuddy";
@@ -5402,6 +5629,8 @@ function settingsPaneDescription(pane: SettingsPane): string {
     return "配置识图、生图、改图的降级 MCP 工具：识图复用对话模型，生/改图独立配置协议与模型。";
   if (pane === "commit")
     return "配置 AI 生成提交信息的 Commit 助手使用的模型；助手基于 codex agent 运行，不配置时跟随当前会话模型。";
+  if (pane === "sessionTitle")
+    return "配置 DeepSeek Harness 会话标题由哪个模型生成。标题生成是一个独立的小请求，默认继承该会话自己的模型，遇到推理模型时容易失败并退回「原始提问截断」的标题。";
   if (pane === "usage")
     return "汇总可上报智能体（Codex、Claude）的 token 用量与性能指标。CodeBuddy 等第三方智能体不纳入统计。";
   if (pane === "lsp")

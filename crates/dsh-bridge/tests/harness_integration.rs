@@ -2134,6 +2134,107 @@ async fn question_answer_uses_waterfall_event_id() {
     let _ = worker.join();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_question_rejects_the_waterfall() {
+    // Regression: 取消 on the question panel used to build an approval rejection
+    // for a question id. The bridge refuses that kind/result mismatch, posts
+    // nothing, and the ask stays pending — so the panel popped straight back up.
+    // dsh cancels a question by *rejecting* its `$events` waterfall (exactly what
+    // its own Web client sends), which fails the `ask_user_question` call and
+    // clears the pending entry.
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            json!({
+                "type": "waterfall",
+                "event": "user-questions/request",
+                "eventId": "question-rpc-9",
+                "agentId": "s-1",
+                "request": {
+                    "type": "question/requested",
+                    "sessionId": "s-1",
+                    "questions": [
+                        { "id": "q1", "question": "Pick one", "options": [{ "label": "A" }, { "label": "B" }] }
+                    ]
+                }
+            }),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    assert!(
+        wait_for_permission_request(&rx, "q1"),
+        "question request was not surfaced"
+    );
+
+    let (reply_tx, reply_rx) = mpsc::channel();
+    command_tx
+        .send(acp_core::RuntimeCommand::ResolveHarnessApproval {
+            rpc_id: "q1".into(),
+            result: acp_core::HarnessApprovalResult::QuestionCancelled,
+            reply_tx,
+        })
+        .unwrap();
+    reply_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("cancel timed out")
+        .expect("cancel was refused instead of posted");
+
+    let results = mock.responds();
+    assert_eq!(results.len(), 1, "expected one $events/result call");
+    assert_eq!(
+        results[0]["eventId"], "question-rpc-9",
+        "the rejection must name the question waterfall eventId"
+    );
+    assert_eq!(results[0]["outcome"]["kind"], "rejected");
+    assert_eq!(results[0]["outcome"]["error"]["name"], "UserQuestionError");
+    assert_eq!(results[0]["outcome"]["error"]["code"], "ASK_CANCELLED");
+    assert_eq!(
+        results[0]["outcome"]["error"]["message"],
+        "the user cancelled ask_user_question"
+    );
+    assert!(
+        results[0]["outcome"].get("value").is_none(),
+        "a rejected outcome carries no value"
+    );
+    assert_eq!(mock.answer_envelopes(), vec![true]);
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
 /// Spawn `run_harness_session` against `endpoint`, returning its command
 /// channel, event channel, and worker thread.
 #[allow(clippy::type_complexity)]

@@ -1,35 +1,48 @@
 /* ── Codex-style Tool Call ── */
 
 .tc {
-  --tc-strong: color-mix(in srgb, var(--text-strong) 62%, var(--text-muted));
-  --tc-command: color-mix(in srgb, var(--text-strong) 58%, var(--text-muted));
-  padding: 6px 10px 6px 0;
-  border-radius: 12px;
-  background: var(--app-bg);
+  --tc-strong: color-mix(in srgb, var(--text-strong) 88%, var(--text-muted));
+  --tc-command: color-mix(in srgb, var(--text-strong) 80%, var(--text-muted));
+  /* No card. A tool invocation is one quiet line of transcript, not a framed
+     widget: the box (surface fill + hairline + 14px radius) is what made a run
+     of five calls read as five heavy blocks. Containment for expanded detail
+     comes from indentation and the recessed wells below, not from a border. */
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   font-family: var(--font-chat);
 }
 
+/* Child rows live inside `.tc-children`, which owns the 12px indent and the
+   hairline left rule. */
 .tc-nested {
-  padding-left: 16px;
-  background: transparent;
+  padding-left: 12px;
+  border: 0;
   border-radius: 0;
+  background: transparent;
 }
 
 /* ── Header line: • Running command_name ── */
 .tc-line-wrap {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   width: 100%;
 }
 
 .tc-header-line {
   display: flex;
-  align-items: baseline;
-  line-height: 1.72;
+  align-items: center;
+  line-height: 1.6;
   flex: 1 1 auto;
   min-width: 0;
   width: auto;
+  min-height: 24px;
+  padding: 0 4px;
+  margin: 0 -4px;
   border: 0;
+  border-radius: var(--radius-sm);
   background: transparent;
   font-family: inherit;
   text-align: left;
@@ -38,13 +51,10 @@
 /* Expandable header — clickable with hover chevron */
 .tc-expandable {
   cursor: pointer;
-  border-radius: 3px;
-  padding: 0 4px;
-  margin: 0 -4px;
 }
 
 .tc-expandable:hover {
-  background: var(--surface-hover);
+  background: var(--interactive-hover);
 }
 
 .tc-header-line:disabled {
@@ -53,8 +63,9 @@
 }
 
 .tc-expandable:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--border-focus);
+  /* The row bleeds to the card's inner edge, so keep the ring inside it. */
+  outline-offset: -2px;
 }
 
 /* Chevron: hidden by default, visible on hover */
@@ -78,30 +89,31 @@
 }
 
 .tc-line {
-  font-size: 15px;
+  /* One step below the transcript body: an activity line is a label, not prose. */
+  font-size: var(--font-size-sm);
   color: var(--text-muted);
 }
 
 .tc-bullet {
-  font-weight: 600;
+  font-weight: 500;
   flex-shrink: 0;
-  /* Pin the bullet into the same fixed column as the message prefix
-     (24px + 7px padding) so header text starts exactly where assistant
-     body text starts. */
-  width: 24px;
-  padding-right: 7px;
+  /* No avatar gutter in the transcript any more, so the bullet is just a small
+     inline marker with a gap — not a fixed 31px column that would indent tool
+     rows past the assistant text they belong to. */
+  width: auto;
+  padding-right: 6px;
   text-align: left;
   user-select: none;
 }
 
+/* The single accent-coloured element allowed on a row: the live bullet. */
 .tc-bullet-active {
   color: var(--accent);
   animation: tc-bullet-blink 1.1s ease-in-out infinite;
 }
 
 .tc-bullet-ok {
-  color: var(--text-muted);
-  opacity: 0.7;
+  color: var(--text-soft);
 }
 
 .tc-bullet-err {
@@ -132,7 +144,7 @@
 
 .tc-verb {
   flex: 0 0 auto;
-  font-weight: 580;
+  font-weight: 500;
   color: var(--tc-strong);
   white-space: nowrap;
   word-break: keep-all;
@@ -141,7 +153,7 @@
 
 .tc-cmd {
   flex: 1 1 auto;
-  color: var(--text-muted);
+  color: var(--text-strong);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -153,7 +165,7 @@
   flex-shrink: 0;
   gap: 5px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
@@ -170,13 +182,13 @@
 .tc-stop-turn-btn {
   flex: 0 0 auto;
   border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--danger) 9%, transparent);
   color: color-mix(in srgb, var(--danger) 76%, var(--text-strong));
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
-  font-weight: 680;
+  font-weight: 600;
   line-height: 1;
   min-height: 28px;
   padding: 0 10px;
@@ -199,20 +211,16 @@
 }
 
 /* ── Shell panel for expanded command tools ── */
+/* Borderless: expanded detail is indented and dimmed, not boxed. */
 .tc-shell-panel {
-  margin: 8px 0 8px var(--msg-text-column, 31px);
+  margin: 2px 0 6px 6px;
   overflow: hidden;
   max-width: min(100%, 760px);
-  border: 1px solid color-mix(in srgb, var(--border-subtle) 78%, transparent);
-  border-radius: 12px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-alt-bg) 92%, var(--app-bg)) 0%,
-      color-mix(in srgb, var(--surface-muted-bg) 88%, var(--app-bg)) 100%
-    );
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-muted);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--border-subtle) 55%, transparent);
+  box-shadow: none;
 }
 
 .tc-shell-header {
@@ -220,17 +228,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 34px;
-  padding: 8px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
-  background: color-mix(in srgb, var(--surface-alt-bg) 70%, transparent);
+  min-height: 26px;
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
 }
 
 .tc-shell-label {
   color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -257,15 +265,15 @@
 }
 
 .tc-shell-command {
-  padding: 12px 12px 8px;
+  padding: 2px 0 4px;
   color: var(--tc-command);
-  font-size: 12.5px;
-  font-weight: 620;
-  line-height: 1.5;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
 }
 
 .tc-shell-prompt {
-  color: color-mix(in srgb, var(--sidebar-accent-hover) 78%, var(--tc-command));
+  color: var(--text-soft);
   user-select: none;
 }
 
@@ -273,11 +281,11 @@
   max-height: 320px;
   overflow: auto;
   padding: 0 12px 12px;
-  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 48%, transparent);
-  color: color-mix(in srgb, var(--text-muted) 88%, var(--text-soft));
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.55;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.6;
   scrollbar-color: var(--scroll-thumb) transparent;
 }
 
@@ -294,8 +302,8 @@
 
 .tc-shell-status {
   color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -304,7 +312,7 @@
 }
 
 .tc-shell-status-success {
-  color: color-mix(in srgb, var(--success) 78%, var(--text-muted));
+  color: var(--success);
 }
 
 .tc-shell-status-danger {
@@ -321,7 +329,7 @@
   background: transparent;
   color: var(--text-soft);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   padding: 2px 0;
 }
@@ -333,7 +341,7 @@
 
 .tc-raw-details {
   border-top: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--app-bg) 62%, transparent);
+  background: transparent;
 }
 
 .tc-raw-detail + .tc-raw-detail {
@@ -344,7 +352,7 @@
   padding: 9px 12px 0;
   color: var(--text-soft);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
 }
 
@@ -353,49 +361,35 @@
   overflow: auto;
   padding: 8px 12px 12px;
   color: var(--text-soft);
-  font-size: 11.5px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.6;
   scrollbar-color: var(--scroll-thumb) transparent;
 }
 
-:root[data-theme="light"] .tc-shell-panel {
-  background: linear-gradient(180deg, #f7f7f5 0%, #f2f2ef 100%);
-  border-color: #e3e3e0;
-  color: var(--text-muted);
-  box-shadow: none;
-}
-
-:root[data-theme="light"] .tc-shell-header {
-  background: #f1f1ee;
-}
-
-:root[data-theme="light"] .tc-shell-command {
-  color: #202124;
-}
-
-:root[data-theme="light"] .tc-shell-output {
-  color: #3f454d;
-  border-top-color: #e7e7e3;
-}
-
-:root[data-theme="light"] .tc-raw-details {
-  background: #f8f8f6;
-}
+/* No light-theme override block: every surface above is token-driven, so
+   `:root[data-theme="light"]` inherits the light palette automatically.
+   (The previous overrides hard-coded hex values that predate the token layer.) */
 
 /* ── Output block (└ indented, dim) ── */
 /* content-visibility lives here (not on .tc) because contain:size on the card
-   would clip position:sticky table headers inside diff views. */
+   would clip position:sticky table headers inside diff views.
+   Borderless: a recessed well would be a second frame inside the row. */
 .tc-output-block {
-  padding-left: 12px;
+  margin-top: 2px;
+  padding: 2px 0 2px 6px;
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
   content-visibility: auto;
   contain-intrinsic-size: 40px;
 }
 
 .tc-output-line {
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12.5px;
   font-weight: 400;
-  line-height: 1.5;
+  line-height: 1.55;
   color: var(--text-soft);
   white-space: pre-wrap;
   word-break: break-all;
@@ -421,7 +415,7 @@
 
 .tc-log-title {
   color: var(--tc-strong);
-  font-weight: 580;
+  font-weight: 500;
   margin-right: 6px;
 }
 
@@ -431,36 +425,37 @@
 
 /* ── Command detail in expanded view ── */
 .tc-cmd-detail {
-  color: var(--text-muted);
+  color: var(--text-soft);
   font-style: italic;
 }
 
 /* ── File paths ── */
 .tc-file-path {
-  color: var(--text-muted);
+  color: var(--text-soft);
 }
 
 .tc-diff-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin: 8px 0 6px var(--msg-text-column, 31px);
+  gap: 8px;
+  margin: 4px 0 4px 6px;
 }
 
 .tc-diff-preview {
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  /* A diff needs a well to read against the canvas, but not a frame. */
+  border: 0;
+  border-radius: var(--radius-sm);
   background: var(--surface-muted-bg);
 }
 
 .tc-diff-path {
   overflow: hidden;
-  padding: 7px 10px;
+  padding: 5px 9px;
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-muted);
+  color: var(--text-soft);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -486,7 +481,7 @@
   overflow: visible;
   background: var(--surface-muted-bg);
   color: var(--text-strong);
-  font-size: 11.5px;
+  font-size: 12px;
 }
 
 .tc-pierre-diff pre {
@@ -495,11 +490,13 @@
 }
 
 .tc-permission-panel {
-  margin: 6px 0 4px var(--msg-text-column, 31px);
-  padding: 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 12px;
-  background: var(--surface-hover);
+  margin: 4px 0 4px 6px;
+  padding: 8px 10px;
+  /* An interactive prompt earns a raised surface, but still no border: the
+     fill alone separates it from the transcript. */
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
 }
 
 .tc-permission-title {
@@ -518,15 +515,15 @@
 }
 
 .tc-permission-btn {
-  min-height: 28px;
+  min-height: 24px;
   padding: 0 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: var(--surface-bg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt-bg);
   color: var(--text-muted);
   cursor: pointer;
-  font-size: var(--font-size-shell-meta);
-  font-weight: 600;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
@@ -538,18 +535,19 @@
 
 .tc-permission-allow,
 .tc-permission-always {
-  border-color: rgba(94, 214, 143, 0.32);
+  border-color: color-mix(in srgb, var(--success) 32%, transparent);
   color: var(--success);
 }
 
 .tc-permission-reject {
-  border-color: rgba(244, 110, 110, 0.32);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
   color: var(--danger);
 }
 
 /* ── Nested children ── */
+/* The sub-agent group owns the 12px indent and the hairline left rule. */
 .tc-children {
-  padding-left: 16px;
+  padding-left: 12px;
   border-left: 1px solid var(--border-subtle);
   margin-left: 6px;
   margin-top: 2px;
@@ -561,7 +559,7 @@
   gap: 4px;
   padding: 1px 4px;
   margin: 0 -4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 12px;
   color: var(--text-soft);
@@ -569,7 +567,7 @@
 }
 
 .tc-children-toggle:hover {
-  background: var(--surface-hover);
+  background: var(--interactive-hover);
   color: var(--text-muted);
 }
 

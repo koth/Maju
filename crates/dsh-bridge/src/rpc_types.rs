@@ -100,9 +100,25 @@ pub struct RemoteEventResultArgs {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RemoteEventOutcome {
-    pub kind: &'static str,
-    pub value: Value,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RemoteEventOutcome {
+    /// The client resolved the waterfall with a value.
+    Result { value: Value },
+    /// The client refused the waterfall. dsh cancels a question or a plan review
+    /// this way (its own Web client rejects the pending ask), and the rejected
+    /// outcome is what the gateway's `parseRemoteEventResult` accepts for it.
+    Rejected { error: RemoteEventRejection },
+}
+
+/// Wire-safe rejection carried by [`RemoteEventOutcome::Rejected`]. The gateway
+/// validates `name`/`message` as non-empty strings and lets `code`/`details`
+/// through when they are lossless JSON.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteEventRejection {
+    pub name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// Business success/failure result. The error arm is held as opaque JSON so an
@@ -711,6 +727,57 @@ pub enum CommandsExecuteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_event_outcome_keeps_the_resolved_result_shape() {
+        // dsh ≥ 0.1.5 resolves a waterfall with the bare value; the enum that
+        // added the `rejected` arm must not change this wire shape.
+        let args = RemoteEventResultArgs {
+            client_id: "$events-client-1".into(),
+            event_id: "event-1".into(),
+            outcome: RemoteEventOutcome::Result {
+                value: serde_json::json!({ "answers": [] }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            serde_json::json!({
+                "clientId": "$events-client-1",
+                "eventId": "event-1",
+                "outcome": { "kind": "result", "value": { "answers": [] } },
+            })
+        );
+    }
+
+    #[test]
+    fn remote_event_outcome_rejected_carries_name_message_and_code() {
+        let args = RemoteEventResultArgs {
+            client_id: "$events-client-1".into(),
+            event_id: "event-1".into(),
+            outcome: RemoteEventOutcome::Rejected {
+                error: RemoteEventRejection {
+                    name: "UserQuestionError".into(),
+                    message: "the user cancelled ask_user_question".into(),
+                    code: Some("ASK_CANCELLED".into()),
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            serde_json::json!({
+                "clientId": "$events-client-1",
+                "eventId": "event-1",
+                "outcome": {
+                    "kind": "rejected",
+                    "error": {
+                        "name": "UserQuestionError",
+                        "message": "the user cancelled ask_user_question",
+                        "code": "ASK_CANCELLED",
+                    },
+                },
+            })
+        );
+    }
 
     #[test]
     fn client_request_round_trip() {

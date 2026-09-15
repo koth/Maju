@@ -1,9 +1,9 @@
 use crate::bootstrap::{build_initial_remote_ui, build_initial_ui, update_initial_agent_notice};
 use crate::file_tracker::FileChangeTracker;
-use crate::image_mcp::ImageMcpHandle;
+use crate::image_mcp::ImageMcpLease;
 use crate::paths::AppPaths;
 use crate::reducer::apply_event;
-use crate::web_tools_mcp::WebToolsMcpHandle;
+use crate::web_tools_mcp::WebToolsLease;
 use acp_core::{
     ClientEvent, HarnessApprovalOutcome, HarnessApprovalResult, HarnessQuestionAnswer, PromptTask,
     RemoteSshSessionConfig, SessionConfig, SessionHandle,
@@ -31,7 +31,7 @@ mod path_utils;
 mod prompt_content;
 mod prompting;
 mod repository;
-mod sessions;
+pub(crate) mod sessions;
 mod shell_bridge;
 pub use shell_bridge::HistoryPage;
 #[cfg(test)]
@@ -140,8 +140,8 @@ struct SessionRuntime {
     agent_command: String,
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
-    web_tools_mcp: Option<WebToolsMcpHandle>,
-    image_mcp: Option<ImageMcpHandle>,
+    web_tools_mcp: Option<WebToolsLease>,
+    image_mcp: Option<ImageMcpLease>,
     in_flight_prompt: Option<InFlightPrompt>,
     seq_counter: i64,
     needs_title: bool,
@@ -270,8 +270,8 @@ pub struct Application {
     pub agent_command: String,
     acp_port: u16,
     remote_ssh: Option<RemoteSshSessionConfig>,
-    web_tools_mcp: Option<WebToolsMcpHandle>,
-    image_mcp: Option<ImageMcpHandle>,
+    web_tools_mcp: Option<WebToolsLease>,
+    image_mcp: Option<ImageMcpLease>,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,

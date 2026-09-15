@@ -21,7 +21,7 @@
   padding: 4px 0 0;
   /* Extend the scroll box into the container's side gutters so the scrollbar
      sits flush against the right-panel divider instead of leaving a gap.
-     Content stays centered via `.timeline-items` (margin: 0 auto). */
+     Content stays centered via `.timeline-items` (margin-inline: auto). */
   margin-left: calc(-1 * var(--center-panel-gutter, 0px));
   margin-right: calc(-1 * var(--center-panel-gutter, 0px));
   padding-left: var(--center-panel-gutter, 0px);
@@ -37,12 +37,16 @@
 .timeline-items {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: min(var(--conversation-column-width), var(--conversation-composer-max));
+  /* Turn rhythm is owned here — the per-turn margins further down are zeroed
+     so spacing stays one value instead of accumulating. */
+  gap: 24px;
+  width: var(--conversation-column-width);
   min-width: var(--conversation-column-min);
-  max-width: var(--conversation-composer-max);
-  margin: 0 auto;
-  padding-bottom: 24px;
+  /* Never wider than the shell column, and never wider than the composer it
+     has to stay aligned with. */
+  max-width: min(var(--conversation-column-max), var(--conversation-composer-max));
+  margin-inline: auto;
+  padding-bottom: 32px;
   background: var(--app-bg);
 }
 
@@ -56,7 +60,7 @@
   height: 30px;
   padding: 0 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-bg);
   color: var(--text-muted);
   font-family: var(--font-chat);
@@ -77,7 +81,7 @@
   gap: 8px;
   width: 100%;
   min-height: 36px;
-  margin: 8px 0 6px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -114,7 +118,7 @@
 
 .timeline-collapse-label {
   color: var(--text-muted);
-  font-weight: 580;
+  font-weight: 600;
 }
 
 .timeline-turn-summary.is-active .timeline-collapse-label {
@@ -155,7 +159,7 @@
 .msg {
   display: flex;
   align-items: flex-start;
-  padding: 5px 0;
+  padding: 0;
   content-visibility: auto;
   contain-intrinsic-size: 48px;
 }
@@ -166,7 +170,7 @@
 .msg-markdown-lazy {
   min-height: 56px;
   width: 100%;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: linear-gradient(
     180deg,
     transparent,
@@ -174,48 +178,46 @@
   );
 }
 
+/* The user turn is the only bubble in the transcript: one soft surface, one
+   large radius, pushed to the right. No border, no accent tint, no shadow. */
 .msg-user {
   align-self: flex-end;
   width: fit-content;
-  max-width: min(760px, 86%);
-  margin: 14px 0 4px auto;
-  padding: 10px 16px 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-bg) 88%, var(--accent-soft)),
-      var(--surface-bg)
-    );
+  max-width: 85%;
+  margin: 0 0 0 auto;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: var(--radius-composer);
+  background: var(--surface-bg);
   box-shadow: none;
+  color: var(--text-strong);
 }
 
 /* Steer (追加指令) annotation — compact inline note, NOT a full bubble. */
 .msg-steer {
   align-self: flex-end;
   width: fit-content;
-  max-width: min(760px, 86%);
-  margin: 10px 0 2px auto;
+  max-width: 85%;
+  margin: 0 0 0 auto;
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 6px 10px 6px 11px;
-  border-radius: var(--radius-md);
+  padding: 8px 12px;
   border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--accent-hover);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-lg);
   background: var(--surface-muted-bg);
   font-size: 13px;
-  line-height: 1.45;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 
 .msg-steer-badge {
   flex-shrink: 0;
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
-  color: var(--accent-hover);
+  color: var(--text-strong);
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
@@ -227,9 +229,9 @@
 }
 
 :root[data-theme="light"] .msg-steer {
-  background: #f4f4f1;
-  border-color: rgba(32, 33, 36, 0.10);
-  border-left-color: var(--accent-hover);
+  background: var(--surface-muted-bg);
+  border-color: var(--border-subtle);
+  border-left-color: var(--border-strong);
 }
 
 .msg-user-wrap {
@@ -238,8 +240,8 @@
   flex-direction: column;
   align-items: flex-end;
   width: fit-content;
-  max-width: min(760px, 86%);
-  margin: 14px 0 4px auto;
+  max-width: 85%;
+  margin: 0 0 0 auto;
 }
 
 .msg-user-wrap .msg-user {
@@ -260,7 +262,7 @@
 .msg-user-edit-cancel,
 .msg-user-edit-submit {
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--surface-alt-bg) 70%, transparent);
   color: var(--text-muted);
   font-family: var(--font-chat);
@@ -293,10 +295,15 @@
   outline-offset: 2px;
 }
 
+/* The inline edit form is not a bubble: it owns an input, not a surface. */
 .msg-user-editing {
   display: block;
-  width: min(760px, 86%);
-  max-width: min(760px, 86%);
+  width: 85%;
+  max-width: 85%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .msg-user-edit {
@@ -311,7 +318,7 @@
   max-height: 260px;
   resize: vertical;
   border: 1px solid var(--border-subtle);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--app-bg) 82%, transparent);
   color: var(--text-strong);
   font-family: var(--font-chat);
@@ -345,9 +352,9 @@
 }
 
 .msg-user-edit-submit {
-  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-subtle));
-  background: color-mix(in srgb, var(--accent) 18%, var(--surface-alt-bg));
-  color: var(--text-strong);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 .msg-user-edit-submit:disabled,
@@ -361,20 +368,24 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
+  max-width: 85%;
   border: 0;
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
   padding: 0;
 }
 
+/* Same bubble as `.msg-user`, for the image + text variant. */
 .msg-user-bubble {
   display: flex;
   align-items: flex-start;
   max-width: 100%;
-  padding: 10px 16px 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: var(--radius-composer);
   background: var(--surface-bg);
+  color: var(--text-strong);
 }
 
 .msg-user-image-strip {
@@ -389,7 +400,7 @@
   display: block;
   padding: 0;
   border: 0;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: transparent;
   cursor: zoom-in;
 }
@@ -404,7 +415,7 @@
   width: 96px;
   height: 96px;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--surface-bg);
   /* 方形预览居中裁切：短边铺满、长边截取中间区间，不留 letterbox 空白；
      完整原图走预览弹层（那里仍是 object-fit: contain）。 */
@@ -439,9 +450,9 @@
   max-width: 100%;
   max-height: 88vh;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--surface-bg);
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-elevated);
   object-fit: contain;
 }
 
@@ -452,7 +463,7 @@
   width: 30px;
   height: 30px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--surface-bg) 82%, transparent);
   color: var(--text-strong);
   cursor: pointer;
@@ -471,17 +482,21 @@
   }
 
   .timeline-items {
-    width: min(var(--conversation-column-width), var(--conversation-composer-max));
+    width: var(--conversation-column-width);
     min-width: var(--conversation-column-min);
-    max-width: var(--conversation-composer-max);
+    max-width: min(var(--conversation-column-max), var(--conversation-composer-max));
   }
 }
 
+/* Assistant turns are plain text on the canvas: no bubble, no card, no
+   avatar gutter. The `•` badge it used to carry is gone from the layout. */
 .msg-assistant {
-  padding: 4px 10px 4px 0;
-  margin: 0 0 8px;
-  border-radius: 12px;
-  background: var(--app-bg);
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   /* 复制/分叉操作行独占一行，落到回复正文下方（而不是被横向 flex
      挤到正文右侧顶格）。 */
   flex-wrap: wrap;
@@ -493,19 +508,21 @@
   visibility: hidden;
 }
 
+/* Turn rhythm comes from `.timeline-items { gap }`; these selectors are kept
+   (they are load-bearing for the cascade order) but must not add spacing. */
 .msg-user + .msg-assistant {
-  margin-top: 14px;
+  margin-top: 0;
 }
 
 .msg-user-wrap + .msg-assistant {
-  margin-top: 14px;
+  margin-top: 0;
 }
 
 .msg-assistant + .msg-user,
 .msg-assistant + .msg-user-wrap,
 .tc + .msg-user,
 .tc + .msg-user-wrap {
-  margin-top: 22px;
+  margin-top: 0;
 }
 
 .msg-assistant-actions {
@@ -514,7 +531,7 @@
   display: flex;
   justify-content: flex-start;
   margin-top: 6px;
-  padding-left: 18px;
+  padding-left: 0;
 }
 
 .msg-copy-btn {
@@ -525,7 +542,7 @@
   height: 26px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
   opacity: 0.62;
@@ -570,9 +587,9 @@
   max-height: min(560px, 80vh);
   padding: 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  background: var(--panel-bg, var(--bg-elevated, #1b1b1f));
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-lg);
+  background: var(--panel-bg, var(--surface-bg));
+  box-shadow: var(--shadow-elevated);
   gap: 12px;
 }
 
@@ -589,7 +606,7 @@
   width: 30px;
   height: 30px;
   flex: 0 0 auto;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
 }
@@ -614,7 +631,7 @@
   min-height: 120px;
   overflow-y: auto;
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 6px;
 }
 
@@ -625,7 +642,7 @@
   width: 100%;
   padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-strong);
   text-align: left;
@@ -661,7 +678,7 @@
 }
 
 .fork-dialog-item-reply {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-muted);
   line-height: 1.4;
   overflow: hidden;
@@ -672,16 +689,16 @@
 
 .fork-dialog-empty {
   padding: 18px 10px;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-muted);
   text-align: center;
 }
 
 .fork-dialog-error {
   padding: 7px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-  color: color-mix(in srgb, var(--danger, #e5484d) 88%, var(--text-strong));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: color-mix(in srgb, var(--danger) 88%, var(--text-strong));
   font-size: 12px;
   line-height: 1.4;
   word-break: break-word;
@@ -699,10 +716,10 @@
   gap: 7px;
   padding: 8px 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--text-strong);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: background 120ms ease, opacity 120ms ease;
@@ -721,16 +738,28 @@
   background: transparent;
 }
 
+/* System notices read as a soft card on the canvas. */
 .msg-system {
-  padding: 2px 0 2px var(--msg-text-column);
+  align-self: stretch;
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-bg);
+  box-shadow: none;
 }
 
+/* The compaction notice replaces the running line in place and stays a
+   divider, so it opts out of the system card. */
 .msg-context-compaction {
   width: 100%;
   align-items: center;
   justify-content: center;
   gap: 12px;
   padding: 18px 0 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   color: color-mix(in srgb, var(--text-soft) 82%, var(--text-muted));
   contain-intrinsic-size: 44px;
 }
@@ -763,9 +792,9 @@
   gap: 7px;
   white-space: nowrap;
   font-family: var(--font-chat);
-  font-size: 15px;
-  line-height: 1.2;
-  font-weight: 520;
+  font-size: 13px;
+  line-height: 1.3;
+  font-weight: 500;
   color: color-mix(in srgb, var(--text-muted) 86%, var(--text-soft));
 }
 
@@ -786,7 +815,7 @@
   left: 3px;
   right: 3px;
   height: 1.5px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: currentColor;
 }
 
@@ -836,36 +865,36 @@
 }
 
 /* ── Prefix characters (Codex style) ── */
-/* Shared text-column width: the prefix column (24px) + its right padding (7px).
-   Markdown lists inside assistant content indent by this amount so the first
-   text line aligns with the tool-call text column, which starts right after
-   the header bullet. */
+/* The assistant no longer has an avatar gutter, so the shared text column
+   collapses to 0. The token stays defined — never delete it — so the var()
+   references below keep resolving; markdown lists set their own padding
+   explicitly instead of inheriting a gutter. */
 :root {
-  --msg-text-column: 31px;
+  --msg-text-column: 0px;
 }
 
 .msg-prefix {
   flex-shrink: 0;
   font-family: var(--font-chat);
   font-size: 15px;
-  line-height: 1.68;
-  width: 24px;
+  line-height: 1.75;
+  width: auto;
   text-align: right;
-  padding-right: 7px;
+  padding-right: 0;
   user-select: none;
 }
 
-/* › prefix for user messages - bold + dim */
+/* › marker carried inside the user bubble */
 .msg-prefix-user {
-  color: var(--accent);
-  font-weight: 600;
-  opacity: 0.9;
+  color: var(--text-muted);
+  font-weight: 500;
+  opacity: 1;
 }
 
-/* • prefix for assistant messages - dim */
+/* • prefix for assistant messages — no longer rendered in the layout, the
+   bullet column was removed to match the plain-text assistant turn. */
 .msg-prefix-assistant {
-  color: var(--text-muted);
-  opacity: 0.7;
+  display: none;
 }
 
 /* ── Content area ── */
@@ -873,9 +902,9 @@
   flex: 1;
   min-width: 0;
   font-family: var(--font-chat);
-  font-size: 15px;
-  line-height: 1.68;
-  color: var(--text-muted);
+  font-size: var(--font-size-chat);
+  line-height: 1.6;
+  color: var(--text-strong);
 }
 
 .msg-content-user {
@@ -883,7 +912,7 @@
   word-break: break-word;
   color: var(--text-strong);
   font-weight: 400;
-  line-height: 1.42;
+  line-height: 1.6;
 }
 
 .msg-user-text {
@@ -893,35 +922,40 @@
 }
 
 .msg-content-assistant {
-  --md-text: var(--text-muted);
+  /* The body must own the whole line. `.msg-assistant` is `flex-wrap: wrap`
+     and `.msg-assistant-actions` below it is `flex-basis: 100%`; the 31px
+     `•` prefix column used to be what pushed that row onto a second line.
+     With the prefix gone, a zero-basis body and a 100%-basis actions row fit
+     side by side, leaving the body 0px wide — every character on its own
+     line. An explicit 100% base keeps the wrap deterministic. */
+  flex: 1 0 100%;
+  --md-text: var(--text-strong);
   --md-strong: var(--text-strong);
   --md-soft: var(--text-muted);
-  /* Inline code carries no background pill — it stands out purely by color.
-     A muted steel-blue reads clearly on the dark surface without the harsh
-     glare of a saturated bright blue. */
-  --md-code-text: #9db8d6;
-  --md-code-bg: color-mix(in srgb, var(--accent) 20%, transparent);
-  --md-code-block-bg: color-mix(in srgb, var(--app-bg) 88%, var(--surface-bg));
-  --md-code-border: color-mix(in srgb, var(--accent) 20%, transparent);
-  --md-table-border: color-mix(in srgb, var(--border-subtle) 48%, transparent);
-  padding-top: 1px;
-  background: var(--app-bg);
+  /* Inline code is a quiet well on the canvas; the code block is a sunken
+     surface. Nothing here carries hue. */
+  --md-code-text: var(--text-strong);
+  --md-code-bg: var(--surface-alt-bg);
+  --md-code-block-bg: var(--surface-muted-bg);
+  --md-code-border: var(--border-subtle);
+  --md-table-border: var(--border-subtle);
+  background: transparent;
   color: var(--md-text);
 }
 
 .msg-content-system {
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: 13px;
   font-style: italic;
 }
 
 .msg-fallback {
   font-family: var(--font-chat);
-  font-size: 15px;
-  line-height: 1.68;
+  font-size: var(--font-size-chat);
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text-muted);
+  color: var(--text-strong);
   margin: 0;
 }
 
@@ -934,7 +968,7 @@
   display: inline-block;
   width: 7px;
   height: 17px;
-  background: linear-gradient(180deg, var(--accent-hover), var(--accent));
+  background: var(--text-strong);
   margin-left: 2px;
   border-radius: 1px;
   animation: blink 1s step-end infinite;
@@ -973,41 +1007,54 @@
 
 .msg-content-user .md-list {
   margin-top: 2px;
-  margin-bottom: 4px;
-  padding-left: 20px;
+  margin-bottom: 8px;
+  padding-left: 24px;
 }
 
 .msg-content-user .md-code-block,
 .msg-content-user .md-blockquote,
 .msg-content-user .md-table-wrap {
-  margin-top: 4px;
-  margin-bottom: 4px;
+  margin-top: 8px;
+  margin-bottom: 8px;
 }
 
 .md-heading {
   font-family: var(--font-chat);
-  font-size: 1em;
-  font-weight: 580;
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--md-strong, var(--text-strong));
-  margin: 22px 0 10px;
+  margin: 20px 0 7px;
 }
 
 .md-heading:first-child {
-  margin-top: 2px;
+  margin-top: 0;
 }
 
-.md-h1,
-.md-h2,
-.md-h3,
-.md-h4,
+.md-h1 {
+  font-size: 20px;
+}
+
+.md-h2 {
+  font-size: 17px;
+}
+
+.md-h3 {
+  font-size: 15px;
+}
+
+.md-h4 {
+  font-size: var(--font-size-chat);
+}
+
 .md-h5,
 .md-h6 {
-  font-size: inherit;
+  font-size: var(--font-size-sm);
 }
 
 .md-list {
+  font-size: var(--font-size-chat);
   margin: 4px 0 12px;
-  padding-left: var(--msg-text-column);
+  padding-left: 24px;
 }
 
 .md-list-ordered {
@@ -1015,7 +1062,7 @@
 }
 
 .md-list-item {
-  margin-bottom: 7px;
+  margin-bottom: 5px;
   padding-left: 2px;
 }
 
@@ -1028,23 +1075,24 @@
 }
 
 .md-bold {
-  font-weight: 580;
+  font-weight: 600;
   color: var(--md-strong, var(--text-strong));
 }
 
 .md-hr {
   border: 0;
   border-top: 1px solid var(--md-table-border, var(--border-subtle));
-  margin: 10px 0;
+  margin: 12px 0;
 }
 
 .md-link {
-  color: var(--accent-hover);
-  text-decoration: none;
+  color: var(--text-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .md-link:hover {
-  text-decoration: underline;
+  color: var(--text-muted);
 }
 
 .md-image {
@@ -1062,7 +1110,7 @@
   aspect-ratio: 1;
   margin: 4px 0;
   border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: var(--surface-muted-bg);
   object-fit: cover;
 }
@@ -1071,7 +1119,7 @@
   display: block;
   padding: 0;
   border: 0;
-  border-radius: 16px;
+  border-radius: var(--radius-lg);
   background: transparent;
   cursor: zoom-in;
 }
@@ -1086,21 +1134,21 @@
 }
 
 .md-blockquote {
-  border-left: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
-  margin: 8px 0;
-  padding: 4px 12px;
-  color: var(--md-text, var(--text-muted));
+  border-left: 2px solid var(--border-strong);
+  margin: 12px 0;
+  padding: 4px 14px;
+  color: var(--text-muted);
 }
 
 .md-inline-code {
   font-family: var(--font-mono);
-  font-size: 0.92em;
+  font-size: 0.9em;
   font-weight: 400;
-  background: transparent;
-  color: var(--md-code-text, var(--text-muted));
-  padding: 0;
-  border: none;
-  border-radius: 0;
+  background: var(--md-code-bg, var(--surface-alt-bg));
+  color: var(--md-code-text, var(--text-strong));
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
 }
 
 .md-file-path {
@@ -1108,11 +1156,12 @@
   align-items: center;
   gap: 3px;
   padding: 0 1px;
-  color: var(--md-file-path, #6ea8fe);
+  color: var(--md-file-path, var(--text-strong));
   background: transparent;
   border-color: transparent;
   cursor: pointer;
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   transition: color 0.12s ease;
 }
 
@@ -1123,22 +1172,37 @@
 }
 
 .md-file-path:hover {
-  color: var(--md-file-path-hover, #93c2ff);
+  color: var(--md-file-path-hover, var(--accent));
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
 :root[data-theme="light"] .md-file-path {
-  --md-file-path: #1a5fd7;
-  --md-file-path-hover: #1550b8;
+  --md-file-path: var(--text-strong);
+  --md-file-path-hover: var(--accent);
 }
 
 .md-code-block {
-  margin: 8px 0;
-  border: 1px solid var(--md-code-border, var(--border));
-  border-radius: 16px;
-  background: var(--md-code-block-bg, color-mix(in srgb, var(--app-bg) 88%, var(--surface-bg)));
+  margin: 12px 0 14px;
+  border: 1px solid var(--md-code-border, var(--border-subtle));
+  border-radius: var(--radius-md);
+  background: var(--md-code-block-bg, var(--surface-muted-bg));
   overflow: hidden;
+}
+
+/* The highlighter writes inline styles for everything visual: the block body
+   gets `padding: 12px 12px 12px 0` and the prism theme hard-codes 13px /
+   Menlo / 1.5 on <code>. The contract asks for 13px mono at 1.55 with a
+   12px/14px inset, and `!important` is the only way past an inline style. */
+.md-code-block > div:not(.md-code-header),
+.md-code-block code[class*="language-"] {
+  font-family: var(--font-mono) !important;
+  font-size: 13px !important;
+  line-height: 1.55 !important;
+}
+
+.md-code-block > div:not(.md-code-header) {
+  padding: 12px 14px !important;
 }
 
 .msg-content-assistant pre {
@@ -1151,8 +1215,8 @@
   justify-content: space-between;
   gap: 8px;
   background: color-mix(in srgb, var(--surface-bg) 55%, var(--app-bg));
-  padding: 6px 8px 6px 0;
-  border-bottom: 1px solid var(--md-code-border, var(--border));
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid var(--md-code-border, var(--border-subtle));
 }
 
 .md-code-lang {
@@ -1171,7 +1235,7 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--md-soft, var(--text-soft));
   cursor: pointer;
@@ -1203,8 +1267,8 @@
 /* ── Table styles ── */
 .md-table-wrap {
   overflow-x: auto;
-  margin: 8px 0 12px;
-  background: var(--app-bg);
+  margin: 12px 0 16px;
+  background: transparent;
 }
 
 .md-table {
@@ -1219,7 +1283,7 @@
 }
 
 .md-th {
-  font-weight: 580;
+  font-weight: 600;
   color: var(--md-strong, var(--text-strong));
   text-align: left;
   padding: 3px 28px 5px 0;
@@ -1240,66 +1304,24 @@
   background: transparent;
 }
 
-:root[data-theme="light"] .msg-content,
-:root[data-theme="light"] .msg-content-assistant,
-:root[data-theme="light"] .msg-fallback,
-:root[data-theme="light"] .msg-streaming-markdown,
-:root[data-theme="light"] .md-td {
-  color: var(--text-strong);
-}
-
+/* Light overrides only carry what genuinely differs. The var block stays
+   because `.editor-document-preview` (EditorView) consumes `--md-*` from here. */
 :root[data-theme="light"] .msg-content-assistant,
 :root[data-theme="light"] .editor-document-preview {
-  --md-text: #3f454d;
-  --md-strong: #202124;
-  --md-soft: #6f747b;
-  --md-code-text: #2d333b;
-  --md-code-pre-text: #24292f;
-  --md-code-bg: #edf0f2;
-  --md-code-block-bg: #fbfbfa;
-  --md-code-border: rgba(32, 33, 36, 0.10);
-  --md-table-border: rgba(32, 33, 36, 0.12);
-}
-
-:root[data-theme="light"] .md-inline-code {
-  color: var(--md-code-text);
-  background: transparent;
-  border: none;
-}
-
-:root[data-theme="light"] .md-inline-code.md-file-path {
-  color: var(--md-file-path);
-  background: transparent;
-  border-color: transparent;
-}
-
-:root[data-theme="light"] .md-inline-code.md-file-path:hover {
-  color: var(--md-file-path-hover);
-}
-
-:root[data-theme="light"] .md-code-block {
-  background: var(--md-code-block-bg);
+  --md-text: var(--text-strong);
+  --md-strong: var(--text-strong);
+  --md-soft: var(--text-muted);
+  --md-code-text: var(--text-strong);
+  --md-code-pre-text: var(--text-strong);
+  --md-code-bg: var(--surface-alt-bg);
+  --md-code-block-bg: var(--surface-muted-bg);
+  --md-code-border: var(--border-subtle);
+  --md-table-border: var(--border-subtle);
 }
 
 :root[data-theme="light"] .md-code-header {
-  background: #f4f4f2;
-  border-bottom-color: rgba(32, 33, 36, 0.10);
-}
-
-:root[data-theme="light"] .md-table-wrap {
-  background: transparent;
-}
-
-:root[data-theme="light"] .md-th {
-  color: var(--md-strong);
-}
-
-:root[data-theme="light"] .md-td {
-  color: var(--md-text);
-}
-
-:root[data-theme="light"] .msg-prefix-assistant {
-  color: var(--text-soft);
+  background: var(--surface-alt-bg);
+  border-bottom-color: var(--border-subtle);
 }
 
 /* ── Thinking indicator ── */
@@ -1307,10 +1329,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 0 4px var(--msg-text-column);
-  font-size: 12.5px;
+  padding: 4px 0;
+  font-size: 13px;
   font-weight: 400;
-  color: var(--accent);
+  color: var(--text-soft);
 }
 
 .thinking-bullet {
@@ -1328,7 +1350,7 @@ button.thinking-indicator {
 
 button.thinking-indicator.is-expandable {
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 button.thinking-indicator.is-expandable:hover {
@@ -1348,19 +1370,22 @@ button.thinking-indicator.is-expandable:hover {
 }
 
 .thinking-body {
-  margin: 2px 0 6px var(--msg-text-column);
-  padding: 8px 12px;
+  margin: 6px 0 8px;
+  padding: 12px 14px;
   max-height: 320px;
   overflow-y: auto;
-  font-size: 12.5px;
+  border: 1px solid var(--border-subtle);
+  /* The old accent rule read as pure white on dark — not a subtle marker —
+     so the marker is a neutral hairline. */
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted-bg);
+  box-shadow: none;
+  font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text-secondary, currentColor);
-  opacity: 0.75;
-  border-left: 2px solid var(--accent);
-  background: color-mix(in srgb, currentColor 4%, transparent);
-  border-radius: 0 6px 6px 0;
+  color: var(--text-soft);
 }
 
 .thinking-active {
@@ -1390,10 +1415,10 @@ button.thinking-indicator.is-expandable:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 0 4px var(--msg-text-column);
-  font-size: 12.5px;
+  padding: 4px 0;
+  font-size: 13px;
   font-weight: 400;
-  color: var(--text-muted, var(--accent));
+  color: var(--text-soft);
 }
 
 .proxy-retry-spinner {
@@ -1469,21 +1494,22 @@ button.thinking-indicator.is-expandable:hover {
      宽度是 GPU 可合成属性，刻度数量少，不会触发整列重排。 */
   width: calc(var(--nav-tick-w, 10) * 1px);
   height: 2px;
-  border-radius: 1.5px;
-  background: var(--text-soft);
-  opacity: 0.45;
+  border-radius: var(--radius-pill);
+  /* Neutral only: no accent, no glow. Inactive ticks are a hairline. */
+  background: var(--border-strong);
+  opacity: 1;
   transition: width 0.18s ease-out, opacity 0.15s ease, background-color 0.15s ease;
 }
 
 .timeline-user-nav-tick.is-hovered::before,
 .timeline-user-nav-tick:focus-visible::before {
-  opacity: 0.9;
-  background: var(--text-strong);
+  opacity: 1;
+  background: var(--text-muted);
 }
 
 .timeline-user-nav-tick.is-active::before {
-  opacity: 0.95;
-  background: var(--accent);
+  opacity: 1;
+  background: var(--text-strong);
 }
 
 .timeline-user-nav-preview {
@@ -1494,10 +1520,10 @@ button.thinking-indicator.is-expandable:hover {
   max-height: 220px;
   overflow: hidden;
   padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   background: var(--surface-bg);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-elevated);
   transform: translateY(-50%);
   pointer-events: none;
   font-family: var(--font-chat);

@@ -536,6 +536,16 @@ pub struct SpawnDshWebConfig {
     /// Extra environment variables forwarded verbatim (e.g.
     /// `DSH_TELEMETRY_DISABLED=1`).
     pub extra_env: Vec<(String, String)>,
+    /// Path to a Kodex-owned patch-list overlay applied with `--patch` after
+    /// the profile layer (bundle patches + the user's `cordis.patch.yml`).
+    /// This is the only channel for overriding a bundle row's plugin `config`;
+    /// `settings.yaml` carries just the two sections Kodex owns.
+    ///
+    /// The flag must be emitted **before** the passthrough flags (`--port`,
+    /// `--no-open`): the dsh launcher forwards everything from the first
+    /// argument it does not recognise onward to the booted app, so a `--patch`
+    /// placed after them would reach the web app instead of the launcher.
+    pub patch_overlay: Option<String>,
 }
 
 impl Default for SpawnDshWebConfig {
@@ -544,8 +554,36 @@ impl Default for SpawnDshWebConfig {
             dsh_home: String::new(),
             provider_keys: Vec::new(),
             extra_env: Vec::new(),
+            patch_overlay: None,
         }
     }
+}
+
+/// Spawn `dsh web --port 0` and return the discovered loopback endpoint plus
+/// the child handle. The endpoint is recovered from the `dsh web: http://...`
+/// readiness line printed on stdout once the server is listening.
+///
+/// `dsh` is resolved via `app_core`'s PATH search (which includes GUI-launched
+/// process PATH gaps); if it is not installed, returns a diagnostic error so
+/// the caller can prompt the user to `npm i -g @deepseek-ai/dsh`.
+/// Build the `dsh web` argv.
+///
+/// Ordering is load-bearing: the dsh launcher forwards everything from the
+/// first argument it does not recognise onward to the booted app
+/// (`passThroughOptions`). `--patch` is a *launcher* flag, so it must be
+/// emitted before the passthrough flags (`--port`, `--no-open`); putting it
+/// after them sends it to the web app, which rejects it and boots without the
+/// overlay. `--port 0` lets the OS pick a free loopback port and the readiness
+/// line reports the actual bound port; `--no-open` suppresses the
+/// default-browser handoff.
+fn web_launch_args(patch_overlay: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["web".to_string()];
+    if let Some(patch) = patch_overlay.map(str::trim).filter(|p| !p.is_empty()) {
+        args.push("--patch".to_string());
+        args.push(patch.to_string());
+    }
+    args.extend(["--port", "0", "--no-open"].map(str::to_string));
+    args
 }
 
 /// Spawn `dsh web --port 0` and return the discovered loopback endpoint plus
@@ -559,6 +597,8 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     let dsh = find_dsh_binary().ok_or_else(|| {
         anyhow!("dsh CLI not found on PATH; install it with `npm i -g @deepseek-ai/dsh`")
     })?;
+
+    let args = web_launch_args(config.patch_overlay.as_deref());
 
     // On Windows, bypass the shim when possible. `dsh` on PATH is usually a
     // `.cmd` shim (`npm` or `volta`); launching it via `cmd.exe /C` with
@@ -578,7 +618,7 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
         );
         let mut cmd = Command::new(node);
         cmd.arg(entry);
-        return spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await;
+        return spawn_with_args(cmd, &dsh, &args, config).await;
     }
 
     // `--port 0` lets the OS pick a free loopback port; the readiness line
@@ -601,7 +641,7 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     } else if cfg!(not(windows)) && is_script_file(&dsh) {
         let mut wrapper = Command::new("/bin/sh");
         let mut cmd_str = dsh.to_string_lossy().to_string();
-        for arg in ["web", "--port", "0", "--no-open"] {
+        for arg in &args {
             cmd_str.push(' ');
             cmd_str.push_str(&shell_words::quote(arg));
         }
@@ -615,14 +655,14 @@ pub async fn spawn_dsh_web(config: SpawnDshWebConfig) -> anyhow::Result<(String,
     // `--no-open` suppresses the default-browser handoff. dsh 0.1.2 prints
     // an authenticated readiness URL containing the one-time launch token;
     // HttpClient exchanges that token for its shared auth cookie.
-    spawn_with_args(cmd, &dsh, &["web", "--port", "0", "--no-open"], config).await
+    spawn_with_args(cmd, &dsh, &args, config).await
 }
 
 /// Shared spawn leg: set env, pipes, spawn, and read the readiness line.
 async fn spawn_with_args(
     mut cmd: Command,
     dsh: &std::path::Path,
-    args: &[&str],
+    args: &[String],
     config: SpawnDshWebConfig,
 ) -> anyhow::Result<(String, DshChild)> {
     cmd.args(args);
@@ -1418,6 +1458,43 @@ mod tests {
             err.to_string().contains("dsh CLI not found"),
             "unexpected error: {err}"
         );
+    }
+
+    // ---- `dsh web` argv ----
+
+    /// Regression guard for the ordering contract: the dsh launcher treats the
+    /// first unrecognised argument as the start of the app's own argv, so a
+    /// `--patch` emitted after `--port`/`--no-open` would be swallowed by the
+    /// web app and the overlay would never load.
+    #[test]
+    fn web_launch_args_places_patch_before_passthrough_flags() {
+        let args = web_launch_args(Some("/tmp/kodex.patch.yml"));
+        assert_eq!(
+            args,
+            vec![
+                "web",
+                "--patch",
+                "/tmp/kodex.patch.yml",
+                "--port",
+                "0",
+                "--no-open"
+            ]
+        );
+        let patch_at = args.iter().position(|a| a == "--patch").unwrap();
+        let port_at = args.iter().position(|a| a == "--port").unwrap();
+        assert!(
+            patch_at < port_at,
+            "`--patch` must precede the passthrough flags: {args:?}"
+        );
+    }
+
+    /// A trimmed-empty path must not emit a bare `--patch` (dsh rejects
+    /// `--patch ""` with `error: --patch needs a path`).
+    #[test]
+    fn web_launch_args_omits_a_blank_patch() {
+        for blank in [None, Some(""), Some("   ")] {
+            assert_eq!(web_launch_args(blank), vec!["web", "--port", "0", "--no-open"]);
+        }
     }
 
     #[cfg(windows)]

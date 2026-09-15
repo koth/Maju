@@ -49,6 +49,15 @@ interface PendingSwitch {
   workspaceRoot: string;
 }
 
+// A project's session list opens with its 5 most recent sessions. Each
+// "展开显示" click then reveals double the previous batch (+10, +20, +40 …)
+// until the list runs out, at which point the toggle disappears.
+const SESSION_PREVIEW_LIMIT = 5;
+const INITIAL_SESSION_REVEAL = {
+  visible: SESSION_PREVIEW_LIMIT,
+  batch: SESSION_PREVIEW_LIMIT * 2,
+};
+
 export function SessionList({
   activeSessionId,
   activeSessionTitle,
@@ -992,6 +1001,22 @@ function WorkspaceSection({
   onArchiveWorkspace: (workspaceRoot: string, isActive: boolean, workspaceName?: string) => void;
 }) {
   const sessions = sortSessions(item.sessions);
+  // State is local to the section so each project tracks its own reveal depth.
+  const [sessionReveal, setSessionReveal] = useState(INITIAL_SESSION_REVEAL);
+  const visibleSessions = (() => {
+    const head = sessions.slice(0, sessionReveal.visible);
+    // Never hide the session that is currently open: switching to an older
+    // session must not make its row vanish behind the reveal toggle.
+    const openSession = sessions.find((s) => s.id === activeSessionId && item.is_active);
+    if (openSession && !head.some((s) => s.id === openSession.id)) {
+      return [...head, openSession];
+    }
+    return head;
+  })();
+  const hiddenSessionCount = Math.max(sessions.length - visibleSessions.length, 0);
+  const showSessionsToggle = hiddenSessionCount > 0;
+  const revealMoreSessions = () =>
+    setSessionReveal(({ visible, batch }) => ({ visible: visible + batch, batch: batch * 2 }));
   // The project-less "聊天" workspace renders inside its own collapsible
   // group (the outer "聊天" header toggles `chatsCollapsed`). Its inner
   // WorkspaceSection has no folder toggle button (`!isChats` skips the
@@ -1000,6 +1025,11 @@ function WorkspaceSection({
   // keep the chats inner section expanded; the outer group toggle controls
   // visibility.
   const collapsed = isChats ? false : (collapsedState ?? !item.is_active);
+  // Collapsing a project resets its reveal depth, so reopening it always starts
+  // from the five most recent sessions again.
+  useEffect(() => {
+    if (collapsed) setSessionReveal(INITIAL_SESSION_REVEAL);
+  }, [collapsed]);
   const setCollapsed = (next: boolean) => onCollapsedChange(item.workspace.root, next);
   const workspaceRoot = item.workspace.root;
   const isRemoteWorkspace = item.workspace.location?.kind === "remote_linux";
@@ -1014,6 +1044,10 @@ function WorkspaceSection({
     collapsed &&
     !isDormantRemoteWorkspace &&
     sessions.some((s) => s.status === "Streaming" || s.status === "WaitingForTool");
+  // A collapsed project renders no session rows, so the running state rides on
+  // the single status dot at the right edge of the header — the header never
+  // carries two dots saying the same thing.
+  const workspaceStateHint = collapsedRunning ? "有会话进行中" : workspaceStateLabel;
 
   return (
     <section className={`sl-workspace-section ${isChats ? "is-chats" : ""} ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""} ${collapsedRunning ? "has-collapsed-running" : ""}`}>
@@ -1045,16 +1079,13 @@ function WorkspaceSection({
             >
               <FolderIcon open={!collapsed} />
             </button>
-            {collapsedRunning && (
-              <span className="sl-session-online is-progress" title="有会话进行中" aria-label="有会话进行中" />
-            )}
             <span className="sl-workspace-copy">
               <span className="sl-workspace-name" title={workspaceRoot}>{item.workspace.name}</span>
             </span>
             <span
               className="sl-workspace-state"
-              title={workspaceStateLabel}
-              aria-label={workspaceStateLabel}
+              title={workspaceStateHint}
+              aria-label={workspaceStateHint}
             />
           </div>
           <button
@@ -1089,7 +1120,7 @@ function WorkspaceSection({
               </div>
             )}
 
-            {sessions.map((session) => {
+            {visibleSessions.map((session) => {
               const isActiveSession = session.id === activeSessionId && item.is_active && !isDormantRemoteWorkspace;
               const displaySession = isActiveSession
                 ? {
@@ -1112,6 +1143,17 @@ function WorkspaceSection({
                 />
               );
             })}
+
+            {showSessionsToggle && (
+              <button
+                type="button"
+                className="sl-sessions-toggle"
+                onClick={revealMoreSessions}
+              >
+                <span>展开显示</span>
+                <ChevronIcon />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -1360,6 +1402,14 @@ function PlusIcon() {
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
       <path d="M10 4.5v11" />
       <path d="M4.5 10h11" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg className="sl-toggle-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4.5 6.4 8 9.9l3.5-3.5" />
     </svg>
   );
 }
