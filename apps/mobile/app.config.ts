@@ -4,7 +4,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "Maju",
   slug: "maju-mobile",
-  version: "0.1.3",
+  version: "0.1.4",
   orientation: "portrait",
   icon: "./assets/icon.png",
   scheme: "kodex",
@@ -12,7 +12,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   newArchEnabled: true,
   android: {
     package: "com.kodex.mobile",
-    versionCode: 4,
+    versionCode: 5,
     // expo-notifications' config plugin also injects POST_NOTIFICATIONS; the
     // explicit entry keeps the permission visible at the config level.
     permissions: ["POST_NOTIFICATIONS"],
