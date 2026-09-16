@@ -48,6 +48,14 @@ pub struct DshModelEntry {
     pub id: String,
     pub name: String,
     pub context_window: i64,
+    /// Declared request modalities (`["text"]` or `["text", "image"]`).
+    ///
+    /// dsh resolves a model's image support from its own catalog and defaults
+    /// an undeclared model to text-only, which makes it reject every image with
+    /// `attachment-error`. Declaring the modality here is the only channel
+    /// Kodex has into that decision, so the harness and Kodex must agree on it
+    /// (`image_capability::harness_model_input`).
+    pub input: Vec<String>,
     // Deliberately no `maxTokens`: dsh's llm-pi-ai treats a configured model
     // `maxTokens` as a per-request *default* (adapterDefaults.maxTokens), on
     // top of the model capability pi-ai already passes, and the upstream
@@ -130,6 +138,18 @@ fn build_llm_section(providers: &[DshProviderRoute]) -> Value {
                 "contextWindow".into(),
                 Value::Number(model.context_window.into()),
             );
+            if !model.input.is_empty() {
+                m.insert(
+                    "input".into(),
+                    Value::Array(
+                        model
+                            .input
+                            .iter()
+                            .map(|modality| Value::String(modality.clone()))
+                            .collect(),
+                    ),
+                );
+            }
             models.push(Value::Object(m));
         }
         entry.insert("models".into(), Value::Array(models));
@@ -440,6 +460,7 @@ mod tests {
                 id: "deepseek-v4-pro".into(),
                 name: "DeepSeek V4 Pro".into(),
                 context_window: 1000000,
+                input: vec!["text".into()],
             }],
         }
     }
@@ -448,6 +469,55 @@ mod tests {
     fn key_env_name_is_uppercase_underscored() {
         assert_eq!(key_env_for_provider("deepseek"), "KODEX_DSH_DEEPSEEK_KEY");
         assert_eq!(key_env_for_provider("kimi-code"), "KODEX_DSH_KIMI_CODE_KEY");
+    }
+
+    #[test]
+    fn declared_model_modalities_reach_the_generated_settings() {
+        // dsh resolves a model's image support from its own catalog and defaults
+        // an undeclared model to text-only (`attachment-error` on every image),
+        // so the `input` list is the only channel Kodex has into that decision.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.yaml");
+        let mut route = sample_route();
+        route.models = vec![
+            DshModelEntry {
+                id: "vision-model".into(),
+                name: "Vision".into(),
+                context_window: 100000,
+                input: vec!["text".into(), "image".into()],
+            },
+            DshModelEntry {
+                id: "text-model".into(),
+                name: "Text".into(),
+                context_window: 100000,
+                input: vec!["text".into()],
+            },
+        ];
+        write_settings(
+            &path,
+            &DshSettingsConfig {
+                providers: vec![route],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let written: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let models = written["llm-pi-ai"]["providers"]["deepseek"]["models"]
+            .as_sequence()
+            .expect("models list");
+        assert_eq!(
+            models[0]["input"],
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("text".into()),
+                serde_yaml::Value::String("image".into()),
+            ])
+        );
+        assert_eq!(
+            models[1]["input"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("text".into())])
+        );
     }
 
     #[test]

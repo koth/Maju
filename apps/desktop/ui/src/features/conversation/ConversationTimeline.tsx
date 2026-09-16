@@ -5,9 +5,11 @@ import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { GitFork } from "lucide-react";
 import { resolveAgentKind } from "../session/AgentIcon";
 import type { FileChangeSummary, MessageRole } from "../../types";
-import type { UiSnapshot } from "../../types";
+import type { ToolInvocation, UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
 import { ToolCallCard } from "../tooling/ToolCallCard";
+import { ToolActivityGroupRow } from "../tooling/ToolActivityGroup";
+import { buildToolActivityGroups } from "../tooling/tool-activity";
 import MarkdownBody, { CopyTextButton, repairCompactMarkdown } from "./MarkdownBody";
 import { buildFilePathCandidatePool } from "./file-path-candidates";
 import {
@@ -1898,12 +1900,48 @@ export function ConversationTimeline({
     });
   };
 
+  // Codex-style activity runs: contiguous groups of ordinary tool calls render
+  // as one collapsed summary that expands on click, instead of stacking every
+  // row. Derived from the timeline/tool structure only — never per streaming
+  // delta (the tool objects are identity-stable between deltas).
+  const toolActivity = useMemo(
+    () =>
+      buildToolActivityGroups(snapshot.timeline, allToolsById, (tool) =>
+        shouldRenderTimelineTool(tool, hiddenPermissionRequestIds),
+      ),
+    [snapshot.timeline, allToolsById, hiddenPermissionRequestIds],
+  );
+
   // Stable identity: an inline arrow here would break MessageRow memoization
   // for the anchor rows on every streaming delta (each break costs a full
   // markdown re-parse of that message).
   const openForkPicker = useCallback((messageId: string) => {
     setForkPickerMessageId(messageId);
   }, []);
+
+  // One row renderer for every tool, shared by the standalone rows and the
+  // expanded members of an activity group. Stable identity keeps the group's
+  // memo intact across streaming deltas.
+  const renderToolRow = useCallback(
+    (member: ToolInvocation) => (
+      <ToolCallCard
+        tool={member}
+        childToolsByParent={childToolsByParent}
+        nested={false}
+        onPermissionSelect={onPermissionSelect}
+        hiddenPermissionRequestIds={hiddenPermissionRequestIds}
+        onCancelTurn={onCancelTurn}
+        onStopTool={onStopTool}
+      />
+    ),
+    [
+      childToolsByParent,
+      onPermissionSelect,
+      hiddenPermissionRequestIds,
+      onCancelTurn,
+      onStopTool,
+    ],
+  );
 
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
@@ -1994,18 +2032,21 @@ export function ConversationTimeline({
       if (!tool) return null;
       if (!shouldRenderTimelineTool(tool, hiddenPermissionRequestIds)) return null;
 
-      return (
-        <ToolCallCard
-          key={`${keyPrefix}${tool.id}`}
-          tool={tool}
-          childToolsByParent={childToolsByParent}
-          nested={false}
-          onPermissionSelect={onPermissionSelect}
-          hiddenPermissionRequestIds={hiddenPermissionRequestIds}
-          onCancelTurn={onCancelTurn}
-          onStopTool={onStopTool}
-        />
-      );
+      // A run of ordinary calls collapses into one summary row (Codex-style);
+      // its first index renders the group and the rest render nothing.
+      const activityGroup = toolActivity.byStartIndex.get(i);
+      if (activityGroup) {
+        return (
+          <ToolActivityGroupRow
+            key={`${keyPrefix}activity:${activityGroup.startIndex}`}
+            group={activityGroup}
+            renderTool={renderToolRow}
+          />
+        );
+      }
+      if (toolActivity.memberIndexes.has(i)) return null;
+
+      return <Fragment key={`${keyPrefix}${tool.id}`}>{renderToolRow(tool)}</Fragment>;
     }
 
     return null;

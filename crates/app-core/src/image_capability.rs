@@ -21,6 +21,7 @@
 
 use workspace_model::ImageCapabilities;
 
+use crate::AppPaths;
 use crate::settings::{
     is_claude_agent_acp_command, is_codex_acp_command, is_deepseek_harness_command,
 };
@@ -56,12 +57,83 @@ const DEFAULT_PROVIDER_ID: &str = "default";
 /// `provider` is the active codex provider id for the codex-acp channel
 /// (e.g. `"default"`, `"timiai"`, `"deepseek"`); it may be `None` for the
 /// kodex-claude channel. `agent_command` selects the channel.
+///
+/// Without `AppPaths` the user's per-model declaration cannot be consulted;
+/// use [`resolve_image_capabilities_for_paths`] on the session path.
 pub fn resolve_image_capabilities(
     model: &str,
     provider: Option<&str>,
     agent_command: &str,
 ) -> ImageCapabilities {
     let (decoded_model, decoded_provider) = decode_byok_identifier(model, provider);
+    resolve_with_declared(
+        &decoded_model,
+        decoded_provider.as_deref(),
+        agent_command,
+        None,
+    )
+}
+
+/// [`resolve_image_capabilities`] plus the user's per-model image-input
+/// declaration from Settings → 模型.
+///
+/// The declaration is authoritative — the same precedence
+/// `settings::resolve_model_attributes` applies when it writes the codex model
+/// catalog — because the keyword table cannot know a model whose name does not
+/// reveal its modality. That gap is not cosmetic: with `native_view` wrongly
+/// false the model is told it cannot see pictures (the degradation notice says
+/// so and `view_image` is mounted), so a vision model refuses to look at an
+/// image and asks for the tool instead.
+pub fn resolve_image_capabilities_for_paths(
+    paths: &AppPaths,
+    model: &str,
+    provider: Option<&str>,
+    agent_command: &str,
+) -> ImageCapabilities {
+    let (decoded_model, decoded_provider) = decode_byok_identifier(model, provider);
+    let declared = declared_image_input(paths, &decoded_model, decoded_provider.as_deref());
+    resolve_with_declared(
+        &decoded_model,
+        decoded_provider.as_deref(),
+        agent_command,
+        declared,
+    )
+}
+
+/// The request modalities to declare for one harness model route.
+///
+/// dsh's `llm-pi-ai` catalog takes an explicit per-model `input` list, and its
+/// documentation is blunt about the contract: declaring images is what makes a
+/// hand-declared vision model usable, while declaring text alone corrects a
+/// model the shipped catalog marks image-capable but whose gateway is not.
+/// Passing Kodex's resolution through here keeps the harness and Kodex agreeing
+/// on one answer instead of the harness defaulting to text-only and rejecting
+/// every attachment with `attachment-error`.
+pub fn harness_model_input(supports_image_input: bool) -> Vec<String> {
+    if supports_image_input {
+        vec!["text".to_string(), "image".to_string()]
+    } else {
+        vec!["text".to_string()]
+    }
+}
+
+/// The user's per-model image-input declaration, when they authored one.
+fn declared_image_input(
+    paths: &AppPaths,
+    decoded_model: &str,
+    decoded_provider: Option<&str>,
+) -> Option<bool> {
+    let provider = decoded_provider?;
+    crate::settings::lookup_model_attributes_for_active(paths, decoded_model, provider)
+        .and_then(|entry| entry.supports_image_input)
+}
+
+fn resolve_with_declared(
+    decoded_model: &str,
+    decoded_provider: Option<&str>,
+    agent_command: &str,
+    declared: Option<bool>,
+) -> ImageCapabilities {
     let is_codex = is_codex_acp_command(agent_command);
     let is_claude = is_claude_agent_acp_command(agent_command);
     let is_harness = is_deepseek_harness_command(agent_command);
@@ -70,19 +142,19 @@ pub fn resolve_image_capabilities(
     // catalog (`input` modality), which it does NOT expose in `session.models`
     // (the response carries only id/name/description/reasoning). A model that
     // does not declare `input: [text, image]` is text-only -- and the harness
-    // defaults undeclared models to `["text"]`. Kodex cannot read that signal,
-    // so for the harness channel an *unknown* model (one the keyword table
-    // does not recognize) must default to text-only and degrade image
-    // attachments through the `view_image` fallback. Defaulting to capable --
-    // as the codex-acp/claude channels do -- forwards the raw image natively
-    // and the harness rejects it with `attachment-error: Model "X" does not
-    // support image input`, failing the prompt (perceived as a disconnect).
-    let native_view = match classify_image_input(&decoded_model) {
-        Some(supports) => supports,
-        None => !is_harness,
-    };
+    // defaults undeclared models to `["text"]`. Kodex writes that declaration
+    // itself (`build_dsh_settings_config`), so for the harness channel an
+    // *unknown* model (one neither the user nor the keyword table classifies)
+    // must default to text-only and degrade image attachments through the
+    // `view_image` fallback. Defaulting to capable -- as the codex-acp/claude
+    // channels do -- forwards the raw image natively and the harness rejects it
+    // with `attachment-error: Model "X" does not support image input`, failing
+    // the prompt (perceived as a disconnect).
+    let native_view = declared
+        .or_else(|| classify_image_input(decoded_model))
+        .unwrap_or(!is_harness);
     let native_generate =
-        is_codex && decoded_provider.as_deref() == Some(DEFAULT_PROVIDER_ID) && !is_claude;
+        is_codex && decoded_provider == Some(DEFAULT_PROVIDER_ID) && !is_claude;
     // kodex-claude has no native generation path; BYOK codex providers go
     // through Responses→Completions conversion and never emit generation events.
     let native_edit = false;
@@ -183,6 +255,93 @@ mod tests {
 
     const CODEX_CMD: &str = "codex-acp";
     const CLAUDE_CMD: &str = "claude-agent-acp";
+
+    /// Paths whose catalog declares one model's image support — the per-model
+    /// attributes the user edits in Settings → 模型.
+    fn paths_with_declared_image_input(
+        provider: &str,
+        slug: &str,
+        supports: bool,
+    ) -> (tempfile::TempDir, AppPaths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path().join(".kodex"));
+        crate::settings::save_provider_models(
+            &paths,
+            provider,
+            vec![workspace_model::ModelAttributesInput {
+                slug: slug.to_string(),
+                display_name: None,
+                context_window: None,
+                max_output_tokens: None,
+                supports_image_input: Some(supports),
+                reasoning_effort: None,
+            }],
+        )
+        .unwrap();
+        (dir, paths)
+    }
+
+    #[test]
+    fn declared_image_input_beats_the_text_only_keyword_table() {
+        // The reported bug: a vision model the keyword table cannot classify
+        // correctly (here `deepseek-flash`, text-only by name) was judged
+        // text-only for the harness channel, so the degradation notice told it
+        // it cannot see images and `view_image` was mounted — it then refused to
+        // look at a picture itself. The user's per-model declaration is
+        // authoritative, exactly as it is for the codex catalog.
+        const DSH_CMD: &str = "dsh";
+        let (_dir, paths) = paths_with_declared_image_input("custom_tencent", "deepseek-flash", true);
+
+        let caps = resolve_image_capabilities_for_paths(
+            &paths,
+            "kodex-provider/byok/custom_tencent/deepseek-flash",
+            Some("custom_tencent"),
+            DSH_CMD,
+        );
+        assert!(
+            caps.native_view,
+            "a model the user declared image-capable must not be degraded"
+        );
+        // The harness is told the same thing, so it accepts the image instead
+        // of rejecting it with `attachment-error`.
+        assert_eq!(
+            harness_model_input(caps.native_view),
+            vec!["text".to_string(), "image".to_string()]
+        );
+    }
+
+    #[test]
+    fn declared_text_only_beats_a_multimodal_keyword() {
+        // The other direction: the user's model page can correct a model the
+        // name suggests is multimodal, and the harness declaration follows.
+        const DSH_CMD: &str = "dsh";
+        let (_dir, paths) = paths_with_declared_image_input("timiai", "gpt-5.5-pro", false);
+
+        let caps = resolve_image_capabilities_for_paths(
+            &paths,
+            "kodex-provider/byok/timiai/gpt-5.5-pro",
+            Some("timiai"),
+            DSH_CMD,
+        );
+        assert!(!caps.native_view);
+        assert_eq!(harness_model_input(caps.native_view), vec!["text".to_string()]);
+    }
+
+    #[test]
+    fn undeclared_harness_model_still_defaults_to_text_only() {
+        // No declaration, no keyword match: the harness default is unchanged,
+        // because dsh would reject a raw image for an undeclared model.
+        const DSH_CMD: &str = "dsh";
+        let (_dir, paths) = paths_with_declared_image_input("custom_tencent", "unrelated-model", true);
+
+        let caps = resolve_image_capabilities_for_paths(
+            &paths,
+            "kodex-provider/byok/custom_tencent/mystery-model",
+            Some("custom_tencent"),
+            DSH_CMD,
+        );
+        assert!(!caps.native_view);
+    }
 
     #[test]
     fn deepseek_is_text_only_under_byok() {

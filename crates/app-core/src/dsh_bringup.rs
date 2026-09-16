@@ -115,6 +115,34 @@ impl DshBringup {
 
     /// Ensure a `dsh web` process is running and return its loopback endpoint.
     ///
+    /// Point the harness's shared `kodex-image` registration at `caps`.
+    ///
+    /// The harness mounts one `kodex-image` server for the whole process, so
+    /// its `tools/list` trim is process-wide: the session that is active decides
+    /// what every dsh session sees. Without this a vision model would still be
+    /// offered `view_image` — and read its description as "you cannot see
+    /// images" — even though Kodex resolved the model as image-capable.
+    ///
+    /// Returns `false` when no managed host (or no image registration) is live.
+    pub fn update_harness_image_capabilities(
+        &self,
+        caps: workspace_model::ImageCapabilities,
+    ) -> bool {
+        let Ok(managed) = self.managed.lock() else {
+            return false;
+        };
+        let Some(managed) = managed.as_ref() else {
+            return false;
+        };
+        match managed._exposed_mcp.image.as_ref() {
+            Some(lease) => {
+                lease.update_capabilities(caps);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// On first call: start Kodex's local MCP servers, write `settings.yaml` and
     /// the patch overlay that mounts them, spawn `dsh web --port 0`, wait for
     /// the readiness line, attach the child to the shared host, and cache the

@@ -1,0 +1,74 @@
+/* Collapsed activity run in the timeline: one summary row that expands to the
+   individual tool rows. Typography follows the tool rows it stands in for
+   (`.tc-line` scale), not the transcript body. */
+
+.tool-activity-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+}
+
+.tool-activity-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 24px;
+  padding: 0 4px;
+  margin: 0 -4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-activity-summary:hover {
+  background: var(--interactive-hover);
+  color: var(--text-strong);
+}
+
+.tool-activity-summary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.tool-activity-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.tool-activity-chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--text-soft);
+  font-size: 12px;
+  transition: transform var(--transition-fast);
+}
+
+.tool-activity-group.is-expanded .tool-activity-chevron {
+  transform: rotate(90deg);
+}
+
+.tool-activity-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 2px 11px;
+  padding-left: 13px;
+  border-left: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+}
+
+.tool-activity-row {
+  display: flex;
+  min-width: 0;
+}

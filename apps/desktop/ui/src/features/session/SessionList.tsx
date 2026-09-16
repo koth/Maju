@@ -1040,17 +1040,18 @@ function WorkspaceSection({
   const workspaceStateLabel = isDormantRemoteWorkspace ? "远程" : item.connected ? "在线" : "休眠";
   const workspaceActionHint = isDormantRemoteWorkspace ? "双击连接远程工作区" : undefined;
   const workspaceTooltip = workspaceActionHint ? `${workspaceActionHint}\n${workspaceRoot}` : workspaceRoot;
-  const collapsedRunning =
-    collapsed &&
+  // A project with work in flight pulses the single status dot at the right
+  // edge of its header — expanded or collapsed. Collapsed it is the only
+  // indicator there is; expanded it is still the one place the project-level
+  // state is visible, because the open session's own row deliberately shows no
+  // progress dot while you are watching its conversation.
+  const hasRunningSession =
     !isDormantRemoteWorkspace &&
     sessions.some((s) => s.status === "Streaming" || s.status === "WaitingForTool");
-  // A collapsed project renders no session rows, so the running state rides on
-  // the single status dot at the right edge of the header — the header never
-  // carries two dots saying the same thing.
-  const workspaceStateHint = collapsedRunning ? "有会话进行中" : workspaceStateLabel;
+  const workspaceStateHint = hasRunningSession ? "有会话进行中" : workspaceStateLabel;
 
   return (
-    <section className={`sl-workspace-section ${isChats ? "is-chats" : ""} ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""} ${collapsedRunning ? "has-collapsed-running" : ""}`}>
+    <section className={`sl-workspace-section ${isChats ? "is-chats" : ""} ${item.is_active ? "is-active" : ""} ${item.connected ? "is-connected" : "is-dormant"} ${isRemoteWorkspace ? "is-remote" : ""} ${collapsed ? "is-collapsed" : ""} ${hasRunningSession ? "has-running-session" : ""}`}>
       {!isChats && (
         <div className="sl-workspace-row">
           <div
@@ -1181,7 +1182,6 @@ function remoteAgentForWorkspace(remote: RemoteLinuxWorkspace | null): AgentCliI
 function ThreadRow({
   session,
   active,
-  activeConversationVisible,
   connected,
   disabled = false,
   onSwitch,
@@ -1189,7 +1189,10 @@ function ThreadRow({
 }: {
   session: SessionListItem;
   active: boolean;
-  activeConversationVisible: boolean;
+  /// Kept for the list API: whether the open conversation is on screen. The
+  /// row's own running dot no longer depends on it (a running session must show
+  /// it either way), so it is accepted and ignored here.
+  activeConversationVisible?: boolean;
   connected: boolean;
   disabled?: boolean;
   onSwitch: (id: string) => void;
@@ -1206,31 +1209,36 @@ function ThreadRow({
   const runtimeStatus = session.runtime_status ?? "none";
   const attentionState = session.attention_state ?? "none";
   const turnStillRunning = session.status === "Streaming" || session.status === "WaitingForTool";
-  const showActiveProgress = !disabled && active && !activeConversationVisible && turnStillRunning;
+  // Running signals, and only these:
+  // - `turnStillRunning` — the turn status: live for the open session, and the
+  //   backend's own record for every other row (a dsh turn keeps running inside
+  //   the shared harness even when its Kodex runtime was never installed here);
+  // - `background_running` — the runtime annotation that means "in flight".
+  //
+  // `runtime_status: "active"` deliberately does NOT count. `annotate_sessions`
+  // sets it for whichever session is currently open, running or not, so reading
+  // it as a running signal lit a breathing dot on every idle session you opened.
+  const runtimeRunning = runtimeStatus === "background_running";
   const hasAttention = !disabled && !active && attentionState === "needs_attention";
-  const hiddenWorkspaceActiveProgress =
-    !disabled && !active && !hasAttention && runtimeStatus === "active" && turnStillRunning;
-  const showBackgroundProgress =
-    !disabled &&
-    !active &&
-    !hasAttention &&
-    (runtimeStatus === "background_running" || hiddenWorkspaceActiveProgress);
-  const showProgress = showActiveProgress || showBackgroundProgress;
-  const showCompletedDot = !disabled && !active && attentionState === "completed_unviewed";
+  // The dot belongs to the row itself, so it shows for the open session too
+  // (the previous rule suppressed it whenever that conversation was on screen).
+  const showProgress = !disabled && !hasAttention && (turnStillRunning || runtimeRunning);
+  const showCompletedDot =
+    !disabled && !active && !showProgress && attentionState === "completed_unviewed";
   const showAttentionDot = hasAttention;
   const indicatorLabel = disabled
     ? disabledHint
-    : showActiveProgress
-    ? "当前会话仍在运行"
     : showAttentionDot
       ? "后台会话需要处理"
-    : showBackgroundProgress
-    ? "后台会话仍在运行"
-      : showCompletedDot
-        ? "后台会话已完成，尚未查看"
-        : connected
-          ? "Agent 已连接"
-          : undefined;
+      : showProgress
+        ? active
+          ? "当前会话仍在运行"
+          : "后台会话仍在运行"
+        : showCompletedDot
+          ? "后台会话已完成，尚未查看"
+          : connected
+            ? "Agent 已连接"
+            : undefined;
 
   return (
     <div
@@ -1238,8 +1246,8 @@ function ThreadRow({
         "sl-item",
         active ? "sl-active" : "",
         disabled ? "is-disabled" : "",
-        showActiveProgress ? "is-active-running" : "",
-        showBackgroundProgress ? "is-background-running" : "",
+        active && showProgress ? "is-active-running" : "",
+        !active && showProgress ? "is-background-running" : "",
         showCompletedDot ? "is-completed-unviewed" : "",
         showAttentionDot ? "is-needs-attention" : "",
       ].filter(Boolean).join(" ")}

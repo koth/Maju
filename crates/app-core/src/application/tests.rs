@@ -37,6 +37,7 @@ use workspace_model::{
 mod change_set_tests;
 mod diff_tests;
 mod fork_tests;
+mod image_injection_tests;
 mod image_switch_tests;
 mod prompt_tests;
 

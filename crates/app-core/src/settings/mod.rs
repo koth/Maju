@@ -1681,10 +1681,25 @@ fn dsh_provider_route(paths: &AppPaths, provider: &str) -> Option<DshProviderRou
 
     let models = effective_catalog_models_for_provider(paths, provider)
         .into_iter()
-        .map(|entry| DshModelEntry {
-            id: entry.slug.clone(),
-            name: entry.display_name.unwrap_or(entry.slug),
-            context_window: entry.context_window.unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW),
+        .map(|entry| {
+            // The harness decides image support from its own catalog and
+            // defaults an undeclared model to text-only (rejecting images with
+            // `attachment-error`). Declare the same answer Kodex resolves for
+            // the session, so both sides agree: the user's per-model override
+            // wins, then the keyword table.
+            let supports_image_input = entry
+                .supports_image_input
+                .unwrap_or_else(|| {
+                    crate::image_capability::model_supports_image_input(&entry.slug)
+                });
+            let input = crate::image_capability::harness_model_input(supports_image_input);
+            let name = entry.display_name.clone().unwrap_or_else(|| entry.slug.clone());
+            DshModelEntry {
+                id: entry.slug,
+                name,
+                context_window: entry.context_window.unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW),
+                input,
+            }
         })
         .collect();
 

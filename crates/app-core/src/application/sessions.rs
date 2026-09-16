@@ -139,14 +139,16 @@ pub(super) fn prepare_image_mcp(
     let is_claude = crate::settings::is_claude_agent_acp_command(agent_command);
     let is_harness = crate::settings::is_deepseek_harness_command(agent_command);
     // Even when the image MCP fallback is not attached, resolve `native_view`
-    // from the model name so text-only models correctly gate image
-    // attachments instead of being assumed capable (Bug 1).
+    // (the user's per-model declaration first, then the model name) so text-only
+    // models correctly gate image attachments instead of being assumed capable
+    // (Bug 1), and a vision model is not told it cannot see pictures.
     let provider = if is_codex {
         Some(crate::settings::codex_current_provider(app_paths))
     } else {
         None
     };
-    let caps = crate::image_capability::resolve_image_capabilities(
+    let caps = crate::image_capability::resolve_image_capabilities_for_paths(
+        app_paths,
         model,
         provider.as_deref(),
         agent_command,
@@ -546,6 +548,12 @@ impl Application {
                         (None, workspace_model::ImageCapabilities::default())
                     }
                 };
+            // The harness's own `kodex-image` registration is process-wide, so
+            // point it at this session's capabilities: the model that is active
+            // decides whether `view_image` is mounted at all. A vision model
+            // must not be handed a tool that says it cannot see images.
+            crate::dsh_bringup::dsh_bringup()
+                .update_harness_image_capabilities(image_capabilities);
             return Ok(PreparedSessionRuntime {
                 workspace_root,
                 agent_env: Vec::new(),

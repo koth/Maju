@@ -994,7 +994,48 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     // second dot next to the folder icon.
     const indicator = await screen.findByLabelText("有会话进行中");
     expect(indicator).toHaveClass("sl-workspace-state");
-    expect(indicator.closest(".sl-workspace-section")).toHaveClass("has-collapsed-running");
+    expect(indicator.closest(".sl-workspace-section")).toHaveClass("has-running-session");
+  });
+
+  it("pulses the workspace dot for a running session even when the project is expanded", async () => {
+    // The report: an expanded project with a session still streaming showed a
+    // static dot, because the pulse was gated on the project being collapsed.
+    // The open session's own row shows no progress dot while its conversation is
+    // on screen, so the header is the only place the state is visible.
+    vi.mocked(sessionList).mockResolvedValue([
+      {
+        ...workspaceSessions[0],
+        sessions: [
+          sessionItem({
+            id: "active-session",
+            title: "Active run",
+            status: "Streaming",
+            runtime_status: "active",
+          }),
+        ],
+        active_session_id: "active-session",
+        is_active: true,
+        connected: true,
+      },
+    ]);
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active run"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Streaming"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("有会话进行中");
+    const section = indicator.closest(".sl-workspace-section");
+    expect(section).toHaveClass("has-running-session");
+    expect(section).not.toHaveClass("is-collapsed");
+    expect(section?.querySelector(".sl-workspace-state")).toBe(indicator);
   });
 
   it("previews the five most recent sessions and reveals the rest on demand", async () => {
@@ -1241,6 +1282,128 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     const indicator = await screen.findByLabelText("当前会话仍在运行");
     expect(indicator).toHaveClass("is-progress");
     expect(indicator.closest(".sl-item")).toHaveClass("is-active-running");
+  });
+
+  it("keeps the running dot on the open session while its conversation is on screen", async () => {
+    // The report: a session was streaming, its row was open in front of the
+    // user, and the row showed no breathing dot — the rule suppressed it
+    // whenever the conversation was visible, leaving the running state
+    // unmarked in the sidebar.
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active", status: "Idle" }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Streaming"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("当前会话仍在运行");
+    expect(indicator).toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-active-running");
+  });
+
+  it("shows the running dot from the turn status when no runtime annotation is present", async () => {
+    // A session still streaming on the agent side can carry no runtime
+    // annotation yet (dsh keeps turns alive across switches and restarts), so
+    // the row must not require one to show the breathing dot.
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active" }),
+        sessionItem({
+          id: "background-session",
+          title: "Streaming without runtime annotation",
+          status: "Streaming",
+          runtime_status: "none",
+        }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("后台会话仍在运行");
+    expect(indicator).toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).toHaveClass("is-background-running");
+  });
+
+  it("does not pulse for an idle session that was just opened", async () => {
+    // `runtime_status: "active"` only means "this row owns the live runtime" —
+    // the backend sets it for whichever session is open, so reading it as a
+    // running signal lit a breathing dot on every idle session you switched to.
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({
+          id: "active-session",
+          title: "Old session",
+          status: "Idle",
+          runtime_status: "active",
+        }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Old session"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const indicator = await screen.findByLabelText("Agent 已连接");
+    expect(indicator).not.toHaveClass("is-progress");
+    expect(indicator.closest(".sl-item")).not.toHaveClass("is-active-running");
+  });
+
+  it("does not pulse for an idle background row carrying a live runtime annotation", async () => {
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "active-session", title: "Active" }),
+        sessionItem({
+          id: "background-session",
+          title: "Idle background",
+          status: "Idle",
+          runtime_status: "active",
+        }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="active-session"
+        activeSessionTitle="Active"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Idle background");
+    expect(document.querySelectorAll(".sl-session-online.is-progress")).toHaveLength(0);
   });
 
   it("shows and clears the completed-unviewed dot from refreshed session data", async () => {

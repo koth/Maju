@@ -1390,10 +1390,11 @@
   background: color-mix(in srgb, var(--text-soft) 45%, transparent);
 }
 
-/* A collapsed project hides its session rows, so its running state is carried
-   by the header's single status dot — pulsing, and never by a second dot next
-   to the folder icon. */
-.sl-workspace-section.has-collapsed-running .sl-workspace-state {
+/* A project with a session still running pulses its own status dot — expanded
+   or collapsed. Collapsed it is the only indicator; expanded the open session's
+   row shows none while you are watching its conversation, so the header carries
+   the state either way. */
+.sl-workspace-section.has-running-session .sl-workspace-state {
   background: var(--success);
   animation: sl-session-progress-pulse 1.45s ease-in-out infinite;
 }

@@ -380,14 +380,17 @@ impl Application {
     /// the result to the running image MCP server's `tools/list` trim and to
     /// the prompt-capability gate, without restarting the server.
     ///
-    /// `native_view` is always re-resolved from the model name so text-only
-    /// models gate image attachments correctly even when no fallback MCP is
-    /// attached (Bug 1). `view_fallback` reflects whether the `kodex-image`
-    /// MCP server is currently attached. The prompt gate becomes
-    /// `native_view || view_fallback`, allowing text-only models to accept
-    /// image attachments that are degraded through `view_image` (Bug 3).
+    /// `native_view` is always re-resolved — the user's per-model declaration
+    /// first, then the model name — so text-only models gate image attachments
+    /// correctly even when no fallback MCP is attached (Bug 1), and a vision
+    /// model the keyword table cannot recognize is not told it is blind.
+    /// `view_fallback` reflects whether the `kodex-image` MCP server is
+    /// currently attached. The prompt gate becomes `native_view ||
+    /// view_fallback`, allowing text-only models to accept image attachments
+    /// that are degraded through `view_image` (Bug 3).
     pub(super) fn reapply_image_capabilities(&mut self, model: &str, provider: Option<&str>) {
-        let mut caps = crate::image_capability::resolve_image_capabilities(
+        let mut caps = crate::image_capability::resolve_image_capabilities_for_paths(
+            &self.app_paths,
             model,
             provider,
             &self.agent_command,
@@ -401,6 +404,13 @@ impl Application {
         self.ui.prompt_capabilities.image = caps.image_capable();
         if let Some(handle) = self.image_mcp.as_ref() {
             handle.update_capabilities(caps);
+        }
+        // A harness session's image tools are mounted on the shared `dsh web`
+        // process, whose registration is what its model actually sees, so it
+        // must follow the same switch: a vision model must stop being offered
+        // `view_image`.
+        if crate::settings::is_deepseek_harness_command(&self.agent_command) {
+            crate::dsh_bringup::dsh_bringup().update_harness_image_capabilities(caps);
         }
     }
 

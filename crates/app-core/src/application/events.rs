@@ -266,22 +266,45 @@ impl Application {
     /// After a `generate_image` / `edit_image` MCP tool completes, inject an
     /// assistant message that renders the generated image inline via markdown
     /// so it shows up in the conversation timeline (not only as raw tool
-    /// output). The tool result carries a `markdown` field
-    /// (`![描述](/abs/path.png)`) which MarkdownBody renders directly because
-    /// the saved path is an absolute filesystem path.
+    /// output).
+    ///
+    /// The MCP result JSON (`{ images: [{ saved_path, … }] }`, or the bare
+    /// object for `edit_image`) may arrive in either result channel: assistant
+    /// channels hand the tool's text content over as `raw_output`, while the
+    /// DeepSeek Harness renders a generic tool card and parks the same text in
+    /// `terminal_output` — reading only `raw_output` meant a dsh session could
+    /// generate an image and never show it.
     fn maybe_inject_generated_image(&mut self, event: &ClientEvent) {
-        let ClientEvent::ToolCompleted { raw_output, .. } = event else {
+        let ClientEvent::ToolCompleted {
+            raw_output,
+            terminal_output,
+            ..
+        } = event
+        else {
             return;
         };
-        let Some(raw) = raw_output.as_deref() else {
+        let markdown = raw_output
+            .as_deref()
+            .and_then(extract_generated_image_markdown)
+            .or_else(|| {
+                terminal_output
+                    .as_ref()
+                    .and_then(|output| extract_generated_image_markdown(&output.output))
+            });
+        let Some(markdown) = markdown else {
             return;
         };
-        // MCP tool results for `generate_image`/`edit_image` are detected by
-        // content (the tool name is not always carried through to this event),
-        // so the parser only succeeds when the output is an image result.
-        let Some(markdown) = extract_generated_image_markdown(raw) else {
+        // A duplicate or re-delivered completion (dsh re-baselines the follow
+        // stream) must not stack a second copy of the same picture. Length is
+        // compared first so the common case never walks a multi-megabyte body.
+        if self
+            .ui
+            .messages
+            .iter()
+            .any(|existing| existing.body.len() == markdown.len() && existing.body == markdown)
+        {
             return;
-        };
+        }
 
         let message = ChatMessage {
             id: uuid::Uuid::new_v4(),
