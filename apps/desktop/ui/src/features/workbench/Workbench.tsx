@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
+import type { CSSProperties } from "react";
 
 import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry } from "../../types";
 import {
@@ -56,7 +57,7 @@ import { useWorkbenchTabs } from "./useWorkbenchTabs";
 import { useLeftSidebarState } from "./useLeftSidebarState";
 import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
-import { useAgentPlanOverlap, type AgentPlanOverlapTier } from "./useAgentPlanOverlap";
+import { useAgentPlanOverlap, resolveAgentPlanDockLayout, type AgentPlanOverlapTier } from "./useAgentPlanOverlap";
 import { useSessionAgentPlan } from "./useSessionAgentPlan";
 import {
   latestReviewableTurnChangeSet,
@@ -356,6 +357,9 @@ export function Workbench() {
   const centerPanelRef = useRef<HTMLElement>(null);
   const contextDockResizeCheckRef = useRef(false);
   const lastAutoOpenedAgentPlanSignatureRef = useRef<string | null>(null);
+  /** True while the review panel is collapsed only because the 环境信息 dock
+   *  needed its width. Cleared on a manual toggle so the two never fight. */
+  const autoCollapsedRightPanelForDockRef = useRef(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const {
     leftSidebarWidth,
@@ -718,6 +722,9 @@ export function Workbench() {
   }, []);
 
   const handleToggleRightPanel = useCallback(() => {
+    // A manual toggle wins over the dock's automatic squeeze: stop treating the
+    // panel as auto-collapsed so the two do not fight over it.
+    autoCollapsedRightPanelForDockRef.current = false;
     setRightPanelCollapsed((collapsed) => {
       if (!collapsed) {
         setReviewPanelExpanded(false);
@@ -1005,17 +1012,20 @@ export function Workbench() {
     centerPanelRef,
     contextDockOverlapCheck,
   );
-  const effectiveContextDockTier = contextDockOverlapCheck ? agentPlanOverlap : contextDockResizeTier;
+  const effectiveContextDockTier = contextDockOverlapCheck ? agentPlanOverlap.tier : contextDockResizeTier;
   const contextDockAutoHidden = effectiveContextDockTier === "hidden";
   const contextDockVisible = contextDockBaseOpen && !contextDockAutoHidden;
   const contextDockShouldShift =
     contextDockVisible && effectiveContextDockTier === "shift";
+  const contextDockShouldSqueeze =
+    contextDockVisible && effectiveContextDockTier === "squeeze";
+  const contextDockColumnWidth = agentPlanOverlap.columnWidth;
 
   useEffect(() => {
     if (contextDockResizeCheck) {
-      setContextDockResizeTier(agentPlanOverlap);
+      setContextDockResizeTier(agentPlanOverlap.tier);
     }
-  }, [agentPlanOverlap, contextDockResizeCheck]);
+  }, [agentPlanOverlap.tier, contextDockResizeCheck]);
 
   useEffect(() => {
     const wasResizeChecking = contextDockResizeCheckRef.current;
@@ -1033,6 +1043,69 @@ export function Workbench() {
       contextDockResizeCheckRef.current = false;
     }
   }, [contextDockCollapsed]);
+
+  // Space-sharing policy for the floating 环境信息 dock, in order:
+  //   1. wide window  → show it beside the centered column ("none"),
+  //   2. narrower     → push the column left ("shift"),
+  //   3. narrower yet → narrow the column ("squeeze"),
+  //   4. no room left → collapse the review panel to free its width, then
+  //      re-evaluate; only if that still fails is the dock hidden.
+  // Step 4 is undone as soon as the dock closes or the window grows back, and a
+  // manual toggle of the review panel always wins over it.
+  useEffect(() => {
+    const restoreRightPanel = () => {
+      if (!autoCollapsedRightPanelForDockRef.current) return;
+      autoCollapsedRightPanelForDockRef.current = false;
+      setRightPanelCollapsed(false);
+    };
+
+    if (!contextDockBaseOpen || !contextDockOverlapCheck) {
+      restoreRightPanel();
+      return;
+    }
+    // Never fight a manual drag of the review panel: while the user is
+    // resizing, the pre-existing rule (auto-hide the dock) takes over.
+    if (contextDockResizeCheck) return;
+    if (!rightPanelCollapsed) {
+      // Panel visible: only take it when the plan says it would not fit even
+      // squeezed AND freeing the panel would actually change that.
+      if (effectiveContextDockTier !== "hidden") return;
+      const metrics = agentPlanOverlap.metrics;
+      if (metrics.panelWidth <= 0) return;
+      const projected = resolveAgentPlanDockLayout({
+        ...metrics,
+        panelWidth: metrics.panelWidth + rightPanelWidth,
+      });
+      if (projected.tier === "hidden") return;
+      autoCollapsedRightPanelForDockRef.current = true;
+      setRightPanelCollapsed(true);
+      return;
+    }
+    // Panel already collapsed: restore it once it would fit alongside the dock
+    // again (window widened), leaving it collapsed otherwise.
+    if (!autoCollapsedRightPanelForDockRef.current) return;
+    const metrics = agentPlanOverlap.metrics;
+    if (metrics.panelWidth <= 0) {
+      restoreRightPanel();
+      return;
+    }
+    const withPanelExpanded = resolveAgentPlanDockLayout({
+      ...metrics,
+      panelWidth: Math.max(0, metrics.panelWidth - rightPanelWidth),
+    });
+    if (withPanelExpanded.tier !== "hidden") {
+      restoreRightPanel();
+    }
+  }, [
+    agentPlanOverlap.metrics,
+    contextDockBaseOpen,
+    contextDockOverlapCheck,
+    contextDockResizeCheck,
+    effectiveContextDockTier,
+    rightPanelCollapsed,
+    rightPanelWidth,
+    setRightPanelCollapsed,
+  ]);
 
   const handleContextDockToggle = useCallback(() => {
     setContextDockResizeTier("none");
@@ -1221,7 +1294,13 @@ export function Workbench() {
               ref={centerPanelRef}
               className={
                 "center-panel" +
-                (contextDockShouldShift ? " is-agent-plan-active is-agent-plan-overlap" : "")
+                (contextDockShouldShift ? " is-agent-plan-active is-agent-plan-overlap" : "") +
+                (contextDockShouldSqueeze ? " is-agent-plan-active is-agent-plan-squeezed" : "")
+              }
+              style={
+                contextDockShouldSqueeze
+                  ? ({ "--agent-plan-column-width": `${contextDockColumnWidth}px` } as CSSProperties)
+                  : undefined
               }
             >
             {reviewPanelExpanded && (

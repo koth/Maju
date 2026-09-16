@@ -1028,6 +1028,32 @@ body.is-resizing-left-sidebar {
   margin-right: calc(var(--agent-plan-dock-width) + var(--agent-plan-dock-gap));
 }
 
+/*
+ * Squeeze tier: the column's natural width no longer fits beside the dock, but
+ * a narrower one does. The workbench measures the space left of the dock and
+ * passes it in as `--agent-plan-column-width`; the column is narrowed to
+ * exactly that, flushed left with the same nav-rail band as the shift tier.
+ *
+ * Why this exists: the shift tier could only reposition the column, so on a
+ * laptop-sized window (any center panel narrower than roughly 1050px) no tier
+ * fit and the dock was refused — the header "环境信息" button looked dead even
+ * though there was room for a slightly narrower conversation.
+ */
+.center-panel.is-agent-plan-squeezed {
+  --agent-plan-dock-width: 300px;
+  --agent-plan-dock-gap: 28px;
+}
+
+.center-panel.is-agent-plan-squeezed .conversation-container .timeline-items,
+.center-panel.is-agent-plan-squeezed .conversation-container .composer-plan-slot,
+.center-panel.is-agent-plan-squeezed .conversation-container .composer,
+.center-panel.is-agent-plan-squeezed .conversation-container .composer-pending-steers {
+  width: var(--agent-plan-column-width, 100%);
+  max-width: var(--agent-plan-column-width, 100%);
+  margin-left: var(--timeline-nav-space, 30px);
+  margin-right: 0;
+}
+
 /* The actual shift is applied by the rules above based on which tier the
    `useAgentPlanOverlap` hook sets. */
 
