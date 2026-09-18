@@ -110,6 +110,30 @@ pub fn run_harness_session(
     sink.set_inflight_flag(inflight.clone());
     host.router().register(session_id.clone(), sink.clone());
 
+    // If resuming, replay history before the live stream delivers events. The
+    // resumed dsh session already carries the full model context; this replay
+    // only rebuilds the UI transcript. The page response also carries the
+    // durable model selection — capture it so the Model control restores the
+    // session's actual provider+model instead of the catalog default.
+    //
+    // This runs BEFORE the follow stream is opened: the follow re-delivers the
+    // session's whole journal from the start, and `apply_follow_frames` only
+    // dedupes frames at or below `last_seq`. Replaying first puts the cursor at
+    // the log cut, so the journal is filtered down to genuinely new events;
+    // opening the follow first made the transcript a race between the replayed
+    // messages and the live-mapped tool frames.
+    let mut restored_model_selection: Option<(String, String)> = None;
+    if let Some(resume_id) = config.resume_session_id.clone()
+        && !resume_id.is_empty()
+    {
+        if let Ok(selection) = host
+            .runtime()
+            .block_on(replay_history(&client, &resume_id, &sink))
+        {
+            restored_model_selection = selection;
+        }
+    }
+
     // dsh 0.1.2 delivers session content events (assistant chunks, tool
     // calls, …) on a per-session `session/follow` journal stream — not on
     // the shared `$events` mux. Open that stream here and forward its frames
@@ -128,23 +152,6 @@ pub fn run_harness_session(
             )
             .await;
         });
-    }
-
-    // If resuming, replay history before the live stream delivers events. The
-    // resumed dsh session already carries the full model context; this replay
-    // only rebuilds the UI transcript. The page response also carries the
-    // durable model selection — capture it so the Model control restores the
-    // session's actual provider+model instead of the catalog default.
-    let mut restored_model_selection: Option<(String, String)> = None;
-    if let Some(resume_id) = config.resume_session_id.clone()
-        && !resume_id.is_empty()
-    {
-        if let Ok(selection) = host
-            .runtime()
-            .block_on(replay_history(&client, &resume_id, &sink))
-        {
-            restored_model_selection = selection;
-        }
     }
 
     // Emit SessionStarted so the reducer flips to the running state. The dsh
@@ -650,10 +657,19 @@ pub fn run_harness_session(
                 // diverges from kodex's turn-opening count (injected turns,
                 // splice-joined prompts, repeated sends), so a pure ordinal
                 // can cut several turns short of what the user picked.
+                //
+                // Every history page needs the session's current log cut
+                // (`throughSeq`); without it the harness answers with an empty
+                // page and the walk sees no prompts and no `turn/end` at all —
+                // forking then always failed with "轮次尚未完成".
+                let cursor = host
+                    .runtime()
+                    .block_on(resolve_history_cursor(&client, &session_id, &sink));
                 let result = match user_message_text.as_deref() {
                     Some(text) => match host.runtime().block_on(find_prompt_turn_end_seq(
                         &client,
                         &session_id,
+                        cursor,
                         text,
                         user_message_occurrence.max(1),
                         at_user_turn,
@@ -673,6 +689,7 @@ pub fn run_harness_session(
                             host.runtime().block_on(fork_session_at_turn(
                                 &client,
                                 &session_id,
+                                cursor,
                                 at_user_turn,
                             ))
                         }
@@ -680,6 +697,7 @@ pub fn run_harness_session(
                     None => host.runtime().block_on(fork_session_at_turn(
                         &client,
                         &session_id,
+                        cursor,
                         at_user_turn,
                     )),
                 };
@@ -762,16 +780,30 @@ pub fn run_harness_session(
                 // mutate the shared permission broker on a doomed request
                 // (`SessionHandle::set_mode` only skips the broker update on
                 // RPC errors, but we want to fail before any RPC).
-                let history_payload = crate::rpc_types::SessionHistoryPayload {
-                    session_id: session_id.to_string(),
-                    before_seq: None,
-                    max_messages: Some(1),
+                // "Has this session produced anything yet?" — asked before
+                // allowing a preset switch. The page cut comes from the follow
+                // cursor, or from the harness when that frame has not landed
+                // (see `resolve_history_cursor`); a session with no page at all
+                // is blank, so its preset is still free to change.
+                let started = {
+                    let cursor = host
+                        .runtime()
+                        .block_on(resolve_history_cursor(&client, &session_id, &sink));
+                    if cursor == 0 {
+                        false
+                    } else {
+                        let history_payload = crate::rpc_types::SessionHistoryPayload {
+                            session_id: session_id.to_string(),
+                            through_seq: cursor,
+                            before_seq: None,
+                            max_messages: Some(1),
+                        };
+                        host.runtime()
+                            .block_on(client.session_history(Uuid::new_v4().to_string(), &history_payload))
+                            .map(|value| !value.events.is_empty())
+                            .unwrap_or(false)
+                    }
                 };
-                let started = host
-                    .runtime()
-                    .block_on(client.session_history(Uuid::new_v4().to_string(), &history_payload))
-                    .map(|value| !value.events.is_empty())
-                    .unwrap_or(false);
                 if started {
                     let _ = reply_tx.send(Err(anyhow::anyhow!(
                         "该会话已开始，预设已固定。请新建会话并选择目标预设。"
@@ -861,6 +893,50 @@ fn canonicalize_harness_cwd(workspace_root: &str) -> String {
         .unwrap_or(text)
 }
 
+/// The session's newest known log seq — the harness page cut (`throughSeq`).
+///
+/// Seeded from the follow opening frame (`sessionSubscribed.lastSeq`) and
+/// advanced by every durable event, so it is exactly the "inclusive log cut
+/// obtained from the corresponding follow opening frame" the harness documents.
+/// Every `session.history` page must carry it: the harness caps a page at
+/// `throughSeq + 1`, so a page without a real cursor comes back empty instead of
+/// failing loudly.
+fn history_cursor(sink: &SessionSink) -> u64 {
+    sink.last_seq.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The page cut to walk history with.
+///
+/// Prefers the follow cursor; when that frame has not landed yet (or was missed
+/// while the stream was still establishing, which is not observable from here)
+/// it asks the harness directly, so a history walk never runs on an empty cut
+/// and misreads a finished turn as "still running".
+async fn resolve_history_cursor(
+    client: &crate::transport::HttpClient,
+    session_id: &SessionId,
+    sink: &SessionSink,
+) -> u64 {
+    match history_cursor(sink) {
+        0 => match client.session_cursor(session_id).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                // Falling back to 0 is not harmless: `session/page` answers an
+                // empty page for that cut, so the walk sees no messages and no
+                // `turn/end` at all. Say so — this failing silently is what hid
+                // the too-large probe sequence for as long as it did.
+                tracing::warn!(
+                    target: "dsh-bridge::session",
+                    session_id = %session_id,
+                    error = %error,
+                    "could not resolve the session page cursor; history walks will see an empty page",
+                );
+                0
+            }
+        },
+        cursor => cursor,
+    }
+}
+
 /// Replay a session's history through the mapping layer before the live stream
 /// delivers events. Used on resume/switch.
 async fn replay_history(
@@ -868,8 +944,13 @@ async fn replay_history(
     session_id: &SessionId,
     sink: &SessionSink,
 ) -> anyhow::Result<Option<(String, String)>> {
+    // The page cut comes from the follow opening frame; if that has not landed
+    // yet, ask the harness (see `resolve_history_cursor`) so the replay sees the
+    // real transcript instead of only the log header.
+    let cursor = resolve_history_cursor(client, session_id, sink).await;
     let payload = crate::rpc_types::SessionHistoryPayload {
         session_id: session_id.to_string(),
+        through_seq: cursor,
         before_seq: None,
         max_messages: Some(200),
     };
@@ -886,8 +967,10 @@ async fn replay_history(
             for ev in events {
                 sink.send(ev);
             }
+            // Monotonic: a late follow frame must never move the cursor back
+            // below what the replay already covered.
             sink.last_seq
-                .store(event.seq, std::sync::atomic::Ordering::Release);
+                .fetch_max(event.seq, std::sync::atomic::Ordering::AcqRel);
         }
     }
     // Resume into an empty transcript (e.g. a fork child) needs the replayed
@@ -939,9 +1022,10 @@ async fn replay_history(
 async fn fork_session_at_turn(
     client: &crate::transport::HttpClient,
     session_id: &SessionId,
+    cursor: u64,
     at_user_turn: u64,
 ) -> anyhow::Result<String> {
-    let target_seq = find_completed_turn_end_seq(client, session_id, at_user_turn).await?;
+    let target_seq = find_completed_turn_end_seq(client, session_id, cursor, at_user_turn).await?;
     fork_at_seq(client, session_id, target_seq).await
 }
 
@@ -980,6 +1064,7 @@ async fn fork_at_seq(
 async fn find_prompt_turn_end_seq(
     client: &crate::transport::HttpClient,
     session_id: &SessionId,
+    cursor: u64,
     prompt_text: &str,
     occurrence: u64,
     fallback_at_user_turn: u64,
@@ -1005,6 +1090,7 @@ async fn find_prompt_turn_end_seq(
     for _ in 0..MAX_HISTORY_PAGES {
         let payload = crate::rpc_types::SessionHistoryPayload {
             session_id: session_id.clone(),
+            through_seq: cursor,
             before_seq,
             max_messages: Some(HISTORY_PAGE_MESSAGES),
         };
@@ -1092,6 +1178,7 @@ async fn find_prompt_turn_end_seq(
 async fn find_completed_turn_end_seq(
     client: &crate::transport::HttpClient,
     session_id: &SessionId,
+    cursor: u64,
     at_user_turn: u64,
 ) -> anyhow::Result<u64> {
     const HISTORY_PAGE_MESSAGES: u32 = 200;
@@ -1104,6 +1191,7 @@ async fn find_completed_turn_end_seq(
     for _ in 0..MAX_HISTORY_PAGES {
         let payload = crate::rpc_types::SessionHistoryPayload {
             session_id: session_id.clone(),
+            through_seq: cursor,
             before_seq,
             max_messages: Some(HISTORY_PAGE_MESSAGES),
         };

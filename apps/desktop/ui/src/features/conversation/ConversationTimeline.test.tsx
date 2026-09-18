@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { clearMocks, mockConvertFileSrc } from "@tauri-apps/api/mocks";
-import { sessionForkCandidates } from "../../lib/tauri";
+import { sessionForkCandidates, settingsGetAgentSnapshot, settingsListDshPresets } from "../../lib/tauri";
 import { ConversationTimeline, conversationForkCapability, type TimelineTurnChangeSet } from "./ConversationTimeline";
 import {
   appendStreamingMessageDelta,
@@ -15,14 +15,22 @@ import type {
   UiSnapshot,
 } from "../../types/index";
 
-// 分叉点选择器从后端拉取全量轮次；其余 tauri 包装保持原实现（未调用）。
+// 分叉点选择器从后端拉取全量轮次；交接弹窗要读 Agent 列表与 dsh 预设。
+// 其余 tauri 包装保持原实现（未调用）。
 vi.mock("../../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   sessionForkCandidates: vi.fn(),
+  settingsGetAgentSnapshot: vi.fn(),
+  settingsListDshPresets: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.mocked(sessionForkCandidates).mockReset().mockResolvedValue([]);
+  vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+    agents: [{ id: "codex-acp", label: "Codex", binary: "codex-acp", installed: true }],
+    settings: { selected_agent: "codex-acp" },
+  } as unknown as Awaited<ReturnType<typeof settingsGetAgentSnapshot>>);
+  vi.mocked(settingsListDshPresets).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -478,11 +486,20 @@ describe("ThinkingIndicator", () => {
 
     fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
 
+    // Inside the expanded turn the two calls form one activity group (they are
+    // contiguous), so the rows are one click further in. The tool named
+    // "Edit package.json" is classified as an edit, hence the file count.
     const expandedText = container.textContent ?? "";
-    expect(expandedText).toContain("edit package.json");
-    expect(expandedText).toContain("pnpm test");
-    expect(expandedText.indexOf("final answer")).toBeLessThan(
-      expandedText.indexOf("edit package.json"),
+    expect(expandedText).toContain("已运行 ×1 · 已编辑 1 个文件");
+    expect(expandedText).not.toContain("edit package.json");
+
+    fireEvent.click(getByRole("button", { name: /展开已运行 ×1 · 已编辑 1 个文件/ }));
+
+    const groupText = container.textContent ?? "";
+    expect(groupText).toContain("edit package.json");
+    expect(groupText).toContain("pnpm test");
+    expect(groupText.indexOf("final answer")).toBeLessThan(
+      groupText.indexOf("edit package.json"),
     );
   });
 
@@ -655,6 +672,77 @@ describe("ThinkingIndicator", () => {
         "live",
       );
     });
+  });
+
+  it("keeps a long running turn unfolded, collapsing only the tool runs", () => {
+    // While the turn runs there is no turn-level summary at all: narration stays
+    // readable and the only folding is the per-run activity groups. The top
+    // collapse appears when the turn ends (see the completed-turn tests).
+    const tools = Array.from({ length: 12 }, (_, i) =>
+      makePermissionTool({
+        id: `tool-run-${i}`,
+        call_id: `run-${i}`,
+        kind: "execute",
+        name: `\`echo ${i}\``,
+        summary: `echo ${i}`,
+        status: "Succeeded",
+        raw_input: JSON.stringify({ command: `echo ${i}` }),
+        permission_options: [],
+      }),
+    );
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Streaming" },
+      timeline: [
+        { Message: "user-long" },
+        ...tools.slice(0, 6).map((tool) => ({ Tool: tool.id })),
+        { Message: "assistant-first" },
+        ...tools.slice(6).map((tool) => ({ Tool: tool.id })),
+        { Message: "assistant-last" },
+      ],
+      messages: [
+        {
+          id: "user-long",
+          role: "User",
+          body: "run everything",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-first",
+          role: "Assistant",
+          body: "first narration",
+          created_at: "2026-05-12T00:00:10Z",
+        },
+        {
+          id: "assistant-last",
+          role: "Assistant",
+          body: "still working",
+          created_at: "2026-05-12T00:00:30Z",
+        },
+      ],
+      tools,
+    });
+
+    const { container, queryByRole, getAllByRole } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    // No top-level collapse while the turn is live.
+    expect(queryByRole("button", { name: "展开已处理上下文" })).toBeNull();
+    // Neither narration segment is folded away.
+    expect(container.textContent).toContain("first narration");
+    expect(container.textContent).toContain("still working");
+
+    // The twelve contiguous calls became two collapsed activity summaries, so
+    // no individual tool row is rendered yet.
+    const summaries = container.querySelectorAll(".tool-activity-summary");
+    expect(summaries).toHaveLength(2);
+    expect(container.querySelectorAll(".tc-header-line")).toHaveLength(0);
+
+    // Expanding one group reveals exactly its own six calls.
+    fireEvent.click(getAllByRole("button", { name: /展开已运行 ×6/ })[0]);
+    expect(container.querySelectorAll(".tc-header-line")).toHaveLength(6);
+    expect(container.textContent).toContain("echo 0");
+    expect(container.textContent).not.toContain("echo 6");
   });
 
   it("updates active turn processing duration while the turn is running", async () => {
@@ -899,6 +987,116 @@ describe("ThinkingIndicator", () => {
       expect(row?.querySelector(".msg-copy-btn")).not.toBeNull();
       expect(row?.querySelector(".msg-fork-btn")).not.toBeNull();
     }
+  });
+
+  it("keeps one activity group across a thinking segment", () => {
+    // Reported: reasoning between two commands split one stretch of work into
+    // several summaries, so the same run rendered as several collapsed rows with
+    // single calls between them. Thinking renders nothing, so it must not break
+    // the run.
+    const tools = Array.from({ length: 4 }, (_, i) =>
+      makePermissionTool({
+        id: `tool-think-${i}`,
+        call_id: `think-${i}`,
+        kind: "execute",
+        name: `\`echo ${i}\``,
+        summary: `echo ${i}`,
+        status: "Succeeded",
+        raw_input: JSON.stringify({ command: `echo ${i}` }),
+        permission_options: [],
+      }),
+    );
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [
+        { Message: "user-think" },
+        { Tool: tools[0].id },
+        { Thinking: { text: "先看看现状" } },
+        "Thinking",
+        { Tool: tools[1].id },
+        { Tool: tools[2].id },
+        { Thinking: { text: "再核对一遍" } },
+        { Tool: tools[3].id },
+        { Message: "assistant-think" },
+      ],
+      messages: [
+        { id: "user-think", role: "User", body: "跑一下" },
+        { id: "assistant-think", role: "Assistant", body: "跑完了。" },
+      ],
+      tools,
+    });
+
+    const { container, getAllByRole, getByRole } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    // The finished turn folds its work behind the turn summary; expanding it is
+    // where the reported layout appeared (rows and summaries interleaved).
+    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
+
+    const summaries = container.querySelectorAll(".tool-activity-summary");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].textContent).toContain("已运行 ×4");
+    // Collapsed: none of the four rows is mounted yet.
+    expect(container.querySelectorAll(".tc-header-line")).toHaveLength(0);
+
+    fireEvent.click(getAllByRole("button", { name: /展开已运行 ×4/ })[0]);
+    expect(container.querySelectorAll(".tc-header-line")).toHaveLength(4);
+  });
+
+  it("opens a handoff briefing from the icon next to fork", async () => {
+    const onHandoff = vi.fn().mockResolvedValue(undefined);
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "u-1" }, { Message: "a-1" }],
+      messages: [
+        { id: "u-1", role: "User", body: "把会话列表项目行改成呼吸灯" },
+        { id: "a-1", role: "Assistant", body: "改好了。" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onForkConversation={() => {}}
+        onHandoff={onHandoff}
+      />,
+    );
+
+    const row = container.querySelector('[data-message-id="a-1"]');
+    expect(row?.querySelector(".msg-handoff-btn")).not.toBeNull();
+
+    fireEvent.click(within(container).getByRole("button", { name: "交接给下一个智能体" }));
+
+    // The briefing is built locally from the conversation window.
+    const textarea = (await screen.findByLabelText("交接说明")) as HTMLTextAreaElement;
+    expect(textarea.value).toContain("# 交接说明（来自上一个会话）");
+    expect(textarea.value).toContain("把会话列表项目行改成呼吸灯");
+
+    fireEvent.click(screen.getByRole("button", { name: "新建会话并带入" }));
+    await waitFor(() =>
+      expect(vi.mocked(onHandoff).mock.calls[0][0]).toContain("把会话列表项目行改成呼吸灯"),
+    );
+    // The dialog passes the picked agent through to the new session.
+    expect(vi.mocked(onHandoff).mock.calls[0][1]).toBe("codex-acp");
+  });
+
+  it("hides the handoff affordance when no handoff handler is wired", () => {
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline: [{ Message: "u-1" }, { Message: "a-1" }],
+      messages: [
+        { id: "u-1", role: "User", body: "问题" },
+        { id: "a-1", role: "Assistant", body: "回复" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".msg-handoff-btn")).toBeNull();
   });
 
   it("keeps intermediate same-turn replies free of action rows", () => {

@@ -24,7 +24,7 @@ use crate::rpc_types::{
     CommandsExecutePayload, HostDescribeValue, RpcId, RpcReceipt, RpcResult, ServerRequest,
     ServerResponse, SessionAddress, SessionCancelPayload, SessionCancelValue, SessionCreatePayload,
     SessionCreateValue, SessionForkPayload, SessionForkValue, SessionHistoryPayload,
-    SessionHistoryValue, SessionListPayload, SessionListValue, SessionModelsPayload,
+    SessionHistoryValue, SessionId, SessionListPayload, SessionListValue, SessionModelsPayload,
     SessionPageRequest, SessionPromptPayload, SessionPromptValue, SessionSelectModelPayload,
     is_command_attachment_field_mismatch,
 };
@@ -38,6 +38,22 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// the HTTP request dies (the carrier signal follows the caller) — so this
 /// call gets a generous cap instead of the 30s default.
 const COMMANDS_EXECUTE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// Cut used to interrogate one session's page cursor — any value past the
+/// session's log triggers the harness rejection that names the real cursor (see
+/// [`HttpClient::session_cursor`]).
+///
+/// Capped at the largest integer a JSON number round-trips exactly
+/// (`Number.MAX_SAFE_INTEGER`). The gateway validates `throughSeq` as a JS safe
+/// integer *before* it compares it against the cursor, so a larger probe —
+/// `i64::MAX / 4`, as this used to be — never reaches the "past cursor N"
+/// rejection the probe parses. It comes back as
+/// "throughSeq must be an integer greater than or equal to -1" instead, the
+/// probe fails, and the callers fall back to a cut of 0: `session/page` answers
+/// an empty page, so the history walk sees nothing. That silently broke every
+/// walk over a sink with no follow cursor yet — including a freshly forked
+/// child, whose transcript was then rebuilt from the follow journal alone
+/// (which carries tool calls but no messages).
+const SESSION_CURSOR_PROBE_SEQ: i64 = 9_007_199_254_740_991;
 
 /// Shared HTTP client for a harness host. Connection pooling multiplexes
 /// concurrent control POSTs from multiple sessions; the cookie jar is empty for
@@ -418,14 +434,48 @@ impl HttpClient {
     ) -> anyhow::Result<SessionHistoryValue> {
         let page = SessionPageRequest {
             address: SessionAddress::session(payload.session_id.clone()),
-            through_seq: payload
-                .before_seq
-                .map(|seq| seq.saturating_sub(1) as i64)
-                .unwrap_or(-1),
+            through_seq: payload.through_seq as i64,
             before_seq: payload.before_seq,
             max_messages: payload.max_messages,
         };
         self.call("session.history", rpc_id, &page).await
+    }
+
+    /// Ask the harness for one session's current page cut (`throughSeq`).
+    ///
+    /// The cut is what the follow opening frame reports, but that frame is
+    /// asynchronous: a session the bridge has only just subscribed to may not
+    /// have delivered it, and `session/page` silently answers with an **empty**
+    /// page for a cut of 0 (or a missing cut). Rather than depend on frame
+    /// timing, ask for an impossible cut — the harness rejects it and names its
+    /// own cursor in the rejection — and read the cursor out of that.
+    pub async fn session_cursor(&self, session_id: &SessionId) -> anyhow::Result<u64> {
+        let page = SessionPageRequest {
+            address: SessionAddress::session(session_id.clone()),
+            through_seq: SESSION_CURSOR_PROBE_SEQ,
+            before_seq: None,
+            max_messages: Some(1),
+        };
+        match self
+            .call::<SessionPageRequest, SessionHistoryValue>(
+                "session.history",
+                uuid::Uuid::new_v4().to_string(),
+                &page,
+            )
+            .await
+        {
+            // A cut that was not past the cursor (an empty session): report the
+            // newest seq the page carried.
+            Ok(value) => Ok(value
+                .events
+                .iter()
+                .filter_map(|entry| entry.event.get("seq").and_then(Value::as_u64))
+                .max()
+                .unwrap_or(0)),
+            Err(error) => {
+                parse_past_cursor(&error.to_string()).ok_or(error)
+            }
+        }
     }
 
     pub async fn session_models(
@@ -712,8 +762,19 @@ async fn exchange_launch_token(
         .ok_or_else(|| anyhow!("dsh launch-token exchange did not return an authentication cookie"))
 }
 
-fn remote_endpoint(method: &str) -> anyhow::Result<&'static str> {
-    match method {
+/// Read the session cursor out of the harness's page-cut rejection:
+/// `session page through seq 1000000000 is past cursor 8847`.
+fn parse_past_cursor(message: &str) -> Option<u64> {
+    const MARKER: &str = "past cursor ";
+    let start = message.rfind(MARKER)? + MARKER.len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+fn remote_endpoint(method: &str) -> anyhow::Result<&'static str> {    match method {
         "session.create" => Ok("session/create"),
         "session.fork" => Ok("session/fork"),
         "session.prompt" => Ok("session/prompt"),
@@ -1198,8 +1259,7 @@ mod tests {
     /// reached the host, so the turn kept streaming and the button looked dead
     /// (the RPC error was invisible: `cancel_prompt` is fire-and-forget).
     #[test]
-    fn remote_payload_session_cancel_nests_under_request() {
-        let payload = SessionCancelPayload {
+    fn remote_payload_session_cancel_nests_under_request() {        let payload = SessionCancelPayload {
             session_id: "session-1".into(),
         };
         let wire = remote_payload("session/cancel", serde_json::to_value(payload).unwrap());
@@ -1373,5 +1433,23 @@ mod tests {
             "value": { "type": "emit", "event": "api-session/status", "args": [] }
         });
         assert!(ready_payload(&event).is_none());
+    }
+
+    /// The page cut is learnt from the harness's own rejection. Without it a
+    /// history walk ran on an empty page and read a finished turn as still
+    /// running, so forking a dsh conversation always failed with 轮次尚未完成.
+    #[test]
+    fn past_cursor_rejection_names_the_session_cursor() {
+        assert_eq!(
+            parse_past_cursor("session page through seq 1000000000 is past cursor 8847"),
+            Some(8847)
+        );
+        assert_eq!(
+            parse_past_cursor(
+                "gateway/bad-request: session page through seq 2305843009213693951 is past cursor 0"
+            ),
+            Some(0)
+        );
+        assert_eq!(parse_past_cursor("something else entirely"), None);
     }
 }

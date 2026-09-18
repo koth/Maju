@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import type { CSSProperties } from "react";
 
-import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry } from "../../types";
+import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry, AgentCliId } from "../../types";
 import {
   startupPerfMark,
   sessionCancel,
+  sessionCreate,
   sessionFork,
   sessionResolvePermission,
   sessionRetryUserMessage,
@@ -13,6 +14,7 @@ import {
   settingsGetAgentSnapshot,
   type SessionForkMode,
 } from "../../lib/tauri";
+import { updateComposerDraftInput } from "../composer/composer-draft-store";
 import { ConversationTimeline, conversationForkCapability, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
 import {
@@ -619,6 +621,26 @@ export function Workbench() {
       setSessionListRefreshToken((value) => value + 1);
     },
     [pollState],
+  );
+
+  // 交接给下一个智能体：在对话框里选好 Agent（dsh 还可选预设）后，在当前工作区
+  // 新建该 Agent 的会话，并把本地生成的交接说明放进它的输入框 —— 由用户决定改成
+  // 什么、什么时候发。
+  // 草稿按工作区存储（composer-draft-store 刻意忽略 session id），所以新建后
+  // 直接写该工作区的草稿键即可，新会话的 Composer 会带着这段文字打开。原有草稿
+  // 不会被丢掉：交接说明放在前面，用户之前输入的内容接在后面。
+  const handleHandoff = useCallback(
+    async (digest: string, agent: AgentCliId | null, preset: string | null) => {
+      const workspaceRoot = snapshot?.workspace.root;
+      if (!workspaceRoot) return;
+      await sessionCreate(workspaceRoot, agent ?? undefined, preset);
+      updateComposerDraftInput(workspaceRoot, (current) =>
+        current.trim() ? `${digest}\n\n${current}` : digest,
+      );
+      await pollState();
+      setSessionListRefreshToken((value) => value + 1);
+    },
+    [pollState, snapshot?.workspace.root],
   );
 
   // 分叉能力按后端门控：dsh（harness session.fork）与 codex（ACP session/fork）
@@ -1455,6 +1477,7 @@ export function Workbench() {
                       onLoadOlderHistory={loadOlderHistory}
                       onForkConversation={forkSupported ? handleForkConversation : undefined}
                       forkWorktreeSupported={forkWorktreeSupported}
+                      onHandoff={handleHandoff}
                     />
                   </>
                 ) : (

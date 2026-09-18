@@ -1147,6 +1147,13 @@ impl HarnessHost {
                     let from_seq = sink.last_seq.load(Ordering::Acquire);
                     let payload = crate::rpc_types::SessionHistoryPayload {
                         session_id: session_id.clone(),
+                        // The re-baseline wants the tail page ending at the
+                        // cursor the (re)opened follow frame just reported, so
+                        // the cut is that cursor and `before_seq` bounds the
+                        // page edge to the same seq. The harness caps a page at
+                        // `throughSeq + 1`, so passing anything lower silently
+                        // returned the wrong window.
+                        through_seq: from_seq,
                         before_seq: Some(from_seq + 1),
                         max_messages: None,
                     };

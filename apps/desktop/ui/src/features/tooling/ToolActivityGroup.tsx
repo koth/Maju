@@ -21,6 +21,9 @@ function ToolActivityGroupImpl({ group, renderTool }: Props) {
   const running = group.tools.some(
     (tool) => tool.status === "Running" || tool.status === "Pending",
   );
+  // Finished runs get no marker: the summary text ("已运行 ×3 · 已编辑 1 个
+  // 文件") already carries the state, so a dot in front of every collapsed run
+  // is noise. A run still in flight keeps the live bullet.
   const bullet = statusBullet(running ? "Running" : "Succeeded");
 
   return (
@@ -32,9 +35,11 @@ function ToolActivityGroupImpl({ group, renderTool }: Props) {
         aria-label={expanded ? `收起${group.summary}` : `展开${group.summary}`}
         onClick={() => setExpanded((value) => !value)}
       >
-        <span className={`tc-bullet ${bullet.className}`} aria-hidden="true">
-          {bullet.char}
-        </span>
+        {bullet && (
+          <span className={`tc-bullet ${bullet.className}`} aria-hidden="true">
+            {bullet.char}
+          </span>
+        )}
         <span className="tool-activity-label">{group.summary}</span>
         <span className="tool-activity-chevron" aria-hidden="true">
           {"\u203A"}

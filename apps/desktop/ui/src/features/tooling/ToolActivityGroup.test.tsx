@@ -63,4 +63,23 @@ describe("ToolActivityGroupRow", () => {
     fireEvent.click(screen.getByRole("button", { name: /收起已探索 ×2/ }));
     expect(screen.queryAllByTestId("tool-row")).toHaveLength(0);
   });
+
+  it("draws no marker for a finished run, but keeps the live one", () => {
+    const { container, rerender } = render(
+      <ToolActivityGroupRow
+        group={{ startIndex: 0, indexes: [0, 1], tools, summary: summarizeToolActivity(tools) }}
+        renderTool={(tool) => <div data-testid="tool-row">{tool.id}</div>}
+      />,
+    );
+    expect(container.querySelector(".tc-bullet")).toBeNull();
+
+    const runningTools = [{ ...tools[0], status: "Running" as const }, tools[1]];
+    rerender(
+      <ToolActivityGroupRow
+        group={{ startIndex: 0, indexes: [0, 1], tools: runningTools, summary: summarizeToolActivity(runningTools) }}
+        renderTool={(tool) => <div data-testid="tool-row">{tool.id}</div>}
+      />,
+    );
+    expect(container.querySelector(".tc-bullet-active")).not.toBeNull();
+  });
 });

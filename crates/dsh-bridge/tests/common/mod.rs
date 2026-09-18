@@ -121,6 +121,10 @@ pub struct MockHarnessConfig {
     /// Per-session history failure: session ids whose `session.history` call
     /// should return an error (to exercise per-session re-baseline isolation).
     pub history_failures: Vec<String>,
+    /// Delay applied to every `session.history` response. Lets a test pin the
+    /// real-world race where the follow stream's opening snapshot (which
+    /// re-delivers the durable journal) lands before the history page does.
+    pub history_delay_ms: u64,
     /// Events returned by `session.history` (each a `HistoryEntry` JSON
     /// `{ event: { type, seq, time, data }, view? }`).
     pub history_events: Vec<Value>,
@@ -171,6 +175,11 @@ struct MockState {
     /// `session.cancel` args objects received, in order (rejected attempts
     /// included, so tests can pin the `request` envelope the descriptor wants).
     pub cancel_args: Vec<Value>,
+    /// `session/page` request objects received, in order — with the descriptor's
+    /// `request` parameter unwrapped. Tests assert the page cut (`throughSeq`)
+    /// here: without a real cursor the harness answers with an empty page, which
+    /// silently broke every history walk.
+    pub pages: Vec<Value>,
     /// `respond` / `$events/result` payloads received (approval/question
     /// answers). For `$events/result` this is the args object the bridge built,
     /// with the carrier envelope stripped.
@@ -194,6 +203,10 @@ struct MockState {
     /// only sends it after the session sink is registered, so tests can use it
     /// as a registration barrier (`HoldFramesUntil::SessionRegistered`).
     pub models_served: bool,
+    /// `session/subscribed` frames written to a stream, in order. Tests that
+    /// need the history cursor poll this before forking, so the follow frame has
+    /// been delivered instead of racing the boot sequence.
+    pub subscribed_frames: usize,
 }
 
 pub struct MockHarness {
@@ -279,6 +292,16 @@ impl MockHarness {
     /// Args objects of the `session.cancel` calls received, in order.
     pub fn cancel_args(&self) -> Vec<Value> {
         self.state.lock().unwrap().cancel_args.clone()
+    }
+
+    /// Request objects of the `session/page` calls received, in order.
+    pub fn pages(&self) -> Vec<Value> {
+        self.state.lock().unwrap().pages.clone()
+    }
+
+    /// How many `session/subscribed` frames have been written to a stream.
+    pub fn subscribed_frames(&self) -> usize {
+        self.state.lock().unwrap().subscribed_frames
     }
 
     pub fn responds(&self) -> Vec<Value> {
@@ -729,6 +752,13 @@ async fn handle_connection(
                         .unwrap_or(Value::Null),
                 );
             }
+            if method_name == "session/page" {
+                let payload = parsed
+                    .pointer("/payload/args/request")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                state.lock().unwrap().pages.push(payload);
+            }
 
             // Mirror the gateway's `assertExactArguments` for the endpoints the
             // bridge calls. Shipping a request object bare (e.g. `{ sessionId }`
@@ -770,6 +800,13 @@ async fn handle_connection(
                 "session/prompt" => serde_json::json!({ "accepted": true }),
                 "session/cancel" => serde_json::json!({ "accepted": true }),
                 "session/page" => {
+                    // The delay is read before the failure branch: a failing
+                    // page is a slow page too, and tests that pin the follow
+                    // race want the hold either way.
+                    let delay_ms = config.lock().unwrap().history_delay_ms;
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
                     let fail = config
                         .lock()
                         .unwrap()
@@ -791,7 +828,90 @@ async fn handle_connection(
                     }
                     let events = config.lock().unwrap().history_events.clone();
                     let projections = config.lock().unwrap().history_projections.clone();
-                    let mut response = serde_json::json!({ "records": events, "hasMore": false });
+                    // Mirror the harness page cut: the page ends at
+                    // `min(throughSeq + 1, beforeSeq)`, and a request without a
+                    // real cursor (`throughSeq < 0`) yields an EMPTY page rather
+                    // than an error. Modelling this is what keeps the
+                    // `throughSeq: -1` regression from shipping again: the fork
+                    // boundary walk saw no prompt and no `turn/end`, so every
+                    // fork failed with "轮次尚未完成".
+                    let page = parsed.pointer("/payload/args/request").cloned().unwrap_or(Value::Null);
+                    let through_seq = page.get("throughSeq").and_then(Value::as_i64).unwrap_or(-1);
+                    let before_seq = page.get("beforeSeq").and_then(Value::as_i64);
+                    // The gateway validates the cut as a JS safe integer BEFORE
+                    // comparing it against the cursor, so an over-large value is
+                    // rejected with a *validation* error instead of the
+                    // "past cursor N" answer the bridge's `session_cursor` probe
+                    // parses. Modelling that is what keeps a too-large probe
+                    // (e.g. `i64::MAX / 4`) from silently shipping again: the
+                    // probe would fail, every history walk would run on a cut of
+                    // 0, and a fork child's transcript would be rebuilt from the
+                    // follow journal alone — tool calls, no messages.
+                    const MAX_SAFE_SEQ: i64 = 9_007_199_254_740_991;
+                    if through_seq > MAX_SAFE_SEQ {
+                        let response = serde_json::json!({
+                            "type": "server-response",
+                            "rpcId": rpc_id,
+                            "result": {
+                                "ok": false,
+                                "error": {
+                                    "code": "gateway/bad-request",
+                                    "message": "throughSeq must be an integer greater than or equal to -1",
+                                    "details": {}
+                                }
+                            }
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        write_response(&mut stream, 200, "application/json", &body).await;
+                        return;
+                    }
+                    // The harness rejects a cut past its cursor and NAMES the
+                    // cursor — the bridge's `session_cursor` probe relies on it.
+                    let newest = events
+                        .iter()
+                        .filter_map(|entry| entry.pointer("/event/seq").and_then(Value::as_i64))
+                        .max()
+                        .unwrap_or(0);
+                    if through_seq > newest {
+                        let response = serde_json::json!({
+                            "type": "server-response",
+                            "rpcId": rpc_id,
+                            "result": {
+                                "ok": false,
+                                "error": {
+                                    "code": "gateway/bad-request",
+                                    "message": format!(
+                                        "session page through seq {through_seq} is past cursor {newest}"
+                                    ),
+                                    "details": {}
+                                }
+                            }
+                        });
+                        let body = serde_json::to_vec(&response).unwrap();
+                        write_response(&mut stream, 200, "application/json", &body).await;
+                        return;
+                    }
+                    let end = if through_seq < 0 {
+                        0
+                    } else {
+                        before_seq.map_or(through_seq + 1, |before| before.min(through_seq + 1))
+                    };
+                    let mut kept: Vec<Value> = Vec::new();
+                    for entry in events {
+                        let seq = entry
+                            .pointer("/event/seq")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0);
+                        if seq < end {
+                            kept.push(entry);
+                        }
+                    }
+                    let has_more = kept
+                        .first()
+                        .and_then(|entry| entry.pointer("/event/seq"))
+                        .and_then(Value::as_i64)
+                        .is_some_and(|seq| seq > 0);
+                    let mut response = serde_json::json!({ "records": kept, "hasMore": has_more });
                     if let Some(projections) = projections {
                         response["projections"] = projections;
                     }
@@ -1090,6 +1210,11 @@ async fn serve_mux(
         }))
         .unwrap();
         let _ = ws.send(Message::Text(payload.into())).await;
+        // Tests that need the follow cursor (`session/page` cut) wait on this:
+        // the frame is in the socket, so the bridge dispatches it imminently.
+        if frame.get("event").and_then(Value::as_str) == Some("session/subscribed") {
+            state.lock().unwrap().subscribed_frames += 1;
+        }
     }
     match script.end {
         MuxEnd::Hold => {
@@ -1252,6 +1377,7 @@ pub fn default_config() -> MockHarnessConfig {
         follow: Vec::new(),
         control: Vec::new(),
         history_failures: Vec::new(),
+        history_delay_ms: 0,
         history_events: Vec::new(),
         preset_locked: false,
         respond_reject: false,
@@ -1326,4 +1452,14 @@ pub fn history_event(seq: u64, type_tag: &str, data: Value) -> Value {
             "data": data
         }
     })
+}
+
+/// [`history_event`] plus the render view the harness ships alongside it. Tool
+/// cards are built from the view (`for`/`view`), so a history page without one
+/// replays the turn text but no tool row — which is exactly how the resume
+/// replay test failed before the mock carried views.
+pub fn history_event_with_view(seq: u64, type_tag: &str, data: Value, view: Value) -> Value {
+    let mut entry = history_event(seq, type_tag, data);
+    entry["view"] = view;
+    entry
 }

@@ -83,4 +83,13 @@ These require Xcode/Android Studio and a real relay/PC; not automatable here:
 - Keychain/Keystore persistence + app-uninstall clearing (criterion 11)
 - A live relay + bound-account reconnect (best-effort re-key; falls back to
   re-scan if the relay rejects the stored token — see `AppController`)
+- Tool-activity collapse + math rendering (2026-09): the grouping rules, the
+  activity summaries, the LaTeX extraction, the inline Unicode pass and the
+  generated WebView document are all pure and unit-tested
+  (`tool-activity.test.ts`, `math-markdown.test.ts`, `latex-inline.test.ts`,
+  `math-html.test.ts`). Still needs a device: that the WebView mounts at the
+  reported height inside the inverted timeline (no jump as the height lands),
+  that the inlined KaTeX fonts load, and that a wide formula is scaled rather
+  than clipped. `react-native-webview` is a new native dependency — the dev
+  build must be regenerated (`npx expo run:android`) before these appear.
 // end of file

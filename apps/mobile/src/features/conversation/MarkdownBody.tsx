@@ -1,9 +1,18 @@
-import { memo } from "react";
+import { memo, useMemo } from "react";
+import type { ReactNode } from "react";
 import Markdown from "react-native-markdown-display";
 import type { ASTNode, RenderRules } from "react-native-markdown-display";
 import { Text, View } from "react-native";
 import { colors, spacing, radius } from "../theme";
 import { repairCompactMarkdown } from "./repair-compact-markdown";
+import { MathFormula } from "./MathFormula";
+import { inlineMathRuns, type InlineMathRun } from "./latex-inline";
+import {
+  MATH_PLACEHOLDER_CLOSE,
+  MATH_PLACEHOLDER_OPEN,
+  prepareMathBody,
+  type MathSpan,
+} from "./math-markdown";
 
 // Renders assistant/user message bodies as markdown on React Native, aligned
 // with the desktop `MarkdownBody` (react-markdown + .md-* CSS in
@@ -189,6 +198,68 @@ const markdownRules: RenderRules = {
   },
 };
 
+// Inline math reaches the renderer as an opaque placeholder (see
+// math-markdown.ts). Formatting it here rather than before parsing is what
+// keeps markdown from re-reading the approximation as markup — the placeholder
+// has no markdown-significant characters, the rendering may.
+//
+// The substitution lives in the `text` rule, so it applies everywhere text can
+// appear: paragraphs, list items, table cells, headings, links.
+function mathAwareTextRule(spans: MathSpan[]): NonNullable<RenderRules["text"]> {
+  return (node, _children, _parentNodes, styles, inheritedStyles = {}) => {
+    const content = typeof node.content === "string" ? node.content : "";
+    if (!content.includes(MATH_PLACEHOLDER_OPEN)) {
+      return (
+        <Text key={node.key} style={[inheritedStyles, styles.text]}>
+          {content}
+        </Text>
+      );
+    }
+    return (
+      <Text key={node.key} style={[inheritedStyles, styles.text]}>
+        {MathTextRuns({ content, spans })}
+      </Text>
+    );
+  };
+}
+
+/// Splits one text node into literal text and inline-math runs.
+function MathTextRuns({ content, spans }: { content: string; spans: MathSpan[] }) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+
+  while (cursor < content.length) {
+    const open = content.indexOf(MATH_PLACEHOLDER_OPEN, cursor);
+    if (open < 0) {
+      parts.push(content.slice(cursor));
+      break;
+    }
+    const close = content.indexOf(MATH_PLACEHOLDER_CLOSE, open + 1);
+    if (close < 0) {
+      parts.push(content.slice(cursor));
+      break;
+    }
+    if (open > cursor) parts.push(content.slice(cursor, open));
+    const span = spans[Number.parseInt(content.slice(open + 1, close), 10)];
+    if (span) {
+      let runKey = 0;
+      for (const run of inlineMathRuns(span.tex)) {
+        parts.push(
+          <Text key={`m${key}:${runKey}`} style={run.italic ? mdStyles.mathItalic : undefined}>
+            {run.text}
+          </Text>,
+        );
+        runKey += 1;
+      }
+    }
+    key += 1;
+    cursor = close + 1;
+  }
+
+  return parts;
+}
+
 const mdStyles = {
   codeBlock: {
     borderWidth: 1,
@@ -225,12 +296,46 @@ const mdStyles = {
     paddingBottom: 12,
     paddingRight: 12,
   } as const,
+  // Inline math: TeX sets variables in italic and everything else upright
+  // (see latex-inline.ts). Inherits the surrounding colour and size.
+  mathItalic: {
+    fontStyle: "italic",
+  } as const,
 };
 
 // Memoized on `body`: markdown re-parsing is the most expensive part of a
 // timeline row on phones, and it ran for every mounted row on every snapshot
 // emit. With memo, only rows whose body actually changed re-parse.
 export const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
-  return <Markdown style={markdownStyles} rules={markdownRules}>{repairCompactMarkdown(body)}</Markdown>;
+  const { pieces, spans } = useMemo(() => prepareMathBody(body), [body]);
+  const rules = useMemo<RenderRules>(
+    () => ({ ...markdownRules, text: mathAwareTextRule(spans) }),
+    [spans],
+  );
+
+  // The common case — no display formula at all — stays a single markdown parse.
+  if (pieces.length === 1 && pieces[0].kind === "text") {
+    return (
+      <Markdown style={markdownStyles} rules={rules}>
+        {pieces[0].text}
+      </Markdown>
+    );
+  }
+
+  // Display formulas get their own renderer; the prose around them keeps
+  // going through the native one.
+  return (
+    <View>
+      {pieces.map((piece, index) =>
+        piece.kind === "display" ? (
+          <MathFormula key={`d${index}`} tex={piece.tex} />
+        ) : (
+          <Markdown key={`t${index}`} style={markdownStyles} rules={rules}>
+            {piece.text}
+          </Markdown>
+        ),
+      )}
+    </View>
+  );
 });
 // end of file

@@ -1,5 +1,11 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+// KaTeX ships its own metrics and embedded fonts; the theme-neutral
+// reconciliations with the chat surface live in MarkdownBody.css.
+import "katex/dist/katex.min.css";
+import "./MarkdownBody.css";
 import { Check, Copy, FileCode } from "lucide-react";
 import {
   Children,
@@ -67,6 +73,7 @@ const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
 import { getAppliedAppTheme } from "../../theme";
 import { fsPathExists } from "../../lib/tauri";
 import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
+import { maskMarkdownMath } from "./markdown-math";
 
 interface Props {
   content: string;
@@ -200,6 +207,25 @@ export function splitMarkdownBlocks(content: string): string[] {
   return blocks.length > 0 ? blocks : [content];
 }
 
+/** Remark plugins, in order. `remarkMath` must run BEFORE
+ *  `remarkPreserveLineBreaks`: the latter splits text nodes on "\n" and would
+ *  otherwise have already shredded a multi-line formula into `break` nodes.
+ *  Once math is its own node it carries no children, so line-break handling
+ *  leaves it untouched. */
+const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkPreserveLineBreaks];
+
+/** KaTeX is strict by default: it warns on unicode-in-math and refuses a few
+ *  constructs LLMs emit casually (bare CJK inside `$…$`, `\text` without a
+ *  package mindset). `strict: "ignore"` typesets them instead of dropping the
+ *  formula; genuine syntax errors still surface through rehype-katex's own
+ *  `throwOnError: false` retry, which renders the source in red rather than
+ *  failing the message. */
+const KATEX_OPTIONS = { strict: "ignore", trust: false } as const;
+
+const REHYPE_PLUGINS: NonNullable<
+  ComponentProps<typeof ReactMarkdown>["rehypePlugins"]
+> = [[rehypeKatex, KATEX_OPTIONS]];
+
 /** One top-level markdown block. Memo compares ONLY the block text and the
  *  file-path verification epoch: react-markdown has no parse cache, so a
  *  re-render of a section re-parses its whole text — during streaming every
@@ -219,7 +245,8 @@ const MarkdownSection = memo(
   }) {
     return (
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkPreserveLineBreaks]}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
         urlTransform={safeMarkdownUrl}
         components={components}
       >
@@ -241,9 +268,16 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
   // per commit (linear, cheap); the per-line repair passes are value-cached
   // per block so every finished block repairs exactly once and only the
   // streaming tail block repairs per commit.
+  //
+  // Math is masked out for the whole pipeline and restored at the very end
+  // (see markdown-math.ts): both repair tiers rewrite lines heuristically and
+  // would mangle LaTeX, and masked formulas are also single-line, which keeps
+  // `splitMarkdownBlocks` from cutting a display block at an internal blank
+  // line.
+  const math = useMemo(() => maskMarkdownMath(content), [content]);
   const normalized = useMemo(
-    () => repairCompactMarkdownNormalized(content),
-    [content],
+    () => repairCompactMarkdownNormalized(math.text),
+    [math],
   );
   const blocks = useMemo(() => splitMarkdownBlocks(normalized), [normalized]);
   // Inline-code spans that look like file paths are only rendered as links
@@ -627,7 +661,7 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
       {blocks.map((block, index) => (
         <MarkdownSection
           key={index}
-          content={repairBlockCached(block)}
+          content={math.restore(repairBlockCached(block))}
           components={components}
           pathVersion={pathVersion}
           workspaceRoot={workspaceRoot}
@@ -983,7 +1017,10 @@ function repairCompactMarkdownBlockLines(block: string) {
 }
 
 export function repairCompactMarkdown(content: string) {
-  return repairCompactMarkdownBlockLines(repairCompactMarkdownNormalized(content));
+  const math = maskMarkdownMath(content);
+  return math.restore(
+    repairCompactMarkdownBlockLines(repairCompactMarkdownNormalized(math.text)),
+  );
 }
 
 const COMPACT_FENCE_LANGUAGES = [

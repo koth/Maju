@@ -755,6 +755,35 @@ impl Application {
         Ok(())
     }
 
+    /// Rewrite the desktop's local handoff digest into a readable briefing with
+    /// one model call.
+    ///
+    /// Uses the provider configured for **session titles**
+    /// (`settings.session_title`) through the same local `codex_api_proxy` route
+    /// the image-view fallback uses, so any configured BYOK provider works
+    /// without new surface area. Blocking by design — the desktop command awaits
+    /// it on the blocking pool, matching `session_fork` — and every failure is
+    /// returned as a message for the dialog to show while it keeps the local
+    /// digest.
+    pub fn generate_handoff_summary(&self, material: &str) -> Result<String, String> {
+        let Some((provider, model)) = crate::settings::session_title_route(&self.app_paths) else {
+            return Err("未配置交接摘要模型（设置 → 会话标题）".to_string());
+        };
+        // BYOK keys are shared across families, so the image-view lookup is the
+        // right accessor for any configured provider.
+        let api_key = crate::settings::image_view_provider_secret(&self.app_paths, &provider);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to create handoff runtime: {error}"))?;
+        runtime.block_on(crate::handoff::polish_handoff(
+            &provider,
+            &model,
+            api_key.as_deref(),
+            material,
+        ))
+    }
+
     pub fn session_create(
         &mut self,
         agent: Option<AgentCliId>,

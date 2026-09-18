@@ -1,0 +1,149 @@
+/* Handoff dialog ("交接给下一个智能体"). Mirrors the fork dialog's language —
+   same backdrop, panel and footer button scale — with one editable text area in
+   place of the turn picker. Tokens come from theme.css only. */
+
+.handoff-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px;
+}
+
+.handoff-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: min(640px, 84vh);
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--panel-bg, var(--surface-bg));
+  box-shadow: var(--shadow-elevated);
+  gap: 12px;
+}
+
+.handoff-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.handoff-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.handoff-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.handoff-dialog-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.handoff-dialog-text {
+  flex: 1 1 auto;
+  min-height: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt-bg, var(--surface-bg));
+  color: var(--text-strong);
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+  overflow-y: auto;
+}
+
+.handoff-dialog-text:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.handoff-dialog-empty {
+  padding: 18px 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.handoff-dialog-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.handoff-dialog-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.handoff-dialog-error {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: color-mix(in srgb, var(--danger) 88%, var(--text-strong));
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.handoff-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.handoff-dialog-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.handoff-dialog-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.handoff-dialog-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.handoff-dialog-btn-primary {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.handoff-dialog-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.handoff-dialog-btn-quiet {
+  color: var(--text-muted);
+}

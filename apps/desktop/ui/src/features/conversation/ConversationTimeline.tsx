@@ -2,10 +2,10 @@ import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, useCal
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { GitFork } from "lucide-react";
+import { GitFork, Handshake } from "lucide-react";
 import { resolveAgentKind } from "../session/AgentIcon";
 import type { FileChangeSummary, MessageRole } from "../../types";
-import type { ToolInvocation, UiSnapshot } from "../../types";
+import type { ToolInvocation, AgentCliId, UiSnapshot } from "../../types";
 import { ChangesBar } from "../changes/ChangesBar";
 import { ToolCallCard } from "../tooling/ToolCallCard";
 import { ToolActivityGroupRow } from "../tooling/ToolActivityGroup";
@@ -18,6 +18,8 @@ import {
 } from "./streaming-message-store";
 import "./ConversationTimeline.css";
 import { ForkDialog } from "./ForkDialog";
+import { HandoffDialog } from "./HandoffDialog";
+import { buildHandoffDigest } from "./handoff";
 import { useProxyRetry, proxyRetryReasonLabel } from "./useProxyRetry";
 import { useNearViewportOnce } from "./useNearViewportOnce";
 
@@ -43,12 +45,6 @@ const STICKY_BOTTOM_THRESHOLD_PX = 96;
  *  always lands (and turn completion swaps in the authoritative snapshot
  *  body anyway). */
 const STREAMING_RENDER_MIN_INTERVAL_MS = 160;
-/** Tool cards kept visible at the tail of the ACTIVE turn; older tool runs in
- *  the same turn collapse into the "已处理 N 次工具调用" summary (still
- *  expandable). Without this cap a long dsh turn kept hundreds of live tool
- *  cards in the DOM, and every streaming chunk paid layout over that entire
- *  subtree — the "very laggy once the session has history" complaint. */
-const ACTIVE_TURN_VISIBLE_TOOLS = 8;
 /** Tail window rendered for thinking text. The backend keeps its live buffer
  *  tail-capped too; this second cap bounds the expanded panel's text node so
  *  mounting/updating it can never re-lay-out a multi-megabyte string (the
@@ -136,6 +132,15 @@ interface Props {
   /** Whether the "new worktree" fork destination is supported by the active
    *  agent backend; only gates the menu item's enabled state. */
   forkWorktreeSupported?: boolean;
+  /** Hand the conversation off to another agent: the timeline builds a local
+   *  briefing from the window and this starts the session that receives it —
+   *  on the agent the user picks in the dialog, with the briefing pre-loaded in
+   *  its composer. Absent → the handoff affordance is hidden. */
+  onHandoff?: (
+    digest: string,
+    agent: AgentCliId | null,
+    preset: string | null,
+  ) => Promise<void> | void;
 }
 
 export interface TimelineTurnChangeSet {
@@ -164,6 +169,8 @@ interface MessageRowProps {
   showActions?: boolean;
   /** Open the fork point picker anchored on this message's turn. */
   onForkOpen?: (messageId: string) => void;
+  /** Open the handoff briefing for the conversation through this message. */
+  onHandoffOpen?: (messageId: string) => void;
 }
 
 interface StreamingMarkdownProps {
@@ -497,6 +504,7 @@ const MessageRow = memo(function MessageRow({
   candidatePaths,
   showActions = false,
   onForkOpen,
+  onHandoffOpen,
 }: MessageRowProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(body);
@@ -691,6 +699,18 @@ const MessageRow = memo(function MessageRow({
                 onClick={() => onForkOpen(id)}
               >
                 <GitFork size={14} strokeWidth={2.1} aria-hidden="true" />
+              </button>
+            )}
+            {onHandoffOpen && (
+              <button
+                type="button"
+                className="msg-copy-btn msg-handoff-btn"
+                aria-label="交接给下一个智能体"
+                title="交接给下一个智能体"
+                aria-haspopup="dialog"
+                onClick={() => onHandoffOpen(id)}
+              >
+                <Handshake size={14} strokeWidth={2.1} aria-hidden="true" />
               </button>
             )}
           </div>
@@ -952,66 +972,14 @@ function buildTimelineCollapseState({
       (activeTurnStartIndex < 0 || (lastItem ? lastItem.index > activeTurnStartIndex : false));
 
     if (isCurrentTurn) {
-      // The active turn used to render every item uncollapsed — a long dsh
-      // turn then kept hundreds of live tool cards in the DOM, and every
-      // streaming chunk paid style/layout over that entire subtree. Collapse
-      // older tool runs exactly like completed turns, but keep the newest
-      // tools (plus the growing reply) visible so live progress stays
-      // readable. When the turn completes, the normal completed-turn grouping
-      // below takes over.
-      const toolItems = turnItems.filter((candidate) => candidate.kind === "tool");
-      if (toolItems.length > ACTIVE_TURN_VISIBLE_TOOLS) {
-        const keepThresholdIndex =
-          toolItems[toolItems.length - ACTIVE_TURN_VISIBLE_TOOLS].index;
-        // Kept tail = the newest tool runs plus everything from the newest
-        // assistant segment onward (the growing reply must stay visible).
-        // Everything BEFORE the tail — older tools AND older intermediate
-        // assistant narration — collapses into the summary. Anchoring the
-        // summary to the tail's first item keeps it hugging the top of the
-        // visible region; anchoring it to the last assistant instead (the old
-        // behavior) stranded it mid-conversation whenever newer segments
-        // streamed in below it.
-        const lastAssistant = [...turnItems]
-          .reverse()
-          .find((candidate) => candidate.kind === "assistant");
-        const keptStartIndex = Math.min(
-          keepThresholdIndex,
-          lastAssistant ? lastAssistant.index : Number.MAX_SAFE_INTEGER,
-        );
-        const anchor = turnItems.find((candidate) => candidate.index >= keptStartIndex);
-        if (anchor) {
-          // Change-set-bearing rows stay visible (the ChangesBar anchors there).
-          const activeItemsToCollapse = turnItems.filter(
-            (candidate) =>
-              candidate.index < anchor.index &&
-              !(
-                candidate.message &&
-                turnChangeSetsByMessageId[candidate.message.id]?.files.length
-              ),
-          );
-          const groupHiddenIndexes = new Set(
-            activeItemsToCollapse.map((candidate) => candidate.index),
-          );
-          for (const index of groupHiddenIndexes) {
-            hiddenIndexes.add(index);
-          }
-          // Duration keeps tracking the newest assistant segment even when the
-          // anchor itself is a tool (no message to measure against).
-          const lastAssistantMessage = lastAssistant?.message ?? null;
-          groupsBySummaryIndex.set(anchor.index, {
-            key: `${turnStartMessage?.id ?? "turn"}:active`,
-            items: activeItemsToCollapse,
-            itemCount: activeItemsToCollapse.length,
-            toolCount: activeItemsToCollapse.filter(
-              (candidate) => candidate.kind === "tool",
-            ).length,
-            durationLabel: lastAssistantMessage
-              ? elapsedLabelForTurn(turnStartMessage, lastAssistantMessage, activeItemsToCollapse)
-              : null,
-            userMessageId: turnStartMessage?.id ?? null,
-          });
-        }
-      }
+      // The turn-level summary is a *finished-turn* affordance: it appears when
+      // the turn ends and folds everything but the final reply. While the turn
+      // is still running nothing is folded away here — the live view keeps every
+      // assistant segment readable, and the only collapsing is the per-run
+      // activity groups (`buildToolActivityGroups`), which turn contiguous tool
+      // calls into one summary row each. Folding narration mid-turn hid the
+      // agent's own progress notes behind a top bar that then moved around as
+      // newer segments streamed in below it.
       turnItems = [];
       turnStartMessage = null;
       return;
@@ -1155,10 +1123,14 @@ export function ConversationTimeline({
   onLoadOlderHistory,
   onForkConversation,
   forkWorktreeSupported = false,
+  onHandoff,
 }: Props) {
   // 分叉点选择器（从这里创建聊天分支）：记录触发分叉按钮的消息 id，
   // 打开时预选该消息所在轮次。
   const [forkPickerMessageId, setForkPickerMessageId] = useState<string | null>(null);
+  // 交接（交给下一个智能体）：记录触发交接按钮的消息 id，摘要只覆盖该轮
+  // 及之前的对话；摘要本身在打开时由 handoff.ts 本地生成。
+  const [handoffMessageId, setHandoffMessageId] = useState<string | null>(null);
   // Remote workspaces store a synthetic ssh:// key in workspace.root. File
   // link resolution/open needs the real remote filesystem root instead.
   visibleWorkspaceRoot =
@@ -1919,6 +1891,19 @@ export function ConversationTimeline({
     setForkPickerMessageId(messageId);
   }, []);
 
+  // Stable identity for the same reason as `openForkPicker`: MessageRow is
+  // memoized, so an inline arrow would re-render every row per streaming delta.
+  const openHandoff = useCallback((messageId: string) => {
+    setHandoffMessageId(messageId);
+  }, []);
+
+  // The briefing is derived from the window the user is looking at, through the
+  // turn they clicked; recomputed only when that changes.
+  const handoffDigest = useMemo(
+    () => (handoffMessageId ? buildHandoffDigest(snapshot, handoffMessageId) : ""),
+    [snapshot, handoffMessageId],
+  );
+
   // One row renderer for every tool, shared by the standalone rows and the
   // expanded members of an activity group. Stable identity keeps the group's
   // memo intact across streaming deltas.
@@ -2011,6 +1996,12 @@ export function ConversationTimeline({
               onForkOpen={
                 onForkConversation && !(turnIsActive && msg.role === "Assistant" && isCurrentTurnMessage)
                   ? openForkPicker
+                  : undefined
+              }
+              // 交接同样只在已完成轮次上出现：摘要覆盖到这一轮为止。
+              onHandoffOpen={
+                onHandoff && !(turnIsActive && msg.role === "Assistant" && isCurrentTurnMessage)
+                  ? openHandoff
                   : undefined
               }
             />
@@ -2236,6 +2227,15 @@ export function ConversationTimeline({
           worktreeSupported={forkWorktreeSupported}
           onFork={onForkConversation}
           onClose={() => setForkPickerMessageId(null)}
+        />
+      )}
+
+      {/* 交接：本地生成的交接说明（可编辑），可复制或新建会话带入。 */}
+      {handoffMessageId && onHandoff && (
+        <HandoffDialog
+          digest={handoffDigest}
+          onStartNewSession={onHandoff}
+          onClose={() => setHandoffMessageId(null)}
         />
       )}
     </div>

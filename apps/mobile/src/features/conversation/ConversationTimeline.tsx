@@ -3,6 +3,9 @@ import { View, Text, FlatList, Pressable, StyleSheet, Image, Modal } from "react
 import type { UiSnapshot, ChatMessage, ToolInvocation } from "../../types";
 import { MarkdownBody } from "./MarkdownBody";
 import { ToolCallCard } from "../tooling/ToolCallCard";
+import { ToolActivityGroupRow } from "../tooling/ToolActivityGroup";
+import { TRANSCRIPT_GUTTER } from "../tooling/row-geometry";
+import { buildToolActivityGroups, isInvisibleTimelineItem } from "../tooling/tool-activity";
 import { ThinkingIndicator } from "../ui/ThinkingIndicator";
 import { EmptyState } from "../ui/EmptyState";
 import {
@@ -53,10 +56,17 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
   // Stable row identity: message id / tool id instead of the timeline index.
   // Index keys shift whenever a patch re-splices the tail, remounting every
   // row after the splice point (markdown re-parse, height churn, scroll
-  // jumps).
+  // jumps). A collapsed activity group keys off its first member's tool id,
+  // which is stable for as long as the run is.
+  //
+  // Contiguous runs of tool calls collapse into ONE summary row (desktop
+  // parity): the group renders at its first member's index and the remaining
+  // members are skipped. A run of one, a failure, a question/permission row
+  // and a child call all stay as their own rows — see `tool-activity.ts`.
+  const { byStartIndex, memberIndexes } = buildToolActivityGroups(snapshot.timeline, toolById);
   const rows: Row[] = [];
-  snapshot.timeline.forEach((item) => {
-    if (item === "Thinking" || (typeof item === "object" && "Thinking" in item)) {
+  snapshot.timeline.forEach((item, index) => {
+    if (isInvisibleTimelineItem(item)) {
       // Timeline Thinking markers render as nothing — exactly like the
       // desktop. The reducer pushes one per reasoning segment and LEAVES it
       // in place once real content lands, and ThinkingActivity does not touch
@@ -64,6 +74,15 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
       // burst that starts while the status is still Idle (typically every
       // turn after the first). The live indicator is driven by
       // thinking_status instead — see below.
+      return;
+    }
+    if (memberIndexes.has(index)) return;
+    const group = byStartIndex.get(index);
+    if (group) {
+      rows.push({
+        key: `g:${group.tools[0].id}`,
+        node: <ToolActivityGroupRow group={group} onStopTool={onStopTool} />,
+      });
       return;
     }
     if ("Message" in item) {
@@ -124,7 +143,14 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
       <FlatList<Row>
         ref={listRef}
         style={{ flex: 1 }}
-        contentContainerStyle={{ padding: spacing.md, paddingTop: spacing.xl }}
+        // The side gutter is owned by the tool-row geometry: rows hang their
+        // status bullet into it so their text lines up with the prose (desktop
+        // parity). 24px rather than the 12px used before.
+        contentContainerStyle={{
+          paddingHorizontal: TRANSCRIPT_GUTTER,
+          paddingTop: spacing.xl,
+          paddingBottom: spacing.md,
+        }}
         data={rows.slice().reverse()}
         inverted
         keyExtractor={rowKey}

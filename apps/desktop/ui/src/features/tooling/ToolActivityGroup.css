@@ -12,11 +12,14 @@
 .tool-activity-summary {
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* No gap: the summary's first child, when present, is the hanging bullet,
+     which already reserves its own slot (see `.tc-bullet`). A gap here would
+     push the label off the prose column the row is supposed to line up with. */
+  gap: 0;
   width: 100%;
   min-height: 24px;
-  padding: 0 4px;
-  margin: 0 -4px;
+  padding: 0 4px 0 calc(var(--tc-bullet-slot, 14px) + 4px);
+  margin: 0 -4px 0 calc(-1 * (var(--tc-bullet-slot, 14px) + 4px));
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -54,7 +57,6 @@
   font-size: 12px;
   transition: transform var(--transition-fast);
 }
-
 .tool-activity-group.is-expanded .tool-activity-chevron {
   transform: rotate(90deg);
 }
@@ -66,6 +68,19 @@
   margin: 0 0 2px 11px;
   padding-left: 13px;
   border-left: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
+}
+
+/* Members keep their bullet inline. This block already owns a 24px indent and a
+   hairline rule, so a hanging bullet would land on the rule — and the member
+   rows are supposed to read as nested inside the summary, not as siblings of
+   the prose around them. */
+.tool-activity-content .tc {
+  --tc-bullet-hang: 0px;
+}
+
+.tool-activity-content .tc-header-line {
+  padding-left: 4px;
+  margin-left: -4px;
 }
 
 .tool-activity-row {

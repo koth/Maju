@@ -472,11 +472,23 @@ pub struct SessionCancelValue {
     pub accepted: bool,
 }
 
-/// `session.history` request (`{ sessionId, beforeSeq?, maxMessages? }`).
+/// `session.history` request (`{ sessionId, throughSeq, beforeSeq?, maxMessages? }`).
+///
+/// `through_seq` is the harness page's *inclusive log cut* — the session's
+/// current cursor, which the follow opening frame reports
+/// (`sessionSubscribed.lastSeq`) and [`crate::session::SessionSink::last_seq`]
+/// tracks. It is mandatory: the harness caps the page at `throughSeq + 1`, so a
+/// page requested without a real cursor comes back **empty** rather than
+/// erroring. Deriving it from `before_seq` (the old behavior, defaulting to
+/// `-1`) silently returned nothing for every first page — which is why the
+/// fork boundary walk never saw a single prompt or `turn/end`, and resume
+/// replay replayed nothing.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionHistoryPayload {
     #[serde(rename = "sessionId")]
     pub session_id: SessionId,
+    /// Inclusive log cut: the newest seq the caller knows for this session.
+    pub through_seq: u64,
     #[serde(skip_serializing_if = "Option::is_none", rename = "beforeSeq")]
     pub before_seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "maxMessages")]

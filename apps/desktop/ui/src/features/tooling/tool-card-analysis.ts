@@ -2094,20 +2094,34 @@ function isGenericPermissionAnswer(answer: string): boolean {
   ].includes(normalized);
 }
 
-export function statusBullet(
-  status: ToolStatus
-): { char: string; className: string } {
-  switch (status) {
-    case "Pending":
-    case "Running":
-      return { char: "•", className: "tc-bullet-active" };
-    case "Succeeded":
-      return { char: "•", className: "tc-bullet-ok" };
-    case "Failed":
-      return { char: "•", className: "tc-bullet-err" };
-    case "Interrupted":
-      return { char: "•", className: "tc-bullet-warn" };
-  }
+export interface StatusBullet {
+  char: string;
+  className: string;
+}
+
+/**
+ * The row's leading marker, or `null` when the row needs none.
+ *
+ * A row draws a bullet only when the bullet is the only thing that can say
+ * what the verb cannot: that the call is still going (live, accent, blinking)
+ * or that it did not finish cleanly (red / amber, so a failure is findable
+ * while scrolling). A `Succeeded` call's verb already reads 已运行 / 已编辑 /
+ * 已探索, so a second neutral marker in front of every finished row is pure
+ * visual noise — the largest class of rows in a long session.
+ *
+ * The mapping is a total record rather than a switch so a new `ToolStatus`
+ * cannot silently fall through to "no marker" (which would hide failures).
+ */
+const STATUS_BULLETS: Record<ToolStatus, StatusBullet | null> = {
+  Pending: { char: "•", className: "tc-bullet-active" },
+  Running: { char: "•", className: "tc-bullet-active" },
+  Succeeded: null,
+  Failed: { char: "•", className: "tc-bullet-err" },
+  Interrupted: { char: "•", className: "tc-bullet-warn" },
+};
+
+export function statusBullet(status: ToolStatus): StatusBullet | null {
+  return STATUS_BULLETS[status] ?? null;
 }
 
 /** Returns true for vague/unhelpful server errors that add no value when displayed */

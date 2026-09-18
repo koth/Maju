@@ -33,7 +33,7 @@ function makeTool(overrides: Partial<ToolInvocation> = {}): ToolInvocation {
 
 describe("ToolCallCard animation states", () => {
   const runningStatuses: ToolStatus[] = ["Pending", "Running"];
-  const terminalStatuses: ToolStatus[] = ["Succeeded", "Failed", "Interrupted"];
+  const abnormalStatuses: ToolStatus[] = ["Failed", "Interrupted"];
 
   runningStatuses.forEach((status) => {
     it(`uses tc-bullet-active for ${status} tool`, () => {
@@ -46,15 +46,27 @@ describe("ToolCallCard animation states", () => {
     });
   });
 
-  terminalStatuses.forEach((status) => {
-    it(`does not use tc-bullet-active for ${status} tool`, () => {
+  abnormalStatuses.forEach((status) => {
+    it(`keeps a non-active marker for ${status} tool`, () => {
       const tool = makeTool({ status });
       const { container } = render(
         <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
       );
       const bullet = container.querySelector(".tc-bullet");
+      expect(bullet).not.toBeNull();
       expect(bullet!.classList.contains("tc-bullet-active")).toBe(false);
     });
+  });
+
+  it("draws no bullet for a succeeded tool", () => {
+    // The verb already says 已探索 / 已运行 / 已编辑, so a neutral dot in front
+    // of every finished row was pure noise.
+    const tool = makeTool({ status: "Succeeded" });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+    expect(container.querySelector(".tc-bullet")).toBeNull();
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已探索");
   });
 
   it("shows editing verb for edit tools with diff_paths", () => {

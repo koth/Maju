@@ -34,7 +34,7 @@ export function deriveToolPresentation(tool: ToolInvocation): ToolPresentation {
           : "running";
 
   const command = extractCommand(tool);
-  const verb = verbFor(tool, command, running);
+  const verb = verbFor(tool, running);
   const title = headerTitle(tool, command);
   return {
     tone,
@@ -46,13 +46,62 @@ export function deriveToolPresentation(tool: ToolInvocation): ToolPresentation {
   };
 }
 
-function verbFor(tool: ToolInvocation, command: string | null, running: boolean): string {
+/// What a call *did*, independent of whether it is still running. The
+/// activity summary and the row verb are both derived from this, so a
+/// collapsed run can never describe its members with a different vocabulary
+/// than the rows it stands in for (desktop `classifyTool`, reduced to the
+/// signals the phone actually receives).
+export type ToolActivityCategory = "exploring" | "executing" | "editing" | "asking";
+
+export function classifyToolActivity(tool: ToolInvocation): ToolActivityCategory {
+  if (isQuestionTool(tool)) return "asking";
+  if (isEditTool(tool)) return "editing";
+  const command = extractCommand(tool);
+  if (command && isExplorationCommand(command)) return "exploring";
+  if (isExploreTool(tool)) return "exploring";
+  return "executing";
+}
+
+/// Read-only tool names — the desktop `isExploreTool` list. Without this a
+/// file `Read` (no shell command to inspect) fell through to "executing" and
+/// its row claimed it "Ran" a file.
+const EXPLORE_TOOL_PATTERN = /read|view|open|search|list|glob|grep|find|webfetch|fetch/i;
+
+function isExploreTool(tool: ToolInvocation): boolean {
+  if (EXPLORE_TOOL_PATTERN.test(`${tool.kind} ${tool.name}`)) return true;
+  return rawInputHasPath(tool);
+}
+
+function rawInputHasPath(tool: ToolInvocation): boolean {
+  if (!tool.raw_input) return false;
+  try {
+    const input = JSON.parse(tool.raw_input) as Record<string, unknown>;
+    return Boolean(input.file_path || input.filePath || input.path);
+  } catch {
+    return false;
+  }
+}
+
+const RUNNING_VERBS: Record<ToolActivityCategory, string> = {
+  exploring: "Searching",
+  executing: "Running",
+  editing: "Editing",
+  asking: "Asking",
+};
+
+/// Past-tense verbs, shared with the activity summary.
+export const FINISHED_VERBS: Record<ToolActivityCategory, string> = {
+  exploring: "Searched",
+  executing: "Ran",
+  editing: "Edited",
+  asking: "Asked",
+};
+
+function verbFor(tool: ToolInvocation, running: boolean): string {
   if (tool.status === "Failed") return "Failed";
   if (tool.status === "Interrupted") return "Interrupted";
-  if (isQuestionTool(tool)) return running ? "Asking" : "Asked";
-  if (isEditTool(tool)) return running ? "Editing" : "Edited";
-  if (command && isExplorationCommand(command)) return running ? "Searching" : "Searched";
-  return running ? "Running" : "Ran";
+  const category = classifyToolActivity(tool);
+  return running ? RUNNING_VERBS[category] : FINISHED_VERBS[category];
 }
 
 function isEditTool(tool: ToolInvocation): boolean {
@@ -64,6 +113,7 @@ function isEditTool(tool: ToolInvocation): boolean {
     tool.diff_previews.length > 0
   );
 }
+
 
 function isQuestionTool(tool: ToolInvocation): boolean {
   return (tool.permission_input?.questions.length ?? 0) > 0;

@@ -49,6 +49,17 @@ function readTool(id: string, path: string) {
   return tool({ id, call_id: id, name: "Read", kind: "read", raw_input: JSON.stringify({ path }) });
 }
 
+function editTool(id: string, path: string) {
+  return tool({
+    id,
+    call_id: id,
+    name: "Edit",
+    kind: "edit",
+    raw_input: JSON.stringify({ file_path: path, old_string: "a", new_string: "b" }),
+    diff_paths: [path],
+  });
+}
+
 function toolsMap(items: ToolInvocation[]) {
   return new Map(items.map((entry) => [entry.id, entry]));
 }
@@ -93,15 +104,8 @@ describe("tool activity grouping", () => {
     expect(splitGroups.memberIndexes.size).toBe(0);
   });
 
-  it("keeps failures, edits, questions and permission rows out of groups", () => {
+  it("keeps failures, questions and permission rows out of groups", () => {
     const failed = commandTool("failed", "false", "Failed");
-    const edited = tool({
-      id: "edited",
-      call_id: "edited",
-      name: "Edit",
-      kind: "edit",
-      raw_input: JSON.stringify({ file_path: "/repo/x.ts", old_string: "a", new_string: "b" }),
-    });
     const question = tool({
       id: "question",
       call_id: "question",
@@ -109,35 +113,54 @@ describe("tool activity grouping", () => {
       kind: "ask",
       permission_input: { questions: [] },
     });
-    const diffTool = tool({
-      id: "diff",
-      call_id: "diff",
-      name: "Edit",
-      kind: "edit",
-      diff_previews: [
-        {
-          path: "/repo/y.ts",
-          hunks: [
-            {
-              heading: "@@ -1 +1 @@",
-              lines: [],
-            },
-          ],
-        },
-      ],
-    });
 
-    for (const entry of [failed, edited, question, diffTool]) {
+    for (const entry of [failed, question]) {
       expect(isGroupableTool(entry), entry.id).toBe(false);
     }
 
-    const timeline: TimelineItem[] = [
-      { Tool: "failed" },
-      { Tool: "edited" },
-      { Tool: "question" },
-      { Tool: "diff" },
+    const timeline: TimelineItem[] = [{ Tool: "failed" }, { Tool: "question" }];
+    expect(
+      buildToolActivityGroups(timeline, toolsMap([failed, question])).byStartIndex.size,
+    ).toBe(0);
+  });
+
+  it("folds edits into the run and counts the files they touched", () => {
+    // The screenshot case: edits and commands alternate in one stretch of work.
+    // Every row belongs to the same group, and the edits are summarized by file
+    // rather than by call.
+    const tools = [
+      editTool("e1", "/repo/scripts/one.py"),
+      commandTool("c1", "scp -P 36000 scripts/one.py root@host:/data/"),
+      editTool("e2", "/repo/scripts/two.py"),
+      editTool("e3", "/repo/scripts/two.py"),
+      readTool("r1", "/repo/scripts/two.py"),
     ];
-    expect(buildToolActivityGroups(timeline, toolsMap([failed, edited, question, diffTool])).byStartIndex.size).toBe(0);
+    const timeline: TimelineItem[] = tools.map((entry) => ({ Tool: entry.id }));
+
+    const { byStartIndex, memberIndexes } = buildToolActivityGroups(timeline, toolsMap(tools));
+
+    const group = byStartIndex.get(0);
+    expect(group?.tools.map((entry) => entry.id)).toEqual(["e1", "c1", "e2", "e3", "r1"]);
+    // Two distinct files edited across three calls, plus the other activities.
+    expect(group?.summary).toBe("已探索 ×1 · 已运行 ×1 · 已编辑 2 个文件");
+    expect([...memberIndexes].sort()).toEqual([1, 2, 3, 4]);
+  });
+
+  it("does not let a thinking segment break the run", () => {
+    // Reasoning renders nothing in the timeline (history folds it in), so it must
+    // not split one stretch of work into two summaries.
+    const tools = [readTool("a", "/repo/one.ts"), commandTool("b", "ls")];
+    const timeline: TimelineItem[] = [
+      { Tool: "a" },
+      "Thinking" as unknown as TimelineItem,
+      { Thinking: "thinking-1" } as unknown as TimelineItem,
+      { Tool: "b" },
+    ];
+
+    const { byStartIndex, memberIndexes } = buildToolActivityGroups(timeline, toolsMap(tools));
+
+    expect(byStartIndex.get(0)?.tools.map((entry) => entry.id)).toEqual(["a", "b"]);
+    expect([...memberIndexes]).toEqual([3]);
   });
 
   it("leaves out rows the timeline would not render", () => {
@@ -174,5 +197,12 @@ describe("tool activity grouping", () => {
         readTool("c", "/repo/two.ts"),
       ]),
     ).toBe("已探索 ×2 · 已运行 ×1");
+    // An edit whose row reported no diff paths still counts as one file.
+    expect(
+      summarizeToolActivity([
+        tool({ id: "e", call_id: "e", name: "Edit", kind: "edit" }),
+        editTool("e2", "/repo/one.ts"),
+      ]),
+    ).toBe("已编辑 2 个文件");
   });
 });

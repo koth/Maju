@@ -102,6 +102,22 @@ pub fn session_cancel(state: State<'_, AppState>) -> Result<(), String> {
     state.with_app(|app| app.cancel_prompt())
 }
 
+/// Polish the desktop's local handoff digest into a readable briefing with one
+/// model call (the provider configured for session titles).
+///
+/// Async + blocking pool: the request is a full model round trip, and the dialog
+/// stays interactive while it runs. Failures come back as messages so the dialog
+/// can keep showing its local digest.
+#[tauri::command]
+pub async fn session_handoff_summary(app: AppHandle, material: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_app(|app_state| app_state.generate_handoff_summary(&material))
+    })
+    .await
+    .map_err(|e| format!("Handoff summary task failed: {e}"))?
+}
+
 #[tauri::command]
 pub fn session_stop_tool(state: State<'_, AppState>, tool_call_id: String) -> Result<(), String> {
     state.with_app(|app| app.stop_tool(&tool_call_id))

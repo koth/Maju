@@ -14,6 +14,8 @@ approval. See the requirements at
   ChaCha20-Poly1305 AEAD, byte-aligned with `crates/relay-client::crypto`
 - `expo-secure-store` (Keychain/Keystore) for the device identity + binding
 - `expo-camera` for QR scanning; `@react-navigation/native-stack` for nav
+- `react-native-webview` + `katex` for display math (LaTeX) in assistant
+  replies — see "Math rendering" below
 - Vitest for the pure-logic + protocol + integration tests
 
 The crypto, framing, relay connection, reducer, pairing, permission, and
@@ -49,6 +51,26 @@ Build a dev client (requires Xcode/Android Studio toolchains):
 ```bash
 npx expo prebuild           # generate native ios/ android/ projects
 npx expo run:ios            # or run:android
+```
+
+## Math rendering
+
+Assistant replies carry LaTeX. How it is drawn differs by construct, because
+React Native has no inline layout:
+
+| Construct | Renderer |
+|---|---|
+| `$$…$$` / `\[…\]` (display) | KaTeX inside a `react-native-webview` (`MathFormula.tsx`). The document is built by `math-html.ts` and is fully self-contained: `katex-css.generated.ts` inlines KaTeX's stylesheet with every woff2 font as a `data:` URI, so the WebView needs no filesystem or network. A formula wider than the column is scaled down to fit; the document reports its height back through `postMessage`. |
+| `$…$` (inline) | A LaTeX → Unicode pass (`latex-inline.ts`) rendered as nested `<Text>`. RN cannot place a native view inside a text run, so `$H_0$` becomes H₀ and `$\hat{p}$` becomes p̂. Lossy by design: `\frac{a}{b}` degrades to `a/b`. |
+
+`math-markdown.ts` extracts both kinds before `repairCompactMarkdown` runs
+(the repair passes would otherwise split `\nabla` / `\neq` at the literal `\n`)
+and cuts display formulas out into their own segments.
+
+After changing the `katex` version, regenerate the inlined stylesheet:
+
+```bash
+node scripts/generate-katex-css.mjs
 ```
 
 ## App icon

@@ -4,6 +4,7 @@ mod bootstrap;
 pub mod dsh_bringup;
 mod editor_files;
 mod file_tracker;
+mod handoff;
 mod image_api;
 mod image_capability;
 mod image_mcp;

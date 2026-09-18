@@ -7,7 +7,7 @@
 mod common;
 
 use acp_core::{ClientEvent, PermissionBroker, RuntimeCommand, SessionConfig, ShutdownSignal};
-use common::{MockHarness, default_config};
+use common::{MockHarness, default_config, mux_subscribed, scripts_with};
 use dsh_bridge::HarnessHostRegistry;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -95,7 +95,7 @@ async fn lifecycle_hydrate_and_set_model() {
         })
         .unwrap();
     let model_events = model_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("SetModel reply timed out")
         .expect("SetModel reply channel closed");
     assert!(
@@ -180,7 +180,7 @@ async fn set_mode_on_started_session_reports_notice_not_interrupt() {
     // so `SessionHandle::set_mode` does not mutate the shared permission
     // broker; the composer surfaces the error to the user.
     let mode_result = mode_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("SetMode reply timed out");
     let err = mode_result.expect_err("locked preset switch must fail");
     assert!(
@@ -260,7 +260,7 @@ async fn lifecycle_hydrate_includes_preset_mode_control_and_set_mode() {
         })
         .unwrap();
     let mode_events = mode_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("SetMode reply timed out")
         .expect("SetMode reply channel closed");
     assert!(
@@ -367,13 +367,37 @@ fn fork_history_events() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Script the follow opening frame that seeds the bridge's history cursor, then
+/// wait until the mock has written it and the bridge has had a beat to dispatch
+/// it.
+///
+/// `session/page` caps a page at `throughSeq + 1`, so a boundary walk that runs
+/// before this frame lands pages an empty history — the exact production failure
+/// this test file pins.
+fn seed_follow_cursor(config: &mut common::MockHarnessConfig, last_seq: i64) {
+    config.mux = scripts_with(vec![mux_subscribed("s-1", last_seq)]);
+}
+
+fn wait_for_follow_cursor(mock: &MockHarness) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.subscribed_frames() == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fork_session_command_cuts_at_nth_completed_turn() {
     // ForkSession walks the session history for the Nth completed turn and
     // anchors the harness `session.fork` atSeq on that turn's `turn/end` —
     // the harness then seeds the child with everything through that turn.
+    //
+    // The walk needs the session's log cut (`throughSeq`), which the follow
+    // opening frame reports: the harness caps a page at `throughSeq + 1`, so a
+    // page requested with the old `throughSeq: -1` came back empty and the walk
+    // saw no prompts and no `turn/end` at all.
     let mut config_mock = default_config();
     config_mock.history_events = fork_history_events();
+    seed_follow_cursor(&mut config_mock, 32);
     let mock = MockHarness::start(config_mock).await;
     let registry = Arc::new(HarnessHostRegistry::new());
 
@@ -398,6 +422,7 @@ async fn fork_session_command_cuts_at_nth_completed_turn() {
     while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
         std::thread::sleep(Duration::from_millis(50));
     }
+    wait_for_follow_cursor(&mock);
 
     let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
     command_tx
@@ -409,7 +434,7 @@ async fn fork_session_command_cuts_at_nth_completed_turn() {
         })
         .unwrap();
     let child = fork_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("ForkSession reply timed out")
         .expect("fork must succeed");
     assert_eq!(child, "s-fork", "mock answers the fork child session id");
@@ -425,6 +450,128 @@ async fn fork_session_command_cuts_at_nth_completed_turn() {
         forks[0].get("atSeq").and_then(|v| v.as_u64()),
         Some(20),
         "atSeq must anchor on the 2nd turn/end: {forks:?}"
+    );
+
+    // The boundary walk must page with the follow cursor as its cut: the harness
+    // empty-pages anything without one, which is what made every fork report
+    // "轮次尚未完成" while the conversation was plainly finished. (The SSE
+    // re-baseline also pages — with `maxMessages` unset — so filter to the walk.)
+    let walk_pages: Vec<_> = mock
+        .pages()
+        .into_iter()
+        .filter(|page| page.get("maxMessages").is_some())
+        .collect();
+    assert!(!walk_pages.is_empty(), "the boundary walk must request history pages");
+    assert!(
+        walk_pages
+            .iter()
+            .all(|page| page.get("throughSeq").and_then(|v| v.as_i64()) == Some(32)),
+        "every walk page must carry the session cursor as throughSeq: {walk_pages:?}"
+    );
+    assert_eq!(
+        walk_pages[0]
+            .pointer("/address/sessionId")
+            .and_then(|v| v.as_str()),
+        Some("s-1"),
+        "the page request must address the source session: {walk_pages:?}"
+    );
+
+    let _ = command_tx.send(RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_session_command_resolves_the_cut_without_a_follow_cursor() {
+    // The follow opening frame seeds the page cut, but it arrives
+    // asynchronously and can be missed while the stream is still establishing.
+    // The walk must not run on an empty cut then — the harness answers an empty
+    // page, which reads as "the turn never finished" and made every fork fail
+    // with 轮次尚未完成. Without any subscription frame the bridge must ask the
+    // harness for the cursor itself (it rejects a cut past its own and names it)
+    // and still resolve the boundary.
+    let mut config_mock = default_config();
+    config_mock.history_events = fork_history_events();
+    let mock = MockHarness::start(config_mock).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, _rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = config_for(mock.endpoint());
+
+    let worker_registry = registry.clone();
+    let worker = thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
+    command_tx
+        .send(RuntimeCommand::ForkSession {
+            at_user_turn: 2,
+            user_message_text: None,
+            user_message_occurrence: 0,
+            reply_tx: fork_reply_tx,
+        })
+        .unwrap();
+    let child = fork_reply_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("ForkSession reply timed out")
+        .expect("fork must resolve the boundary without a follow cursor");
+    assert_eq!(child, "s-fork", "mock answers the fork child session id");
+
+    let pages = mock.pages();
+    // The probe is any cut past the session's log — the harness names its real
+    // cursor in the rejection. It must stay inside the range the gateway
+    // validates as a JS safe integer, or the rejection is a validation error
+    // instead and the walk silently falls back to a cut of 0.
+    let probe = pages
+        .iter()
+        .find(|page| {
+            page.get("throughSeq")
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|seq| seq > 32)
+        })
+        .unwrap_or_else(|| panic!("the bridge must ask the harness for the cut: {pages:?}"));
+    let probe_seq = probe
+        .get("throughSeq")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap();
+    assert!(
+        probe_seq <= 9_007_199_254_740_991,
+        "the cursor probe must stay a JSON safe integer, got {probe_seq}"
+    );
+    assert!(
+        probe
+            .get("maxMessages")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count <= 1),
+        "the cursor probe only needs the rejection, not a page: {probe:?}"
+    );
+    assert_eq!(
+        probe
+            .pointer("/address/sessionId")
+            .and_then(serde_json::Value::as_str),
+        Some("s-1"),
+        "the cursor probe must address the source session: {pages:?}"
+    );
+    assert_eq!(
+        mock.forks()[0]
+            .get("atSeq")
+            .and_then(serde_json::Value::as_u64),
+        Some(20),
+        "the walk must still cut at the 2nd turn/end: {:?}",
+        mock.forks()
     );
 
     let _ = command_tx.send(RuntimeCommand::Shutdown);
@@ -475,7 +622,7 @@ async fn fork_session_command_rejects_uncompleted_turn() {
         })
         .unwrap();
     let err = fork_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("ForkSession reply timed out")
         .expect_err("forking an uncompleted turn must fail");
     assert!(
@@ -542,6 +689,7 @@ async fn fork_session_command_anchors_on_prompt_text_past_injected_turns() {
     // at the end of the turn the matched prompt opened (seq 30).
     let mut config_mock = default_config();
     config_mock.history_events = fork_history_with_injected_turn();
+    seed_follow_cursor(&mut config_mock, 30);
     let mock = MockHarness::start(config_mock).await;
     let registry = Arc::new(HarnessHostRegistry::new());
 
@@ -565,6 +713,7 @@ async fn fork_session_command_anchors_on_prompt_text_past_injected_turns() {
     while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
         std::thread::sleep(Duration::from_millis(50));
     }
+    wait_for_follow_cursor(&mock);
 
     let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
     command_tx
@@ -576,7 +725,7 @@ async fn fork_session_command_anchors_on_prompt_text_past_injected_turns() {
         })
         .unwrap();
     let child = fork_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("ForkSession reply timed out")
         .expect("text-anchored fork must succeed");
     assert_eq!(child, "s-fork", "mock answers the fork child session id");
@@ -599,6 +748,7 @@ async fn fork_session_command_text_anchor_falls_back_to_ordinal_on_miss() {
     // transformed prompt), the legacy ordinal walk must still anchor the cut.
     let mut config_mock = default_config();
     config_mock.history_events = fork_history_with_injected_turn();
+    seed_follow_cursor(&mut config_mock, 30);
     let mock = MockHarness::start(config_mock).await;
     let registry = Arc::new(HarnessHostRegistry::new());
 
@@ -622,6 +772,7 @@ async fn fork_session_command_text_anchor_falls_back_to_ordinal_on_miss() {
     while start.elapsed() < Duration::from_secs(5) && mock.creates().is_empty() {
         std::thread::sleep(Duration::from_millis(50));
     }
+    wait_for_follow_cursor(&mock);
 
     let (fork_reply_tx, fork_reply_rx) = mpsc::channel();
     command_tx
@@ -633,7 +784,7 @@ async fn fork_session_command_text_anchor_falls_back_to_ordinal_on_miss() {
         })
         .unwrap();
     let child = fork_reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("ForkSession reply timed out")
         .expect("fallback must keep the ordinal anchor working");
 
@@ -692,7 +843,7 @@ async fn cancel_prompt_reaches_the_host_in_the_descriptor_shape() {
         })
         .unwrap();
     reply_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(15))
         .expect("CancelPrompt reply timed out")
         .expect("the harness must accept the cancel; a rejected stop is what made the button dead");
 

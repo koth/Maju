@@ -1,51 +1,26 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { View, Text, Pressable, StyleSheet, Animated, Easing, Vibration } from "react-native";
 import type { ToolInvocation } from "../../types";
 import { styles, colors, spacing, radius } from "../theme";
-import { deriveToolPresentation, type ToolTone } from "./tool-presentation";
+import { deriveToolPresentation } from "./tool-presentation";
+import { BULLET_HANG, ROW_PADDING } from "./row-geometry";
+import { StatusBullet, TONE_COLOR } from "./StatusBullet";
 import { compactPreviewHunks } from "./compact-diff";
 
 interface Props {
   tool: ToolInvocation;
   onStop?: (toolCallId: string) => void;
-}
-
-const TONE_COLOR: Record<ToolTone, string> = {
-  running: colors.accent,
-  ok: colors.textFaint,
-  danger: colors.danger,
-  warning: colors.warn,
-};
-
-// Status bullet with the desktop `tc-bullet-active` blink cadence while the
-// tool is running; static otherwise.
-function StatusBullet({ running, color }: { running: boolean; color: string }) {
-  const opacity = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    if (!running) {
-      opacity.stopAnimation();
-      opacity.setValue(0.9);
-      return;
-    }
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.25, duration: 550, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 1, duration: 550, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      ]),
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [running, opacity]);
-  return (
-    <Animated.Text style={[cardStyles.bullet, { color, opacity }]}>{"\u25CF"}</Animated.Text>
-  );
+  /// Set for rows that already live inside an indented container (the expanded
+  /// members of an activity group): their bullet stays inline instead of
+  /// hanging into a gutter they do not own.
+  indented?: boolean;
 }
 
 // Collapsed tool row matching the desktop ToolCallCard: a flat
 // `● verb  title (+N -N) ›` line instead of a boxed card. Expanding reveals
 // the `└`-prefixed output block, diff list, and raw request/result — the
 // same sections the desktop shows, without tabs.
-function ToolCallCardImpl({ tool, onStop }: Props) {
+function ToolCallCardImpl({ tool, onStop, indented = false }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const spin = useRef(new Animated.Value(0)).current;
@@ -90,9 +65,20 @@ function ToolCallCardImpl({ tool, onStop }: Props) {
         disabled={!presentation.hasDetail}
         accessibilityRole="button"
         accessibilityState={{ expanded }}
-        style={({ pressed }) => [cardStyles.header, pressed && presentation.hasDetail ? cardStyles.headerPressed : null]}
+        style={({ pressed }) => [
+          cardStyles.header,
+          indented ? cardStyles.headerIndented : cardStyles.headerHanging,
+          pressed && presentation.hasDetail ? cardStyles.headerPressed : null,
+        ]}
       >
-        <StatusBullet running={running} color={TONE_COLOR[presentation.tone]} />
+        {/* Desktop parity: only a row that still needs a marker draws one. A
+            succeeded call's verb (已运行 / 已编辑) already carries the state, so
+            a neutral dot in front of every finished row is pure noise; the
+            gutter stays reserved either way (the bullet's width equals its hang
+            in `row-geometry`), so the verb does not move. */}
+        {presentation.tone !== "ok" ? (
+          <StatusBullet running={running} color={TONE_COLOR[presentation.tone]} hang={indented ? 0 : undefined} />
+        ) : null}
         <Text style={cardStyles.verb} numberOfLines={1}>
           {presentation.verb}
         </Text>
@@ -222,16 +208,23 @@ const cardStyles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.xs + 2,
+    paddingRight: ROW_PADDING,
     borderRadius: radius.sm,
     minWidth: 0,
   },
+  // Hanging geometry (desktop parity): the box bleeds `BULLET_HANG` into the
+  // left gutter and pads the same amount back, so the row's TEXT still starts on
+  // the transcript's prose column while the bullet sits out in the gutter. Only
+  // the left side bleeds — the right edge stays where it was.
+  headerHanging: {
+    paddingLeft: BULLET_HANG,
+    marginLeft: -BULLET_HANG,
+  },
+  headerIndented: {
+    paddingLeft: ROW_PADDING,
+  },
   headerPressed: {
     backgroundColor: colors.surface,
-  },
-  bullet: {
-    fontSize: 7,
-    marginRight: spacing.sm,
   },
   verb: {
     color: colors.text,
@@ -270,7 +263,10 @@ const cardStyles = StyleSheet.create({
     fontWeight: "600",
   },
   detail: {
-    paddingLeft: 18,
+    // Indented under the row rather than flush with the prose column: the
+    // header text now starts at the column edge, so the detail needs its own
+    // small step to read as belonging to the row above it.
+    paddingLeft: spacing.md,
     paddingTop: spacing.xs,
     paddingBottom: spacing.xs,
   },

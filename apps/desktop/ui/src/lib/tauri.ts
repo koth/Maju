@@ -383,8 +383,7 @@ export async function sessionFork(
 
 /** One selectable fork branch point: a turn's opening user prompt plus its
  *  reply preview. Built from the session's FULL persisted history. */
-export interface SessionForkCandidate {
-  turn_ordinal: number;
+export interface SessionForkCandidate {  turn_ordinal: number;
   user_message_id: string;
   user_excerpt: string;
   reply_excerpt: string;
@@ -393,6 +392,13 @@ export interface SessionForkCandidate {
 /** List every fork branch point of the active session (all turns). */
 export async function sessionForkCandidates(): Promise<SessionForkCandidate[]> {
   return invoke<SessionForkCandidate[]>("session_fork_candidates");
+}
+
+/** Rewrite the local handoff digest into a readable briefing with one model call
+ *  (the provider configured for session titles). Rejects with a message the
+ *  dialog shows while keeping the local digest. */
+export async function sessionHandoffSummary(material: string): Promise<string> {
+  return invoke<string>("session_handoff_summary", { material });
 }
 
 export async function sessionDelete(

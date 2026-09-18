@@ -28,6 +28,7 @@ import {
   sameOrNestedPath,
   statusBullet,
   toolVerb,
+  type StatusBullet,
   uniqueStrings,
   type ToolCategory,
 } from "./tool-card-analysis";
@@ -126,7 +127,8 @@ interface ToolRenderModel {
   hasReviewableDiff: boolean;
   effectiveCategory: ToolCategory;
   verb: string;
-  bullet: { char: string; className: string };
+  /// `null` for rows that need no marker (a call that finished successfully).
+  bullet: StatusBullet | null;
   outputLines: { lines: string[]; omitted: number };
   detailLines: { lines: string[]; omitted: number };
   logEntries: { entries: ToolInvocation["logs"]; omitted: number };
@@ -423,7 +425,7 @@ function ToolCallCardImpl({
 
   return (
     <div className={`tc ${nested ? "tc-nested" : ""}`}>
-      {/* Header line: bullet + verb + title + expand chevron on hover */}
+      {/* Header line: optional status bullet + verb + title + expand chevron */}
       <div className="tc-line-wrap">
         <button
           type="button"
@@ -432,7 +434,11 @@ function ToolCallCardImpl({
           aria-expanded={hasDetail ? expanded : undefined}
           disabled={!hasDetail}
         >
-          <span className={`tc-bullet ${bullet.className}`}>{bullet.char}</span>
+          {bullet && (
+            <span className={`tc-bullet ${bullet.className}`} aria-hidden="true">
+              {bullet.char}
+            </span>
+          )}
           <span className="tc-verb">{verb}</span>
           <span className="tc-cmd">{headerTitle}</span>
           {effectiveCategory === "editing" && hasReviewableDiff && (

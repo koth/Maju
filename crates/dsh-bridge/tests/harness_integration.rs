@@ -10,8 +10,8 @@ mod common;
 use acp_core::{ClientEvent, PermissionBroker};
 use common::{
     HoldFramesUntil, MockHarness, MuxEnd, MuxScript, default_config, follow_assistant_stream,
-    history_event, mux_assistant_final, mux_assistant_text_delta, mux_host_event,
-    mux_session_event, mux_subscribed, scripts_with,
+    history_event, history_event_with_view, mux_assistant_final, mux_assistant_text_delta,
+    mux_host_event, mux_session_event, mux_subscribed, scripts_with,
 };
 use dsh_bridge::{HarnessHostRegistry, HttpClient};
 use serde_json::{Value, json};
@@ -656,10 +656,11 @@ async fn session_restore_replays_history_before_started() {
             "assistant/message",
             json!({ "turn": 1, "step": 1, "message": { "role": "assistant", "content": [{ "type": "text", "text": "prior answer" }] } }),
         ),
-        history_event(
+        history_event_with_view(
             2,
             "tool/call",
             json!({ "turn": 1, "step": 1, "callId": "call-prior", "name": "bash", "arguments": "{}" }),
+            json!({ "for": "call", "view": { "card": "terminal", "title": "ls" } }),
         ),
         history_event(
             3,
@@ -702,17 +703,15 @@ async fn session_restore_replays_history_before_started() {
     // History events replay before SessionStarted.
     let mut saw_history_text = false;
     let mut saw_started = false;
-    let mut saw_prior_tool = false;
+    let mut replayed_tool_start = false;
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(5)
-        && !(saw_history_text && saw_prior_tool && saw_started)
-    {
+    while start.elapsed() < Duration::from_secs(5) && !(saw_history_text && saw_started) {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(ClientEvent::MessageChunk { content, .. }) if content == "prior answer" => {
                 saw_history_text = true;
             }
             Ok(ClientEvent::ToolStarted { id, .. }) if id == "call-prior" => {
-                saw_prior_tool = true;
+                replayed_tool_start = true;
             }
             Ok(ClientEvent::SessionStarted { .. }) => {
                 saw_started = true;
@@ -724,8 +723,160 @@ async fn session_restore_replays_history_before_started() {
         }
     }
     assert!(saw_history_text, "history assistant text was not replayed");
-    assert!(saw_prior_tool, "history tool call was not replayed");
     assert!(saw_started, "SessionStarted was not emitted after history");
+    // A replayed `tool/call` records its args (so a replayed `tool/result` can
+    // synthesize the diff preview) but deliberately does NOT re-emit
+    // `ToolStarted`: the transcript's tool rows are rebuilt from SQLite, and a
+    // replayed start would overwrite the persisted row back to Running.
+    assert!(
+        !replayed_tool_start,
+        "a replayed tool/call must not re-emit ToolStarted"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_replay_wins_over_the_follow_journal_flood() {
+    // The follow stream re-delivers the session's durable journal in its
+    // opening snapshot. The history replay must land FIRST and hold the cursor,
+    // so those frames are deduped away instead of being re-applied through the
+    // LIVE mapping — which drops assistant text and user prompts by design.
+    // That flood is exactly what left a freshly forked child showing tool calls
+    // and nothing else.
+    let journal = vec![
+        history_event(
+            1,
+            "user/message",
+            json!({
+                "content": [{ "type": "text", "text": "earlier question" }],
+                "source": { "kind": "user" }
+            }),
+        ),
+        history_event(
+            2,
+            "assistant/message",
+            json!({
+                "turn": 1, "step": 1,
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": "earlier answer" }] }
+            }),
+        ),
+        history_event_with_view(
+            3,
+            "tool/call",
+            json!({ "turn": 1, "step": 1, "callId": "call-prior", "name": "bash", "arguments": "{}" }),
+            json!({ "for": "call", "view": { "card": "terminal", "title": "ls" } }),
+        ),
+        history_event(
+            4,
+            "turn/end",
+            json!({ "turn": 1, "reason": { "kind": "completed" } }),
+        ),
+    ];
+
+    let mut c = default_config();
+    c.history_events = journal.clone();
+    // Hold the history page until the follow snapshot has already been written.
+    // That is the real-world race: the harness re-delivers the journal the
+    // moment the follower subscribes, while the history page is still in
+    // flight. Without replay-before-follow the snapshot is applied live (tools
+    // only) and the replayed messages land after it, in the wrong order.
+    c.history_delay_ms = 150;
+    // The follow baseline re-delivers the same records; the `$events` mux
+    // announces the subscription with `lastSeq: 0` — the frame that used to
+    // rewind the cursor the replay had just established.
+    let records: Vec<Value> = journal
+        .iter()
+        .map(|entry| json!({ "type": "event", "event": entry["event"], "view": entry.get("view") }))
+        .collect();
+    c.mux = scripts_with(vec![mux_subscribed("s-1", 0)]);
+    c.follow = scripts_with(vec![json!({
+        "type": "snapshot",
+        "cursor": 4,
+        "records": records,
+        "hasMore": false,
+        "projections": { "asOfSeq": 4, "values": {} }
+    })]);
+
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: "deepseek-v4-pro".into(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: Some("s-1".into()),
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    let start = std::time::Instant::now();
+    let mut answer_chunks = 0usize;
+    let mut question_chunks = 0usize;
+    let mut tool_starts = 0usize;
+    let mut saw_started = false;
+    while start.elapsed() < Duration::from_secs(5) && !(saw_started && answer_chunks > 0) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::SessionStarted { .. }) => saw_started = true,
+            Ok(ClientEvent::MessageChunk { content, .. }) if content == "earlier answer" => {
+                answer_chunks += 1;
+            }
+            Ok(ClientEvent::MessageChunk { content, .. }) if content == "earlier question" => {
+                question_chunks += 1;
+            }
+            Ok(ClientEvent::ToolStarted { id, .. }) if id == "call-prior" => tool_starts += 1,
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    // Give any late duplicate frame a chance to land before asserting.
+    while let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) {
+        match event {
+            ClientEvent::MessageChunk { content, .. } if content == "earlier answer" => {
+                answer_chunks += 1;
+            }
+            ClientEvent::MessageChunk { content, .. } if content == "earlier question" => {
+                question_chunks += 1;
+            }
+            ClientEvent::ToolStarted { id, .. } if id == "call-prior" => tool_starts += 1,
+            _ => {}
+        }
+    }
+
+    assert!(saw_started, "SessionStarted was not emitted");
+    assert_eq!(
+        answer_chunks, 1,
+        "the replayed assistant text must arrive exactly once"
+    );
+    assert_eq!(
+        question_chunks, 1,
+        "the replayed user prompt must arrive exactly once"
+    );
+    assert_eq!(
+        tool_starts, 0,
+        "the re-delivered journal must not resurrect the persisted tool row"
+    );
 
     let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
     let _ = worker.join();

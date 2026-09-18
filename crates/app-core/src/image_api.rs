@@ -815,7 +815,8 @@ fn percent_encode_query(value: &str) -> String {
 
 /// Extract a human-readable error message from a JSON error body, falling
 /// back to the raw body string when no `error.message` field is present.
-fn error_message(body: &Value) -> String {
+/// Shared with the handoff-summary call (`crate::handoff`).
+pub(crate) fn error_message(body: &Value) -> String {
     body.get("error")
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
@@ -842,7 +843,10 @@ fn persist_image(dir: &Path, bytes: &[u8], mime: &str) -> Result<PersistedImage,
 /// Extract the assistant text from an OpenAI Responses-format response
 /// (`output[].content[]` with `type: "output_text"`), defensively handling
 /// shape variations across providers proxied through codex_api_proxy.
-fn extract_responses_output_text(response: &Value) -> Option<String> {
+///
+/// Shared with the handoff-summary call (`crate::handoff`), which speaks the
+/// same Responses protocol through the same proxy.
+pub(crate) fn extract_responses_output_text(response: &Value) -> Option<String> {
     let output = response.get("output").and_then(Value::as_array)?;
     let mut texts = Vec::new();
     for item in output {

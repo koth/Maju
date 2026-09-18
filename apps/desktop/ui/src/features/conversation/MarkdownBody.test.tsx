@@ -421,6 +421,81 @@ describe("MarkdownBody", () => {
   });
 });
 
+describe("MarkdownBody math", () => {
+  /** KaTeX echoes the TeX source it was handed into the MathML annotation —
+   *  the only place the original formula text survives rendering, which makes
+   *  it the right probe for "did a repair pass corrupt the LaTeX?". */
+  function texAnnotation(container: HTMLElement, index = 0): string {
+    const annotations = container.querySelectorAll(
+      'annotation[encoding="application/x-tex"]',
+    );
+    return annotations[index]?.textContent ?? "";
+  }
+
+  it("typesets a whole-line $$…$$ as a display formula", () => {
+    const { container } = render(
+      <MarkdownBody
+        content={
+          "数学上就是：\n\n$$p = \\sum_{i=k}^{n} \\binom{n}{i} \\left(\\frac{1}{2}\\right)^n$$\n\n零假设："
+        }
+      />,
+    );
+
+    const display = container.querySelector(".katex-display");
+    expect(display).not.toBeNull();
+    // The regression this guards: `language-math` used to fall through to the
+    // Prism code-block renderer and print the LaTeX source verbatim.
+    expect(container.querySelector(".md-code-block")).toBeNull();
+    // KaTeX emits the source back in the MathML annotation; that is where a
+    // corrupted (repaired) formula would show up.
+    expect(texAnnotation(container)).toContain(
+      "p = \\sum_{i=k}^{n} \\binom{n}{i} \\left(\\frac{1}{2}\\right)^n",
+    );
+  });
+
+  it("typesets inline math without turning it into a block", () => {
+    const { container } = render(
+      <MarkdownBody content={"其中 $p=0.0009$ 表示公平抛硬币的概率。"} />,
+    );
+
+    expect(container.querySelector(".katex")).not.toBeNull();
+    expect(container.querySelector(".katex-display")).toBeNull();
+    expect(container.textContent).toContain("表示公平抛硬币的概率");
+  });
+
+  it("leaves money and shell variables as text", () => {
+    const { container } = render(
+      <MarkdownBody content={"价格 $5 和 $6 元，环境变量 $HOME 与 $TEMP。"} />,
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.textContent).toContain("价格 $5 和 $6 元");
+    expect(container.textContent).toContain("$HOME 与 $TEMP");
+  });
+
+  it("renders raw LaTeX delimiters and survives the repair passes", () => {
+    const { container } = render(
+      <MarkdownBody content={"\\[\\nabla f \\neq 0\\]\n\n\\(x \\notin S\\)"} />,
+    );
+
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(container.querySelector(".katex-error")).toBeNull();
+    // `\nabla` / `\neq` / `\notin` all start with `\n`; the stringified
+    // line-break repair used to split them across lines.
+    expect(texAnnotation(container)).toContain("\\nabla f \\neq 0");
+    expect(texAnnotation(container, 1)).toContain("x \\notin S");
+  });
+
+  it("keeps dollar signs inside code spans literal", () => {
+    const { container } = render(
+      <MarkdownBody content={"跑 `echo $HOME`，不是公式。"} />,
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.textContent).toContain("echo $HOME");
+  });
+});
+
 describe("resolveClickableFilePath", () => {
   const root = "D:\\work\\kodex";
 

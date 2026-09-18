@@ -70,9 +70,17 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
         MuxFrame::SessionSubscribed { last_seq, .. } => {
             // Seed last_seq from the subscription baseline (lastSeq = last
             // delivered seq; the next event is lastSeq + 1).
-            sink.last_seq.store(
+            //
+            // Monotonic: a fresh subscription reports 0, and a plain `store`
+            // would CLOBBER a cursor the sink already holds. After a history
+            // replay the sink sits at the session's log cut, so lowering it to
+            // 0 let the follow re-deliver (and re-apply) the whole journal —
+            // that flood is what rebuilt a fork child's transcript as tool
+            // calls only, since the live mapping drops assistant text and user
+            // prompts by design.
+            sink.last_seq.fetch_max(
                 (*last_seq).max(0) as u64,
-                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::AcqRel,
             );
             MappedEvents::default()
         }
@@ -1346,6 +1354,45 @@ mod tests {
 
     fn mux(json: serde_json::Value) -> MuxFrame {
         serde_json::from_value(json).expect("fixture frame must deserialize")
+    }
+
+    #[test]
+    fn subscription_baseline_never_lowers_the_cursor() {
+        // A fresh follow reports `lastSeq: 0`. Storing that unconditionally
+        // rewound the sink below the history replay's cursor, so the whole
+        // journal passed the `apply_follow_frames` dedupe and was re-applied
+        // live — which is how a fork child's transcript ended up holding tool
+        // calls only (the live mapping drops assistant text and user prompts).
+        let (sink, _rx) = test_sink();
+        sink.last_seq.store(32, std::sync::atomic::Ordering::Release);
+
+        map_mux_frame(
+            &mux(serde_json::json!({
+                "type": "session/subscribed",
+                "sessionId": "s-1",
+                "lastSeq": 0
+            })),
+            &sink,
+        );
+        assert_eq!(
+            sink.last_seq.load(std::sync::atomic::Ordering::Acquire),
+            32,
+            "the subscription baseline must not rewind the cursor"
+        );
+
+        map_mux_frame(
+            &mux(serde_json::json!({
+                "type": "session/subscribed",
+                "sessionId": "s-1",
+                "lastSeq": 40
+            })),
+            &sink,
+        );
+        assert_eq!(
+            sink.last_seq.load(std::sync::atomic::Ordering::Acquire),
+            40,
+            "a newer baseline still advances the cursor"
+        );
     }
 
     #[test]

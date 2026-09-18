@@ -140,6 +140,7 @@ fn main() {
             commands::session::session_set_config_control,
             commands::session::session_resolve_permission,
             commands::session::session_cancel,
+            commands::session::session_handoff_summary,
             commands::session::session_stop_tool,
             commands::session::session_list,
             commands::session::session_list_archived,
