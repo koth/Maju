@@ -16,6 +16,8 @@
 # removes any round/background layers prebuild would delete.
 #
 # Requires macOS `sips` and libwebp's `cwebp`.
+# Windows twin: scripts/generate-mobile-icons.ps1 — same brand mark, sizes and
+# outputs; keep the two in lockstep when either changes.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

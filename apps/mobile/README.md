@@ -84,6 +84,15 @@ Android mipmaps from the repo root:
 scripts/generate-mobile-icons.sh   # needs macOS sips + libwebp's cwebp
 ```
 
+On Windows use the PowerShell twin — same brand mark, same sizes, same
+outputs. It resizes with GDI+ and encodes the WebP layers with whichever of
+`cwebp`, ImageMagick or `ffmpeg` is on `PATH`, so nothing extra is required
+beyond one WebP encoder:
+
+```powershell
+pwsh -File scripts/generate-mobile-icons.ps1
+```
+
 Then rebuild the app. The `android/` and `ios/` projects are gitignored, so the
 tracked artifact is `assets/icon.png` — keep it in sync with the script rather
 than editing it by hand.
