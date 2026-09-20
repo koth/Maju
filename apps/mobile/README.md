@@ -3,9 +3,7 @@
 A React Native (Expo) + TypeScript phone app that pairs with a running Maju
 desktop (PC) over a relay and remotely controls it: scan-to-pair, end-to-end
 encrypted session control, tool-call/timeline rendering, and remote permission
-approval. See the requirements at
-`docs/mobile-companion-app-requirements.md` and the OpenSpec change
-`add-mobile-companion-app`.
+approval. End-user onboarding guide (中文): [`docs/mobile-user-guide.md`](../../docs/mobile-user-guide.md).
 
 ## Stack
 
@@ -51,6 +49,42 @@ Build a dev client (requires Xcode/Android Studio toolchains):
 ```bash
 npx expo prebuild           # generate native ios/ android/ projects
 npx expo run:ios            # or run:android
+```
+
+## Release build hygiene (autolinking cache)
+
+`settings.gradle` links RN community libraries via
+`autolinkLibrariesFromCommand`, which **caches its discovery result** in
+`android/build/generated/autolinking/autolinking.json` and re-runs discovery
+only when `package.json` / `package-lock.json` change SHA. Two failure modes
+observed first-hand (2026-09-19, the `react-native-webview` addition):
+
+- **Never build while `npm install` is still running.** Discovery ran
+  mid-install, missed the half-installed package, and cached the result. The
+  next build saw unchanged lockfiles, reused the poisoned list, and shipped an
+  APK whose fresh JS bundle imports a native module the binary never linked —
+  instant launch crash
+  (`TurboModuleRegistry.getEnforcing(...): 'RNCWebViewModule' could not be
+  found`).
+- **`./gradlew clean` can die before it reaches the root `build/` dir**: stale
+  `app/.cxx` re-configures CMake against already-cleaned codegen dirs
+  (`:app:externalNativeBuildClean*` fails), so the poisoned cache survives
+  `clean`.
+
+If a release APK crashes at launch after a native dependency change, rebuild
+clean by hand:
+
+```bash
+cd android
+rm -rf app/.cxx app/build build   # stale native state + poisoned autolinking cache
+./gradlew assembleRelease
+```
+
+Before installing, verify the module actually landed in the dex:
+
+```bash
+unzip -p app/build/outputs/apk/release/app-release.apk 'classes*.dex' \
+  | strings | grep -m1 RNCWebView
 ```
 
 ## Math rendering

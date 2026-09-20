@@ -31,6 +31,8 @@ Maju 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，�
 3. 如果本机已经安装 CodeBuddy CLI，也可以选择 CodeBuddy 作为 ACP 后端。
 4. 打开一个代码目录作为 workspace，在底部输入需求；智能体执行后的文件改动会出现在右侧 Review/Git 区域。
 
+> 📖 更详细的上手指南：[桌面端](docs/desktop-user-guide.md) · [手机端](docs/mobile-user-guide.md)
+
 ## 常见工作流
 
 - **让智能体改代码**：在 composer 里描述目标，必要时引用 workspace 文件，等待工具调用完成后审阅 diff。
