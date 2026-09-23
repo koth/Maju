@@ -224,11 +224,16 @@ pub fn map_mux_frame(frame: &MuxFrame, sink: &SessionSink) -> MappedEvents {
                 reason: format!("harness stream error: {error}"),
             })
         }
-        // session/queue, session/jobs, and unknown frames are not represented
-        // in ClientEvent in v1; ignore (debug-logged by the router).
-        MuxFrame::SessionQueue { .. } | MuxFrame::SessionJobs { .. } | MuxFrame::Other => {
+        // `session/jobs` carries the session's background-job snapshots (后台
+        //任务): recorded into `dsh_bridge::jobs` for the context dock. They
+        // are session-level state, not turn events — no ClientEvent.
+        MuxFrame::SessionJobs { session_id, jobs } => {
+            crate::jobs::record_session_jobs(&session_id, &jobs);
             MappedEvents::default()
         }
+        // session/queue and unknown frames are not represented in ClientEvent
+        // in v1; ignore (debug-logged by the router).
+        MuxFrame::SessionQueue { .. } | MuxFrame::Other => MappedEvents::default(),
     }
 }
 
@@ -1130,21 +1135,37 @@ fn result_outcome(data: &ToolResultData) -> String {
     }
 }
 
-/// Model-facing result text: concatenate text blocks of the tool-result message.
+/// Model-facing result text: concatenate text blocks of the tool-result
+/// message, INCLUDING text nested inside `tool-result` blocks. Nested blocks
+/// that are not plain text (e.g. an MCP `generate_image` JSON result) are kept
+/// as compact JSON instead of being dropped — the tool card's image preview
+/// and the expanded raw view both read them from `raw_output`.
 fn result_text(data: &ToolResultData) -> Option<String> {
-    let texts: Vec<&str> = data
-        .message
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    if texts.is_empty() {
+    let mut parts: Vec<String> = Vec::new();
+    collect_result_text(&data.message.content, &mut parts);
+    if parts.is_empty() {
         None
     } else {
-        Some(texts.join("\n"))
+        Some(parts.join("\n"))
+    }
+}
+
+fn collect_result_text(blocks: &[ContentBlock], out: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => out.push(text.clone()),
+            ContentBlock::ToolResult { content, .. } => {
+                for value in content {
+                    let text = value.get("text").and_then(Value::as_str);
+                    let is_text = value.get("type").and_then(Value::as_str) == Some("text");
+                    match (text, is_text) {
+                        (Some(text), true) => out.push(text.to_string()),
+                        _ => out.push(json_compact_no_escape(value)),
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2720,6 +2741,47 @@ mod tests {
         assert!(matches!(&events[1], ClientEvent::TurnFinished { .. }));
         // last_seq ends at the final event so a re-baseline resumes past it.
         assert_eq!(sink.last_seq.load(std::sync::atomic::Ordering::Acquire), 4);
+    }
+
+    #[test]
+    fn nested_mcp_tool_result_payload_is_kept_as_raw_output_json() {
+        // generate_image 类 MCP 工具的结果嵌在 tool-result 块里且不是 text
+        // 块（JSON payload）：必须以 JSON 保留进 raw_output——生图卡的图片
+        // 预览和展开的原始视图都从这里恢复 `images[].path`。
+        let (sink, _rx) = test_sink();
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 2,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool-result",
+                            "toolCallId": "call-img",
+                            "content": [{
+                                "type": "json",
+                                "images": [{ "path": "file:///C:/x/.kodex/generated-images/a.png" }]
+                            }]
+                        }]
+                    }
+                }
+            }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        let raw = mapped
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::ToolCompleted { raw_output, .. } => raw_output.clone(),
+                _ => None,
+            })
+            .expect("expected ToolCompleted carrying raw_output");
+        assert!(raw.contains("generated-images"), "raw_output: {raw}");
     }
 
     #[test]

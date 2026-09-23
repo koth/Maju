@@ -75,6 +75,23 @@ impl PairingHandler for DesktopPairingHandler {
         // The phone's device id is the peer for E2E AAD.
         Ok((key, confirm.phone_device_id, emit_b64))
     }
+
+    async fn on_subscription_status(
+        &mut self,
+        _status: relay_protocol::SubscriptionStatus,
+    ) {
+        // The relay acks `PairingRegister` with a `SubscriptionStatus` frame.
+        // Flip the panel's「正在把配对码注册到 relay…」flag here — routed
+        // through the driver's frame loop, so an interleaved request frame
+        // from a paired phone can no longer consume the ack (the old one-shot
+        // `recv` in the connect path left the panel stuck forever on that
+        // warning whenever the phone beat the ack to the wire).
+        self.app
+            .state::<AppState>()
+            .remote_control()
+            .mark_pairing_registered();
+        tracing::info!(target: "remote_control", "pairing code registered with relay");
+    }
 }
 
 /// Adapts `DesktopRemoteControl` to the driver's `ControlHandler` trait.
@@ -123,15 +140,38 @@ impl ControlHandler for DesktopControlHandler {
             ControlRequest::CreateSession {
                 workspace_root,
                 agent,
+                preset,
                 ..
             } => self
                 .control
-                .create_session(workspace_root, agent)
+                .create_session(workspace_root, agent, preset)
                 .await
                 .map(|session_id| ControlResponse::CreateSession {
                     request_id,
                     session_id,
                 }),
+            // Settings + harness host live in the shell, not the active
+            // `Application`, so this one bypasses the `RemoteControl` trait
+            // (same boundary reasoning as `list_sessions`, which the trait
+            // injects from the shell).
+            ControlRequest::ListAgentOptions { .. } => {
+                crate::remote_control::list_agent_options()
+                    .await
+                    .map(|options| ControlResponse::AgentOptions {
+                        request_id,
+                        options,
+                    })
+            }
+            ControlRequest::SetConfigControl {
+                control_id,
+                value_id,
+                provider,
+                ..
+            } => self
+                .control
+                .set_config_control(control_id, value_id, provider)
+                .await
+                .map(|config| ControlResponse::SetConfigControl { request_id, config }),
             ControlRequest::SwitchSession {
                 session_id,
                 workspace_root,

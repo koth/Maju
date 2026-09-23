@@ -333,7 +333,33 @@ export function EditorView({
       editorRef.current = editor;
       monacoRef.current = monacoInstance;
       editorDisposedRef.current = false;
+
+      // Monaco's find-widget buttons (previous / next / scope / close) arm a
+      // hover through the editor's hover service. In a standalone editor that
+      // hover is rendered in a context-view layer (`.context-view`, z-index
+      // 2576) that sits above the widget itself, and Monaco's workbench hover
+      // styling is scoped to `.monaco-workbench`, so here it has no background
+      // and no `pointer-events: none`. The result is a floating "Close (Esc)"
+      // box over the widget's own controls that eats the click, and its position
+      // comes from Monaco's context-view layout, which drifts up over the
+      // toolbar in this host.
+      // Swallow both events that arm the hover — `setupUpdatableHover` registers
+      // `mouseover` *and* `focus`, and once one of them has created the hover
+      // preparation the other short-circuits, so intercepting only `mouseover`
+      // is not enough. The buttons' hover highlight is pure CSS
+      // (`.find-widget .button:not(.disabled):hover`), so it is unaffected.
+      const editorDomNode = editor.getDomNode();
+      const suppressFindWidgetHover = (event: Event) => {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest?.(".find-widget [custom-hover]")) {
+          event.stopPropagation();
+        }
+      };
+      editorDomNode?.addEventListener("mouseover", suppressFindWidgetHover, true);
+      editorDomNode?.addEventListener("focus", suppressFindWidgetHover, true);
       editor.onDidDispose?.(() => {
+        editorDomNode?.removeEventListener("mouseover", suppressFindWidgetHover, true);
+        editorDomNode?.removeEventListener("focus", suppressFindWidgetHover, true);
         if (editorRef.current === editor) {
           editorRef.current = null;
         }

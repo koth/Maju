@@ -900,6 +900,52 @@
   opacity: 0.6;
 }
 
+/* Upgrading the global `dsh` package is the user's job, done with Maju closed:
+   this block is the instruction, deliberately not an action button. */
+.settings-dsh-upgrade-guide {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted-bg);
+}
+
+.settings-dsh-upgrade-guide-title {
+  color: var(--text-strong);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.settings-dsh-upgrade-guide-body {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+.settings-dsh-upgrade-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-dsh-upgrade-command code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
 .settings-update-panel {
   display: flex;
   align-items: center;

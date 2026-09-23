@@ -14,6 +14,8 @@ import type {
   UserPromptContent,
   WorkspaceSessionList,
   AgentCliId,
+  AgentOptionsList,
+  SessionConfigState,
 } from "./index";
 
 export const PROTO_VERSION = 1 as const;
@@ -63,6 +65,17 @@ export type ControlRequest =
       request_id: string;
       workspace_root?: string | null;
       agent?: AgentCliId | null;
+      /** DeepSeek Harness agent preset (mode); only meaningful for the
+       *  harness agent. Absent = deployment default. */
+      preset?: string | null;
+    }
+  | { op: "list_agent_options"; request_id: string }
+  | {
+      op: "set_config_control";
+      request_id: string;
+      control_id: string;
+      value_id: string;
+      provider?: string | null;
     }
   | {
       op: "switch_session";
@@ -95,6 +108,8 @@ export type ControlRequest =
 export type ControlResponse =
   | { op: "list_sessions"; request_id: string; sessions: WorkspaceSessionList[] }
   | { op: "create_session"; request_id: string; session_id: string }
+  | { op: "agent_options"; request_id: string; options: AgentOptionsList }
+  | { op: "set_config_control"; request_id: string; config: SessionConfigState }
   | { op: "switch_session"; request_id: string }
   | { op: "send_prompt"; request_id: string }
   | {

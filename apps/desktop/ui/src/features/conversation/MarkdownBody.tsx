@@ -70,8 +70,8 @@ const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
     </div>
   );
 });
-import { getAppliedAppTheme } from "../../theme";
 import { fsPathExists } from "../../lib/tauri";
+import { useCurrentAppTheme } from "../../lib/use-app-theme";
 import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
 import { maskMarkdownMath } from "./markdown-math";
 
@@ -923,19 +923,6 @@ function fallbackCopyText(text: string) {
   textarea.select();
   document.execCommand("copy");
   textarea.remove();
-}
-
-function useCurrentAppTheme() {
-  const [theme, setTheme] = useState(() => getAppliedAppTheme());
-
-  useEffect(() => {
-    const root = document.documentElement;
-    const observer = new MutationObserver(() => setTheme(getAppliedAppTheme()));
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
-    return () => observer.disconnect();
-  }, []);
-
-  return theme;
 }
 
 function safeMarkdownUrl(url: string) {

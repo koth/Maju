@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { View, Text, ActivityIndicator } from "react-native";
 import { useAppController, useSnapshot } from "../../app/AppServicesContext";
+import type { UserPromptContent } from "../../types";
 import { ConversationTimeline } from "./ConversationTimeline";
 import { TurnChangesBar } from "./TurnChangesBar";
 import { SessionInfoSheet } from "./SessionInfoSheet";
@@ -29,10 +30,10 @@ export function ConversationScreen({ sessionId, workspaceRoot }: Props) {
   const [sendError, setSendError] = useState<string | null>(null);
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (content: UserPromptContent[]) => {
       setSendError(null);
       try {
-        await controller.sendPrompt(text);
+        await controller.sendPrompt(content);
       } catch (e) {
         setSendError(e instanceof Error ? e.message : String(e));
         throw e;
@@ -47,6 +48,26 @@ export function ConversationScreen({ sessionId, workspaceRoot }: Props) {
 
   const handleStopTool = useCallback(
     (toolCallId: string) => controller.stopTool(toolCallId),
+    [controller],
+  );
+
+  // Model switching mirrors the desktop composer: the snapshot's
+  // session_config carries the model control (choices + current value), and
+  // the PC answers a set_config_control with both the refreshed state and a
+  // following snapshot patch.
+  const modelControl =
+    snapshot?.session_config.controls.find((control) => control.category === "Model") ?? null;
+
+  const handleSelectModel = useCallback(
+    async (controlId: string, valueId: string, provider: string | null) => {
+      setSendError(null);
+      try {
+        await controller.setConfigControl(controlId, valueId, provider);
+      } catch (e) {
+        setSendError(e instanceof Error ? e.message : String(e));
+        throw e;
+      }
+    },
     [controller],
   );
 
@@ -122,6 +143,9 @@ export function ConversationScreen({ sessionId, workspaceRoot }: Props) {
         error={sendError}
         streaming={streaming}
         onCancel={handleCancel}
+        modelControl={modelControl}
+        onSelectModel={handleSelectModel}
+        imageCapable={!!snapshot?.prompt_capabilities.image}
       />
 
       <SessionInfoSheet />

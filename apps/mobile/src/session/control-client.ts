@@ -6,6 +6,8 @@ import type {
   UserPromptContent,
   PermissionInputResponse,
   AgentCliId,
+  AgentOptionsList,
+  SessionConfigState,
   WorkspaceSessionList,
   UiSnapshot,
   SessionFileChange,
@@ -95,13 +97,48 @@ export class ControlClient {
   createSession(opts?: {
     workspace_root?: string | null;
     agent?: AgentCliId | null;
+    preset?: string | null;
   }): Promise<{ op: "create_session"; request_id: string; session_id: string }> {
     return this.send({
       op: "create_session",
       request_id: uuidV4(),
       workspace_root: opts?.workspace_root ?? null,
       agent: opts?.agent ?? null,
+      preset: opts?.preset ?? null,
     }) as Promise<{ op: "create_session"; request_id: string; session_id: string }>;
+  }
+
+  /** Fetch the agent/preset choices for the new-session picker. The preset
+   *  half is best-effort on the PC (it may spawn the dsh host), so expect
+   *  this to take a moment and `dsh_presets` to come back empty when the
+   *  harness is unavailable. */
+  listAgentOptions(): Promise<{
+    op: "agent_options";
+    request_id: string;
+    options: AgentOptionsList;
+  }> {
+    return this.send({ op: "list_agent_options", request_id: uuidV4() }) as Promise<{
+      op: "agent_options";
+      request_id: string;
+      options: AgentOptionsList;
+    }>;
+  }
+
+  /** Set a session config control (e.g. the model picker) on the active
+   *  session. The PC answers with the refreshed config state; a snapshot
+   *  patch carrying the same state follows on the event stream. */
+  setConfigControl(
+    controlId: string,
+    valueId: string,
+    provider?: string | null,
+  ): Promise<{ op: "set_config_control"; request_id: string; config: SessionConfigState }> {
+    return this.send({
+      op: "set_config_control",
+      request_id: uuidV4(),
+      control_id: controlId,
+      value_id: valueId,
+      provider: provider ?? null,
+    }) as Promise<{ op: "set_config_control"; request_id: string; config: SessionConfigState }>;
   }
 
   switchSession(

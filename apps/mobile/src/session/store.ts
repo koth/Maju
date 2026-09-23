@@ -32,9 +32,22 @@ export class SessionStore {
   private snapshot: Snapshot | null = null;
   private lastLoggedUsageTokens: number | null = null;
   private activeSessionId: string | null = null;
+  /** PC 端最后已知的"当前会话"（从任何到达的帧推断，含被丢弃的帧）。 */
+  private pcActiveSessionId: string | null = null;
   private listeners = new Set<Listener>();
   private permissionHandler: PermissionHandler | null = null;
   private resyncHandler: ResyncHandler | null = null;
+
+  /** 手机正在看（本地持有）的会话 id。 */
+  get heldSessionId(): string | null {
+    return this.activeSessionId;
+  }
+
+  /** PC 端当前会话的最后已知值；null = 未知。用于判断手机动作前是否需要
+   *  把 PC 切回手机正在看的会话（见 services.ensurePcOnHeldSession）。 */
+  get pcActiveHint(): string | null {
+    return this.pcActiveSessionId;
+  }
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
@@ -65,6 +78,14 @@ export class SessionStore {
    * behind patches that already landed, and accepting it would rewind the
    * revision so every subsequent patch fails the freshness guard. */
   setSnapshot(snapshot: Snapshot): void {
+    // 跨会话守卫：PC 只会推它自己"当前会话"的状态（resync 的 GetState 响应、
+    // 事件 Full 都一样）。桌面用户切到别的会话后，把这些内容收编进当前会话
+    // 就是"会话 B 的消息覆盖了会话 A"的污染来源 —— 一律丢弃，只记下 PC 的
+    // 位置供动作前切回（ensurePcOnHeldSession）。
+    this.pcActiveSessionId = snapshot.session.id;
+    if (this.activeSessionId && snapshot.session.id !== this.activeSessionId) {
+      return;
+    }
     if (
       this.snapshot !== null &&
       snapshot.session.id === this.snapshot.session.id &&
@@ -80,6 +101,7 @@ export class SessionStore {
   /** Clear local state (e.g. on unbind/session switch reset). */
   clear(): void {
     this.activeSessionId = null;
+    this.pcActiveSessionId = null;
     this.snapshot = null;
     clearAllStreamingMessages();
     this.emit();
@@ -101,6 +123,9 @@ export class SessionStore {
     switch (frame.kind) {
       case "snapshot_full": {
         const incoming = frame.snapshot as Snapshot;
+        // 记下 PC 的位置（含被丢弃的帧）：桌面用户切走后，手机动作前据此把
+        // PC 切回手机正在看的会话（ensurePcOnHeldSession）。
+        this.pcActiveSessionId = incoming.session.id;
         if (this.activeSessionId && incoming.session.id !== this.activeSessionId) {
           break;
         }
@@ -175,7 +200,13 @@ export class SessionStore {
       case "tool_updated":
         if (this.snapshot) this.snapshot = applyToolUpdated(this.snapshot, frame.tool as unknown as import("../types").ToolInvocation);
         break;
-      case "session_status_changed":
+      case "session_status_changed": {
+        this.pcActiveSessionId = frame.session_id;
+        // 状态帧属于它声明的会话：桌面用户在别的会话里切流/停流时，绝不能
+        // 改写手机正在看的会话的状态。
+        if (this.snapshot && frame.session_id !== this.snapshot.session.id) {
+          break;
+        }
         if (this.snapshot) {
           this.snapshot = applySessionStatus(
             this.snapshot,
@@ -183,6 +214,7 @@ export class SessionStore {
           );
         }
         break;
+      }
       case "permission_request":
         if (this.permissionHandler) this.permissionHandler(frame.request);
         break;

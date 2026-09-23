@@ -91,7 +91,11 @@
   padding: 12px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
+  /* Elevated, not `--surface-bg`: this card sits IN the sidebar, and in the
+     light theme the sidebar is `--surface-bg`'s own value (#f4f4f4) — the card
+     would vanish. `--bg-elevated` is white on the light sidebar and still
+     #262626 on the dark one. */
+  background: var(--bg-elevated);
 }
 
 .remote-hydration-sidebar-title {
@@ -302,7 +306,12 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   flex: 1;
   min-width: 0;
   flex-direction: column;
-  background: var(--app-bg);
+  /* Not the canvas colour: this is the surface the rounded seam corner reveals.
+     Every child paints its own `--app-bg`, so the only place this shows through
+     is that corner — which is what makes the round read as a seam rather than
+     as an invisible clip. It matches the sidebar so the corner reads as the
+     sidebar's own surface curving away, with no third tone in the seam. */
+  background: var(--shell-sidebar-bg);
 }
 
 .global-chrome {
@@ -424,6 +433,11 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   padding: 0;
   gap: 0;
   background: transparent;
+  /* The seam where the canvas meets the sidebar is rounded on the canvas side:
+     the boundary bows into the main area at the top instead of biting into the
+     sidebar. `.workbench-body` already clips its overflow, so the radius also
+     rounds whatever paints the corner inside it. */
+  border-top-left-radius: var(--radius-md);
 }
 
 /* Docked terminal: the dock is a sibling of the body inside
@@ -462,10 +476,14 @@ body.is-resizing-left-sidebar .sidebar-resizer-hit::after {
   position: absolute;
   top: 12px;
   bottom: 12px;
-  left: 4px;
+  /* Exactly on `.right-panel`'s border-left (hit area starts 2px left of the
+     panel edge). Drawing it anywhere else puts a second hairline next to the
+     panel's own border, which reads as two seams instead of one. */
+  left: 2px;
   width: 1px;
   border-radius: 999px;
-  background: var(--border-subtle);
+  /* The panel's border is the seam; this only reinforces it while dragging. */
+  background: transparent;
   transition: background var(--transition-fast);
 }
 
@@ -570,6 +588,18 @@ body.is-resizing-left-sidebar {
   letter-spacing: 0;
   line-height: 1.15;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which agent this conversation runs with, read alongside the title instead of
+   competing with it: one rung down in size and strength, in parentheses. The
+   title's ellipsis truncates this first, and the full pair stays in the
+   header's tooltip. */
+.thread-header-agent {
+  margin-left: 6px;
+  color: var(--text-soft);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
   white-space: nowrap;
 }
 
@@ -694,7 +724,8 @@ body.is-resizing-left-sidebar {
 .session-archive-toast-btn {
   padding: 0 9px;
   border-color: var(--border-subtle);
-  background: rgba(255, 255, 255, 0.04);
+  /* Secondary-button token, not a white wash (invisible in the light theme). */
+  background: var(--surface-alt-bg);
   color: var(--text-strong);
   font-size: var(--font-size-xs);
   font-weight: 600;

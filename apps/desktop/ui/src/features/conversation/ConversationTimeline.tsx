@@ -35,6 +35,12 @@ let visibleChangedFiles: string[] = [];
 
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
+// 历史折叠按「轮次」计（存在轮次开头的会话）：默认只展示最近 3 轮对话，
+// 更早的收进「更多对话」；每次点击多展开 6 轮，之后每点击一次翻倍
+// （12、24 …）。没有轮次开头的退化转录（例如纯助手回复的旧版回放）没有
+// 轮次边界可切，回退为按条数折叠（INITIAL_TIMELINE_WINDOW 条一档）。
+const INITIAL_TURN_REVEAL_COUNT = 3;
+const TURN_REVEAL_BATCH = 6;
 /** Distance from the bottom that still counts as "following" the stream. */
 const STICKY_BOTTOM_THRESHOLD_PX = 96;
 /** Minimum interval between React commits of the streaming markdown body.
@@ -817,6 +823,16 @@ function retryableUserMessageIds(snapshot: UiSnapshot) {
   return retryableIds;
 }
 
+/** 一轮对话的开头：非 steer、非 `/compact` 拦截的用户消息（与复制/分叉
+ *  操作行、轮次导航的轮次判定保持一致）。 */
+function isTurnOpeningMessage(message: TimelineMessage): boolean {
+  return (
+    message.role === "User" &&
+    !message.is_steer &&
+    message.body.trim().toLowerCase() !== "/compact"
+  );
+}
+
 /** Minimum window size that keeps the last completed turn's user prompt and
  *  final assistant reply visible. A long codex session can end with hundreds
  *  of tool rows between two replies; a fixed 80-entry initial window then
@@ -1000,8 +1016,11 @@ function buildTimelineCollapseState({
       // into the turn summary together with the tools: leaving them expanded
       // sandwiched the summary bar between blocks of assistant prose and it
       // appeared "in the middle of the conversation". They stay reachable by
-      // expanding the summary. Change-set-bearing rows stay visible (the
-      // ChangesBar anchors there).
+      // expanding the summary.
+      //
+      // A row carrying a change set the final reply does NOT carry stays out of
+      // the fold: that change set is drawn on the row it is anchored to (the
+      // reply that produced the edits), not as the turn footer below.
       if (
         candidate.message &&
         turnChangeSetsByMessageId[candidate.message.id]?.files.length
@@ -1160,6 +1179,11 @@ export function ConversationTimeline({
   const scrollbarDragging = useRef(false);
   const visibleSessionId = useRef(snapshot.session.id);
   const [visibleCount, setVisibleCount] = useState(INITIAL_TIMELINE_WINDOW);
+  // 按轮次折叠的展开深度：默认 3 轮，每次点击的增量从 6 轮起翻倍。
+  const [turnReveal, setTurnReveal] = useState({
+    turns: INITIAL_TURN_REVEAL_COUNT,
+    batch: TURN_REVEAL_BATCH,
+  });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const mountedRef = useRef(true);
   const [expandedCollapseGroups, setExpandedCollapseGroups] = useState<Set<string>>(
@@ -1426,6 +1450,7 @@ export function ConversationTimeline({
   useEffect(() => {
     visibleSessionId.current = snapshot.session.id;
     setVisibleCount(INITIAL_TIMELINE_WINDOW);
+    setTurnReveal({ turns: INITIAL_TURN_REVEAL_COUNT, batch: TURN_REVEAL_BATCH });
     setExpandedCollapseGroups(new Set());
     userScrolledUp.current = false;
     manualScrollIntent.current = false;
@@ -1440,13 +1465,55 @@ export function ConversationTimeline({
     };
   }, []);
 
+  const allMessagesById = useMemo(
+    () => new Map(snapshot.messages.map((message) => [message.id, message])),
+    [snapshot.messages],
+  );
+  const allToolsById = useMemo(
+    () => new Map(snapshot.tools.map((tool) => [tool.id, tool])),
+    [snapshot.tools],
+  );
+  // 轮次开头的时间线下标。历史折叠以此按「轮次」切片——切片永不落在轮次
+  // 中间（每轮开头的用户消息与其后的回复/工具始终一起显示或一起隐藏）。
+  const turnStartIndexes = useMemo(() => {
+    const starts: number[] = [];
+    for (let index = 0; index < snapshot.timeline.length; index += 1) {
+      const item = snapshot.timeline[index];
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      const message = allMessagesById.get(item.Message);
+      if (message && isTurnOpeningMessage(message)) starts.push(index);
+    }
+    return starts;
+  }, [snapshot.timeline, allMessagesById]);
+  const useTurnFolding = turnStartIndexes.length > 0;
+  const hiddenTurnCount = useTurnFolding
+    ? Math.max(0, turnStartIndexes.length - turnReveal.turns)
+    : 0;
+  // 顶部切口对齐：历史分页按「条」加载，页首可能落在轮次中间（该轮开头的
+  // 用户消息还在更早的一页里）。只要还有未加载的历史，第一个轮次开头之前
+  // 的条目就是这种切口——收起不显示，让可视边界始终对齐到轮次开头；等它的
+  // 开头随下一页加载进来后自然归位。全部历史加载完毕（history_earliest_seq
+  // 为空）时，这些条目是真正的会话开场，正常显示。
+  const hideLeadingTurnCut =
+    useTurnFolding &&
+    turnStartIndexes[0] > 0 &&
+    snapshot.history_earliest_seq != null;
+
   const effectiveVisibleCount = Math.max(
     visibleSessionId.current === snapshot.session.id
       ? visibleCount
       : INITIAL_TIMELINE_WINDOW,
     minimumVisibleCountForLastTurn(snapshot.timeline, snapshot.messages),
   );
-  const timelineStart = Math.max(0, snapshot.timeline.length - effectiveVisibleCount);
+  // 有轮次边界时按轮次折叠（默认最近 3 轮，「更多对话」逐级展开）；没有
+  // 轮次边界的退化转录回退为按条数折叠。
+  const timelineStart = useTurnFolding
+    ? hiddenTurnCount > 0
+      ? turnStartIndexes[hiddenTurnCount]
+      : hideLeadingTurnCut
+        ? turnStartIndexes[0]
+        : 0
+    : Math.max(0, snapshot.timeline.length - effectiveVisibleCount);
   const visibleTimeline = useMemo(
     () => snapshot.timeline.slice(timelineStart),
     [snapshot.timeline, timelineStart],
@@ -1469,14 +1536,6 @@ export function ConversationTimeline({
   if (userScrolledUp.current) {
     manualScrollTopRef.current = scrollRef.current?.scrollTop ?? null;
   }
-  const allMessagesById = useMemo(
-    () => new Map(snapshot.messages.map((message) => [message.id, message])),
-    [snapshot.messages],
-  );
-  const allToolsById = useMemo(
-    () => new Map(snapshot.tools.map((tool) => [tool.id, tool])),
-    [snapshot.tools],
-  );
   const activeTurnStartIndex = useMemo(() => {
     if (!turnIsActive) return -1;
     for (let index = snapshot.timeline.length - 1; index >= 0; index -= 1) {
@@ -1575,8 +1634,7 @@ export function ConversationTimeline({
       const message = allMessagesById.get(item.Message);
       if (!message) continue;
       if (message.role === "User") {
-        const isTurnOpening =
-          !message.is_steer && message.body.trim().toLowerCase() !== "/compact";
+        const isTurnOpening = isTurnOpeningMessage(message);
         if (isTurnOpening) {
           sawTurnOpening = true;
           if (currentAnchor) anchors.add(currentAnchor);
@@ -1728,7 +1786,13 @@ export function ConversationTimeline({
       syncNavActiveOnScrollRef.current?.();
     });
     return () => cancelAnimationFrame(frame);
-  }, [userNavEntries, visibleCount]);
+  }, [userNavEntries, visibleCount, hiddenTurnCount]);
+
+  // 「更多对话」：按轮次展开——每次多展示一批轮次（6 轮起），之后每点击
+  // 一次该批翻倍（12、24 …）。
+  const revealMoreTurns = useCallback(() => {
+    setTurnReveal(({ turns, batch }) => ({ turns: turns + batch, batch: batch * 2 }));
+  }, []);
 
   const handleUserNavJump = useCallback((messageId: string) => {
     const scroller = scrollRef.current;
@@ -1750,13 +1814,17 @@ export function ConversationTimeline({
       scrollToTarget();
     } else {
       // 目标在当前可视窗口之外：扩窗渲染后等 React 提交 + 布局再跳。
-      setVisibleCount(snapshot.timeline.length);
+      if (useTurnFolding) {
+        setTurnReveal((prev) => ({ ...prev, turns: turnStartIndexes.length }));
+      } else {
+        setVisibleCount(snapshot.timeline.length);
+      }
       requestAnimationFrame(() => {
         requestAnimationFrame(scrollToTarget);
       });
     }
     setNavActiveId(messageId);
-  }, [snapshot.timeline.length]);
+  }, [snapshot.timeline.length, turnStartIndexes, useTurnFolding]);
 
   const displayTurnChangeSetsByMessageId = useMemo(
     () =>
@@ -1931,6 +1999,41 @@ export function ConversationTimeline({
   const isLastMessage = (index: number) =>
     index === snapshot.timeline.length - 1;
 
+  /**
+   * The turn change set a timeline row carries, if it may be shown yet.
+   *
+   * Single source of truth for both render paths: the plain row, and the
+   * collapsed turn block (where the bar is drawn as the block's footer instead
+   * of under the anchor row). Guards: a streaming tail has no settled change
+   * set, and the live turn keeps its changes in the changes panel until the
+   * turn is anchored to a finished reply.
+   */
+  const turnChangeSetForRow = (
+    item: TimelineItem,
+    i: number,
+  ): TimelineTurnChangeSet | undefined => {
+    if (typeof item !== "object" || !("Message" in item)) return undefined;
+    const msg = messagesById.get(item.Message);
+    if (!msg || msg.role !== "Assistant") return undefined;
+    const isStreaming =
+      snapshot.session.status === "Streaming" && isLastMessage(i);
+    const isCurrentTurnMessage =
+      turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
+    if (isStreaming || isCurrentTurnMessage) return undefined;
+    const changeSet = displayTurnChangeSetsByMessageId[msg.id];
+    return changeSet?.files.length ? changeSet : undefined;
+  };
+
+  const renderTurnChangesBar = (changeSet: TimelineTurnChangeSet | undefined) =>
+    changeSet && changeSet.files.length > 0 ? (
+      <ChangesBar
+        changeSetId={changeSet.changeSetId}
+        changes={changeSet.files}
+        onFileSelect={onReviewFileSelect ?? (() => {})}
+        onReviewClick={onReviewChangeSetSelect}
+      />
+    ) : null;
+
   const renderTimelineItem = (
     item: TimelineItem,
     i: number,
@@ -1957,10 +2060,9 @@ export function ConversationTimeline({
         isLastMessage(i);
       const isCurrentTurnMessage =
         turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
-      const changesForMessage =
-        renderChanges && msg.role === "Assistant" && !isStreaming && !isCurrentTurnMessage
-          ? displayTurnChangeSetsByMessageId[msg.id]
-          : undefined;
+      const changesForMessage = renderChanges
+        ? turnChangeSetForRow(item, i)
+        : undefined;
       const renderMessage = shouldRenderMessage(msg.role, msg.body);
 
       if (!renderMessage && !changesForMessage?.files.length) {
@@ -2006,14 +2108,7 @@ export function ConversationTimeline({
               }
             />
           )}
-          {changesForMessage && changesForMessage.files.length > 0 && (
-            <ChangesBar
-              changeSetId={changesForMessage.changeSetId}
-              changes={changesForMessage.files}
-              onFileSelect={onReviewFileSelect ?? (() => {})}
-              onReviewClick={onReviewChangeSetSelect}
-            />
-          )}
+          {renderTurnChangesBar(changesForMessage)}
         </Fragment>
       );
     }
@@ -2047,20 +2142,34 @@ export function ConversationTimeline({
     <div className="timeline-host">
       <div className="timeline-scroll" ref={scrollRef}>
         <div className="timeline-items" ref={itemsRef}>
-        {hiddenCount > 0 && (
-          <button
-            className="timeline-load-older"
-            type="button"
-            onClick={() =>
-              setVisibleCount((count) =>
-                Math.min(snapshot.timeline.length, count + TIMELINE_WINDOW_STEP),
-              )
-            }
-          >
-            显示更早 {Math.min(hiddenCount, TIMELINE_WINDOW_STEP)} 条
-          </button>
+        {useTurnFolding ? (
+          hiddenTurnCount > 0 && (
+            <button
+              className="timeline-load-older"
+              type="button"
+              onClick={revealMoreTurns}
+            >
+              更多对话（还有 {hiddenTurnCount} 轮）
+            </button>
+          )
+        ) : (
+          hiddenCount > 0 && (
+            <button
+              className="timeline-load-older"
+              type="button"
+              onClick={() =>
+                setVisibleCount((count) =>
+                  Math.min(snapshot.timeline.length, count + TIMELINE_WINDOW_STEP),
+                )
+              }
+            >
+              显示更早 {Math.min(hiddenCount, TIMELINE_WINDOW_STEP)} 条
+            </button>
+          )
         )}
-        {hiddenCount === 0 &&
+        {/* 本地全部展开后才允许向后端翻页（顶部切口不算"未展开"，
+            它只能靠继续翻页让该轮开头加载进来后归位）。 */}
+        {(useTurnFolding ? hiddenTurnCount === 0 : hiddenCount === 0) &&
           snapshot.timeline.length > 0 &&
           snapshot.history_earliest_seq != null &&
           onLoadOlderHistory && (
@@ -2075,7 +2184,11 @@ export function ConversationTimeline({
                 if (!mountedRef.current) return;
                 if (loaded) {
                   // Show the newly prepended page immediately.
-                  setVisibleCount((count) => count + TIMELINE_WINDOW_STEP);
+                  if (useTurnFolding) {
+                    revealMoreTurns();
+                  } else {
+                    setVisibleCount((count) => count + TIMELINE_WINDOW_STEP);
+                  }
                 }
               } finally {
                 if (mountedRef.current) setLoadingOlder(false);
@@ -2115,6 +2228,7 @@ export function ConversationTimeline({
                 )}
               </div>
             ) : null;
+          const anchorChangeSet = turnChangeSetForRow(item, i);
           return (
             <Fragment key={`collapse:${group.key}`}>
               <TimelineCollapseSummary
@@ -2124,8 +2238,18 @@ export function ConversationTimeline({
                 navUserId={group.userMessageId}
               />
               {expanded && renderExpandedItems(expandedBeforeItems)}
-              {renderTimelineItem(item, i)}
+              {renderTimelineItem(item, i, { renderChanges: !anchorChangeSet })}
               {expanded && renderExpandedItems(expandedAfterItems)}
+              {/* When the change set is anchored to THIS turn's final reply, the
+                  bar is the turn's FOOTER: a turn can keep working after that
+                  reply — an interrupted turn ends on the tool call the user
+                  stopped — and drawing the bar under the reply put "本轮对话"
+                  in the middle of the turn with the agent's last call hanging
+                  below it. With the reply last (the common case) the bar lands
+                  exactly where it always did. A change set anchored to an
+                  EARLIER reply is left on that reply instead (see
+                  `itemsToCollapse`), so it keeps reading as produced-by-that-reply. */}
+              {renderTurnChangesBar(anchorChangeSet)}
             </Fragment>
           );
         })}

@@ -4,6 +4,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useAppController, useConnectionState } from "../../app/AppServicesContext";
 import type { SessionListItem, WorkspaceSessionList } from "../../types";
 import { splitSessionGroups } from "./session-groups";
+import { NewSessionSheet } from "./NewSessionSheet";
 import { MachineSwitcher } from "../machines/MachineSwitcher";
 import { styles, typeScale, colors, spacing, radius } from "../theme";
 import { EmptyState } from "../ui/EmptyState";
@@ -109,7 +110,11 @@ export function SessionListScreen({
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [creatingFor, setCreatingFor] = useState<string | "global" | null>(null);
+  // Target of the open new-session picker: which workspace the new session
+  // lands in (null = the global project-less space). The picker sheet owns
+  // the agent/preset choice and the create call itself; creation errors
+  // surface inside the sheet, not here.
+  const [pickerTarget, setPickerTarget] = useState<{ workspaceRoot: string | null } | null>(null);
 
   // Per-workspace expand state keyed by workspace root. Unset entries fall
   // back to "expanded iff this is the active workspace" so the list mirrors
@@ -150,22 +155,11 @@ export function SessionListScreen({
   }, []);
 
   const createInWorkspace = useCallback(
-    async (group: Group) => {
+    (group: Group) => {
       if (!connected || group.workspace.location?.kind === "remote_linux") return;
-      setCreatingFor(group.workspace.root);
-      setError(null);
-      try {
-        const id = await controller.createSession({
-          workspaceRoot: group.workspace.root,
-        });
-        onOpenSession(id, "新会话", group.workspace.root);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setCreatingFor(null);
-      }
+      setPickerTarget({ workspaceRoot: group.workspace.root });
     },
-    [connected, controller, onOpenSession],
+    [connected],
   );
 
   const { chats: chatsGroups, projects: projectGroups } = splitSessionGroups(groups);
@@ -183,24 +177,16 @@ export function SessionListScreen({
 
   // 新建 is contextual: on the 聊天 tab it starts a chat in the chats
   // workspace; on the 项目 tab it creates a global (workspace-less) session
-  // as before.
-  const createFromHeader = useCallback(async () => {
+  // as before. Both paths open the agent/preset picker instead of creating
+  // immediately — the target workspace is all that is decided here.
+  const createFromHeader = useCallback(() => {
     if (!connected) return;
     if (tab === "chats" && chatsGroup && chatsGroup.connected) {
-      await createInWorkspace(chatsGroup);
+      createInWorkspace(chatsGroup);
       return;
     }
-    setCreatingFor("global");
-    setError(null);
-    try {
-      const id = await controller.createSession();
-      onOpenSession(id, "新会话");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreatingFor(null);
-    }
-  }, [connected, tab, chatsGroup, createInWorkspace, controller, onOpenSession]);
+    setPickerTarget({ workspaceRoot: null });
+  }, [connected, tab, chatsGroup, createInWorkspace]);
 
   // Flatten the ACTIVE tab into section rows. Collapsed projects contribute
   // no session rows, so the list stays short like the desktop sidebar.
@@ -238,8 +224,6 @@ export function SessionListScreen({
     }
   }
 
-  const busy = creatingFor !== null;
-
   return (
     <View style={styles.screen}>
       {/* Header: which PC (left) + the primary action (right). Settings lives in
@@ -252,16 +236,12 @@ export function SessionListScreen({
             localStyles.newButton,
             { opacity: !connected ? 0.4 : pressed ? 0.85 : 1 },
           ]}
-          onPress={() => void createFromHeader()}
-          disabled={busy || !connected}
+          onPress={createFromHeader}
+          disabled={!connected}
           accessibilityRole="button"
           accessibilityLabel="新建会话"
         >
-          {busy || !connected ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <Text style={localStyles.newButtonText}>新建</Text>
-          )}
+          <Text style={localStyles.newButtonText}>新建</Text>
         </Pressable>
       </View>
 
@@ -283,9 +263,8 @@ export function SessionListScreen({
             <WorkspaceRow
               group={item.group}
               expanded={expanded[item.group.workspace.root] ?? item.group.is_active}
-              creating={creatingFor === item.group.workspace.root}
               onToggle={() => toggleWorkspace(item.group.workspace.root)}
-              onCreate={() => void createInWorkspace(item.group)}
+              onCreate={() => createInWorkspace(item.group)}
             />
           ) : (
             <SessionRow
@@ -327,6 +306,18 @@ export function SessionListScreen({
       {tab === "projects" && !anySessionVisible && projectGroups.length > 0 && !loading ? (
         <Text style={localStyles.hint}>点开项目查看其中的会话</Text>
       ) : null}
+      {/* Capture the target at render time so onCreated navigates with the
+          same workspace root the sheet created in, even after state moves on. */}
+      <NewSessionSheet
+        visible={pickerTarget !== null}
+        workspaceRoot={pickerTarget?.workspaceRoot ?? null}
+        onClose={() => setPickerTarget(null)}
+        onCreated={(id) => {
+          const workspaceRoot = pickerTarget?.workspaceRoot ?? null;
+          setPickerTarget(null);
+          onOpenSession(id, "新会话", workspaceRoot);
+        }}
+      />
     </View>
   );
 }
@@ -359,13 +350,11 @@ function TabButton({
 function WorkspaceRow({
   group,
   expanded,
-  creating,
   onToggle,
   onCreate,
 }: {
   group: Group;
   expanded: boolean;
-  creating: boolean;
   onToggle: () => void;
   onCreate: () => void;
 }) {
@@ -410,15 +399,11 @@ function WorkspaceRow({
               event.stopPropagation();
               onCreate();
             }}
-            disabled={!group.connected || creating}
+            disabled={!group.connected}
             accessibilityRole="button"
             accessibilityLabel={`在 ${group.workspace.name} 新建会话`}
           >
-            {creating ? (
-              <ActivityIndicator color={colors.textDim} size="small" />
-            ) : (
-              <Text style={[localStyles.plusText, !group.connected && { color: colors.textFaint }]}>+</Text>
-            )}
+            <Text style={[localStyles.plusText, !group.connected && { color: colors.textFaint }]}>+</Text>
           </Pressable>
         ) : null}
         <AnimatedChevron expanded={expanded} />

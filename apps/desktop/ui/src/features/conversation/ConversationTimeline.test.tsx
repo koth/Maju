@@ -503,6 +503,86 @@ describe("ThinkingIndicator", () => {
     );
   });
 
+  it("keeps a turn's changes bar below a trailing call that has no sibling to group with", () => {
+    // Interrupting a turn mid-flight leaves the call the user stopped as the
+    // turn's LAST item: after the closing reply, and alone, so it renders as a
+    // raw row instead of an activity group. The changes bar belongs to the turn
+    // (it is the turn's footer), so it must not land between the two — that put
+    // "已编辑 2 个文件" in the middle of the turn with the agent's last failed
+    // call hanging below it.
+    const stoppedTool = makePermissionTool({
+      id: "tool-stopped-ssh",
+      call_id: "stopped-ssh",
+      kind: "execute",
+      name: "Execute",
+      summary: "ssh export",
+      status: "Failed",
+      raw_input: JSON.stringify({
+        command: "ssh -n -o BatchMode=yes 9.134.231.95 'cd /data/workspace/admesh'",
+      }),
+      raw_output: null,
+      error: "Command failed",
+      permission_options: [],
+    });
+    const snapshot = makeSnapshot({
+      session: {
+        ...makeSnapshot().session,
+        status: "Idle",
+      },
+      timeline: [
+        { Message: "user-export" },
+        { Message: "assistant-export" },
+        { Tool: stoppedTool.id },
+      ],
+      messages: [
+        {
+          id: "user-export",
+          role: "User",
+          body: "跑导出",
+          created_at: "2026-05-12T00:00:00Z",
+        },
+        {
+          id: "assistant-export",
+          role: "Assistant",
+          body: "跑导出。",
+          created_at: "2026-05-12T00:01:05Z",
+        },
+      ],
+      tools: [stoppedTool],
+    });
+
+    const { container, getByRole } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "assistant-export": makeTurnChangeSet("turn-export", [
+            makeFileSummary("scripts/export_x1_meshes.py", 212, 0, "turn-export"),
+          ]),
+        }}
+      />,
+    );
+
+    // Folded: the stopped call is part of the turn summary, the bar closes it.
+    const collapsedText = container.textContent ?? "";
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
+    expect(collapsedText).not.toContain("BatchMode");
+    expect(collapsedText.indexOf("跑导出。")).toBeLessThan(
+      collapsedText.indexOf("export_x1_meshes.py"),
+    );
+
+    fireEvent.click(getByRole("button", { name: "展开已处理上下文" }));
+
+    const expandedText = container.textContent ?? "";
+    const replyAt = expandedText.indexOf("跑导出。");
+    const toolAt = expandedText.indexOf("BatchMode");
+    const barAt = expandedText.indexOf("export_x1_meshes.py");
+    expect(replyAt).toBeGreaterThan(-1);
+    expect(toolAt).toBeGreaterThan(replyAt);
+    expect(barAt).toBeGreaterThan(toolAt);
+    expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
+  });
+
   it("collapses completed turns when the user prompt is outside the visible window", () => {
     const intermediateMessages = Array.from({ length: 83 }, (_, index) => ({
       id: `assistant-mid-${index}`,
@@ -2716,7 +2796,7 @@ describe("ConversationTimeline – window paging trigger", () => {
         (button) => button.textContent?.includes("加载更早历史"),
       ),
     ).toHaveLength(0);
-    fireEvent.click(getByRole("button", { name: /显示更早/ }));
+    fireEvent.click(getByRole("button", { name: /更多对话/ }));
     expect(onLoadOlderHistory).not.toHaveBeenCalled();
   });
 
@@ -2888,5 +2968,197 @@ describe("ConversationTimeline – window paging trigger", () => {
     const summary = container.querySelector(".timeline-collapse-toggle");
     expect(summary).not.toBeNull();
     expect(summary?.getAttribute("data-nav-user-id")).toBe("collapsed-user");
+  });
+});
+
+describe("ConversationTimeline – turn-based history folding", () => {
+  // 每轮 user → assistant（已完成轮次默认折叠为摘要行 + 收尾回复），以
+  // 收尾回复文本（answer N）判定整轮是否渲染——折叠从不把轮次切成两半。
+  function makeTurnSnapshot(turnCount: number) {
+    const timeline: TimelineItem[] = [];
+    const messages: UiSnapshot["messages"] = [];
+    for (let turn = 0; turn < turnCount; turn += 1) {
+      const hh = String(turn).padStart(2, "0");
+      messages.push({
+        id: `turn-user-${turn}`,
+        role: "User",
+        body: `question ${turn}`,
+        created_at: `2026-05-12T${hh}:00:00Z`,
+      });
+      timeline.push({ Message: `turn-user-${turn}` });
+      messages.push({
+        id: `turn-assistant-${turn}`,
+        role: "Assistant",
+        body: `answer ${turn}`,
+        created_at: `2026-05-12T${hh}:00:30Z`,
+      });
+      timeline.push({ Message: `turn-assistant-${turn}` });
+    }
+    return makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline,
+      messages,
+    });
+  }
+
+  it("shows 3 turns by default; each 更多对话 click reveals +6 turns, then doubles", () => {
+    const { container, getByRole } = render(
+      <ConversationTimeline
+        snapshot={makeTurnSnapshot(12)}
+        onPermissionSelect={() => {}}
+      />,
+    );
+
+    // 默认展示最近 3 轮（第 9、10、11 轮），更早 9 轮收进「更多对话」。
+    expect(container.textContent).toContain("answer 11");
+    expect(container.textContent).toContain("answer 9");
+    expect(container.textContent).not.toContain("answer 8");
+    expect(container.textContent).not.toContain("answer 0");
+
+    // 第一次点击 +6 轮 → 还有 3 轮。
+    fireEvent.click(getByRole("button", { name: "更多对话（还有 9 轮）" }));
+    expect(container.textContent).toContain("answer 3");
+    expect(container.textContent).not.toContain("answer 2");
+
+    // 第二次点击 +12 轮（6 翻倍）→ 全部可见，按钮消失。
+    fireEvent.click(getByRole("button", { name: "更多对话（还有 3 轮）" }));
+    expect(container.textContent).toContain("answer 0");
+    expect(container.querySelectorAll(".timeline-load-older")).toHaveLength(0);
+  });
+
+  it("never slices mid-turn: a hidden turn hides its user, tools and reply together", () => {
+    const timeline: TimelineItem[] = [];
+    const messages: UiSnapshot["messages"] = [];
+    const tools: ToolInvocation[] = [];
+    for (let turn = 0; turn < 5; turn += 1) {
+      const hh = String(turn).padStart(2, "0");
+      messages.push({
+        id: `mid-user-${turn}`,
+        role: "User",
+        body: `question ${turn}`,
+        created_at: `2026-05-12T${hh}:00:00Z`,
+      });
+      timeline.push({ Message: `mid-user-${turn}` });
+      tools.push(
+        makePermissionTool({
+          id: `mid-tool-${turn}`,
+          call_id: `mid-tool-${turn}`,
+          kind: "execute",
+          name: `run ${turn}`,
+          summary: `run ${turn}`,
+          status: "Succeeded",
+          permission_options: [],
+        }),
+      );
+      timeline.push({ Tool: `mid-tool-${turn}` });
+      messages.push({
+        id: `mid-assistant-${turn}`,
+        role: "Assistant",
+        body: `answer ${turn}`,
+        created_at: `2026-05-12T${hh}:00:30Z`,
+      });
+      timeline.push({ Message: `mid-assistant-${turn}` });
+    }
+    const snapshot = makeSnapshot({
+      session: { ...makeSnapshot().session, status: "Idle" },
+      timeline,
+      messages,
+      tools,
+    });
+
+    const { container, getByRole } = render(
+      <ConversationTimeline snapshot={snapshot} onPermissionSelect={() => {}} />,
+    );
+
+    // 默认 3 轮（第 2、3、4 轮）：被隐藏的第 1 轮整体隐藏——用户消息、
+    // 工具、收尾回复一起切走，不会出现"上半轮隐藏、下半轮可见"的切口。
+    expect(container.textContent).toContain("answer 2");
+    expect(container.textContent).not.toContain("answer 1");
+    expect(container.textContent).not.toContain("question 1");
+    expect(container.textContent).not.toContain("run 1");
+
+    fireEvent.click(getByRole("button", { name: "更多对话（还有 2 轮）" }));
+    // 展开后第 0、1 轮整轮回归（已完成轮次折叠为摘要 + 收尾回复）。
+    expect(container.textContent).toContain("answer 1");
+    expect(container.textContent).toContain("answer 0");
+  });
+
+  it("keeps the visible top aligned to a turn boundary across backend paging", () => {
+    // 分页按「条」加载，页首可能落在轮次中间：开头的用户消息还在更早的
+    // 一页里。只要还有未加载历史，这个切口不显示，可视边界对齐到第一个
+    // 轮次开头；全部加载完毕后它作为真正的会话开场恢复显示。
+    const makePagedSnapshot = (historyEarliestSeq: number | null) =>
+      makeSnapshot({
+        session: { ...makeSnapshot().session, status: "Idle" },
+        timeline: [
+          { Message: "cut-assistant" }, // 上一轮的切口（其开头在未加载页）
+          { Message: "page-user-1" },
+          { Message: "page-assistant-1" },
+          { Message: "page-user-2" },
+          { Message: "page-assistant-2" },
+        ],
+        messages: [
+          {
+            id: "cut-assistant",
+            role: "Assistant",
+            body: "orphan narration",
+            created_at: "2026-05-12T00:30:00Z",
+          },
+          {
+            id: "page-user-1",
+            role: "User",
+            body: "question 1",
+            created_at: "2026-05-12T01:00:00Z",
+          },
+          {
+            id: "page-assistant-1",
+            role: "Assistant",
+            body: "answer 1",
+            created_at: "2026-05-12T01:00:30Z",
+          },
+          {
+            id: "page-user-2",
+            role: "User",
+            body: "question 2",
+            created_at: "2026-05-12T02:00:00Z",
+          },
+          {
+            id: "page-assistant-2",
+            role: "Assistant",
+            body: "answer 2",
+            created_at: "2026-05-12T02:00:30Z",
+          },
+        ],
+        history_total: 500,
+        history_earliest_seq: historyEarliestSeq,
+      });
+
+    const { container, getByRole, rerender } = render(
+      <ConversationTimeline
+        snapshot={makePagedSnapshot(42)}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={() => Promise.resolve(true)}
+      />,
+    );
+
+    // 切口隐藏，可视内容从第一个轮次开头（question 1 那轮）开始。
+    expect(container.textContent).not.toContain("orphan narration");
+    expect(container.textContent).toContain("answer 2");
+    expect(container.textContent).toContain("answer 1");
+    // 本地已全部展开 → 仍可继续向后翻页让切口的开头加载进来。
+    expect(getByRole("button", { name: "加载更早历史" })).toBeInTheDocument();
+
+    // 全部历史加载完毕：切口恢复为真正的会话开场。
+    rerender(
+      <ConversationTimeline
+        snapshot={makePagedSnapshot(null)}
+        onPermissionSelect={() => {}}
+        onLoadOlderHistory={() => Promise.resolve(true)}
+      />,
+    );
+    expect(container.textContent).toContain("orphan narration");
+    expect(
+      Array.from(container.querySelectorAll(".timeline-load-older")),
+    ).toHaveLength(0);
   });
 });

@@ -597,11 +597,17 @@ export function useWorkbenchSnapshot() {
     const current = snapshotRef.current;
     const earliest = current?.history_earliest_seq;
     if (!current || earliest == null) return false;
+    // 绑定发起时的会话：后端在**执行时刻**按当时的当前会话查询，等待期间的
+    // 会话切换会让本页属于另一个对话。错会话的页面必须丢弃——否则历史某个
+    // 对话的内容会被合并进当前会话（内容覆盖污染）。
+    const sessionId = current.session.id;
     try {
       const page = await sessionLoadHistoryBefore(earliest, limit);
+      if (page.session_id !== sessionId) return false;
       if (page.timeline.length === 0) return false;
+      if (snapshotRef.current?.session.id !== sessionId) return false;
       setSnapshot((prev) => {
-        if (!prev) return prev;
+        if (!prev || prev.session.id !== sessionId) return prev;
         // Dedupe by id in case of overlap with the current window.
         const knownMessageIds = new Set(prev.messages.map((m) => m.id));
         const knownToolIds = new Set(prev.tools.map((t) => t.id));

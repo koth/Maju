@@ -1,6 +1,8 @@
 use tauri::{AppHandle, Emitter};
 use terminal_service::TerminalServiceEvent;
-use workspace_model::{ProxyRetryStatus, RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch};
+use workspace_model::{
+    AutomationFiredEvent, ProxyRetryStatus, RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch,
+};
 
 pub fn emit_ui_snapshot(app: &AppHandle, snapshot: &UiSnapshot) {
     let _ = app.emit("ui:snapshot", snapshot);
@@ -37,4 +39,11 @@ pub fn emit_remote_open_progress(app: &AppHandle, progress: &RemoteOpenProgressE
 /// snapshot bridge calls this each wake when the value changes.
 pub fn emit_proxy_retry_status(app: &AppHandle, status: Option<&ProxyRetryStatus>) {
     let _ = app.emit("proxy:retry", status);
+}
+
+/// "到点提醒": fired when an automation (定时任务) reaches its trigger point
+/// and its prompt run is dispatched — or when dispatch fails (the reminder
+/// still surfaces, carrying the error).
+pub fn emit_automation_fired(app: &AppHandle, event: &AutomationFiredEvent) {
+    let _ = app.emit("automation:fired", event);
 }

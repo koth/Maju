@@ -193,9 +193,13 @@ describe("SessionStore guard", () => {
   });
 
   it("SnapshotFull replaces", () => {
+    // 换会话的全量替换要显式 beginSession（切换语义）；直接 setSnapshot 只
+    // 替换当前会话的状态（跨会话污染守卫见 session-gating.test.ts）。
     const fresh = makeSnapshot({ revision: 9, session: { ...makeSnapshot().session, id: "s-9" } });
+    store.beginSession("s-9");
     store.setSnapshot(fresh);
     expect(store.state?.revision).toBe(9);
+    expect(store.state?.session.id).toBe("s-9");
   });
 
   it("ignores a patch for a different session", () => {
@@ -232,8 +236,14 @@ describe("SessionStore guard", () => {
     // A same-session response at the SAME revision is stale too.
     store.setSnapshot(makeSnapshot({ revision: 6, messages: [userMsg("m2", "dupe")] }));
     expect(store.state?.messages.map((m) => m.id)).toEqual(["m1"]);
-    // A different session replaces freely (session switch).
-    store.setSnapshot(makeSnapshot({ revision: 1, session: { ...makeSnapshot().session, id: "s-next" } }));
+    // 别的会话的快照默认丢弃（跨会话污染守卫）；显式 beginSession（切换）
+    // 之后才收编。
+    const heldId = store.state!.session.id;
+    const foreign = makeSnapshot({ revision: 1, session: { ...makeSnapshot().session, id: "s-next" } });
+    store.setSnapshot(foreign);
+    expect(store.state?.session.id).toBe(heldId);
+    store.beginSession("s-next");
+    store.setSnapshot(foreign);
     expect(store.state?.session.id).toBe("s-next");
   });
 });

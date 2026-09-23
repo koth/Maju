@@ -1,4 +1,5 @@
 mod application;
+pub mod automation;
 mod attachment_cache;
 mod bootstrap;
 pub mod dsh_bringup;

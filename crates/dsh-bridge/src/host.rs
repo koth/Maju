@@ -831,6 +831,15 @@ impl HarnessHost {
                 );
             }
             ControlFrame::Baseline { value } => {
+                // Background jobs at the cut (`Record<SessionId, SessionJob[]>`)
+                // feed the context dock's "后台任务" list.
+                if let Some(jobs) = value.get("jobs").and_then(Value::as_object) {
+                    for (session_id, jobs) in jobs {
+                        if let Some(jobs) = jobs.as_array() {
+                            crate::jobs::record_session_jobs(session_id, jobs);
+                        }
+                    }
+                }
                 // Every session's values at the cut. Keys are session ids;
                 // each value is a projection snapshot `{ asOfSeq, values }`.
                 let Some(projections) = value.get("projections").and_then(Value::as_object) else {
@@ -848,9 +857,14 @@ impl HarnessHost {
                     }
                 }
             }
-            // Queue/jobs are not represented in `ClientEvent` (same as the
-            // mux frames for them).
-            ControlFrame::Queue { .. } | ControlFrame::Jobs { .. } | ControlFrame::Other => {}
+            // A `jobs` control frame is the FULL job snapshot for one session
+            // (后台任务); recorded for the context dock (no ClientEvent).
+            ControlFrame::Jobs { session_id, jobs } => {
+                crate::jobs::record_session_jobs(&session_id, &jobs);
+            }
+            // session/queue is not represented in `ClientEvent` (same as the
+            // mux frames for it).
+            ControlFrame::Queue { .. } | ControlFrame::Other => {}
         }
     }
 
@@ -1109,8 +1123,10 @@ impl HarnessHost {
                 return;
             }
         };
-        // Honor host/session-removed: mark the sink so re-baseline skips it.
+        // Honor host/session-removed: mark the sink so re-baseline skips it,
+        // and drop the session's background-job snapshot (后台任务) with it.
         if let HostFrame::HostSessionRemoved { session_id } = &frame {
+            crate::jobs::clear_session_jobs(session_id);
             if let Some(sink) = self.router.get(session_id) {
                 sink.mark_removed();
             }

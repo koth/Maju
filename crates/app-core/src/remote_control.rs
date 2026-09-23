@@ -11,11 +11,13 @@
 //! `create_session`, `switch_session`) are implemented here directly against
 //! `Application`. `list_sessions` crosses the workspace-registry boundary
 //! (it lives on `AppState` in the Tauri shell), so its implementation is
-//! provided by the shell, not here.
+//! provided by the shell, not here. `list_agent_options` likewise stays in
+//! the shell (settings + harness host live outside `Application`) and is
+//! dispatched by the bridge without crossing this trait.
 
 use workspace_model::{
-    AgentCliId, PermissionInputResponse, SessionFileChange, UiSnapshot, UserPromptContent,
-    WorkspaceSessionList,
+    AgentCliId, PermissionInputResponse, SessionConfigState, SessionFileChange, UiSnapshot,
+    UserPromptContent, WorkspaceSessionList,
 };
 
 use crate::application::AppUpdate;
@@ -41,12 +43,24 @@ pub trait RemoteControl: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<WorkspaceSessionList>, String>> + Send;
 
-    /// Create a new session in the active workspace context.
+    /// Create a new session in the active workspace context. `preset` is the
+    /// DeepSeek Harness agent preset (mode), only meaningful for the harness
+    /// agent; `None` = deployment default.
     fn create_session(
         &self,
         workspace_root: Option<String>,
         agent: Option<AgentCliId>,
+        preset: Option<String>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send;
+
+    /// Set a session config control (e.g. the model picker) on the active
+    /// session. Mirrors the local `session_set_config_control` command.
+    fn set_config_control(
+        &self,
+        control_id: String,
+        value_id: String,
+        provider: Option<String>,
+    ) -> impl std::future::Future<Output = Result<SessionConfigState, String>> + Send;
 
     /// Switch the active session.
     fn switch_session(
@@ -184,10 +198,23 @@ where
         &self,
         _workspace_root: Option<String>,
         agent: Option<AgentCliId>,
+        preset: Option<String>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send {
         let result = self.with_app(|app| {
-            app.session_create(agent, None)?;
+            app.session_create(agent, preset)?;
             Ok(app.ui.session.id.to_string())
+        });
+        async move { result }
+    }
+
+    fn set_config_control(
+        &self,
+        control_id: String,
+        value_id: String,
+        provider: Option<String>,
+    ) -> impl std::future::Future<Output = Result<SessionConfigState, String>> + Send {
+        let result = self.with_app(|app| {
+            app.set_session_config_control(&control_id, &value_id, provider.as_deref())
         });
         async move { result }
     }

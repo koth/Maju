@@ -27,6 +27,9 @@
   display: none;
 }
 
+/* Footer is a separate surface, not the last row of the list: one hairline and
+   a little air above it, matching how the account/settings band reads in the
+   reference client. */
 .sl-footer {
   flex-shrink: 0;
   display: flex;
@@ -34,6 +37,7 @@
   align-items: stretch;
   margin-top: auto;
   padding: 10px 8px 14px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .sl-settings-btn {
@@ -117,6 +121,23 @@
   border-bottom: 0;
 }
 
+/* Brand header. The app rail carries the mark; this names the product at the
+   top of the sidebar, the way the reference client opens with its workspace
+   name. Its left edge is 18px — the icon column every row below starts on — so
+   the wordmark lines up with the rows rather than floating in the gutter. */
+.sl-brand {
+  padding: 14px 8px 2px 18px;
+}
+
+.sl-brand-name {
+  color: var(--text-strong);
+  font-family: var(--font-chat);
+  font-size: var(--font-size-ui);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
 /* Hero "新建对话" row (ChatGPT-style launcher: flat row, neutral hover) */
 .sl-hero {
   padding: 8px 8px 0;
@@ -177,10 +198,12 @@
   white-space: nowrap;
 }
 
+/* The shortcut chip is a hint, not a control: no border, no fill, one rung
+   below the label it sits beside. */
 .sl-hero-new-kbd {
   flex-shrink: 0;
-  padding: 3px 7px;
-  border: 1px solid var(--border-subtle);
+  padding: 2px 6px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
@@ -385,7 +408,9 @@
   place-items: center;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.12);
+  /* `--surface-alt-bg`, not the muted well: this chip sits in the sidebar, and
+     the light theme's well (#f7f7f7) is lighter than the sidebar (#f4f4f4). */
+  background: var(--surface-alt-bg);
   color: var(--text-soft);
   font-size: var(--font-size-2xs);
   font-weight: 500;
@@ -1103,7 +1128,7 @@
 
 /* Compact project navigation */
 .sl-header {
-  padding: 16px 8px 4px;
+  padding: 20px 8px 6px;
   border-bottom: 0;
 }
 
@@ -1125,7 +1150,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 34px;
+  min-height: var(--row-height);
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-md);
@@ -1148,9 +1173,11 @@
   background: var(--interactive-active);
 }
 
+/* 18px like every other sidebar icon column, so this row's label lands on the
+   same left edge as the project names and session titles (46px). */
 .sl-quick-nav-item .sl-action-icon {
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
   color: var(--text-soft);
 }
 
@@ -1186,11 +1213,18 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 0 2px 10px;
+  padding: 3px 0 3px 10px;
   border: 0;
   background: transparent;
+  color: var(--text-soft);
   cursor: pointer;
-  font: inherit;
+  font-family: var(--font-chat);
+  /* `font: inherit` used to sit here and silently reset the label to the
+     sidebar's body size, so the section header read as one more list row.
+     A section label is the smallest rung of the type scale, not a row. */
+  font-size: var(--font-size-2xs);
+  font-weight: 500;
+  letter-spacing: 0.04em;
   transition: color var(--transition-fast);
 }
 
@@ -1199,10 +1233,10 @@
 }
 
 .sl-kicker-toggle svg {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   flex-shrink: 0;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
 .sl-workspaces.is-hidden {
@@ -1213,7 +1247,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 16px 8px 4px;
+  padding: 20px 8px 4px;
   /* Long chat lists used to overflow the sidebar below the projects list and
      get clipped with no way to reach the remaining sessions. Bound the
      section and let it scroll on its own instead. */
@@ -1251,17 +1285,18 @@
   margin-top: 0;
 }
 
-/* Icon-only "+" control in the section header — same 34px row height. */
+/* Icon-only "+" control beside the section label — label scale, not row scale,
+   so it reads as an affordance of the header rather than a fifth list item. */
 .sl-new-btn {
   display: grid;
-  width: 34px;
-  min-width: 34px;
-  min-height: 34px;
-  height: 34px;
+  width: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  height: 26px;
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-soft);
 }
@@ -1279,7 +1314,7 @@
 .sl-workspace-section,
 .sl-workspace-section.is-active,
 .sl-workspace-section.is-dormant {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1296,12 +1331,15 @@
   grid-template-columns: minmax(0, 1fr) 28px 28px;
   align-items: center;
   gap: 2px;
-  min-height: 34px;
+  min-height: var(--row-height);
   border-radius: var(--radius-md);
 }
 
+/* 激活项目不再常驻高亮项目行：会话行的选中高亮已经表达"当前在此项目"，
+   两块高亮同时出现很抢眼。项目行只在鼠标明确悬停在项目名上时高亮
+   （`.sl-workspace-node:hover`）；选中态仅保留项目名的加粗强调。 */
 .sl-workspace-section.is-active .sl-workspace-row {
-  background: var(--interactive-hover);
+  background: transparent;
 }
 
 .sl-workspace-node {
@@ -1310,7 +1348,7 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 34px;
+  min-height: var(--row-height);
   padding: 0 10px;
   border-radius: var(--radius-md);
   color: var(--text-muted);
@@ -1326,7 +1364,7 @@
   align-items: center;
   justify-content: center;
   width: 18px;
-  height: 34px;
+  height: var(--row-height);
   padding: 0;
   border: none;
   background: transparent;
@@ -1371,8 +1409,8 @@
 
 .sl-workspace-state {
   display: inline-flex;
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -1462,10 +1500,16 @@
   color: var(--text-soft);
 }
 
+/* Sessions nest under their project: a hairline guide plus an inset that puts
+   every session title on the *same left edge as the project name* (46px from
+   the sidebar's content edge). The status dot lives in the gutter to the left
+   of that edge instead of pushing the text right, so nothing is left floating
+   in a gap. Breakdown: list 8 + guide 1 + inset 12 + row padding 10 + dot 7 +
+   gap 8 = 46. */
 .sl-thread-branch {
   margin: -1px 0 2px;
-  padding: 0 0 0 17px;
-  border-left: 0;
+  padding: 0 0 0 12px;
+  border-left: 1px solid var(--border-subtle);
 }
 
 .sl-items {
@@ -1475,15 +1519,16 @@
 }
 
 /* "展开显示" — a quiet row that lines up with the session rows above it, not a
-   button that competes with them. The left inset matches where a session title
-   starts: row padding 10 + dot 7 + gap 8 + badge 16 + gap 8. */
+   button that competes with them. Its text sits on the same left edge as the
+   session titles: branch 13 + this inset 25 = the 38px the titles measure from
+   the branch's own left edge. */
 .sl-sessions-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
   min-height: 30px;
-  padding: 0 10px 0 49px;
+  padding: 0 10px 0 25px;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -1576,7 +1621,9 @@
 
 .sl-item-button {
   display: grid;
-  grid-template-columns: 7px 16px minmax(0, 1fr) auto;
+  /* Status dot, then the title. The agent mark used to sit between them and is
+     gone — see `.sl-item-agent` on the right for where that identity went. */
+  grid-template-columns: 7px minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 34px;
   align-items: center;
@@ -1589,24 +1636,6 @@
   cursor: pointer;
   font: inherit;
   text-align: left;
-}
-
-.sl-agent-badge {
-  display: grid;
-  width: 16px;
-  height: 16px;
-  place-items: center;
-  flex-shrink: 0;
-}
-
-.sl-agent-badge svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
-.sl-item:not(.sl-active) .sl-agent-badge {
-  opacity: 0.85;
 }
 
 .sl-item-button:focus-visible {
@@ -1668,16 +1697,24 @@
   }
 }
 
+/* Session titles sit one rung below their project on purpose: the project owns
+   the group, the sessions belong to it. Only the open session is promoted back
+   to full strength. */
 .sl-item-title {
-  color: var(--text-strong);
+  color: var(--text-muted);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
   line-height: 1.25;
+}
+
+.sl-active .sl-item-title {
+  color: var(--text-strong);
+  font-weight: 500;
 }
 
 .sl-item-time {
   color: var(--text-soft);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-2xs);
   line-height: 1;
   white-space: nowrap;
 }
@@ -1688,16 +1725,21 @@
   min-width: 0;
 }
 
+/* Hover reveals the agent's brand mark in place of the timestamp. The name is
+   not repeated as text — it stays in the mark's tooltip — so the row keeps its
+   quiet resting state and only the identity is one glance away. */
 .sl-item-agent {
   display: none;
-  max-width: 78px;
-  overflow: hidden;
+  width: 14px;
+  height: 14px;
+  place-items: center;
   color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.sl-item-agent svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .sl-active .sl-item-agent {
@@ -1718,8 +1760,9 @@
   display: none;
 }
 
+/* Hover swaps the timestamp for the agent's brand mark. */
 .sl-item:hover .sl-item-agent {
-  display: block;
+  display: grid;
 }
 
 .sl-item:hover .sl-archive-btn,

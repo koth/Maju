@@ -282,6 +282,13 @@ pub struct HarnessMcpServer {
     /// Auth header the local server requires, and its per-server token.
     pub header_name: String,
     pub header_value: String,
+    /// Per-tool-call timeout (`toolCallTimeoutMs`) for `dsh-mcp-client`, in
+    /// milliseconds. `0` omits the key so the client keeps its own default
+    /// (60s) — far too short for image generation, which is why a configured
+    /// "300s" still died at ~2 minutes: the client deadline cut the call
+    /// before the HTTP timeout could. The image server row carries the
+    /// configured generation timeout here instead.
+    pub tool_call_timeout_ms: u64,
 }
 
 /// `None` = keep dsh's default (inherit the session route). dsh rejects a
@@ -419,6 +426,12 @@ pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
                 server.header_name,
                 yaml_quote(&server.header_value)
             ));
+            if server.tool_call_timeout_ms > 0 {
+                out.push_str(&format!(
+                    "        toolCallTimeoutMs: {}\n",
+                    server.tool_call_timeout_ms
+                ));
+            }
         }
     }
     out
@@ -842,6 +855,7 @@ mod tests {
             url: "http://127.0.0.1:54321/mcp".into(),
             header_name: "x-kodex-web-tools-token".into(),
             header_value: "tok:en #1".into(),
+            tool_call_timeout_ms: 315_000,
         }]);
         let text = render_harness_patch(&config);
         let doc: serde_yaml::Value = serde_yaml::from_str(&text)
@@ -881,6 +895,27 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("tok:en #1")
         );
+        // The per-call timeout must reach the mcp-client row — its own 60s
+        // default is what killed long generate_image calls before the HTTP
+        // timeout could.
+        assert_eq!(
+            row_config.get("toolCallTimeoutMs").and_then(|v| v.as_u64()),
+            Some(315_000)
+        );
+    }
+
+    #[test]
+    fn harness_patch_omits_tool_timeout_when_unset() {
+        let config = HarnessPatchConfig::default().with_mcp_servers(vec![HarnessMcpServer {
+            id: "kodex-web-tools-mcp".into(),
+            server_name: "kodex_web_tools".into(),
+            url: "http://127.0.0.1:54321/mcp".into(),
+            header_name: "x-kodex-web-tools-token".into(),
+            header_value: "tok".into(),
+            tool_call_timeout_ms: 0,
+        }]);
+        let text = render_harness_patch(&config);
+        assert!(!text.contains("toolCallTimeoutMs"), "unset must keep dsh default:\n{text}");
     }
 
     #[test]

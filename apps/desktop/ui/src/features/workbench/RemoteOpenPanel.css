@@ -53,7 +53,11 @@
   padding: 12px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(215, 225, 223, 0.035);
+  /* Token fills throughout this file: the old pale washes
+     (`rgba(215,225,223,.035)` and friends) only read as a lift on a dark
+     canvas, so in the light theme every card in this panel lost its fill and
+     the selected states had no feedback at all. */
+  background: var(--surface-bg);
 }
 
 .remote-open-step-head {
@@ -112,7 +116,9 @@
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.16);
+  /* Token well: the old `rgba(0,0,0,.16)` is a dark-theme recess and paints a
+     #d6d6d6 slab around every field on the light canvas. */
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   font: inherit;
   font-size: 12px;
@@ -143,7 +149,7 @@
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--surface-muted-bg);
   color: var(--text-soft);
   cursor: pointer;
   font: inherit;
@@ -203,7 +209,7 @@
   padding: 8px 7px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--surface-muted-bg);
   color: var(--text-soft);
   cursor: pointer;
   font: inherit;
@@ -267,7 +273,7 @@
 }
 
 .remote-open-secondary {
-  background: rgba(215, 225, 223, 0.04);
+  background: var(--surface-alt-bg);
 }
 
 .remote-open-primary:hover:not(:disabled),
@@ -310,7 +316,10 @@
   padding: 10px 12px;
   border: 1px solid var(--interactive-selected-border);
   border-radius: 8px;
-  background: rgba(108, 142, 174, 0.1);
+  /* Neutral selected fill. The old `rgba(108,142,174,.1)` was the only blue in
+     the palette — off-contract ("no hue"), and on the light canvas it read as a
+     stray blue box. */
+  background: var(--interactive-selected);
   overflow: hidden;
 }
 
@@ -403,7 +412,7 @@
   padding: 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(215, 225, 223, 0.035);
+  background: var(--surface-bg);
 }
 
 .remote-open-progress-item {
@@ -422,7 +431,7 @@
   height: 8px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(215, 225, 223, 0.08);
+  background: var(--surface-alt-bg);
 }
 
 .remote-open-progress-item.is-pending {

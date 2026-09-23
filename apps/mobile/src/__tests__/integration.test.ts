@@ -14,7 +14,13 @@ import type {
   EventFrame,
   SubscriptionStatus,
 } from "../types/relay-protocol";
-import type { UiSnapshot, ToolInvocation, WorkspaceSessionList } from "../types";
+import type {
+  UiSnapshot,
+  ToolInvocation,
+  WorkspaceSessionList,
+  AgentOptionsList,
+  SessionConfigState,
+} from "../types";
 
 // End-to-end loopback harness: a fake PC (RelayConnection on the peer end of a
 // linked channel transport) + the real AppController on the phone. Proves the
@@ -96,6 +102,51 @@ function tool(callId: string, over: Partial<ToolInvocation> = {}): ToolInvocatio
   };
 }
 
+/** Fixture for ListAgentOptions: three installed agents with the PC default
+ *  on Codex, plus two harness presets. */
+const AGENT_OPTIONS: AgentOptionsList = {
+  agents: [
+    { id: "codex-acp", label: "Codex", installed: true, selected: true },
+    { id: "claude-agent-acp", label: "Claude", installed: true, selected: false },
+    { id: "deepseek-harness", label: "DeepSeek Harness", installed: true, selected: false },
+  ],
+  dsh_presets: [
+    { id: "standard", label: "Standard", description: null },
+    { id: "code", label: "Code", description: null },
+  ],
+  dsh_default_preset: "standard",
+};
+
+/** Fixture for SetConfigControl: one hydrated model control whose current
+ *  value flips to the requested choice. */
+function modelConfigState(currentValueId: string, currentLabel: string): SessionConfigState {
+  return {
+    hydrated: true,
+    controls: [
+      {
+        id: "model",
+        label: "Model",
+        description: null,
+        category: "Model",
+        source: "SessionModel",
+        current_value_id: currentValueId,
+        current_value_label: currentLabel,
+        choices: [
+          { id: "gpt-5.1", label: "GPT-5.1", description: null, provider: null },
+          {
+            id: "kimi-for-coding",
+            label: "Kimi For Coding",
+            description: null,
+            provider: "kimi_code",
+            provider_label: "Kimi",
+          },
+        ],
+        enabled: true,
+      },
+    ],
+  };
+}
+
 async function tick(ms = 10): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -129,6 +180,19 @@ class FakePc {
   /** The last ResolvePermission request the phone sent (option id + request
    * id), so tests can assert what was actually approved. */
   lastResolve: { permission_request_id: string; option_id?: string | null } | null = null;
+  /** The last CreateSession request the phone sent, so tests can assert the
+   *  chosen workspace / agent / preset actually crossed the wire. */
+  lastCreate: {
+    workspace_root?: string | null;
+    agent?: string | null;
+    preset?: string | null;
+  } | null = null;
+  /** The last SetConfigControl request the phone sent. */
+  lastConfigControl: {
+    control_id: string;
+    value_id: string;
+    provider?: string | null;
+  } | null = null;
 
   get shortCircuitedGetStates(): number {
     return this.getStateShortCircuits;
@@ -232,9 +296,34 @@ class FakePc {
       return;
     }
     if (request.op === "create_session") {
+      this.lastCreate = {
+        workspace_root: request.workspace_root,
+        agent: request.agent,
+        preset: request.preset,
+      };
       this.snapshot = makeSnapshot("s1", "Idle");
       await this.sendResponse({ op: "create_session", request_id: requestId, session_id: "s1" });
       await this.pushEvent({ kind: "snapshot_full", snapshot: this.snapshot });
+      return;
+    }
+    if (request.op === "list_agent_options") {
+      await this.sendResponse({ op: "agent_options", request_id: requestId, options: AGENT_OPTIONS });
+      return;
+    }
+    if (request.op === "set_config_control") {
+      this.lastConfigControl = {
+        control_id: request.control_id,
+        value_id: request.value_id,
+        provider: request.provider,
+      };
+      const choice = modelConfigState("gpt-5.1", "GPT-5.1").controls[0].choices.find(
+        (entry) => entry.id === request.value_id,
+      );
+      await this.sendResponse({
+        op: "set_config_control",
+        request_id: requestId,
+        config: modelConfigState(request.value_id, choice?.label ?? request.value_id),
+      });
       return;
     }
     if (request.op === "send_prompt") {
@@ -348,7 +437,7 @@ describe("integration: phone <-> fake PC over relay", () => {
     expect(sessionId).toBe("s1");
     await waitFor(() => (controller.snapshot?.session.id === "s1" ? true : undefined));
 
-    await controller.sendPrompt("hello");
+    await controller.sendPrompt([{ type: "text", text: "hello" }]);
     await waitFor(() => {
       const tools = controller.snapshot?.tools ?? [];
       const status = controller.snapshot?.session.status;
@@ -357,6 +446,45 @@ describe("integration: phone <-> fake PC over relay", () => {
     });
     expect(controller.snapshot?.session.status).toBe("Idle");
     expect(controller.snapshot?.tools.find((t) => t.call_id === "call-1")?.status).toBe("Succeeded");
+
+    pc.stopLoop();
+    await controller.disconnect();
+    await pcRun;
+  });
+
+  it("create carries agent + harness preset; agent options and model control round-trip", async () => {
+    const { controller, pc, pcRun } = await bootstrap();
+    await controller.getState();
+
+    // The new-session picker reads its choices from the PC.
+    const options = await controller.listAgentOptions();
+    expect(options.agents.map((entry) => entry.id)).toContain("deepseek-harness");
+    expect(options.dsh_presets?.map((entry) => entry.id)).toContain("standard");
+    expect(options.dsh_default_preset).toBe("standard");
+
+    // Creation forwards the picked workspace / agent / preset verbatim.
+    const sessionId = await controller.createSession({
+      workspaceRoot: "/demo",
+      agent: "deepseek-harness",
+      preset: "code",
+    });
+    expect(sessionId).toBe("s1");
+    await waitFor(() => (controller.snapshot?.session.id === "s1" ? true : undefined));
+    expect(pc.lastCreate).toMatchObject({
+      workspace_root: "/demo",
+      agent: "deepseek-harness",
+      preset: "code",
+    });
+
+    // The composer's model control goes through set_config_control and comes
+    // back with the refreshed state.
+    const config = await controller.setConfigControl("model", "kimi-for-coding", "kimi_code");
+    expect(config.controls[0]?.current_value_id).toBe("kimi-for-coding");
+    expect(pc.lastConfigControl).toMatchObject({
+      control_id: "model",
+      value_id: "kimi-for-coding",
+      provider: "kimi_code",
+    });
 
     pc.stopLoop();
     await controller.disconnect();

@@ -259,6 +259,7 @@ pub(crate) fn harness_exposed_mcp(app_paths: &AppPaths) -> crate::dsh_bringup::H
                 lease.url(),
                 "x-kodex-web-tools-token",
                 lease.token(),
+                0,
             ));
             exposed.web_tools = Some(lease);
         }
@@ -278,12 +279,26 @@ pub(crate) fn harness_exposed_mcp(app_paths: &AppPaths) -> crate::dsh_bringup::H
     let output_root = app_paths.harness_image_output_root();
     match image_lease(app_paths, &output_root.display().to_string(), caps) {
         Ok(Some((lease, _caps))) => {
+            // `dsh-mcp-client` caps every tool call with `toolCallTimeoutMs`
+            // (default 60s) — it used to kill long generate_image calls well
+            // before the configured HTTP timeout. Carry the configured
+            // generation timeout into the mount row with a little slack, so
+            // our own HTTP timeout fires first (clear message) and the client
+            // deadline only acts as the backstop.
+            let mut timeout_seconds =
+                crate::settings::load_app_settings(app_paths).image.generate.timeout_seconds;
+            if timeout_seconds == 0 {
+                timeout_seconds =
+                    workspace_model::ImageGenerateSettings::default().timeout_seconds;
+            }
+            let tool_call_timeout_ms = (u64::from(timeout_seconds) + 15) * 1000;
             exposed.rows.push(dsh_mcp_row(
                 "kodex-image-mcp",
                 "kodex_image",
                 lease.url(),
                 "x-kodex-image-token",
                 lease.token(),
+                tool_call_timeout_ms,
             ));
             exposed.image = Some(lease);
         }
@@ -300,6 +315,7 @@ fn dsh_mcp_row(
     url: &str,
     header_name: &str,
     header_value: &str,
+    tool_call_timeout_ms: u64,
 ) -> dsh_bridge::HarnessMcpServer {
     dsh_bridge::HarnessMcpServer {
         id: id.to_string(),
@@ -307,6 +323,7 @@ fn dsh_mcp_row(
         url: url.to_string(),
         header_name: header_name.to_string(),
         header_value: header_value.to_string(),
+        tool_call_timeout_ms,
     }
 }
 
@@ -647,6 +664,14 @@ impl Application {
     }
 
     // ── Session management ──
+
+    /// Background jobs (后台任务) the dsh harness reports for the visible
+    /// session (empty for non-harness agents). Live mirror of the harness's
+    /// `session/jobs` push — see `dsh_bridge::jobs`; the conversation's
+    /// context dock lists these under "后台任务".
+    pub fn session_background_jobs(&self) -> Vec<workspace_model::SessionJobRecord> {
+        dsh_bridge::session_jobs(&self.session.id)
+    }
 
     pub fn session_list(&self) -> Result<Vec<SessionListItem>, String> {
         let mut sessions = self.store.list_sessions().map_err(|e| e.to_string())?;
@@ -1481,10 +1506,11 @@ impl Application {
             history_earliest_seq,
             conversation_change_set_signature: 0,
             conversation_change_set_turn_cache: HashMap::new(),
+            automation_run_id: None,
         })
     }
 
-    fn runtime_for_new_session(
+    pub(super) fn runtime_for_new_session(
         &mut self,
         agent: Option<AgentCliId>,
         preset: Option<String>,
@@ -1605,6 +1631,7 @@ impl Application {
             history_earliest_seq: None,
             conversation_change_set_signature: 0,
             conversation_change_set_turn_cache: HashMap::new(),
+            automation_run_id: None,
         })
     }
 }

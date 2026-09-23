@@ -607,7 +607,12 @@ pub enum ContentBlock {
     ToolResult {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
-        content: Vec<ContentBlock>,
+        /// Raw nested result content, kept as JSON on purpose: MCP tool results
+        /// (e.g. kodex-image `generate_image` returning `images[].path`) use
+        /// block shapes outside the typed schema, and routing them through a
+        /// fieldless `Other` variant silently dropped the payload.
+        #[serde(default)]
+        content: Vec<Value>,
         #[serde(default)]
         #[serde(rename = "isError")]
         is_error: Option<bool>,

@@ -21,6 +21,7 @@ import { AccountButton } from "../account/AccountButton";
 import { AgentIcon, resolveAgentKind } from "./AgentIcon";
 import "./SessionList.css";
 import { appConfirm, archiveWorkspaceConfirmRequest } from "../../lib/confirm";
+import { formatAgentLabel } from "../../lib/agent-label";
 
 interface Props {
   activeSessionId: string;
@@ -30,6 +31,8 @@ interface Props {
   activeConversationVisible?: boolean;
   refreshToken?: number;
   onOpenSettings: () => void;
+  /** Opens the automation (定时任务) panel; optional for tests. */
+  onOpenAutomation?: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
   onWorkspaceArchived?: (snapshot: UiSnapshot | null) => void;
@@ -66,6 +69,7 @@ export function SessionList({
   activeConversationVisible = true,
   refreshToken,
   onOpenSettings,
+  onOpenAutomation,
   onSessionChanged,
   onWorkspaceChanged,
   onWorkspaceArchived,
@@ -95,7 +99,6 @@ export function SessionList({
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState<Record<string, boolean>>({});
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteReconnect, setRemoteReconnect] = useState<RemoteLinuxWorkspace | null>(null);
-  const [comingSoonFeature, setComingSoonFeature] = useState<string | null>(null);
   // DeepSeek Harness agent preset (mode) picker for the new-session modal.
   // Loaded lazily once the user selects the `deepseek-harness` agent.
   const [dshPresets, setDshPresets] = useState<DshPresetOption[] | null>(null);
@@ -134,11 +137,6 @@ export function SessionList({
       }
     }
   });
-
-  const setComingSoon = useCallback((feature: string) => {
-    setComingSoonFeature(feature);
-    window.setTimeout(() => setComingSoonFeature(null), 1800);
-  }, []);
 
   useEffect(() => {
     workspaceChatsRoot()
@@ -555,6 +553,10 @@ export function SessionList({
 
   return (
     <div className="session-list">
+      <div className="sl-brand">
+        <span className="sl-brand-name">Maju</span>
+      </div>
+
       <div className="sl-hero">
         <button
           className="sl-hero-new"
@@ -575,20 +577,11 @@ export function SessionList({
         <button
           className="sl-quick-nav-item"
           type="button"
-          onClick={() => setComingSoon("自动化")}
-          title="自动化(即将上线)"
+          onClick={() => onOpenAutomation?.()}
+          title="自动化"
         >
           <AutomationIcon />
           <span>自动化</span>
-        </button>
-        <button
-          className="sl-quick-nav-item"
-          type="button"
-          onClick={() => setComingSoon("技能库")}
-          title="技能库(即将上线)"
-        >
-          <SkillIcon />
-          <span>技能库</span>
         </button>
       </div>
 
@@ -717,12 +710,6 @@ export function SessionList({
           <span>设置</span>
         </button>
       </div>
-
-      {comingSoonFeature && (
-        <div className="sl-coming-soon" role="status">
-          {comingSoonFeature}功能即将上线
-        </div>
-      )}
 
       {pendingSwitch && createPortal(
         <div className="sl-agent-modal-backdrop" role="presentation" onClick={closeSwitchConfirm}>
@@ -1270,19 +1257,19 @@ function ThreadRow({
           title={indicatorLabel}
           aria-label={indicatorLabel}
         />
-        <span className="sl-agent-badge" title={agentLabel ?? undefined}>
-          {/* Empty badge for unknown agents keeps every row's title aligned. */}
-          {resolveAgentKind(session.agent_cli) !== "unknown" && (
-            <AgentIcon agentCli={session.agent_cli} />
-          )}
-        </span>
         <span className="sl-item-main">
           <span className="sl-item-title" title={sessionTooltip}>{session.title}</span>
         </span>
         {(timeLabel || agentLabel) && (
           <span className="sl-item-side-label">
             {timeLabel && <span className="sl-item-time">{timeLabel}</span>}
-            {agentLabel && <span className="sl-item-agent">{agentLabel}</span>}
+            {/* Hover swaps the timestamp for the agent's brand mark — the name
+                itself stays in the tooltip so it never crowds the row. */}
+            {agentLabel && resolveAgentKind(session.agent_cli) !== "unknown" && (
+              <span className="sl-item-agent" title={agentLabel}>
+                <AgentIcon agentCli={session.agent_cli} />
+              </span>
+            )}
           </span>
         )}
       </button>
@@ -1308,18 +1295,6 @@ function ThreadRow({
       </button>
     </div>
   );
-}
-
-function formatAgentLabel(value?: string | null): string | null {
-  const raw = value?.trim();
-  if (!raw) return "未知";
-  const normalized = raw.toLowerCase();
-  if (normalized.includes("deepseek")) return "DeepSeek";
-  if (normalized.includes("codebuddy")) return "CodeBuddy";
-  if (normalized.includes("claude")) return "Claude";
-  if (normalized.includes("codex")) return "Codex";
-  if (normalized.includes("goose")) return "goose";
-  return raw;
 }
 
 function sortSessions(sessions: SessionListItem[]): SessionListItem[] {
@@ -1387,14 +1362,6 @@ function AutomationIcon() {
   );
 }
 
-function SkillIcon() {
-  return (
-    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M10 2.8 16.6 6.2v7.6L10 17.2 3.4 13.8V6.2Z" />
-      <path d="M10 6.4v7.2M3.8 6.6l6.2 3 6.2-3" />
-    </svg>
-  );
-}
 function ArchiveIcon() {
   return (
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">

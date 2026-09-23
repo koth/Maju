@@ -117,6 +117,7 @@ pub fn settings_save_image_generate_settings(
     model: String,
     default_size: String,
     api_key_env: String,
+    timeout_seconds: u64,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     app_core::settings::save_image_generate_settings(
@@ -126,6 +127,7 @@ pub fn settings_save_image_generate_settings(
         &model,
         &default_size,
         &api_key_env,
+        timeout_seconds,
     )
     .map_err(|e| e.to_string())
 }
@@ -558,60 +560,13 @@ pub async fn settings_set_dsh_preset(
     .map_err(|e| format!("set preset task failed: {e}"))?
 }
 
-/// One-click upgrade for the DeepSeek Harness `dsh` CLI: reinstalls the npm
-/// package at `@latest` and returns a refreshed agent snapshot (with the new
-/// current/latest versions).
-#[tauri::command]
-pub async fn settings_upgrade_dsh() -> Result<AgentInstallResult, String> {
-    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    let install_paths = paths.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let package = format!("{}@latest", app_core::settings::DSH_NPM_PACKAGE);
-        let mut command = npm_command_with_augmented_path(if cfg!(windows) {
-            "npm.cmd"
-        } else {
-            "npm"
-        });
-        command
-            .args(["install", "-g", package.as_str()])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(windows)]
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-
-        let output = command.output().map_err(|e| {
-            format!("Failed to start upgrader. Make sure npm is installed and on PATH: {e}")
-        })?;
-        if output.status.success() {
-            Ok("Upgrade completed.".to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let details = if !stderr.is_empty() { stderr } else { stdout };
-            Err(if details.is_empty() {
-                "Upgrade failed without output".to_string()
-            } else {
-                details
-            })
-        }
-    })
-    .await
-    .map_err(|e| format!("Upgrader task failed: {e}"))?;
-    let snapshot =
-        tokio::task::spawn_blocking(move || app_core::settings::settings_snapshot(&paths))
-            .await
-            .map_err(|e| format!("Settings refresh failed: {e}"))?;
-    Ok(AgentInstallResult {
-        agent: AgentCliId::DeepSeekHarness,
-        success: result.is_ok(),
-        message: result.unwrap_or_else(|e| e),
-        manual_instruction: manual_instruction(AgentCliId::DeepSeekHarness),
-        snapshot,
-    })
-}
-
+// There is deliberately no `settings_upgrade_dsh` alongside the update check.
+// `dsh` is a global npm package that Maju itself keeps running as the `dsh web`
+// host, so `npm install -g @deepseek-ai/dsh@latest` would rewrite the package
+// tree under a live host — on Windows the file replacement can fail outright and
+// leave a half-updated package that cannot start next launch. The settings page
+// only *checks* for updates and hands the user the npm command to run after
+// quitting Maju (see the guidance in the dsh settings tab).
 #[tauri::command]
 pub fn settings_get_lsp_snapshot(
     state: State<'_, AppState>,

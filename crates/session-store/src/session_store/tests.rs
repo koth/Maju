@@ -1,5 +1,5 @@
 use super::*;
-use workspace_model::DiffQuality;
+use workspace_model::{AutomationScheduleKind, DiffQuality};
 
 fn make_change_set_summary(
     store: &SessionStore,
@@ -3221,4 +3221,172 @@ fn list_sessions_emits_iso8601_timestamps_for_phone_date_parse() {
     assert!(item.created_at.ends_with('Z'));
     assert_eq!(&item.updated_at[10..11], "T");
     assert!(item.updated_at.starts_with("20"), "sane year: {}", item.updated_at);
+}
+
+fn make_automation(id: &str, name: &str, next_run_at_ms: Option<i64>) -> AutomationRecord {
+    AutomationRecord {
+        id: id.to_string(),
+        name: name.to_string(),
+        prompt: format!("{name} 的提示词"),
+        workspace_root: "/tmp/ws".to_string(),
+        agent_cli: Some(AgentCliId::DeepSeekHarness),
+        agent_preset: Some("default".to_string()),
+        schedule: AutomationSchedule {
+            kind: AutomationScheduleKind::Daily,
+            interval_minutes: None,
+            hour: Some(9),
+            minute: Some(30),
+            weekday: None,
+            run_at_ms: None,
+        },
+        enabled: true,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+        next_run_at_ms,
+        run_count: 0,
+        last_run: None,
+    }
+}
+
+#[test]
+fn test_automation_crud_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    let record = make_automation("a1", "晨报", Some(1_000));
+    store.insert_automation(&record).unwrap();
+
+    let loaded = store.get_automation("a1").unwrap().unwrap();
+    assert_eq!(loaded.name, "晨报");
+    assert_eq!(loaded.prompt, "晨报 的提示词");
+    assert_eq!(loaded.agent_cli, Some(AgentCliId::DeepSeekHarness));
+    assert_eq!(loaded.agent_preset.as_deref(), Some("default"));
+    assert_eq!(loaded.schedule.kind, AutomationScheduleKind::Daily);
+    assert_eq!(loaded.schedule.hour, Some(9));
+    assert_eq!(loaded.schedule.minute, Some(30));
+    assert_eq!(loaded.next_run_at_ms, Some(1_000));
+    assert!(loaded.enabled);
+    assert_eq!(loaded.run_count, 0);
+    assert!(loaded.last_run.is_none());
+
+    let mut updated = loaded.clone();
+    updated.name = "早报".to_string();
+    updated.schedule.kind = AutomationScheduleKind::Weekly;
+    updated.schedule.weekday = Some(1);
+    updated.agent_cli = Some(AgentCliId::CodexAcp);
+    updated.next_run_at_ms = Some(2_000);
+    store.update_automation(&updated).unwrap();
+
+    let loaded = store.get_automation("a1").unwrap().unwrap();
+    assert_eq!(loaded.name, "早报");
+    assert_eq!(loaded.schedule.kind, AutomationScheduleKind::Weekly);
+    assert_eq!(loaded.schedule.weekday, Some(1));
+    assert_eq!(loaded.agent_cli, Some(AgentCliId::CodexAcp));
+    assert_eq!(loaded.next_run_at_ms, Some(2_000));
+
+    store.set_automation_enabled("a1", false).unwrap();
+    let loaded = store.get_automation("a1").unwrap().unwrap();
+    assert!(!loaded.enabled);
+
+    store.set_automation_next_run("a1", None).unwrap();
+    let loaded = store.get_automation("a1").unwrap().unwrap();
+    assert_eq!(loaded.next_run_at_ms, None);
+
+    store.delete_automation("a1").unwrap();
+    assert!(store.get_automation("a1").unwrap().is_none());
+}
+
+#[test]
+fn test_due_automations_filtering() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+
+    store
+        .insert_automation(&make_automation("due", "到点", Some(100)))
+        .unwrap();
+    store
+        .insert_automation(&make_automation("future", "未到", Some(5_000)))
+        .unwrap();
+    store
+        .insert_automation(&make_automation("unscheduled", "无计划", None))
+        .unwrap();
+    let mut disabled = make_automation("disabled", "停用", Some(100));
+    disabled.enabled = false;
+    store.insert_automation(&disabled).unwrap();
+
+    let due = store.list_due_automations(200).unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, "due");
+}
+
+#[test]
+fn test_automation_runs_lifecycle_and_aggregation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store
+        .insert_automation(&make_automation("a1", "晨报", Some(1_000)))
+        .unwrap();
+
+    let run = AutomationRunRecord {
+        id: "r1".to_string(),
+        automation_id: "a1".to_string(),
+        trigger: AutomationRunTrigger::Scheduled,
+        status: AutomationRunStatus::Running,
+        started_at: "2026-01-01T09:30:00Z".to_string(),
+        finished_at: None,
+        session_id: None,
+        workspace_root: "/tmp/ws".to_string(),
+        error: None,
+    };
+    store.insert_automation_run(&run).unwrap();
+    store
+        .attach_automation_run_session("r1", "session-1")
+        .unwrap();
+    store
+        .finish_automation_run("r1", AutomationRunStatus::Completed, None)
+        .unwrap();
+
+    let runs = store.list_automation_runs("a1", 10).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, AutomationRunStatus::Completed);
+    assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
+    assert_eq!(runs[0].trigger, AutomationRunTrigger::Scheduled);
+
+    // A second, failed run sorts first (started_at DESC) and feeds `last_run`.
+    let run2 = AutomationRunRecord {
+        id: "r2".to_string(),
+        automation_id: "a1".to_string(),
+        trigger: AutomationRunTrigger::Manual,
+        status: AutomationRunStatus::Running,
+        started_at: "2026-01-02T09:30:00Z".to_string(),
+        finished_at: None,
+        session_id: None,
+        workspace_root: "/tmp/ws".to_string(),
+        error: None,
+    };
+    store.insert_automation_run(&run2).unwrap();
+    store
+        .finish_automation_run("r2", AutomationRunStatus::Failed, Some("启动失败"))
+        .unwrap();
+
+    let runs = store.list_automation_runs("a1", 10).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].id, "r2");
+    assert_eq!(runs[0].status, AutomationRunStatus::Failed);
+    assert_eq!(runs[0].error.as_deref(), Some("启动失败"));
+
+    let loaded = store.get_automation("a1").unwrap().unwrap();
+    assert_eq!(loaded.run_count, 2);
+    assert_eq!(loaded.last_run.as_ref().map(|run| run.id.as_str()), Some("r2"));
+
+    // Reconciliation query: nothing is left `running`.
+    let running = store
+        .list_automation_runs_with_status(AutomationRunStatus::Running)
+        .unwrap();
+    assert!(running.is_empty());
+
+    // Deleting the automation cascades to its runs.
+    store.delete_automation("a1").unwrap();
+    let runs = store.list_automation_runs("a1", 10).unwrap();
+    assert!(runs.is_empty());
 }

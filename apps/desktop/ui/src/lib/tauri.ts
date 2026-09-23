@@ -51,6 +51,10 @@ import type {
   CustomProviderInput,
   ImageGenerateProtocol,
   ModelAttributesInput,
+  AutomationInput,
+  AutomationRecord,
+  AutomationRunRecord,
+  SessionJobRecord,
 } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -503,6 +507,9 @@ export async function sessionGetTurnFileDiff(
 }
 
 export interface HistoryPage {
+  /** Session the page belongs to — stale pages from a pre-switch fetch must be
+   *  dropped instead of merged into the visible session. */
+  session_id: string;
   messages: UiSnapshot["messages"];
   tools: UiSnapshot["tools"];
   timeline: UiSnapshot["timeline"];
@@ -675,6 +682,7 @@ export async function settingsSaveImageGenerateSettings(
   model: string,
   defaultSize: string,
   apiKeyEnv: string,
+  timeoutSeconds: number,
 ): Promise<AgentSettingsSnapshot> {
   return invoke<AgentSettingsSnapshot>("settings_save_image_generate_settings", {
     protocol,
@@ -682,6 +690,7 @@ export async function settingsSaveImageGenerateSettings(
     model,
     defaultSize,
     apiKeyEnv,
+    timeoutSeconds,
   });
 }
 
@@ -877,16 +886,16 @@ export async function settingsInstallAgent(
   return invoke<AgentInstallResult>("settings_install_agent", { agent });
 }
 
-export async function settingsUpgradeDsh(): Promise<AgentInstallResult> {
-  return invoke<AgentInstallResult>("settings_upgrade_dsh");
-}
-
 export interface DshVersionInfo {
   current_version: string | null;
   latest_version: string | null;
   update_available: boolean;
 }
 
+// There is deliberately no `settingsUpgradeDsh`: upgrading the global npm
+// package while Maju runs would replace the files the `dsh web` host it spawned
+// is executing from. The check above is read-only; the upgrade is the user's to
+// run after quitting Maju (see the guidance in the dsh settings tab).
 export async function settingsCheckDshUpdate(): Promise<DshVersionInfo> {
   return invoke<DshVersionInfo>("settings_check_dsh_update");
 }
@@ -1039,4 +1048,52 @@ export async function remoteControlLogin(
 /** Forget the locally stored account session (logout). */
 export async function remoteControlLogout(): Promise<void> {
   return invoke<void>("remote_control_logout");
+}
+
+// ── Automation (定时任务) ──
+
+export async function automationList(): Promise<AutomationRecord[]> {
+  return invoke<AutomationRecord[]>("automation_list");
+}
+
+export async function automationCreate(
+  input: AutomationInput,
+): Promise<AutomationRecord> {
+  return invoke<AutomationRecord>("automation_create", { input });
+}
+
+export async function automationUpdate(
+  id: string,
+  input: AutomationInput,
+): Promise<AutomationRecord> {
+  return invoke<AutomationRecord>("automation_update", { id, input });
+}
+
+export async function automationDelete(id: string): Promise<void> {
+  return invoke<void>("automation_delete", { id });
+}
+
+export async function automationSetEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<AutomationRecord> {
+  return invoke<AutomationRecord>("automation_set_enabled", { id, enabled });
+}
+
+/** 立即运行: dispatch the automation's prompt right now as a manual run. */
+export async function automationRunNow(id: string): Promise<AutomationRunRecord> {
+  return invoke<AutomationRunRecord>("automation_run_now", { id });
+}
+
+export async function automationListRuns(
+  id: string,
+  limit?: number,
+): Promise<AutomationRunRecord[]> {
+  return invoke<AutomationRunRecord[]>("automation_list_runs", { id, limit });
+}
+
+/** Background jobs (后台任务) the dsh harness reports for the visible
+ *  session (empty for non-harness agents). */
+export async function sessionListBackgroundJobs(): Promise<SessionJobRecord[]> {
+  return invoke<SessionJobRecord[]>("session_list_background_jobs");
 }

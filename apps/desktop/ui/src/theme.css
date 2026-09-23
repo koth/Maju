@@ -233,11 +233,16 @@
   --surface-alt-bg: #ececec;
   --surface-muted-bg: #f7f7f7;
   --bg-elevated: #ffffff;
-  --shell-rail-bg: #f9f9f9;
-  --shell-sidebar-bg: #f9f9f9;
+  /* One step below the canvas, not a hair below it: at #f9f9f9 the sidebar and
+     the canvas measured 1.024 apart (the dark theme's same step is 1.10), so
+     the whole window read as a single white sheet. #f4f4f4 restores the step
+     the dark theme has. Sidebar-interior fills that this would swallow are
+     drawn with `--bg-elevated` (cards) or `--surface-alt-bg` (chips) instead. */
+  --shell-rail-bg: #f4f4f4;
+  --shell-sidebar-bg: #f4f4f4;
   --shell-center-bg: #ffffff;
   --shell-review-bg: #ffffff;
-  --shell-titlebar-bg: #f9f9f9;
+  --shell-titlebar-bg: #f4f4f4;
   --surface-hover: rgba(13, 13, 13, 0.05);
   --surface-active: rgba(13, 13, 13, 0.08);
   --surface-selected: rgba(13, 13, 13, 0.07);
@@ -256,9 +261,14 @@
   /* --- Text --------------------------------------------------------------- */
   --text-strong: #0d0d0d;
   --text-muted: #5d5d5d;
-  --text-soft: #8f8f8f;
-  --text-faint: #8f8f8f;
-  --text-dim: #8f8f8f;
+  /* The metadata tier. #8f8f8f is ChatGPT's tertiary value, but it only reads
+     that way on a dark canvas: the dark theme's equivalent tier measures 3.6:1
+     while #8f8f8f on white is 3.0:1, so timestamps, counts and "N unmodified
+     lines" looked washed out. #6f6f6f is 5.0:1 on the canvas and 4.6:1 on the
+     sidebar — still clearly secondary, no longer faded. */
+  --text-soft: #6f6f6f;
+  --text-faint: #6f6f6f;
+  --text-dim: #6f6f6f;
   --text-primary: var(--text-strong);
   --text-secondary: var(--text-muted);
 

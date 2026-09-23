@@ -27,12 +27,13 @@ use util::{
 // without duplicating the calendar algorithm; storage stays epoch-seconds.
 pub use util::{epoch_secs_to_iso_utc, instant_to_iso_utc};
 use workspace_model::{
-    ArchivedSessionListItem, ChangeSetSource, ChangeSetStatus, ChangeSetSummary, ChatMessage,
-    FileChangeRecord, FileChangeSummary, FileChangeType, MessageRole, SessionFileChange,
-    SessionListItem, SessionUsageSnapshot, TimelineItem, ToolDiffPreview, ToolInvocation,
-    ToolStatus, TurnFileChanges, UsageContextSnapshot, UsageDailyBucket, UsageEvent,
-    UsageEventScope, UsageModelSummary, UsageSummaryGroupBy, UsageSummaryRequest,
-    UsageSummaryRow, UsageTokenBreakdown,
+    AgentCliId, ArchivedSessionListItem, AutomationRecord, AutomationRunRecord,
+    AutomationRunStatus, AutomationRunTrigger, AutomationSchedule, ChangeSetSource,
+    ChangeSetStatus, ChangeSetSummary, ChatMessage, FileChangeRecord, FileChangeSummary,
+    FileChangeType, MessageRole, SessionFileChange, SessionListItem, SessionUsageSnapshot,
+    TimelineItem, ToolDiffPreview, ToolInvocation, ToolStatus, TurnFileChanges,
+    UsageContextSnapshot, UsageDailyBucket, UsageEvent, UsageEventScope, UsageModelSummary,
+    UsageSummaryGroupBy, UsageSummaryRequest, UsageSummaryRow, UsageTokenBreakdown,
 };
 
 const MAX_RAW_OUTPUT_BYTES: usize = 32 * 1024;
@@ -426,6 +427,39 @@ impl SessionStore {
                  ALTER TABLE usage_events ADD COLUMN tokens_per_second REAL;",
             )?;
         }
+
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS automations (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                workspace_root TEXT NOT NULL,
+                agent_cli TEXT,
+                agent_preset TEXT,
+                schedule_json TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                next_run_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS automation_runs (
+                id TEXT PRIMARY KEY,
+                automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+                trigger_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                session_id TEXT,
+                workspace_root TEXT NOT NULL,
+                error TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_automation_runs_status ON automation_runs(status);
+            ",
+        )?;
 
         Ok(())
     }
@@ -1962,6 +1996,244 @@ impl SessionStore {
             }
         }
         Ok((messages, tools, timeline))
+    }
+
+    // ── Automation (定时任务) CRUD ──
+
+    pub fn list_automations(&self) -> Result<Vec<AutomationRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, prompt, workspace_root, agent_cli, agent_preset, schedule_json, enabled, created_at, updated_at, next_run_at
+             FROM automations
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], automation_record_from_row)?;
+        let mut automations = Vec::new();
+        for row in rows {
+            let mut automation = row?;
+            automation.last_run = self.latest_automation_run(&automation.id)?;
+            automation.run_count = self.automation_run_count(&automation.id)?;
+            automations.push(automation);
+        }
+        Ok(automations)
+    }
+
+    pub fn get_automation(&self, id: &str) -> Result<Option<AutomationRecord>> {
+        let mut automation = self
+            .conn
+            .query_row(
+                "SELECT id, name, prompt, workspace_root, agent_cli, agent_preset, schedule_json, enabled, created_at, updated_at, next_run_at
+                 FROM automations WHERE id = ?1",
+                params![id],
+                automation_record_from_row,
+            )
+            .optional()?;
+        if let Some(automation) = automation.as_mut() {
+            automation.last_run = self.latest_automation_run(&automation.id)?;
+            automation.run_count = self.automation_run_count(&automation.id)?;
+        }
+        Ok(automation)
+    }
+
+    /// Enabled automations whose `next_run_at` is due at (or before) `now_ms`.
+    pub fn list_due_automations(&self, now_ms: i64) -> Result<Vec<AutomationRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, prompt, workspace_root, agent_cli, agent_preset, schedule_json, enabled, created_at, updated_at, next_run_at
+             FROM automations
+             WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1
+             ORDER BY next_run_at ASC",
+        )?;
+        let rows = stmt.query_map(params![now_ms], automation_record_from_row)?;
+        let mut automations = Vec::new();
+        for row in rows {
+            automations.push(row?);
+        }
+        Ok(automations)
+    }
+
+    pub fn insert_automation(&self, record: &AutomationRecord) -> Result<()> {
+        let schedule_json = serde_json::to_string(&record.schedule)?;
+        let agent_cli_json = record
+            .agent_cli
+            .map(|agent| serde_json::to_string(&agent))
+            .transpose()?;
+        self.conn.execute(
+            "INSERT INTO automations (id, name, prompt, workspace_root, agent_cli, agent_preset, schedule_json, enabled, created_at, updated_at, next_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                record.id,
+                record.name,
+                record.prompt,
+                record.workspace_root,
+                agent_cli_json,
+                record.agent_preset,
+                schedule_json,
+                record.enabled as i64,
+                record.created_at,
+                record.updated_at,
+                record.next_run_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_automation(&self, record: &AutomationRecord) -> Result<()> {
+        let schedule_json = serde_json::to_string(&record.schedule)?;
+        let agent_cli_json = record
+            .agent_cli
+            .map(|agent| serde_json::to_string(&agent))
+            .transpose()?;
+        self.conn.execute(
+            "UPDATE automations
+             SET name = ?2, prompt = ?3, workspace_root = ?4, agent_cli = ?5, agent_preset = ?6,
+                 schedule_json = ?7, enabled = ?8, updated_at = ?9, next_run_at = ?10
+             WHERE id = ?1",
+            params![
+                record.id,
+                record.name,
+                record.prompt,
+                record.workspace_root,
+                agent_cli_json,
+                record.agent_preset,
+                schedule_json,
+                record.enabled as i64,
+                record.updated_at,
+                record.next_run_at_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_automation(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM automations WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn set_automation_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE automations SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, enabled as i64, now_iso()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_automation_next_run(&self, id: &str, next_run_at_ms: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE automations SET next_run_at = ?2 WHERE id = ?1",
+            params![id, next_run_at_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_automation_run(&self, run: &AutomationRunRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO automation_runs (id, automation_id, trigger_kind, status, started_at, finished_at, session_id, workspace_root, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                run.id,
+                run.automation_id,
+                automation_run_trigger_to_str(run.trigger),
+                automation_run_status_to_str(run.status),
+                run.started_at,
+                run.finished_at,
+                run.session_id,
+                run.workspace_root,
+                run.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn attach_automation_run_session(&self, run_id: &str, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE automation_runs SET session_id = ?2 WHERE id = ?1",
+            params![run_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_automation_run(
+        &self,
+        run_id: &str,
+        status: AutomationRunStatus,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE automation_runs SET status = ?2, error = ?3, finished_at = ?4 WHERE id = ?1",
+            params![
+                run_id,
+                automation_run_status_to_str(status),
+                error,
+                now_iso()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_automation_runs(
+        &self,
+        automation_id: &str,
+        limit: u32,
+    ) -> Result<Vec<AutomationRunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, automation_id, trigger_kind, status, started_at, finished_at, session_id, workspace_root, error
+             FROM automation_runs
+             WHERE automation_id = ?1
+             ORDER BY started_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![automation_id, limit as i64], automation_run_from_row)?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row?);
+        }
+        Ok(runs)
+    }
+
+    /// Runs currently recorded with `status`, across all automations. Used to
+    /// reconcile `running` rows orphaned by an app restart.
+    pub fn list_automation_runs_with_status(
+        &self,
+        status: AutomationRunStatus,
+    ) -> Result<Vec<AutomationRunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, automation_id, trigger_kind, status, started_at, finished_at, session_id, workspace_root, error
+             FROM automation_runs
+             WHERE status = ?1
+             ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![automation_run_status_to_str(status)],
+            automation_run_from_row,
+        )?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row?);
+        }
+        Ok(runs)
+    }
+
+    fn latest_automation_run(&self, automation_id: &str) -> Result<Option<AutomationRunRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, automation_id, trigger_kind, status, started_at, finished_at, session_id, workspace_root, error
+                 FROM automation_runs
+                 WHERE automation_id = ?1
+                 ORDER BY started_at DESC
+                 LIMIT 1",
+                params![automation_id],
+                automation_run_from_row,
+            )
+            .optional()?)
+    }
+
+    fn automation_run_count(&self, automation_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM automation_runs WHERE automation_id = ?1",
+            params![automation_id],
+            |row| row.get(0),
+        )?)
     }
 
     // ── Helpers ──
@@ -3999,6 +4271,79 @@ where
         }
     }
     items
+}
+
+// ── Automation row mapping ──
+
+fn automation_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRecord> {
+    let agent_cli_json: Option<String> = row.get(4)?;
+    let schedule_json: String = row.get(6)?;
+    Ok(AutomationRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        prompt: row.get(2)?,
+        workspace_root: row.get(3)?,
+        agent_cli: agent_cli_json
+            .and_then(|json| serde_json::from_str::<AgentCliId>(&json).ok()),
+        agent_preset: row.get(5)?,
+        schedule: serde_json::from_str::<AutomationSchedule>(&schedule_json).unwrap_or_default(),
+        enabled: row.get::<_, i64>(7)? != 0,
+        created_at: instant_to_iso_utc(&row.get::<_, String>(8)?),
+        updated_at: instant_to_iso_utc(&row.get::<_, String>(9)?),
+        next_run_at_ms: row.get(10)?,
+        run_count: 0,
+        last_run: None,
+    })
+}
+
+fn automation_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationRunRecord> {
+    let trigger_kind: String = row.get(2)?;
+    let status: String = row.get(3)?;
+    Ok(AutomationRunRecord {
+        id: row.get(0)?,
+        automation_id: row.get(1)?,
+        trigger: automation_run_trigger_from_str(&trigger_kind),
+        status: automation_run_status_from_str(&status),
+        started_at: instant_to_iso_utc(&row.get::<_, String>(4)?),
+        finished_at: row
+            .get::<_, Option<String>>(5)?
+            .map(|value| instant_to_iso_utc(&value)),
+        session_id: row.get(6)?,
+        workspace_root: row.get(7)?,
+        error: row.get(8)?,
+    })
+}
+
+fn automation_run_status_to_str(status: AutomationRunStatus) -> &'static str {
+    match status {
+        AutomationRunStatus::Running => "running",
+        AutomationRunStatus::Completed => "completed",
+        AutomationRunStatus::Failed => "failed",
+        AutomationRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn automation_run_status_from_str(value: &str) -> AutomationRunStatus {
+    match value {
+        "completed" => AutomationRunStatus::Completed,
+        "failed" => AutomationRunStatus::Failed,
+        "interrupted" => AutomationRunStatus::Interrupted,
+        _ => AutomationRunStatus::Running,
+    }
+}
+
+fn automation_run_trigger_to_str(trigger: AutomationRunTrigger) -> &'static str {
+    match trigger {
+        AutomationRunTrigger::Scheduled => "scheduled",
+        AutomationRunTrigger::Manual => "manual",
+    }
+}
+
+fn automation_run_trigger_from_str(value: &str) -> AutomationRunTrigger {
+    match value {
+        "manual" => AutomationRunTrigger::Manual,
+        _ => AutomationRunTrigger::Scheduled,
+    }
 }
 
 #[cfg(test)]

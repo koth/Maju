@@ -146,7 +146,18 @@ function ConversationTimelineImpl({ snapshot, onStopTool }: Props) {
         // The side gutter is owned by the tool-row geometry: rows hang their
         // status bullet into it so their text lines up with the prose (desktop
         // parity). 24px rather than the 12px used before.
+        //
+        // flexGrow + flex-end anchor SHORT content to the visual top: the
+        // inverted container packs children at its local start, which the
+        // flip renders at the BOTTOM — so a brand-new session's only row
+        // (the welcome/empty state) was pinned just above the composer with
+        // a dead screen above it. With the container grown to the viewport,
+        // flex-end packs children at the local end = visual top (desktop
+        // transcript parity). Once content exceeds the viewport there is no
+        // free space to distribute, so long conversations are unaffected.
         contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: "flex-end",
           paddingHorizontal: TRANSCRIPT_GUTTER,
           paddingTop: spacing.xl,
           paddingBottom: spacing.md,

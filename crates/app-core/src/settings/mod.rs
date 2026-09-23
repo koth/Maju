@@ -1469,6 +1469,7 @@ fn image_settings_status(paths: &AppPaths, settings: &AppSettings) -> ImageSetti
         generate_model: generate.model.clone(),
         generate_base_url: generate.base_url.clone(),
         generate_default_size: generate.default_size.clone(),
+        generate_timeout_seconds: generate.timeout_seconds,
         generate_configured,
     }
 }
@@ -1493,9 +1494,9 @@ pub fn save_image_view_settings(
 }
 
 /// Save the image generation/edit configuration: wire protocol, base URL,
-/// model, default size. The API key is stored separately
-/// (`save_image_generate_api_key`) so it never round-trips through the
-/// settings file.
+/// model, default size, request timeout (seconds). The API key is stored
+/// separately (`save_image_generate_api_key`) so it never round-trips through
+/// the settings file.
 pub fn save_image_generate_settings(
     paths: &AppPaths,
     protocol: ImageGenerateProtocol,
@@ -1503,6 +1504,7 @@ pub fn save_image_generate_settings(
     model: &str,
     default_size: &str,
     api_key_env: &str,
+    timeout_seconds: u64,
 ) -> Result<AgentSettingsSnapshot> {
     let mut settings = load_app_settings(paths);
     settings.image.generate.protocol = protocol;
@@ -1514,6 +1516,12 @@ pub fn save_image_generate_settings(
         default_size.trim().to_string()
     };
     settings.image.generate.api_key_env = api_key_env.trim().to_string();
+    // 超时时间（秒）：0 表示"未设置"→ 恢复默认；上限 24 小时防误填。
+    settings.image.generate.timeout_seconds = if timeout_seconds == 0 {
+        ImageGenerateSettings::default().timeout_seconds
+    } else {
+        timeout_seconds.min(86_400)
+    };
     save_app_settings(paths, &settings)?;
     Ok(settings_snapshot(paths))
 }

@@ -78,6 +78,7 @@ describe("useWorkbenchSnapshot – loadOlderHistory", () => {
       history_earliest_seq: 20,
     });
     mockedLoadHistoryBefore.mockResolvedValue({
+      session_id: "s-1",
       messages: [
         { id: "m1", role: "User", body: "older" },
         // Overlapping entry must be deduped, not duplicated.
@@ -112,6 +113,7 @@ describe("useWorkbenchSnapshot – loadOlderHistory", () => {
       history_earliest_seq: 5,
     });
     mockedLoadHistoryBefore.mockResolvedValue({
+      session_id: "s-1",
       messages: [{ id: "m0", role: "Assistant", body: "oldest" }],
       tools: [],
       timeline: [{ Message: "m0" }],
@@ -152,5 +154,107 @@ describe("useWorkbenchSnapshot – loadOlderHistory", () => {
 
     expect(loaded).toBe(false);
     expect(result.current.snapshot?.history_earliest_seq).toBe(20);
+  });
+
+  it("drops a page that belongs to a different session (no content pollution)", async () => {
+    // 后端按执行时刻的当前会话查询：会话切换后同一请求会带回另一个对话的
+    // 历史页。错会话的页面必须整体丢弃，绝不能合并进当前会话。
+    const snapshot = makeSnapshot({
+      messages: [{ id: "m2", role: "User", body: "current" }],
+      timeline: [{ Message: "m2" }],
+      history_earliest_seq: 20,
+    });
+    mockedLoadHistoryBefore.mockResolvedValue({
+      session_id: "other-session",
+      messages: [{ id: "x1", role: "User", body: "foreign content" }],
+      tools: [],
+      timeline: [{ Message: "x1" }],
+      earliest_seq: 1,
+      has_more: true,
+    });
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    act(() => {
+      result.current.acceptSnapshot(snapshot);
+    });
+
+    let loaded: boolean | undefined;
+    await act(async () => {
+      loaded = await result.current.loadOlderHistory();
+    });
+
+    expect(loaded).toBe(false);
+    const next = result.current.snapshot;
+    expect(next?.messages.map((message) => message.id)).toEqual(["m2"]);
+    expect(next?.timeline).toEqual([{ Message: "m2" }]);
+    expect(next?.history_earliest_seq).toBe(20);
+  });
+
+  it("drops an in-flight page when the visible session switched while paging", async () => {
+    const snapshot = makeSnapshot({
+      messages: [{ id: "m2", role: "User", body: "old session" }],
+      timeline: [{ Message: "m2" }],
+      history_earliest_seq: 20,
+    });
+    let resolvePage!: (page: {
+      session_id: string;
+      messages: UiSnapshot["messages"];
+      tools: UiSnapshot["tools"];
+      timeline: UiSnapshot["timeline"];
+      earliest_seq: number | null;
+      has_more: boolean;
+    }) => void;
+    mockedLoadHistoryBefore.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useWorkbenchSnapshot());
+    act(() => {
+      result.current.acceptSnapshot(snapshot);
+    });
+
+    let paging!: Promise<boolean>;
+    await act(async () => {
+      paging = result.current.loadOlderHistory();
+    });
+
+    // 分页在途时切到另一个会话……
+    act(() => {
+      result.current.acceptSnapshot(
+        makeSnapshot({
+          session: {
+            id: "s-2",
+            workspace_id: "ws-1",
+            title: "other",
+            model: "test-model",
+            mode: null,
+            agent_cli: null,
+            status: "Idle",
+          },
+          messages: [{ id: "n1", role: "User", body: "new session" }],
+          timeline: [{ Message: "n1" }],
+        }),
+      );
+    });
+
+    // ……旧会话的页面才返回：必须丢弃，不能覆盖新会话内容。
+    let loaded: boolean | undefined;
+    await act(async () => {
+      resolvePage({
+        session_id: "s-1",
+        messages: [{ id: "m1", role: "User", body: "stale page" }],
+        tools: [],
+        timeline: [{ Message: "m1" }],
+        earliest_seq: 1,
+        has_more: true,
+      });
+      loaded = await paging;
+    });
+
+    expect(loaded).toBe(false);
+    const next = result.current.snapshot;
+    expect(next?.session.id).toBe("s-2");
+    expect(next?.messages.map((message) => message.id)).toEqual(["n1"]);
   });
 });

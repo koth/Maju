@@ -1,3 +1,4 @@
+pub mod automation;
 pub mod editor;
 pub mod fs;
 pub mod git;

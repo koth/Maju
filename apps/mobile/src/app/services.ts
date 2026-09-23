@@ -20,7 +20,14 @@ import {
   runPairingResume,
   buildDeviceAuthArgs,
 } from "../pairing/pairing-flow";
-import type { UiSnapshot, PermissionInputResponse } from "../types";
+import type {
+  UiSnapshot,
+  PermissionInputResponse,
+  AgentCliId,
+  AgentOptionsList,
+  SessionConfigState,
+  UserPromptContent,
+} from "../types";
 import {
   loadBoundDevices,
   upsertBoundDevice,
@@ -751,13 +758,51 @@ export class AppController {
     return this.controlClient().listSessions();
   }
 
-  async createSession(opts?: { workspaceRoot?: string | null; agent?: string | null }) {
+  async createSession(opts?: {
+    workspaceRoot?: string | null;
+    agent?: AgentCliId | null;
+    /** DeepSeek Harness agent preset (mode); only meaningful for the
+     *  harness agent. Absent = deployment default. */
+    preset?: string | null;
+  }) {
     const res = await this.controlClient().createSession({
       workspace_root: opts?.workspaceRoot ?? null,
-      agent: (opts?.agent ?? null) as never,
+      agent: opts?.agent ?? null,
+      preset: opts?.preset ?? null,
     });
     this.sessionStore.beginSession(res.session_id);
     return res.session_id;
+  }
+
+  /** Agent/preset choices for the new-session picker (see
+   *  `ControlClient.listAgentOptions` for the latency note). */
+  async listAgentOptions(): Promise<AgentOptionsList> {
+    const res = await this.controlClient().listAgentOptions();
+    return res.options;
+  }
+
+  /** Set a session config control (model picker) on the active session. */
+  async setConfigControl(
+    controlId: string,
+    valueId: string,
+    provider?: string | null,
+  ): Promise<SessionConfigState> {
+    await this.ensurePcOnHeldSession();
+    const res = await this.controlClient().setConfigControl(controlId, valueId, provider);
+    return res.config;
+  }
+
+  /** 手机侧动作必须落在手机正在看的会话上。PC 把一切动作作用于它的"当前
+   *  会话"——桌面用户切到会话 B 后，手机在会话 A 里直接发消息会写进 B。已
+   *  知 PC 在别的会话（从被丢弃的帧/快照推断）时先补一个 switch（幂等）；
+   *  平时零额外开销。 */
+  private async ensurePcOnHeldSession(): Promise<void> {
+    const held = this.sessionStore.heldSessionId;
+    if (!held) return;
+    const pcActive = this.sessionStore.pcActiveHint;
+    if (pcActive && pcActive !== held) {
+      await this.controlClient().switchSession(held, null);
+    }
   }
 
   async switchSession(sessionId: string, workspaceRoot?: string | null) {
@@ -799,10 +844,9 @@ export class AppController {
     this.sessionStore.setSnapshot(response.snapshot);
   }
 
-  async sendPrompt(text: string) {
-    return this.controlClient().sendPrompt([
-      { type: "text", text } as never,
-    ]);
+  async sendPrompt(content: UserPromptContent[]) {
+    await this.ensurePcOnHeldSession();
+    return this.controlClient().sendPrompt(content);
   }
 
   async cancel() {
@@ -810,10 +854,12 @@ export class AppController {
     // alert (one-shot, short window — a later unrelated interruption still
     // alerts).
     this.turnWatcher.suppressNextInterruption();
+    await this.ensurePcOnHeldSession();
     return this.controlClient().cancel();
   }
 
   async stopTool(toolCallId: string) {
+    await this.ensurePcOnHeldSession();
     return this.controlClient().stopTool(toolCallId);
   }
 

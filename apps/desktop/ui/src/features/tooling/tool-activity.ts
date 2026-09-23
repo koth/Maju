@@ -22,7 +22,12 @@
 // A run of one is not a group either: the row alone already says everything.
 
 import type { ToolInvocation } from "../../types";
-import { classifyTool, isQuestionTool, isTodoWriteTool } from "./tool-card-analysis";
+import {
+  classifyTool,
+  imageGenerationMode,
+  isQuestionTool,
+  isTodoWriteTool,
+} from "./tool-card-analysis";
 
 export interface ToolActivityGroup {
   /// Index in the timeline of the group's first tool (the row that renders the
@@ -53,6 +58,8 @@ export function isGroupableTool(tool: ToolInvocation): boolean {
   // timeline row, so they can never be a member of a group.
   if (tool.parent_call_id) return false;
   if (isQuestionTool(tool) || isTodoWriteTool(tool)) return false;
+  // 生图/改图结果行自带大图预览，必须独立成行。
+  if (imageGenerationMode(tool)) return false;
   if (tool.status === "Failed" || tool.status === "Interrupted") return false;
   if (tool.permission_input) return false;
   const category = classifyTool(tool);

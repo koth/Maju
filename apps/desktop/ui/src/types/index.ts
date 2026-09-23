@@ -651,6 +651,90 @@ export interface WorkspaceSessionList {
   connected: boolean;
 }
 
+// Automation (定时任务) types
+
+export type AutomationScheduleKind = "once" | "interval" | "daily" | "weekly";
+
+export interface AutomationSchedule {
+  kind: AutomationScheduleKind;
+  interval_minutes?: number | null;
+  hour?: number | null;
+  minute?: number | null;
+  /** ISO weekday: 1 = Monday … 7 = Sunday. */
+  weekday?: number | null;
+  /** `once`: epoch milliseconds of the firing moment. */
+  run_at_ms?: number | null;
+}
+
+export interface AutomationInput {
+  name: string;
+  prompt: string;
+  workspace_root: string;
+  /** Execution agent; defaults to the DeepSeek Harness. */
+  agent_cli?: AgentCliId | null;
+  /** dsh agent preset override (only meaningful for `deepseek-harness`). */
+  agent_preset?: string | null;
+  schedule: AutomationSchedule;
+}
+
+export type AutomationRunTrigger = "scheduled" | "manual";
+export type AutomationRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted";
+
+export interface AutomationRunRecord {
+  id: string;
+  automation_id: string;
+  trigger: AutomationRunTrigger;
+  status: AutomationRunStatus;
+  started_at: string;
+  finished_at?: string | null;
+  session_id?: string | null;
+  workspace_root: string;
+  error?: string | null;
+}
+
+export interface AutomationRecord {
+  id: string;
+  name: string;
+  prompt: string;
+  workspace_root: string;
+  agent_cli?: AgentCliId | null;
+  agent_preset?: string | null;
+  schedule: AutomationSchedule;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  next_run_at_ms?: number | null;
+  run_count: number;
+  last_run?: AutomationRunRecord | null;
+}
+
+/** Payload of the `automation:fired` event (the "到点提醒"). */
+export interface AutomationFiredEvent {
+  run_id: string;
+  automation_id: string;
+  name: string;
+  workspace_root: string;
+  session_id?: string | null;
+  error?: string | null;
+}
+
+/** One dsh harness background job (后台任务) owned by a session — the wire
+ *  `SessionJob` mirrored through `session_list_background_jobs`. */
+export interface SessionJobRecord {
+  id: string;
+  kind: string;
+  label: string;
+  status: "running" | "stopping" | "completed" | "killed" | "failed" | (string & {});
+  detail?: string | null;
+  /** Epoch milliseconds. */
+  startedAt: number;
+  finishedAt?: number | null;
+}
+
 export type FileChangeType = "Created" | "Modified" | "Deleted";
 export type ChangeSetSource =
   | "AgentTurn"
@@ -1070,6 +1154,8 @@ export interface ImageSettingsStatus {
   generate_model: string;
   generate_base_url: string;
   generate_default_size: string;
+  /** 生图工具超时时间（秒）；缺省/0 按 300 秒处理。 */
+  generate_timeout_seconds?: number | null;
   generate_configured: boolean;
 }
 

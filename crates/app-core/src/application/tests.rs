@@ -2069,7 +2069,7 @@ fn loopback_remote_control_drives_gateway() {
     assert!(matches!(update, AppUpdate::UiUpdated { .. }));
 
     let session_id = rt
-        .block_on(control.create_session(None, None))
+        .block_on(control.create_session(None, None, None))
         .expect("create_session via trait should succeed");
     assert!(!session_id.is_empty());
 

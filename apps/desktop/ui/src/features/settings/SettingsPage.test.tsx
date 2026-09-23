@@ -36,6 +36,7 @@ import {
   settingsSaveWebToolsSettings,
   settingsSaveImageViewSettings,
   settingsSaveCommitAssistantSettings,
+  settingsCheckDshUpdate,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -985,6 +986,47 @@ describe("SettingsPage LSP settings", () => {
 
     await waitFor(() => expect(installPendingAppUpdate).toHaveBeenCalled());
     expect(await screen.findByText("更新已安装，正在重启")).toBeInTheDocument();
+  });
+
+  it("guides the user to upgrade dsh themselves with Maju closed", async () => {
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      agents: [
+        ...agentSnapshot.agents,
+        {
+          id: "deepseek-harness",
+          label: "DeepSeek Harness",
+          binary: "dsh",
+          installed: true,
+          detected_path: "C:\\tools\\dsh.cmd",
+          selected: false,
+          current_version: "0.3.0",
+        },
+      ],
+    });
+    vi.mocked(settingsCheckDshUpdate).mockResolvedValue({
+      current_version: "0.3.0",
+      latest_version: "0.4.0",
+      update_available: true,
+    });
+
+    render(<SettingsPage onBack={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "DeepSeek Harness" }));
+    fireEvent.click(await screen.findByRole("button", { name: "检测更新" }));
+
+    expect(await screen.findByText(/发现新版本 v0.4.0/)).toBeInTheDocument();
+    expect(
+      screen.getByText("升级请在退出 Maju 后手动执行"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("npm install -g @deepseek-ai/dsh@latest"),
+    ).toBeInTheDocument();
+    // Nothing in settings may reinstall the global package: Maju runs the dsh
+    // host out of it, so the upgrade belongs to the user, with Maju closed.
+    expect(
+      screen.queryByRole("button", { name: /升级到最新|升级中/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows archived sessions by project and restores or deletes individual chats", async () => {

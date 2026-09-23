@@ -1032,6 +1032,118 @@
   color: var(--text-muted);
 }
 
+/* ── 后台任务 (dsh harness background jobs, context dock) ── */
+
+.agent-jobs-count {
+  margin-left: 8px;
+  color: var(--text-soft);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+.agent-jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 12px 12px;
+}
+
+.agent-jobs-list[hidden] {
+  display: none;
+}
+
+.agent-job-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--text-strong) 4%, transparent);
+}
+
+.agent-job-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-job-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-strong);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.agent-job-status {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: var(--font-size-sm);
+}
+
+.agent-job-status.is-running,
+.agent-job-status.is-stopping {
+  color: var(--accent);
+}
+
+.agent-job-status.is-completed {
+  color: var(--text-soft);
+}
+
+.agent-job-status.is-killed {
+  color: var(--text-muted);
+}
+
+.agent-job-status.is-failed {
+  color: #e0715f;
+}
+
+.agent-job-meta {
+  display: flex;
+  gap: 10px;
+  color: var(--text-soft);
+  font-size: var(--font-size-sm);
+}
+
+.agent-job-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-soft);
+  font-size: var(--font-size-sm);
+}
+
+.agent-job-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.agent-job-actions button {
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-chat);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.agent-job-actions button:hover {
+  color: var(--text-strong);
+  border-color: var(--border);
+}
+
+.agent-jobs-note {
+  color: var(--text-soft);
+  font-size: var(--font-size-sm);
+}
+
 .agent-plan-entry.is-in_progress {
   color: var(--text-strong);
 }
@@ -1304,8 +1416,11 @@
 }
 
 .plan-approval-proposal-body {
-  --md-code-bg: rgba(255, 255, 255, 0.045);
-  --md-code-block-bg: rgba(0, 0, 0, 0.2);
+  /* Tokens, not dark-theme overlays: `rgba(255,255,255,.045)` is invisible on
+     the light canvas, and `rgba(0,0,0,.2)` turned a light-theme code block into
+     a grey slab. The transcript already styles its markdown this way. */
+  --md-code-bg: var(--surface-alt-bg);
+  --md-code-block-bg: var(--surface-muted-bg);
   --md-code-border: var(--border-subtle);
   flex: 1 1 auto;
   min-height: min(46vh, 460px);

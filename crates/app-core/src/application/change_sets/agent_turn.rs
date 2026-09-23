@@ -455,4 +455,94 @@ impl Application {
         }
         changed
     }
+
+    /// 本轮（进行中）的文件改动 —— `persist_current_turn_file_changes` 的只读
+    /// 预览：从当前轮次工具的 `diff_previews` / `diff_paths` 聚合，供远程投影
+    /// 在轮次**收尾前**实时下发手机的"本轮改动"条（收尾后持久化条目接管，
+    /// 本函数返回 `None`）。锚定消息与收尾持久化一致：本轮最后一条助手回复。
+    /// 返回的记录已是元数据形态（无 old/new 文本）。
+    pub fn live_turn_file_changes(&self) -> Option<TurnFileChanges> {
+        let turn_user_id = self.current_turn_user_message_id?;
+        let anchor_id = self.current_turn_assistant_message_ids().last().copied()?;
+        if self
+            .ui
+            .turn_changes
+            .iter()
+            .any(|entry| entry.message_id == anchor_id)
+        {
+            return None;
+        }
+
+        let mut in_turn = false;
+        let mut changes: std::collections::BTreeMap<String, SessionFileChange> =
+            std::collections::BTreeMap::new();
+        for item in &self.ui.timeline {
+            match item {
+                workspace_model::TimelineItem::Message(id) => {
+                    if *id == turn_user_id {
+                        in_turn = true;
+                    }
+                }
+                workspace_model::TimelineItem::Tool(tool_id) if in_turn => {
+                    let Some(tool) = self.ui.tools.iter().find(|tool| tool.id == *tool_id) else {
+                        continue;
+                    };
+                    for preview in &tool.diff_previews {
+                        let path = preview.path.display().to_string();
+                        let mut added = 0usize;
+                        let mut removed = 0usize;
+                        for hunk in &preview.hunks {
+                            for line in &hunk.lines {
+                                match line.kind {
+                                    workspace_model::DiffLineKind::Added => added += 1,
+                                    workspace_model::DiffLineKind::Removed => removed += 1,
+                                    workspace_model::DiffLineKind::Context => {}
+                                }
+                            }
+                        }
+                        let change_type = self
+                            .ui
+                            .session_changes
+                            .iter()
+                            .find(|change| change.path == path)
+                            .map(|change| change.change_type.clone())
+                            .unwrap_or(workspace_model::FileChangeType::Modified);
+                        let entry = changes.entry(path.clone()).or_insert_with(|| SessionFileChange {
+                            path,
+                            change_type,
+                            old_text: None,
+                            new_text: String::new(),
+                            added_lines: 0,
+                            removed_lines: 0,
+                            timestamp: String::new(),
+                        });
+                        entry.added_lines += added;
+                        entry.removed_lines += removed;
+                    }
+                    for path in &tool.diff_paths {
+                        let path = path.display().to_string();
+                        changes.entry(path.clone()).or_insert_with(|| SessionFileChange {
+                            path,
+                            change_type: workspace_model::FileChangeType::Modified,
+                            old_text: None,
+                            new_text: String::new(),
+                            added_lines: 0,
+                            removed_lines: 0,
+                            timestamp: String::new(),
+                        });
+                    }
+                }
+                workspace_model::TimelineItem::Message(_)
+                | workspace_model::TimelineItem::Tool(_)
+                | workspace_model::TimelineItem::Thinking(_) => {}
+            }
+        }
+        if changes.is_empty() {
+            return None;
+        }
+        Some(TurnFileChanges {
+            message_id: anchor_id,
+            changes: changes.into_values().collect(),
+        })
+    }
 }

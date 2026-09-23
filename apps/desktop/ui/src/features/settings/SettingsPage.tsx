@@ -40,7 +40,6 @@ import {
   settingsGetLspSnapshot,
   settingsGetRemoteProfiles,
   settingsInstallAgent,
-  settingsUpgradeDsh,
   settingsCheckDshUpdate,
   type DshVersionInfo,
   settingsListDshPresets,
@@ -160,6 +159,9 @@ const AGENT_SETTINGS_TABS: Array<{ id: AgentSettingsTab; label: string }> = [
   { id: "codex-acp", label: "Codex" },
   { id: "deepseek-harness", label: "DeepSeek Harness" },
 ];
+
+/** The user runs this themselves, in a terminal, with Maju closed. */
+const DSH_UPGRADE_COMMAND = "npm install -g @deepseek-ai/dsh@latest";
 
 const WEB_TOOL_PROVIDER_OPTIONS = [
   { id: "brave", label: "Brave Search", apiKeyLabel: "Brave Search API key" },
@@ -718,6 +720,7 @@ export function SettingsPage({
   const [imageGenDraftBaseUrl, setImageGenDraftBaseUrl] = useState("");
   const [imageGenDraftModel, setImageGenDraftModel] = useState("");
   const [imageGenDraftSize, setImageGenDraftSize] = useState("1024x1024");
+  const [imageGenDraftTimeout, setImageGenDraftTimeout] = useState("300");
   const [imageGenDraftApiKeyEnv, setImageGenDraftApiKeyEnv] = useState("");
   const [imageGenApiKey, setImageGenApiKey] = useState("");
   const [codexAcpMessage, setCodexAcpMessage] = useState<string | null>(null);
@@ -1178,7 +1181,7 @@ export function SettingsPage({
   }, []);
 
   const [checkingDsh, setCheckingDsh] = useState(false);
-  const [upgradingDsh, setUpgradingDsh] = useState(false);
+  const [dshCommandCopied, setDshCommandCopied] = useState(false);
   const [dshVersionInfo, setDshVersionInfo] = useState<DshVersionInfo | null>(null);
   const [dshCheckMessage, setDshCheckMessage] = useState<string | null>(null);
   const [dshPresets, setDshPresets] = useState<DshPresetOption[] | null>(null);
@@ -1236,6 +1239,7 @@ export function SettingsPage({
     setError(null);
     setInstallResult(null);
     setDshCheckMessage(null);
+    setDshCommandCopied(false);
     try {
       const info = await settingsCheckDshUpdate();
       setDshVersionInfo(info);
@@ -1252,21 +1256,19 @@ export function SettingsPage({
       setCheckingDsh(false);
     }
   }, []);
-  const handleUpgradeDsh = useCallback(async () => {
-    setUpgradingDsh(true);
+  // No in-app upgrade: `dsh` is a global npm package, and Maju keeps it running
+  // as the `dsh web` host. Reinstalling it here would rewrite the package under
+  // that live host (Windows can fail the file replacement outright), which is
+  // how an environment ends up unable to start. The tab hands the user the npm
+  // command instead — see `DshUpgradeGuide`.
+
+  const handleCopyDshUpgradeCommand = useCallback(async () => {
     setError(null);
-    setInstallResult(null);
-    setDshCheckMessage(null);
     try {
-      const result = await settingsUpgradeDsh();
-      setInstallResult(result);
-      setSnapshot(result.snapshot);
-      // Clear the pending update state so the button returns to 检测更新.
-      setDshVersionInfo(null);
+      await navigator.clipboard.writeText(DSH_UPGRADE_COMMAND);
+      setDshCommandCopied(true);
     } catch (e) {
       setError(String(e));
-    } finally {
-      setUpgradingDsh(false);
     }
   }, []);
 
@@ -1757,6 +1759,11 @@ export function SettingsPage({
     setImageGenDraftBaseUrl(image.generate_base_url);
     setImageGenDraftModel(image.generate_model);
     setImageGenDraftSize(image.generate_default_size || "1024x1024");
+    setImageGenDraftTimeout(
+      image.generate_timeout_seconds && image.generate_timeout_seconds > 0
+        ? String(image.generate_timeout_seconds)
+        : "300",
+    );
     setImageGenApiKey("");
   }, [
     snapshot?.image?.view_provider,
@@ -1765,6 +1772,7 @@ export function SettingsPage({
     snapshot?.image?.generate_base_url,
     snapshot?.image?.generate_model,
     snapshot?.image?.generate_default_size,
+    snapshot?.image?.generate_timeout_seconds,
   ]);
 
   // Sync commit-assistant drafts from the snapshot.
@@ -1958,11 +1966,18 @@ export function SettingsPage({
     [imageViewDraftProvider, imageViewDraftModel],
   );
 
+  const imageGenTimeoutCurrent = String(
+    snapshot?.image?.generate_timeout_seconds &&
+      snapshot.image.generate_timeout_seconds > 0
+      ? snapshot.image.generate_timeout_seconds
+      : 300,
+  );
   const imageGenerateDirty =
     imageGenDraftProtocol !== (snapshot?.image?.generate_protocol ?? "openai_images") ||
     imageGenDraftBaseUrl !== (snapshot?.image?.generate_base_url ?? "") ||
     imageGenDraftModel !== (snapshot?.image?.generate_model ?? "") ||
     imageGenDraftSize !== (snapshot?.image?.generate_default_size ?? "1024x1024") ||
+    imageGenDraftTimeout !== imageGenTimeoutCurrent ||
     imageGenDraftApiKeyEnv !== "";
 
   const handleSaveImageGenerate = useCallback(async () => {
@@ -1970,6 +1985,12 @@ export function SettingsPage({
     setBusyImage(true);
     setImageMessage(null);
     try {
+      // 超时时间（秒）：非法输入回落默认 300，后端同时做 0 → 默认 的规范化。
+      const timeoutParsed = Math.floor(Number(imageGenDraftTimeout));
+      const timeoutSeconds =
+        Number.isFinite(timeoutParsed) && timeoutParsed > 0
+          ? Math.min(timeoutParsed, 86_400)
+          : 300;
       let next = snapshot;
       if (imageGenerateDirty) {
         next = await settingsSaveImageGenerateSettings(
@@ -1978,6 +1999,7 @@ export function SettingsPage({
           imageGenDraftModel,
           imageGenDraftSize,
           imageGenDraftApiKeyEnv,
+          timeoutSeconds,
         );
         setSnapshot(next);
       }
@@ -2001,6 +2023,7 @@ export function SettingsPage({
     imageGenDraftBaseUrl,
     imageGenDraftModel,
     imageGenDraftSize,
+    imageGenDraftTimeout,
     imageGenDraftApiKeyEnv,
     snapshot,
   ]);
@@ -2266,7 +2289,6 @@ export function SettingsPage({
     // successful update check.
     const dshCurrent = agent.current_version ?? dshVersionInfo?.current_version ?? null;
     const dshLatest = dshVersionInfo?.latest_version ?? null;
-    const dshUpdateAvailable = isDsh && (dshVersionInfo?.update_available ?? false);
     return (
       <div className="settings-provider-detail settings-agent-runtime">
         <span
@@ -2283,26 +2305,16 @@ export function SettingsPage({
         <div className="settings-row-actions">
           {agent.installed ? (
             <>
-              {isDsh &&
-                (dshUpdateAvailable ? (
+              {isDsh && (
                 <button
                   type="button"
-                  className="settings-btn is-install"
-                  disabled={upgradingDsh}
-                  onClick={handleUpgradeDsh}
+                  className="settings-btn"
+                  disabled={checkingDsh}
+                  onClick={handleCheckDshUpdate}
                 >
-                  {upgradingDsh ? "升级中..." : "升级到最新"}
+                  {checkingDsh ? "检测中..." : "检测更新"}
                 </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="settings-btn"
-                    disabled={checkingDsh || upgradingDsh}
-                    onClick={handleCheckDshUpdate}
-                  >
-                    {checkingDsh ? "检测中..." : "检测更新"}
-                  </button>
-                ))}
+              )}
               <button
                 type="button"
                 className={`settings-btn ${agent.selected ? "is-selected" : ""}`}
@@ -3126,6 +3138,22 @@ export function SettingsPage({
               disabled={busyImage}
               onChange={(event) =>
                 setImageGenDraftSize(event.currentTarget.value)
+              }
+            />
+          </label>
+          <label className="settings-field settings-provider-source-field">
+            <span>超时时间（秒）</span>
+            <input
+              aria-label="image_generate_timeout_seconds"
+              type="number"
+              min={1}
+              max={86400}
+              step={1}
+              placeholder="300"
+              value={imageGenDraftTimeout}
+              disabled={busyImage}
+              onChange={(event) =>
+                setImageGenDraftTimeout(event.currentTarget.value)
               }
             />
           </label>
@@ -4941,6 +4969,32 @@ export function SettingsPage({
                           {dshCheckMessage && (
                             <div className="settings-success">
                               <span>{dshCheckMessage}</span>
+                            </div>
+                          )}
+                          {dshVersionInfo?.update_available && (
+                            <div className="settings-dsh-upgrade-guide">
+                              <span className="settings-dsh-upgrade-guide-title">
+                                升级请在退出 Maju 后手动执行
+                              </span>
+                              <p className="settings-dsh-upgrade-guide-body">
+                                Maju 会用 <code>dsh web</code> 拉起常驻的 dsh
+                                宿主，直接在这里升级会替换正在运行中的全局包，
+                                可能导致 dsh 下次无法启动。
+                                <br />
+                                请先完全退出 Maju（如果之前是异常退出，确认任务管理器里
+                                没有残留的 dsh 进程），在终端执行下面的命令，然后重新
+                                打开 Maju：
+                              </p>
+                              <div className="settings-dsh-upgrade-command">
+                                <code>{DSH_UPGRADE_COMMAND}</code>
+                                <button
+                                  type="button"
+                                  className="settings-btn"
+                                  onClick={() => void handleCopyDshUpgradeCommand()}
+                                >
+                                  {dshCommandCopied ? "已复制" : "复制"}
+                                </button>
+                              </div>
                             </div>
                           )}
                           <div className="settings-field settings-dsh-preset-field">

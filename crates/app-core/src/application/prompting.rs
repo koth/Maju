@@ -519,6 +519,10 @@ impl Application {
                         reason: reason.clone(),
                     });
                     self.push_system_message(format!("会话已断开：{}", reason));
+                    self.finalize_automation_run(
+                        workspace_model::AutomationRunStatus::Failed,
+                        Some(reason),
+                    );
                     self.bump_revision();
                 }
                 return;
@@ -530,6 +534,10 @@ impl Application {
                 reason: reason.clone(),
             });
             self.push_system_message(format!("会话已断开：{}", reason));
+            self.finalize_automation_run(
+                workspace_model::AutomationRunStatus::Failed,
+                Some(reason),
+            );
             self.bump_revision();
             return;
         }
@@ -609,6 +617,10 @@ impl Application {
                 ));
                 self.in_flight_prompt = None;
                 self.current_turn_user_message_id = None;
+                self.finalize_automation_run(
+                    workspace_model::AutomationRunStatus::Failed,
+                    Some(format!("读取 ACP 事件失败：{error}")),
+                );
                 self.bump_revision();
                 return;
             }
@@ -645,6 +657,27 @@ impl Application {
             if self.ui.session.status == SessionStatus::Streaming {
                 self.ui.session.status = SessionStatus::Idle;
                 ui_changed = true;
+            }
+
+            // Terminal state for the automation run that dispatched this turn
+            // (no-op for manually driven turns).
+            match result.turn_stop_reason.as_deref() {
+                None | Some("end_turn") => {
+                    self.finalize_automation_run(workspace_model::AutomationRunStatus::Completed, None)
+                }
+                Some("cancelled") => self.finalize_automation_run(
+                    workspace_model::AutomationRunStatus::Interrupted,
+                    result.turn_detail.clone(),
+                ),
+                Some(reason) => self.finalize_automation_run(
+                    workspace_model::AutomationRunStatus::Failed,
+                    Some(
+                        result
+                            .turn_detail
+                            .clone()
+                            .unwrap_or_else(|| format!("本轮异常结束：{reason}")),
+                    ),
+                ),
             }
 
             // Step 2: If ACP did not provide title metadata yet, refine the local fallback.

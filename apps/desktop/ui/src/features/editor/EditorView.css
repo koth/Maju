@@ -436,6 +436,19 @@
   box-shadow: none !important;
 }
 
+/* Monaco renders its hover widgets in a `.context-view` layer (z-index 2576)
+ * that is a sibling of the editor's overlay widgets, so a hover always paints
+ * above the find widget. In this standalone host Monaco's workbench hover rules
+ * (`.monaco-workbench .workbench-hover`) never apply, which leaves that hover
+ * without a background and without `pointer-events: none` — so a button hover
+ * floats over the find widget's own controls and swallows the click.
+ * Lifting the find widget above that layer guarantees its buttons stay
+ * clickable no matter where the hover is anchored; the event-level suppression
+ * in EditorView.tsx keeps the hover from being armed in the first place. */
+.editor-view .monaco-editor .find-widget {
+  z-index: 2600;
+}
+
 /* On light surfaces macOS "antialiased" smoothing thins dark text strokes,
  * making the code look faint/washed out. Use subpixel (auto) smoothing for
  * the editor so glyphs render with full weight. */

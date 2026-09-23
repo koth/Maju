@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod automation_scheduler;
 mod codebuddy_proxy;
 mod commands;
 mod events;
@@ -106,6 +107,10 @@ fn main() {
                     app_core::startup_perf::mark("desktop/remote_control_identity_failed", &e.to_string());
                 }
                 start_remote_control_driver(app.handle().clone());
+                // Automation (定时任务) scheduler: ticks in the background,
+                // fires due automations as background session runs and emits
+                // the `automation:fired` reminder events.
+                automation_scheduler::start(app.handle().clone());
                 // If the CodeBuddy provider is configured and selected, eagerly
                 // start the managed proxy at app launch.
                 // Spawn the codebuddy proxy boot in the background so the
@@ -132,6 +137,13 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::automation::automation_list,
+            commands::automation::automation_create,
+            commands::automation::automation_update,
+            commands::automation::automation_delete,
+            commands::automation::automation_set_enabled,
+            commands::automation::automation_run_now,
+            commands::automation::automation_list_runs,
             commands::session::session_get_state,
             commands::session::session_get_revision,
             commands::session::session_get_patches_since,
@@ -164,6 +176,7 @@ fn main() {
             commands::session::session_get_turn_file_diff,
             commands::session::session_load_history_before,
             commands::session::session_get_tool_detail,
+            commands::session::session_list_background_jobs,
             commands::session::session_reconnect,
             commands::git::git_status,
             commands::git::git_stage,
@@ -225,7 +238,6 @@ fn main() {
             commands::settings::settings_clear_codebuddy_config,
             commands::settings::settings_install_agent,
             commands::settings::settings_check_dsh_update,
-            commands::settings::settings_upgrade_dsh,
             commands::settings::settings_list_dsh_presets,
             commands::settings::settings_set_dsh_preset,
             commands::settings::settings_get_lsp_snapshot,
@@ -429,57 +441,25 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
             // Register the current pairing code (if any) so the phone's
             // PairingInitiate can be routed here. Best-effort: a missing or
             // expired code just means no pairing is in flight right now.
+            //
+            // Fire-and-forget: the UI's "registered" flag flips when the
+            // relay's `SubscriptionStatus` ack arrives and the driver routes
+            // it to `DesktopPairingHandler::on_subscription_status`. The old
+            // inline one-shot `recv` here consumed whatever frame came FIRST
+            // — with a paired phone forwarding requests that was never the
+            // ack, the mismatch arm dropped the real ack when it followed,
+            // and the panel sat on「正在把配对码注册到 relay…」forever.
             if let Some(code) = manager.current_pairing_code() {
                 let reg = Envelope::from_message(
                     None,
                     &Message::PairingRegister(PairingRegister { pairing_code: code }),
                 );
                 if let Ok(env) = reg {
-                    if conn.send_envelope(&env).await.is_ok() {
-                        // Consume the relay's SubscriptionStatus ack. This MUST
-                        // be time-bounded and instance-checked: a plain
-                        // `recv_envelope()` here waited forever for a frame of a
-                        // specific shape, so any interleaved frame (an
-                        // authenticated peer's frame arriving first, a
-                        // keep-alive) parked the driver BEFORE it started
-                        // heartbeating — the connection then died of the
-                        // relay's heartbeat timeout, and the code that was
-                        // registered stayed live while the PC looked offline.
-                        // Registration lives in the relay DB keyed by device
-                        // id, so a slow or missing ack must not cost us the
-                        // connection.
-                        let ack = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            conn.recv_envelope(),
-                        )
-                        .await;
-                        match ack {
-                            Ok(Ok(Some(envelope)))
-                                if matches!(
-                                    envelope.into_message(),
-                                    Ok(Message::SubscriptionStatus(_))
-                                ) =>
-                            {
-                                app_for_loop
-                                    .state::<AppState>()
-                                    .remote_control()
-                                    .mark_pairing_registered();
-                                tracing::info!(target: "remote_control", "pairing code registered with relay");
-                            }
-                            Ok(Ok(_)) => tracing::warn!(
-                                target: "remote_control",
-                                "pairing register ack was not a SubscriptionStatus; continuing"
-                            ),
-                            Ok(Err(e)) => tracing::warn!(
-                                target: "remote_control",
-                                error = %e,
-                                "pairing register ack read failed; continuing"
-                            ),
-                            Err(_) => tracing::warn!(
-                                target: "remote_control",
-                                "pairing register ack timed out; continuing"
-                            ),
-                        }
+                    if conn.send_envelope(&env).await.is_err() {
+                        tracing::warn!(
+                            target: "remote_control",
+                            "pairing register send failed; a reconnect will retry"
+                        );
                     }
                 }
             }

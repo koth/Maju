@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -49,4 +49,10 @@ export function onRemoteOpenProgress(callback: (progress: RemoteOpenProgressEven
  *  bridge. `null` clears the retry animation (no retry in flight). */
 export function onProxyRetry(callback: (status: ProxyRetryStatus | null) => void): Promise<UnlistenFn> {
   return listen<ProxyRetryStatus | null>("proxy:retry", (event) => callback(event.payload));
+}
+
+/** "到点提醒": an automation (定时任务) reached its trigger point and its run
+ *  was dispatched — or failed to start (`error` is then set). */
+export function onAutomationFired(callback: (event: AutomationFiredEvent) => void): Promise<UnlistenFn> {
+  return listen<AutomationFiredEvent>("automation:fired", (event) => callback(event.payload));
 }

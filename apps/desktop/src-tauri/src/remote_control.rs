@@ -7,7 +7,8 @@
 use app_core::{AppUpdate, RemoteControl};
 use tauri::{AppHandle, Manager};
 use workspace_model::{
-    AgentCliId, PermissionInputResponse, SessionFileChange, UserPromptContent, WorkspaceSessionList,
+    AgentCliId, AgentOptionEntry, AgentOptionsList, PermissionInputResponse, SessionConfigState,
+    SessionFileChange, UserPromptContent, WorkspaceSessionList,
 };
 
 use crate::state::AppState;
@@ -36,15 +37,29 @@ impl RemoteControl for DesktopRemoteControl {
         &self,
         workspace_root: Option<String>,
         agent: Option<AgentCliId>,
+        preset: Option<String>,
     ) -> impl std::future::Future<Output = Result<String, String>> + Send {
         // Honor the phone-supplied workspace root: session creation must land
         // in the workspace the user picked on the phone, not whichever
         // workspace happens to be active on the desktop (mirrors the local
         // `session_create` command's `with_workspace_app` routing).
         let result = self.app.state::<AppState>().with_workspace_app(workspace_root, |app| {
-            app.session_create(agent, None)?;
+            app.session_create(agent, preset)?;
             Ok(app.ui.session.id.to_string())
         });
+        async move { result }
+    }
+
+    fn set_config_control(
+        &self,
+        control_id: String,
+        value_id: String,
+        provider: Option<String>,
+    ) -> impl std::future::Future<Output = Result<SessionConfigState, String>> + Send {
+        let result = self
+            .app
+            .state::<AppState>()
+            .with_app(|app| app.set_session_config_control(&control_id, &value_id, provider.as_deref()));
         async move { result }
     }
 
@@ -145,4 +160,55 @@ impl RemoteControl for DesktopRemoteControl {
             .flatten()
             .unwrap_or_else(|| tokio::sync::broadcast::channel(1).1)
     }
+}
+
+/// Answer the phone's `ListAgentOptions`: the selectable agents (from the
+/// settings snapshot) plus the DeepSeek Harness preset list. The preset
+/// list is best-effort — it spawns the `dsh web` host on demand and can
+/// block for seconds, so it runs off the async runtime, and a failure
+/// degrades to an empty list (the phone then offers only the deployment
+/// default) instead of failing the whole request.
+pub async fn list_agent_options() -> Result<AgentOptionsList, String> {
+    tokio::task::spawn_blocking(|| {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let snapshot = app_core::settings::settings_snapshot(&paths);
+        let agents = snapshot
+            .agents
+            .iter()
+            .map(|agent| AgentOptionEntry {
+                id: agent.id,
+                label: agent.label.clone(),
+                installed: agent.installed,
+                selected: agent.selected,
+            })
+            .collect();
+        let dsh_presets = dsh_preset_options(&paths).unwrap_or_default();
+        Ok(AgentOptionsList {
+            agents,
+            dsh_presets,
+            dsh_default_preset: snapshot.settings.dsh_default_preset,
+        })
+    })
+    .await
+    .map_err(|e| format!("list agent options task failed: {e}"))?
+}
+
+fn dsh_preset_options(
+    paths: &app_core::AppPaths,
+) -> Result<Vec<workspace_model::DshPresetOption>, String> {
+    let host = app_core::dsh_bringup::dsh_bringup().ensure_harness_host(paths)?;
+    let client = host.client().clone();
+    let value = host
+        .runtime()
+        .block_on(client.agent_preset_list(uuid::Uuid::new_v4().to_string()))
+        .map_err(|e| format!("agentPreset.list failed: {e}"))?;
+    Ok(value
+        .presets
+        .iter()
+        .map(|preset| workspace_model::DshPresetOption {
+            id: preset.id.clone(),
+            label: preset.name.clone().unwrap_or_else(|| preset.id.clone()),
+            description: preset.description.clone(),
+        })
+        .collect())
 }

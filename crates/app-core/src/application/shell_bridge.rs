@@ -386,6 +386,7 @@ impl Application {
         // When the page came back short of `limit` there is no older history.
         let page_len = timeline.len();
         Ok(HistoryPage {
+            session_id,
             messages,
             tools,
             timeline,
@@ -436,6 +437,11 @@ fn cap_detail_field(value: &mut String) {
 /// A page of older timeline history prepended into the visible session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryPage {
+    /// Session the page belongs to (stamped at execution time). The frontend
+    /// drops pages whose session no longer matches its own snapshot — a paging
+    /// request can execute after a session switch and must not merge another
+    /// conversation's history into the visible one.
+    pub session_id: String,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolInvocation>,
     pub timeline: Vec<TimelineItem>,

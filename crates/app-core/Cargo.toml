@@ -8,6 +8,7 @@ acp-core = { path = "../acp-core" }
 anyhow.workspace = true
 base64 = "0.22"
 bytes.workspace = true
+chrono = "0.4"
 dirs-next = "2.0"
 dsh-bridge = { path = "../dsh-bridge" }
 git-service = { path = "../git-service" }

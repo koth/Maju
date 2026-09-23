@@ -734,9 +734,9 @@ impl AppState {
             UiSnapshotUpdate::Full(snapshot) => {
                 UiSnapshotUpdate::Full(app_core::project_remote_snapshot(snapshot))
             }
-            UiSnapshotUpdate::Patch(patch) => {
-                UiSnapshotUpdate::Patch(app_core::project_remote_patch(patch))
-            }
+            UiSnapshotUpdate::Patch(patch) => UiSnapshotUpdate::Patch(
+                app_core::project_remote_patch(patch, app.live_turn_file_changes()),
+            ),
         }))
     }
 
@@ -1089,6 +1089,67 @@ impl AppState {
             _ => return Err("Workspace is not connected".into()),
         };
         f(app)
+    }
+
+    /// Run an automation (定时任务) prompt in `path`'s workspace WITHOUT
+    /// changing the active workspace: the target workspace's `Application`
+    /// connects (dormant workspaces wake up) and the prompt is dispatched as a
+    /// background session, so the user's current conversation is never
+    /// disturbed. Returns the new session's id.
+    pub fn run_automation_prompt(
+        &self,
+        path: String,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+        prompt: String,
+        automation_run_id: Option<String>,
+    ) -> Result<String, String> {
+        let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        let key = workspace_key_for_identifier(&guard, &path)
+            .unwrap_or_else(|| normalize_tracked_path(&path));
+        let (remote, local_path) = match guard.workspaces.get(&key) {
+            Some(entry) => (entry_remote(entry), entry_path(entry)),
+            None => {
+                // Auto-open the project-less "聊天" workspace, mirroring
+                // `with_workspace_app`.
+                if is_chats_workspace(&key) {
+                    let root = chats_workspace_root()?;
+                    std::fs::create_dir_all(&root)
+                        .map_err(|e| format!("创建聊天工作区目录失败: {e}"))?;
+                    connect_workspace_locked(&mut guard, key.clone(), root, None, None)?;
+                    (None, None)
+                } else {
+                    return Err(format!("自动化目标项目未打开：{path}"));
+                }
+            }
+        };
+        if let Some(remote) = remote {
+            connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
+        } else if let Some(local_path) = local_path {
+            if !matches!(
+                guard.workspaces.get(&key),
+                Some(WorkspaceEntry::Connected(_))
+            ) {
+                connect_workspace_locked(&mut guard, key.clone(), local_path, None, None)?;
+            }
+        }
+        // Deliberately NOT setting `guard.active_workspace`: a background
+        // automation run must never steal focus from the user's workspace.
+        let app = match guard.workspaces.get_mut(&key) {
+            Some(WorkspaceEntry::Connected(app)) => app,
+            _ => return Err("自动化目标项目未连接".into()),
+        };
+        app.run_automation_prompt(agent, preset, prompt, automation_run_id)
+    }
+
+    /// Whether some connected workspace still owns `run_id`'s in-flight turn.
+    /// Used to reconcile automation run rows orphaned by an app restart.
+    pub fn automation_run_in_flight(&self, run_id: &str) -> Result<bool, String> {
+        let guard = self.workspaces.lock().map_err(|e| e.to_string())?;
+        Ok(guard.workspaces.values().any(|entry| match entry {
+            WorkspaceEntry::Connected(app) => app.automation_run_in_flight(run_id),
+            WorkspaceEntry::Dormant(_) => false,
+        }))
     }
 
     pub fn delete_session(&self, workspace_root: Option<String>, id: &str) -> Result<(), String> {

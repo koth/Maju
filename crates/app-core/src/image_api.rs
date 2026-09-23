@@ -180,15 +180,18 @@ impl ImageApi {
         let generate = &self.config.settings.generate;
         let (model, base_url, api_key) =
             generate_endpoints(generate, self.config.generate_api_key.as_deref())?;
+        let timeout_secs = generate_timeout_seconds(generate);
         let images = match generate.protocol {
             workspace_model::ImageGenerateProtocol::OpenaiImages => {
-                generate_openai_images(&base_url, &api_key, &model, prompt, size, n).await?
+                generate_openai_images(&base_url, &api_key, &model, prompt, size, n, timeout_secs)
+                    .await?
             }
             workspace_model::ImageGenerateProtocol::ChatCompletions => {
-                generate_chat_completions(&base_url, &api_key, &model, prompt, size).await?
+                generate_chat_completions(&base_url, &api_key, &model, prompt, size, timeout_secs)
+                    .await?
             }
             workspace_model::ImageGenerateProtocol::Gemini => {
-                generate_gemini(&base_url, &api_key, &model, prompt, size).await?
+                generate_gemini(&base_url, &api_key, &model, prompt, size, timeout_secs).await?
             }
         };
         if images.is_empty() {
@@ -240,6 +243,7 @@ impl ImageApi {
             .map_err(|error| format!("failed to read source image {source:?}: {error}"))?;
         let image_mime = mime_for_path(&source);
         let size = generate.default_size.trim();
+        let timeout_secs = generate_timeout_seconds(generate);
         let images = match generate.protocol {
             workspace_model::ImageGenerateProtocol::OpenaiImages => {
                 edit_openai_images(
@@ -251,6 +255,7 @@ impl ImageApi {
                     &image_bytes,
                     image_mime,
                     mask_path,
+                    timeout_secs,
                 )
                 .await?
             }
@@ -262,6 +267,7 @@ impl ImageApi {
                     &prompt,
                     &image_bytes,
                     image_mime,
+                    timeout_secs,
                 )
                 .await?
             }
@@ -273,6 +279,7 @@ impl ImageApi {
                     &prompt,
                     &image_bytes,
                     image_mime,
+                    timeout_secs,
                 )
                 .await?
             }
@@ -345,6 +352,26 @@ fn generate_endpoints(
     Ok((model, base_url, api_key))
 }
 
+/// Effective request timeout (seconds) for `generate_image` / `edit_image`:
+/// the configured `image.generate.timeout_seconds`, falling back to the
+/// default (300s) when unset/zero.
+fn generate_timeout_seconds(generate: &workspace_model::ImageGenerateSettings) -> u64 {
+    if generate.timeout_seconds == 0 {
+        workspace_model::ImageGenerateSettings::default().timeout_seconds
+    } else {
+        generate.timeout_seconds
+    }
+}
+
+/// HTTP client whose whole-request timeout is the generation timeout: a slow
+/// or hung image API must fail the tool call instead of hanging the turn.
+fn http_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        .build()
+        .unwrap_or_default()
+}
+
 /// OpenAI-compatible `POST /images/generations`.
 async fn generate_openai_images(
     base_url: &str,
@@ -353,6 +380,7 @@ async fn generate_openai_images(
     prompt: &str,
     size: &str,
     n: usize,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let payload = json!({
         "model": model,
@@ -362,10 +390,10 @@ async fn generate_openai_images(
         "response_format": "b64_json"
     });
     let url = format!("{base_url}/images/generations");
-    let response = post_json(&url, api_key, &payload)
+    let response = post_json(&url, api_key, &payload, timeout_secs)
         .await
         .map_err(|error| format!("generate_image request failed: {error}"))?;
-    parse_image_results(&response).await
+    parse_image_results(&response, timeout_secs).await
 }
 
 /// OpenAI-compatible `POST /images/edits` (multipart).
@@ -378,6 +406,7 @@ async fn edit_openai_images(
     image_bytes: &[u8],
     image_mime: &str,
     mask_path: Option<&str>,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let image_ext = crate::attachment_cache::extension_for_mime_type(image_mime);
     let mut form = reqwest::multipart::Form::new()
@@ -405,7 +434,7 @@ async fn edit_openai_images(
     }
 
     let url = format!("{base_url}/images/edits");
-    let client = reqwest::Client::new();
+    let client = http_client(timeout_secs);
     let response = client
         .post(&url)
         .bearer_auth(api_key)
@@ -422,7 +451,7 @@ async fn edit_openai_images(
         let message = error_message(&body);
         return Err(format!("edit_image call failed ({status}): {message}"));
     }
-    parse_image_results(&body).await
+    parse_image_results(&body, timeout_secs).await
 }
 
 /// OpenAI-compatible `POST /chat/completions` for image generation. The model
@@ -434,6 +463,7 @@ async fn generate_chat_completions(
     model: &str,
     prompt: &str,
     size: &str,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let mut user_content = format!("Generate an image. Prompt: {prompt}");
     if !size.is_empty() {
@@ -448,10 +478,10 @@ async fn generate_chat_completions(
         "stream": false
     });
     let url = format!("{base_url}/chat/completions");
-    let response = post_json(&url, api_key, &payload)
+    let response = post_json(&url, api_key, &payload, timeout_secs)
         .await
         .map_err(|error| format!("generate_image (chat) request failed: {error}"))?;
-    parse_chat_image_response(&response).await
+    parse_chat_image_response(&response, timeout_secs).await
 }
 
 /// `POST /chat/completions` for image editing: the original image is sent as
@@ -463,6 +493,7 @@ async fn edit_chat_completions(
     prompt: &str,
     image_bytes: &[u8],
     image_mime: &str,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let data_url = data_url(image_bytes, image_mime);
     let payload = json!({
@@ -477,10 +508,10 @@ async fn edit_chat_completions(
         "stream": false
     });
     let url = format!("{base_url}/chat/completions");
-    let response = post_json(&url, api_key, &payload)
+    let response = post_json(&url, api_key, &payload, timeout_secs)
         .await
         .map_err(|error| format!("edit_image (chat) request failed: {error}"))?;
-    parse_chat_image_response(&response).await
+    parse_chat_image_response(&response, timeout_secs).await
 }
 
 /// Google Gemini `POST /models/{model}:generateContent` with
@@ -499,6 +530,7 @@ async fn generate_gemini(
     model: &str,
     prompt: &str,
     _size: &str,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let payload = json!({
         "contents": [{
@@ -513,7 +545,7 @@ async fn generate_gemini(
         "{base_url}/models/{model}:generateContent?key={}",
         percent_encode_query(api_key)
     );
-    let response = post_json_gemini(&url, api_key, &payload)
+    let response = post_json_gemini(&url, api_key, &payload, timeout_secs)
         .await
         .map_err(|error| format!("generate_image (gemini) request failed: {error}"))?;
     parse_gemini_image_response(&response)
@@ -530,6 +562,7 @@ async fn edit_gemini(
     prompt: &str,
     image_bytes: &[u8],
     image_mime: &str,
+    timeout_secs: u64,
 ) -> Result<Vec<DecodedImage>, String> {
     let payload = json!({
         "contents": [{
@@ -547,7 +580,7 @@ async fn edit_gemini(
         "{base_url}/models/{model}:generateContent?key={}",
         percent_encode_query(api_key)
     );
-    let response = post_json_gemini(&url, api_key, &payload)
+    let response = post_json_gemini(&url, api_key, &payload, timeout_secs)
         .await
         .map_err(|error| format!("edit_image (gemini) request failed: {error}"))?;
     parse_gemini_image_response(&response)
@@ -556,7 +589,10 @@ async fn edit_gemini(
 /// Extract images from an OpenAI `chat/completions` response. Handles both the
 /// OpenAI Images-in-Chat shape (`message.images[]` with `b64_json`) and inline
 /// `image_url` content parts, falling back to a `data` array.
-async fn parse_chat_image_response(response: &Value) -> Result<Vec<DecodedImage>, String> {
+async fn parse_chat_image_response(
+    response: &Value,
+    timeout_secs: u64,
+) -> Result<Vec<DecodedImage>, String> {
     // OpenAI images-in-chat: choices[0].message.images[]
     if let Some(images) = response
         .get("choices")
@@ -581,7 +617,7 @@ async fn parse_chat_image_response(response: &Value) -> Result<Vec<DecodedImage>
                         .map(str::to_string),
                 });
             } else if let Some(url) = image.get("url").and_then(Value::as_str) {
-                let bytes = fetch_image_url(url)
+                let bytes = fetch_image_url(url, timeout_secs)
                     .await
                     .map_err(|error| format!("failed to fetch image url {url}: {error}"))?;
                 let mime = mime_from_bytes(&bytes);
@@ -620,7 +656,7 @@ async fn parse_chat_image_response(response: &Value) -> Result<Vec<DecodedImage>
                                 revised_prompt: None,
                             });
                         } else {
-                            let fetched = fetch_image_url(url)
+                            let fetched = fetch_image_url(url, timeout_secs)
                                 .await
                                 .map_err(|error| format!("fetch image url {url}: {error}"))?;
                             let mime = mime_from_bytes(&fetched);
@@ -639,7 +675,7 @@ async fn parse_chat_image_response(response: &Value) -> Result<Vec<DecodedImage>
         }
     }
     // Fall back to the standard images `data[]` shape.
-    parse_image_results(response).await
+    parse_image_results(response, timeout_secs).await
 }
 
 /// Extract images from a Gemini `generateContent` response:
@@ -712,7 +748,7 @@ fn mime_from_str(mime: &str) -> &'static str {
 /// `images/edits` response. Supports `b64_json` (preferred, requested) and
 /// falls back to fetching a `url` when the provider does not honor
 /// `response_format`.
-async fn parse_image_results(response: &Value) -> Result<Vec<DecodedImage>, String> {
+async fn parse_image_results(response: &Value, timeout_secs: u64) -> Result<Vec<DecodedImage>, String> {
     let data = response
         .get("data")
         .and_then(Value::as_array)
@@ -733,7 +769,7 @@ async fn parse_image_results(response: &Value) -> Result<Vec<DecodedImage>, Stri
                 revised_prompt,
             });
         } else if let Some(url) = entry.get("url").and_then(Value::as_str) {
-            let bytes = fetch_image_url(url)
+            let bytes = fetch_image_url(url, timeout_secs)
                 .await
                 .map_err(|error| format!("failed to fetch image url {url}: {error}"))?;
             let mime = mime_from_bytes(&bytes);
@@ -747,8 +783,8 @@ async fn parse_image_results(response: &Value) -> Result<Vec<DecodedImage>, Stri
     Ok(images)
 }
 
-async fn fetch_image_url(url: &str) -> Result<Vec<u8>, String> {
-    let bytes = reqwest::Client::new()
+async fn fetch_image_url(url: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+    let bytes = http_client(timeout_secs)
         .get(url)
         .send()
         .await
@@ -759,8 +795,13 @@ async fn fetch_image_url(url: &str) -> Result<Vec<u8>, String> {
     Ok(bytes.to_vec())
 }
 
-async fn post_json(url: &str, api_key: &str, payload: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::new();
+async fn post_json(
+    url: &str,
+    api_key: &str,
+    payload: &Value,
+    timeout_secs: u64,
+) -> Result<Value, String> {
+    let client = http_client(timeout_secs);
     let mut request = client.post(url).json(payload);
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
@@ -782,8 +823,13 @@ async fn post_json(url: &str, api_key: &str, payload: &Value) -> Result<Value, S
 /// instead of `Authorization: Bearer`. The Gemini Developer API and Vertex AI
 /// both accept this header; Vertex proxies (e.g. zenmux) require it because
 /// they ignore the `?key=` query parameter.
-async fn post_json_gemini(url: &str, api_key: &str, payload: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::new();
+async fn post_json_gemini(
+    url: &str,
+    api_key: &str,
+    payload: &Value,
+    timeout_secs: u64,
+) -> Result<Value, String> {
+    let client = http_client(timeout_secs);
     let mut request = client.post(url).json(payload);
     if !api_key.is_empty() {
         request = request.header("x-goog-api-key", api_key);
@@ -1019,7 +1065,7 @@ mod tests {
                 {"b64_json": BASE64.encode(&[4, 5, 6])}
             ]
         });
-        let images = run_async(parse_image_results(&response)).unwrap();
+        let images = run_async(parse_image_results(&response, 300)).unwrap();
         assert_eq!(images.len(), 2);
         assert_eq!(images[0].data, vec![1, 2, 3]);
         assert_eq!(images[0].mime, "image/png");
@@ -1029,7 +1075,7 @@ mod tests {
 
     #[test]
     fn parse_image_results_errors_without_data() {
-        assert!(run_async(parse_image_results(&json!({"foo": 1}))).is_err());
+        assert!(run_async(parse_image_results(&json!({"foo": 1}), 300)).is_err());
     }
 
     #[test]
@@ -1166,7 +1212,7 @@ mod tests {
                 }
             }]
         });
-        let images = run_async(parse_chat_image_response(&response)).unwrap();
+        let images = run_async(parse_chat_image_response(&response, 300)).unwrap();
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].data, vec![4, 5]);
         assert_eq!(images[0].revised_prompt.as_deref(), Some("a cat"));
@@ -1184,7 +1230,7 @@ mod tests {
                 }
             }]
         });
-        let images = run_async(parse_chat_image_response(&response)).unwrap();
+        let images = run_async(parse_chat_image_response(&response, 300)).unwrap();
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].data, vec![7, 8, 9]);
         assert_eq!(images[0].mime, "image/png");

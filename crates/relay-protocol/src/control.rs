@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use workspace_model::{
-    AgentCliId, PermissionInputResponse, SessionFileChange, UiSnapshot, UserPromptContent,
-    WorkspaceSessionList,
+    AgentCliId, AgentOptionsList, PermissionInputResponse, SessionConfigState, SessionFileChange,
+    UiSnapshot, UserPromptContent, WorkspaceSessionList,
 };
 
 /// A control operation sent from the phone (or relay) to the PC gateway.
@@ -22,6 +22,27 @@ pub enum ControlRequest {
         workspace_root: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentCliId>,
+        /// DeepSeek Harness agent preset (mode) for the new session. Only
+        /// meaningful when `agent` is the harness; `None` = deployment
+        /// default. Peers that predate the field omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
+    },
+    /// Fetch the agent/preset choices for the new-session picker (settings
+    /// snapshot + best-effort harness preset list). Answered by the shell,
+    /// not the active `Application`.
+    ListAgentOptions {
+        request_id: Uuid,
+    },
+    /// Set a session config control (e.g. the model picker) on the active
+    /// session. Mirrors the local `session_set_config_control` command;
+    /// answers with the refreshed config state.
+    SetConfigControl {
+        request_id: Uuid,
+        control_id: String,
+        value_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     SwitchSession {
         request_id: Uuid,
@@ -88,6 +109,14 @@ pub enum ControlResponse {
         request_id: Uuid,
         session_id: String,
     },
+    AgentOptions {
+        request_id: Uuid,
+        options: AgentOptionsList,
+    },
+    SetConfigControl {
+        request_id: Uuid,
+        config: SessionConfigState,
+    },
     SwitchSession {
         request_id: Uuid,
     },
@@ -135,6 +164,8 @@ impl ControlRequest {
         match self {
             ControlRequest::ListSessions { request_id }
             | ControlRequest::CreateSession { request_id, .. }
+            | ControlRequest::ListAgentOptions { request_id }
+            | ControlRequest::SetConfigControl { request_id, .. }
             | ControlRequest::SwitchSession { request_id, .. }
             | ControlRequest::SendPrompt { request_id, .. }
             | ControlRequest::GetState {

@@ -22,6 +22,7 @@ use workspace_model::{
 
 mod bootstrap;
 mod change_sets;
+pub(crate) mod automations;
 mod commit_assistant;
 mod config;
 pub(crate) mod diff_utils;
@@ -168,6 +169,11 @@ struct SessionRuntime {
     conversation_change_set_signature: u64,
     conversation_change_set_turn_cache:
         HashMap<String, (String, Vec<workspace_model::FileChangeRecord>)>,
+    /// Automation (定时任务) run that dispatched this session's current turn,
+    /// if any. Swapped with the rest of the session state so the run row can
+    /// be finalized when the turn ends — whether the session is visible or
+    /// parked as a background runtime. See `application::automations`.
+    automation_run_id: Option<String>,
 }
 
 impl SessionRuntime {
@@ -305,6 +311,10 @@ pub struct Application {
     conversation_change_set_signature: u64,
     conversation_change_set_turn_cache:
         HashMap<String, (String, Vec<workspace_model::FileChangeRecord>)>,
+    /// Automation (定时任务) run driving the visible session's current turn.
+    /// Swapped with `SessionRuntime::automation_run_id`; see
+    /// `application::automations`.
+    automation_run_id: Option<String>,
 }
 
 fn current_timestamp() -> String {
@@ -825,6 +835,7 @@ impl Application {
             &mut self.conversation_change_set_turn_cache,
             &mut runtime.conversation_change_set_turn_cache,
         );
+        std::mem::swap(&mut self.automation_run_id, &mut runtime.automation_run_id);
     }
 
     fn install_runtime_as_visible(&mut self, mut runtime: SessionRuntime) -> SessionRuntime {

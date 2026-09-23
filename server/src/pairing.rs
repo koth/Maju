@@ -19,12 +19,13 @@ pub async fn handle_pairing_register(
     pc_device_id: &str,
     tx: &mpsc::Sender<String>,
 ) -> Result<()> {
-    // §7: rate-limit pairing-code generation per PC device_id to deter
-    // brute-force / flooding. Reuses the failure limiter as a request counter.
-    if !state.rate_limiter.allowed(pc_device_id) {
-        return Err(RelayError::Other("pairing code rate limited".into()));
-    }
-    state.rate_limiter.record_failure(pc_device_id);
+    // Registering a PC's OWN pairing code is authenticated (`require_device`),
+    // idempotent (upsert) and cheap. It must NOT count in the auth-failure
+    // limiter: that used to `record_failure` on every SUCCESS, so a device
+    // with accumulated auth failures could get its registrations rejected and
+    // sit on the PC's「正在把配对码注册到 relay…」forever. The guessable
+    // surface is `PairingInitiate`, which consumes the one-time code on
+    // success and is bounded by the code TTL.
     state
         .db
         .register_pairing_code(

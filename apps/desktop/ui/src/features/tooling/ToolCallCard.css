@@ -600,3 +600,48 @@
 .tc-children-count {
   font-weight: 600;
 }
+
+/* ── 生图/改图结果预览 ── */
+
+.tc-image-previews {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-left: 18px;
+}
+
+.tc-image-preview {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+
+.tc-image-preview img {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  max-height: 420px;
+  object-fit: contain;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+.tc-image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  cursor: zoom-out;
+}
+
+.tc-image-lightbox img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: 8px;
+}

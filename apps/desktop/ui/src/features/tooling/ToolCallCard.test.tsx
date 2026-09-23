@@ -1503,3 +1503,137 @@ it("uses edit paths from tool logs when raw_input was truncated before file_path
     expect(container.textContent).toContain("aggregated_output");
   });
 });
+
+describe("ToolCallCard – 生图/改图工具", () => {
+  it("labels generate_image 已生图, previews exactly one image, titled by prompt", () => {
+    const tool = makeTool({
+      kind: "mcp__kodex-image__generate_image",
+      name: "generate_image",
+      status: "Succeeded",
+      summary: "mcp__kodex_image__generate_image",
+      raw_input: JSON.stringify({ prompt: "A clean technical diagram" }),
+      raw_output: JSON.stringify({
+        images: [
+          {
+            path: "file:///C:/Users/test/.kodex/generated-images/abc.png",
+            saved_path: "C:\\Users\\test\\.kodex\\generated-images\\abc.png",
+            mime_type: "image/png",
+          },
+        ],
+        saved_dir: "C:\\Users\\test\\.kodex\\generated-images",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已生图");
+    // 标题是提示词，不是结果文件路径。
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe(
+      "A clean technical diagram",
+    );
+    // path 与 saved_path 是同一张图的两种引用 —— 只渲染一张。
+    const imgs = container.querySelectorAll(".tc-image-previews img");
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].getAttribute("src")).toContain("generated-images");
+
+    // 转换后的 URL 加载失败时回退到原始引用，绝不留坏图占位。
+    const img = imgs[0] as HTMLImageElement;
+    fireEvent.error(img);
+    expect(img.getAttribute("src")).toBe(
+      "file:///C:/Users/test/.kodex/generated-images/abc.png",
+    );
+  });
+
+  it("labels edit_image 已改图 and previews only the result, not the source image", () => {
+    const tool = makeTool({
+      kind: "mcp__kodex-image__edit_image",
+      name: "edit_image",
+      status: "Succeeded",
+      raw_input: JSON.stringify({
+        image_path: "C:\\Users\\test\\hair_edit_source.jpg",
+        prompt: "换个发型",
+      }),
+      raw_output: JSON.stringify({
+        mime_type: "image/png",
+        path: "file:///C:/Users/test/.kodex/generated-images/ed.png",
+        revised_prompt: null,
+        saved_path: "C:\\Users\\test\\.kodex\\generated-images\\ed.png",
+        source: "C:\\Users\\test\\hair_edit_source.jpg",
+      }),
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已改图");
+    expect(container.querySelector(".tc-cmd")!.textContent).toBe("换个发型");
+    // 改图只出一张结果图：path/saved_path 去重，source（送进去的原图）不渲染。
+    const imgs = container.querySelectorAll(".tc-image-previews img");
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].getAttribute("src")).toContain("generated-images");
+  });
+
+  it("recovers image references from dsh text payloads", () => {
+    // dsh 的工具结果常是随手写的文本（带 file:// 或本地路径），不是 MCP JSON。
+    const tool = makeTool({
+      kind: "kodex_image",
+      name: "mcp__kodex_image__generate_image",
+      status: "Succeeded",
+      raw_output:
+        "saved to file:///D:/work/out/generated-images/x1.png",
+      detail_text: "D:/work/out/generated-images/x2.png",
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    expect(container.querySelector(".tc-verb")!.textContent).toBe("已生图");
+    const imgs = container.querySelectorAll(".tc-image-previews img");
+    expect(imgs).toHaveLength(2);
+    expect(imgs[0].getAttribute("src")).toContain("generated-images");
+  });
+
+  it("shows 生图中 while running with no preview yet, and 失败 stays visible", () => {
+    const running = makeTool({
+      kind: "mcp__kodex-image__generate_image",
+      name: "generate_image",
+      status: "Running",
+    });
+    const runningView = render(
+      <ToolCallCard tool={running} nested={false} onPermissionSelect={() => {}} />,
+    );
+    expect(runningView.container.querySelector(".tc-verb")!.textContent).toBe("生图中");
+    expect(runningView.container.querySelector(".tc-image-previews")).toBeNull();
+    runningView.unmount();
+
+    const failed = makeTool({
+      kind: "mcp__kodex-image__generate_image",
+      name: "generate_image",
+      status: "Failed",
+    });
+    const failedView = render(
+      <ToolCallCard tool={failed} nested={false} onPermissionSelect={() => {}} />,
+    );
+    expect(failedView.container.querySelector(".tc-verb")!.textContent).toBe("生图失败");
+  });
+
+  it("opens a lightbox when a preview is clicked", () => {
+    const tool = makeTool({
+      kind: "mcp__kodex-image__generate_image",
+      name: "generate_image",
+      status: "Succeeded",
+      raw_output: '{"images":[{"path":"data:image/png;base64,iVBORw0KGgo="}]}',
+    });
+    const { container } = render(
+      <ToolCallCard tool={tool} nested={false} onPermissionSelect={() => {}} />,
+    );
+
+    // Scope to this render's container: earlier tests' DOM can still be in
+    // document (no global RTL cleanup), so no document-wide role queries here.
+    fireEvent.click(container.querySelector(".tc-image-preview")!);
+    expect(container.querySelector(".tc-image-lightbox")).not.toBeNull();
+    fireEvent.click(container.querySelector(".tc-image-lightbox")!);
+    expect(container.querySelector(".tc-image-lightbox")).toBeNull();
+  });
+});

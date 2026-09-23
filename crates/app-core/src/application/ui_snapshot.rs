@@ -435,11 +435,17 @@ pub fn project_remote_snapshot(
 ///
 /// `thinking_text` is the worst offender: it is re-sent in full (uncapped) on
 /// every patch while a turn streams, and the mobile reducer never applies it.
-pub fn project_remote_patch(mut patch: workspace_model::UiSnapshotPatch) -> workspace_model::UiSnapshotPatch {
-    patch.session_config = workspace_model::SessionConfigState {
-        hydrated: false,
-        controls: Vec::new(),
-    };
+///
+/// `live_turn_changes` carries the IN-FLIGHT turn's file changes (see
+/// [`Application::live_turn_file_changes`]); without them the phone's
+/// "本轮改动" bar only appears after the turn ends, because `ui.turn_changes`
+/// is persisted at turn close. `session_config` is deliberately NOT zeroed:
+/// the phone's model/provider switcher renders from its controls (it used to
+/// be stripped to `hydrated: false`, which made the picker never appear).
+pub fn project_remote_patch(
+    mut patch: workspace_model::UiSnapshotPatch,
+    live_turn_changes: Option<workspace_model::TurnFileChanges>,
+) -> workspace_model::UiSnapshotPatch {
     patch.available_commands = Vec::new();
     patch.agent_plan = Vec::new();
     patch.repository = None;
@@ -450,6 +456,12 @@ pub fn project_remote_patch(mut patch: workspace_model::UiSnapshotPatch) -> work
     // the mobile "本轮改动" bar — the same projection the Full snapshot path
     // applies. The texts were already stripped at patch build time.
     patch.turn_changes = metadata_only_turn_changes(&patch.turn_changes);
+    if let Some(live) = live_turn_changes {
+        patch
+            .turn_changes
+            .retain(|entry| entry.message_id != live.message_id);
+        patch.turn_changes.push(live);
+    }
     patch.thinking_text = String::new();
     // Usage is a handful of numbers and feeds the phone's session-info sheet;
     // it is not zeroed.
@@ -457,10 +469,8 @@ pub fn project_remote_patch(mut patch: workspace_model::UiSnapshotPatch) -> work
 }
 
 fn zero_remote_only_fields(snapshot: &mut workspace_model::UiSnapshot) {
-    snapshot.session_config = workspace_model::SessionConfigState {
-        hydrated: false,
-        controls: Vec::new(),
-    };
+    // `session_config` stays: the phone's model/provider switcher renders
+    // from its controls (stripping it to `hydrated: false` hid the picker).
     snapshot.available_commands = Vec::new();
     snapshot.agent_plan = Vec::new();
     snapshot.inspector_sections = Vec::new();
@@ -666,7 +676,7 @@ mod tests {
         assert!(projected.thinking_text.is_empty());
         assert!(projected.repository.changed_files.is_empty());
         assert!(projected.repository.branch.is_empty());
-        assert!(!projected.session_config.hydrated);
+        assert!(projected.session_config.hydrated);
         // Conversation-relevant fields survive.
         assert!(projected.thinking_status.is_some());
         assert_eq!(projected.revision, 7);
@@ -922,7 +932,7 @@ mod tests {
             },
             pending_steers: Vec::new(),
         };
-        let projected = project_remote_patch(patch);
+        let projected = project_remote_patch(patch, None);
         assert!(projected.thinking_text.is_empty(), "thinking text is phone-dead weight");
         assert!(projected.repository.is_none());
         assert!(projected.session_changes.is_empty());
@@ -937,7 +947,7 @@ mod tests {
         assert_eq!(change.new_text, "");
         // Usage feeds the phone's session-info sheet and is not zeroed.
         assert_eq!(projected.usage.context.used_tokens, Some(1234));
-        assert!(!projected.session_config.hydrated);
+        assert!(projected.session_config.hydrated);
         // Conversation delta fields are untouched.
         assert_eq!(projected.revision, 9);
         assert_eq!(projected.timeline_start, 0);
@@ -1033,7 +1043,16 @@ impl Application {
     /// response can be processed. The projection trims it to what the phone
     /// actually renders (see [`project_remote_snapshot`]).
     pub fn remote_ui_snapshot(&self) -> workspace_model::UiSnapshot {
-        project_remote_snapshot(self.lightweight_ui_snapshot())
+        let mut snapshot = project_remote_snapshot(self.lightweight_ui_snapshot());
+        // 边跑边看的"本轮改动"：进行中轮次的实时文件改动并入下发（收尾后
+        // 持久化条目自然接管，`live_turn_file_changes` 返回 None）。
+        if let Some(live) = self.live_turn_file_changes() {
+            snapshot
+                .turn_changes
+                .retain(|entry| entry.message_id != live.message_id);
+            snapshot.turn_changes.push(live);
+        }
+        snapshot
     }
 
     pub fn lightweight_ui_update(

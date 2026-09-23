@@ -124,6 +124,7 @@ interface FakeEditorAction {
 }
 
 function createFakeEditor() {
+  const domNode = document.createElement("div");
   return {
     setModel: vi.fn((model: FakeModel) => {
       currentModel = model;
@@ -131,6 +132,7 @@ function createFakeEditor() {
     getModel: () => currentModel,
     getSelection: () => currentSelection,
     hasTextFocus: () => true,
+    getDomNode: () => domNode,
     onDidDispose: vi.fn(),
     onDidChangeCursorSelection: vi.fn((listener: () => void) => {
       selectionListener = listener;
@@ -624,5 +626,42 @@ describe("EditorView editable state", () => {
     expect(screen.getByLabelText("文件路径")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "显示文件树" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "全屏编辑" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Monaco's find-widget hover from being armed over the widget's own buttons", async () => {
+    render(<EditorView path="src/main.ts" appTheme="kodex_dark" />);
+    await screen.findByLabelText("mock editor");
+
+    const domNode = fakeEditor.getDomNode();
+    const findWidget = document.createElement("div");
+    findWidget.className = "find-widget";
+    const closeButton = document.createElement("a");
+    closeButton.className = "monaco-button";
+    closeButton.setAttribute("role", "button");
+    // Monaco marks every element it wires a custom hover onto with this attribute.
+    closeButton.setAttribute("custom-hover", "true");
+    findWidget.appendChild(closeButton);
+    const editorContent = document.createElement("div");
+    domNode.append(findWidget, editorContent);
+
+    // Monaco arms the hover from capture-phase `mouseover` *and* `focus`
+    // listeners on the button, and once either has created the hover
+    // preparation the other short-circuits — so both must be stopped here.
+    const buttonHoverArm = vi.fn();
+    closeButton.addEventListener("mouseover", buttonHoverArm, true);
+    closeButton.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true }));
+    expect(buttonHoverArm).not.toHaveBeenCalled();
+
+    closeButton.addEventListener("focus", buttonHoverArm, true);
+    closeButton.dispatchEvent(new FocusEvent("focus", { bubbles: true, cancelable: true }));
+    expect(buttonHoverArm).not.toHaveBeenCalled();
+
+    // Hovering anywhere else in the editor must keep working untouched.
+    const contentHoverArm = vi.fn();
+    editorContent.addEventListener("mouseover", contentHoverArm, true);
+    editorContent.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true }));
+    expect(contentHoverArm).toHaveBeenCalledTimes(1);
+
+    domNode.replaceChildren();
   });
 });

@@ -9,7 +9,12 @@ export type ChangeSection = "Staged" | "Unstaged" | "Untracked";
 export type MessageRole = "User" | "Assistant" | "System";
 export type InspectorTab = "Activity" | "Diff" | "Files" | "Sources";
 export type ThinkingStatus = "Active" | "Completed";
-export type AgentCliId = "codebuddy" | "goose" | "codex-acp" | "claude-agent-acp";
+export type AgentCliId =
+  | "codebuddy"
+  | "goose"
+  | "codex-acp"
+  | "claude-agent-acp"
+  | "deepseek-harness";
 export type FileChangeType = "Created" | "Modified" | "Deleted";
 
 export type ThinkingSegment = { text: string };
@@ -81,6 +86,32 @@ export interface SessionConfigControl {
 export interface SessionConfigState {
   hydrated: boolean;
   controls: SessionConfigControl[];
+}
+
+/** One DeepSeek Harness agent preset (mode) choice. Mirrors
+ *  `workspace_model::DshPresetOption`. */
+export interface DshPresetOption {
+  id: string;
+  label: string;
+  description?: string | null;
+}
+
+/** One selectable agent in the new-session picker. Mirrors
+ *  `workspace_model::AgentOptionEntry`. */
+export interface AgentOptionEntry {
+  id: AgentCliId;
+  label: string;
+  installed: boolean;
+  selected: boolean;
+}
+
+/** The agent/preset choices offered when creating a session. Mirrors
+ *  `workspace_model::AgentOptionsList`; `dsh_presets` is best-effort and
+ *  empty when the harness host is unavailable. */
+export interface AgentOptionsList {
+  agents: AgentOptionEntry[];
+  dsh_presets?: DshPresetOption[];
+  dsh_default_preset?: string | null;
 }
 
 export type AgentPlanEntryPriority = "high" | "medium" | "low";

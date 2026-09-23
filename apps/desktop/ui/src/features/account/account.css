@@ -135,7 +135,10 @@
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.16);
+  /* Recessed well via the shared token: the old `rgba(0,0,0,.16)` was a dark
+     theme value (a 16% black wash on a dark surface). On the light canvas the
+     same wash paints the field #d6d6d6 — a grey slab around every input. */
+  background: var(--surface-muted-bg);
   color: var(--text-strong);
   font: inherit;
   font-size: 13px;

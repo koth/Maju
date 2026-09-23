@@ -425,6 +425,7 @@ impl Application {
             history_earliest_seq: restored_history_earliest_seq,
             conversation_change_set_signature: 0,
             conversation_change_set_turn_cache: HashMap::new(),
+            automation_run_id: None,
         })
     }
 
@@ -697,6 +698,7 @@ impl Application {
             history_earliest_seq: restored_history_earliest_seq,
             conversation_change_set_signature: 0,
             conversation_change_set_turn_cache: HashMap::new(),
+            automation_run_id: None,
         })
     }
 }

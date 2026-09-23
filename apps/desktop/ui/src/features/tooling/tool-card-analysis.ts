@@ -2020,6 +2020,134 @@ export function commandToolLabel(tool: ToolInvocation): string {
   return "Command";
 }
 
+// ── 生图/改图工具（kodex-image MCP） ──────────────────────────────────────────
+
+export type ImageGenerationMode = "generate" | "edit";
+
+/** generate_image / edit_image 的工具身份：codex ACP 形如
+ *  `mcp__kodex-image__generate_image`，dsh 形如 `generate_image` /
+ *  `mcp__kodex_image__edit_image`。 */
+export function imageGenerationMode(tool: ToolInvocation): ImageGenerationMode | null {
+  const identity = `${tool.name} ${tool.kind}`.trim().toLowerCase();
+  if (/(^|[^a-z])edit[_-]?image\b|editimage/.test(identity)) return "edit";
+  if (/(^|[^a-z])generate[_-]?image\b|generateimage/.test(identity)) return "generate";
+  return null;
+}
+
+export function imageGenerationVerb(status: ToolStatus, mode: ImageGenerationMode): string {
+  if (status === "Failed") return mode === "edit" ? "改图失败" : "生图失败";
+  if (status === "Interrupted") return "已中断";
+  const running = status === "Running" || status === "Pending";
+  if (mode === "edit") return running ? "改图中" : "已改图";
+  return running ? "生图中" : "已生图";
+}
+
+const IMAGE_FILE_EXTENSION = /\.(?:png|jpe?g|gif|webp|bmp|avif)(?:$|[?#])/i;
+const IMAGE_REFERENCE_PATTERN =
+  /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+|file:\/\/[^\s"'`<>)]+|asset:\/\/[^\s"'`<>)]+|(?:[A-Za-z]:[\\/]|\/|~\/)[^\s"'`<>)]*\.(?:png|jpe?g|gif|webp|bmp|avif)/gi;
+
+function isImageReference(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^data:image\//i.test(trimmed)) return true;
+  return IMAGE_FILE_EXTENSION.test(trimmed);
+}
+
+/// 同一张图片的不同引用形态（`file:///C:/x.png` 与 `C:\x.png`）归一为一个
+/// 去重键，避免结果图被渲染两遍。
+function canonicalImageKey(ref: string): string {
+  let value = ref.trim();
+  if (/^data:image\//i.test(value)) return value;
+  value = value.replace(/^file:\/\//i, "").replace(/^\//, "");
+  value = value.replace(/\\\\/g, "\\").replace(/\\/g, "/");
+  return value.toLowerCase();
+}
+
+/// 结构化结果里的图片引用：只认结果字段（`images[].path|saved_path|uri|url`
+/// 与单对象结果的 `path|saved_path`），**跳过输入引用**——改图的 `source` /
+/// `image_path` 是送进去的原图，不是产物。
+function collectStructuredImageRefs(
+  value: unknown,
+  push: (raw: string) => void,
+): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectStructuredImageRefs(entry, push);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      normalizedKey === "source" ||
+      normalizedKey === "image_path" ||
+      normalizedKey === "imagepath" ||
+      normalizedKey === "input"
+    ) {
+      continue;
+    }
+    if (typeof child === "string") {
+      if (
+        (normalizedKey === "path" ||
+          normalizedKey === "saved_path" ||
+          normalizedKey === "savedpath" ||
+          normalizedKey === "uri" ||
+          normalizedKey === "url") &&
+        isImageReference(child)
+      ) {
+        push(child);
+      }
+    } else {
+      collectStructuredImageRefs(child, push);
+    }
+  }
+}
+
+/** 生图/改图结果里的图片引用（原始形态：data URL / `file://` / `asset://` /
+ *  本地路径），兼容两种载荷：codex 的 MCP JSON 结果（`images[].path` /
+ *  `saved_path`）与 dsh 的文本结果。优先结构化提取——同一张图的 `path` 与
+ *  `saved_path` 去重、`source` 输入图排除（改图只出一张结果图，就只渲染一
+ *  张）；无结构时回退文本扫描。显示 URL 的转换在卡片层做；最多返回 4 个。 */
+export function imageGenerationImages(tool: ToolInvocation): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const cleaned = raw.trim().replace(/\\\\/g, "\\");
+    if (!cleaned || !isImageReference(cleaned)) return;
+    const key = canonicalImageKey(cleaned);
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(cleaned);
+  };
+
+  const payloads = [tool.raw_output, tool.detail_text].filter(
+    (payload): payload is string => !!payload,
+  );
+  for (const payload of payloads) {
+    const parsed = parseJsonValue(payload);
+    if (parsed != null && typeof parsed === "object") {
+      collectStructuredImageRefs(parsed, push);
+    }
+  }
+  if (found.length === 0) {
+    // 文本载荷（dsh 随手写出 file:// 或本地路径）：扫描全部图片引用。
+    for (const payload of payloads) {
+      for (const match of payload.matchAll(IMAGE_REFERENCE_PATTERN)) push(match[0]);
+    }
+  }
+  return found.slice(0, 4);
+}
+
+/** 生图/改图卡片的标题：结果里的文件路径很枯燥，提示词才是这次产出的
+ *  "题目"（与生成卡此前展示的形态一致）。 */
+export function imageGenerationPromptTitle(tool: ToolInvocation): string | null {
+  if (!tool.raw_input) return null;
+  const parsed = parseJsonValue(tool.raw_input);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const prompt = (parsed as Record<string, unknown>).prompt;
+  if (typeof prompt !== "string" || prompt.trim().length === 0) return null;
+  return truncate(prompt.trim(), 96);
+}
+
 export function toolVerb(status: ToolStatus, category: ToolCategory): string {
   if (status === "Failed") return "失败";
   if (status === "Interrupted") return "已中断";

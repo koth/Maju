@@ -5,8 +5,8 @@ use workspace_model::{
     AgentCliId, ArchivedSessionListItem, ChangeSetFilesResponse, ChangeSetSummary,
     FileChangeRecord, GetChangeSetFileDiffRequest, ListChangeSetFilesRequest,
     ListChangeSetsRequest, PermissionInputResponse, PromptSendOutcome, SessionConfigState,
-    SessionFileChange, UiSnapshot, UiSnapshotPatch, UsageDailyBucket, UsageSummaryRequest,
-    UsageSummaryRow, UserPromptContent, WorkspaceSessionList,
+    SessionFileChange, SessionJobRecord, UiSnapshot, UiSnapshotPatch, UsageDailyBucket,
+    UsageSummaryRequest, UsageSummaryRow, UserPromptContent, WorkspaceSessionList,
 };
 
 #[tauri::command]
@@ -234,6 +234,16 @@ pub fn session_delete_archived(state: State<'_, AppState>, id: String) -> Result
 #[tauri::command]
 pub fn session_delete_all_archived(state: State<'_, AppState>) -> Result<(), String> {
     state.delete_all_archived_sessions()
+}
+
+/// Background jobs (后台任务) the dsh harness reports for the visible session
+/// (empty for non-harness agents). The context dock polls this for its
+/// "后台任务" section.
+#[tauri::command]
+pub fn session_list_background_jobs(
+    state: State<'_, AppState>,
+) -> Result<Vec<SessionJobRecord>, String> {
+    state.with_app(|app| Ok(app.session_background_jobs()))
 }
 
 #[tauri::command]

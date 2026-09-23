@@ -1040,6 +1040,159 @@ pub struct WorkspaceSessionList {
     pub connected: bool,
 }
 
+// ── Automation (定时任务) types ──
+
+/// When an automation should fire. Wall-clock fields (`hour` / `minute` /
+/// `weekday`) are interpreted in the machine's LOCAL timezone by the
+/// scheduler (see `app_core::automation`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationScheduleKind {
+    /// One-shot run at `run_at_ms` (epoch milliseconds).
+    Once,
+    /// Every `interval_minutes` minutes.
+    Interval,
+    /// Daily at `hour`:`minute`.
+    Daily,
+    /// Weekly on `weekday` (1 = Monday … 7 = Sunday) at `hour`:`minute`.
+    Weekly,
+}
+
+impl Default for AutomationScheduleKind {
+    fn default() -> Self {
+        Self::Daily
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationSchedule {
+    #[serde(default)]
+    pub kind: AutomationScheduleKind,
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
+    #[serde(default)]
+    pub hour: Option<u32>,
+    #[serde(default)]
+    pub minute: Option<u32>,
+    /// ISO weekday: 1 = Monday … 7 = Sunday.
+    #[serde(default)]
+    pub weekday: Option<u32>,
+    #[serde(default)]
+    pub run_at_ms: Option<i64>,
+}
+
+/// Create / update payload for an automation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationInput {
+    pub name: String,
+    pub prompt: String,
+    pub workspace_root: String,
+    /// Agent that executes the prompt. `None` = the workspace's default;
+    /// new automations default to `DeepSeekHarness`.
+    #[serde(default)]
+    pub agent_cli: Option<AgentCliId>,
+    /// dsh agent preset override (only meaningful for `DeepSeekHarness`).
+    #[serde(default)]
+    pub agent_preset: Option<String>,
+    pub schedule: AutomationSchedule,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationRunTrigger {
+    Scheduled,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationRunStatus {
+    Running,
+    Completed,
+    Failed,
+    /// The app exited (or the session broke) before the run's turn ended.
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationRunRecord {
+    pub id: String,
+    pub automation_id: String,
+    pub trigger: AutomationRunTrigger,
+    pub status: AutomationRunStatus,
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub workspace_root: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationRecord {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub workspace_root: String,
+    #[serde(default)]
+    pub agent_cli: Option<AgentCliId>,
+    #[serde(default)]
+    pub agent_preset: Option<String>,
+    pub schedule: AutomationSchedule,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Epoch milliseconds of the next scheduled firing.
+    #[serde(default)]
+    pub next_run_at_ms: Option<i64>,
+    #[serde(default)]
+    pub run_count: i64,
+    #[serde(default)]
+    pub last_run: Option<AutomationRunRecord>,
+}
+
+/// Payload of the `automation:fired` Tauri event — the "到点提醒". `error` is
+/// set when the run could not be started (still worth reminding about).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationFiredEvent {
+    pub run_id: String,
+    pub automation_id: String,
+    pub name: String,
+    pub workspace_root: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// ── Background jobs (后台任务) types ──
+
+/// One dsh harness background job owned by a session, mirrored from the
+/// harness's `session/jobs` push (`SessionJob` on the wire — camelCase). The
+/// conversation's context dock lists these under "后台任务".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionJobRecord {
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub label: String,
+    /// Wire status: `running` | `stopping` | `completed` | `killed` | `failed`.
+    /// Kept as a string so new harness statuses degrade gracefully.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Epoch milliseconds.
+    #[serde(rename = "startedAt", default)]
+    pub started_at_ms: i64,
+    #[serde(rename = "finishedAt", default)]
+    pub finished_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileEntryKind {
     File,
@@ -1881,6 +2034,10 @@ pub struct ImageGenerateSettings {
     pub protocol: ImageGenerateProtocol,
     #[serde(default = "default_image_generate_size")]
     pub default_size: String,
+    /// 超时时间（秒）：`generate_image` / `edit_image` 请求的整体超时。
+    /// 0/缺省表示默认 300 秒。
+    #[serde(default = "default_image_generate_timeout_seconds")]
+    pub timeout_seconds: u64,
 }
 
 impl Default for ImageGenerateSettings {
@@ -1892,6 +2049,7 @@ impl Default for ImageGenerateSettings {
             api_key_env: String::new(),
             protocol: default_image_generate_protocol(),
             default_size: default_image_generate_size(),
+            timeout_seconds: default_image_generate_timeout_seconds(),
         }
     }
 }
@@ -1929,6 +2087,10 @@ fn default_image_generate_protocol() -> ImageGenerateProtocol {
 
 fn default_image_generate_size() -> String {
     "1024x1024".to_string()
+}
+
+fn default_image_generate_timeout_seconds() -> u64 {
+    300
 }
 
 /// Commit-message assistant configuration. The assistant always runs as a
@@ -2150,6 +2312,30 @@ pub struct DshPresetOption {
     pub description: Option<String>,
 }
 
+/// One selectable agent for the remote (mobile) new-session picker. A
+/// deliberately trimmed `AgentCliStatus`: the phone needs identity, display
+/// label, install state, and whether it is the current default — not
+/// version numbers or filesystem paths.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentOptionEntry {
+    pub id: AgentCliId,
+    pub label: String,
+    pub installed: bool,
+    pub selected: bool,
+}
+
+/// The agent/preset choices a remote client offers when creating a session.
+/// `dsh_presets` is best-effort: empty when the harness host is unavailable
+/// (the phone then offers only the deployment default, i.e. preset `None`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentOptionsList {
+    pub agents: Vec<AgentOptionEntry>,
+    #[serde(default)]
+    pub dsh_presets: Vec<DshPresetOption>,
+    #[serde(default)]
+    pub dsh_default_preset: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexAcpSettingsStatus {
     pub provider: String,
@@ -2196,6 +2382,9 @@ pub struct ImageSettingsStatus {
     pub generate_model: String,
     pub generate_base_url: String,
     pub generate_default_size: String,
+    /// 生图工具超时时间（秒），0 表示未设置（按默认 300 秒处理）。
+    #[serde(default)]
+    pub generate_timeout_seconds: u64,
     pub generate_configured: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

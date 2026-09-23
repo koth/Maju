@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, lazy, Suspense } from "react";
 import type { CSSProperties } from "react";
 
-import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry, AgentCliId } from "../../types";
+import type { UiSnapshot, AppTheme, ToolInvocation, PermissionInputResponse, WorkspaceDescriptor, AgentPlanEntry, AgentCliId, AutomationFiredEvent, SessionJobRecord } from "../../types";
 import {
   startupPerfMark,
   sessionCancel,
@@ -9,11 +9,13 @@ import {
   sessionFork,
   sessionResolvePermission,
   sessionRetryUserMessage,
+  sessionSendPrompt,
   sessionStopTool,
   sessionUnarchive,
   settingsGetAgentSnapshot,
   type SessionForkMode,
 } from "../../lib/tauri";
+import { onAutomationFired } from "../../lib/events";
 import { updateComposerDraftInput } from "../composer/composer-draft-store";
 import { ConversationTimeline, conversationForkCapability, type TimelineTurnChangeSet } from "../conversation/ConversationTimeline";
 import { Composer, type ComposerReferenceRequest } from "../composer/Composer";
@@ -27,6 +29,10 @@ import {
   findPlanReplanOption,
   findPlanTerminateOption,
 } from "../composer/AgentPlanPanel";
+import {
+  BackgroundJobsPanel,
+  type BackgroundJobAction,
+} from "../composer/BackgroundJobsPanel";
 import { CommitDialog } from "../changes/CommitDialog";
 import { ReviewPanel } from "../review/ReviewPanel";
 import type { ReviewPanelActiveTab, ReviewPanelOpenTab, ReviewPreferredChangeSet } from "../review/ReviewPanel";
@@ -49,6 +55,7 @@ import {
   type SettingsPane,
   type SettingsStartupNotice,
 } from "../settings/SettingsPage";
+import { AutomationPage } from "../automation/AutomationPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import { checkForAppUpdate, type AppUpdateInfo } from "../../lib/updater";
@@ -399,6 +406,8 @@ export function Workbench() {
     handleTerminalDockHeightChange,
   } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [automationOpen, setAutomationOpen] = useState(false);
+  const [automationToast, setAutomationToast] = useState<AutomationFiredEvent | null>(null);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteWorkspaceHydration, setRemoteWorkspaceHydration] = useState<{
     workspaceRoot: string;
@@ -466,6 +475,14 @@ export function Workbench() {
     setSettingsRemoteContext(null);
   }, []);
 
+  const handleOpenAutomation = useCallback(() => {
+    setAutomationOpen(true);
+  }, []);
+
+  const handleCloseAutomation = useCallback(() => {
+    setAutomationOpen(false);
+  }, []);
+
   const resetReviewPanelTabs = useCallback(() => {
     setReviewPanelActiveTab(INITIAL_REVIEW_PANEL_ACTIVE_TAB);
     setReviewPanelOpenTabs([]);
@@ -522,6 +539,34 @@ export function Workbench() {
     window.addEventListener("kodex:open-settings", handleOpenSettingsEvent);
     return () => window.removeEventListener("kodex:open-settings", handleOpenSettingsEvent);
   }, [handleOpenSettings]);
+
+  // "到点提醒": surface every automation trigger (and dispatch failure) as a
+  // toast while its run executes in the background.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    onAutomationFired((event) => {
+      setAutomationToast(event);
+    })
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!automationToast) return;
+    const timeout = window.setTimeout(() => setAutomationToast(null), 12000);
+    return () => window.clearTimeout(timeout);
+  }, [automationToast]);
 
   useEffect(() => {
     if (!sessionArchiveToast || sessionArchiveToast.restoring || sessionArchiveToast.error) return;
@@ -1129,6 +1174,22 @@ export function Workbench() {
     setRightPanelCollapsed,
   ]);
 
+  // 后台任务（dsh harness background jobs）管理动作。harness 只给 agent 提供
+  // job_kill / job_output 工具（没有外部 kill RPC），所以终止 / 查看输出以指令
+  // 形式交给当前会话的 Agent 执行：运行中会追加为追加指令，空闲时开启新一轮。
+  const handleBackgroundJobAction = useCallback(
+    (job: SessionJobRecord, action: BackgroundJobAction) => {
+      const text =
+        action === "kill"
+          ? `请调用 job_kill 终止后台任务 ${job.id}（${job.label}），并向我确认结果。`
+          : `请调用 job_output 查看后台任务 ${job.id}（${job.label}）的最近输出，并把结果总结给我。`;
+      sessionSendPrompt([{ type: "text", text }])
+        .then(() => pollState())
+        .catch(() => {});
+    },
+    [pollState],
+  );
+
   const handleContextDockToggle = useCallback(() => {
     setContextDockResizeTier("none");
     setContextDockCollapsed((collapsed) => !collapsed);
@@ -1147,6 +1208,15 @@ export function Workbench() {
           onStartupNoticeDismissed={() => setSettingsStartupNotice(null)}
           onThemeChange={setAppTheme}
         />
+        {updateNotice}
+      </div>
+    );
+  }
+
+  if (automationOpen) {
+    return (
+      <div className="workbench">
+        <AutomationPage onBack={handleCloseAutomation} />
         {updateNotice}
       </div>
     );
@@ -1198,6 +1268,10 @@ export function Workbench() {
           onCommitAction={() => setCommitDialogOpen(true)}
         />
         <AgentPlanPanel entries={agentPlanEntries} />
+        <BackgroundJobsPanel
+          sessionId={snapshot.session.id}
+          onJobAction={handleBackgroundJobAction}
+        />
       </aside>
     ) : null;
   // Steers queued while a turn was running but not yet moved into the
@@ -1288,6 +1362,7 @@ export function Workbench() {
               activeConversationVisible={activeTab.type === "conversation"}
               refreshToken={sessionListRefreshToken}
               onOpenSettings={handleOpenSettings}
+              onOpenAutomation={handleOpenAutomation}
               onSessionChanged={handleSessionChanged}
               onWorkspaceChanged={handleWorkspaceChanged}
               onWorkspaceArchived={handleWorkspaceArchived}
@@ -1596,6 +1671,40 @@ export function Workbench() {
                   }}
                   onCancel={() => setRemoteOpenVisible(false)}
                 />
+              </div>
+            </div>
+          )}
+          {automationToast && (
+            <div className="automation-toast" role="status" aria-live="polite">
+              <div className="automation-toast-copy">
+                <span className="automation-toast-title">
+                  {automationToast.error ? "自动化执行失败" : "自动化已到点"}
+                </span>
+                <span>
+                  {automationToast.error
+                    ? `「${automationToast.name}」未能开始执行：${automationToast.error}`
+                    : `「${automationToast.name}」已开始自动执行`}
+                </span>
+              </div>
+              <div className="automation-toast-actions">
+                <button
+                  type="button"
+                  className="automation-toast-btn"
+                  onClick={() => {
+                    setAutomationToast(null);
+                    setAutomationOpen(true);
+                  }}
+                >
+                  查看
+                </button>
+                <button
+                  type="button"
+                  className="automation-toast-close"
+                  aria-label="关闭自动化提醒"
+                  onClick={() => setAutomationToast(null)}
+                >
+                  ×
+                </button>
               </div>
             </div>
           )}

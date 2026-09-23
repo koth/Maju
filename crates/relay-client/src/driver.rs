@@ -45,6 +45,19 @@ pub trait PairingHandler: Send {
         &mut self,
         confirm: PairingConfirm,
     ) -> impl std::future::Future<Output = Result<(SessionKey, String, bool)>> + Send;
+
+    /// A `SubscriptionStatus` frame arrived on this connection. The PC driver
+    /// uses the relay's `PairingRegister` ack (also a `SubscriptionStatus`)
+    /// as this signal; implementations that don't care keep the default.
+    /// Routing it through the frame loop (instead of a one-shot `recv` in the
+    /// connect path) means an interleaved peer frame can never consume — and
+    /// lose — the ack.
+    fn on_subscription_status(
+        &mut self,
+        _status: relay_protocol::SubscriptionStatus,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// Drives a relay connection: routes inbound control requests to a
@@ -316,6 +329,10 @@ impl<T: RelayTransport, H: ControlHandler, E: EventSource, P: PairingHandler> Re
                 if let Ok(mut guard) = self.session_sink.lock() {
                     *guard = None;
                 }
+                Ok(())
+            }
+            Message::SubscriptionStatus(status) => {
+                self.pairing.on_subscription_status(status).await;
                 Ok(())
             }
             _ => Ok(()),

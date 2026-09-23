@@ -1,7 +1,9 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { PatchDiff } from "@pierre/diffs/react";
-import type { DiffHunk, ToolDiffPreview, ToolInvocation } from "../../types";
+import type { AppTheme, DiffHunk, ToolDiffPreview, ToolInvocation } from "../../types";
 import { sessionGetToolDetail } from "../../lib/tauri";
+import { useCurrentAppTheme } from "../../lib/use-app-theme";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
 import { deriveToolPresentation, type ToolPresentation } from "./tool-presentation";
 import { getDiffStats, previewToCompactPatch } from "./compact-patch";
@@ -22,26 +24,47 @@ import {
   getTrackedDiffPaths,
   getTrackedDiffPreviews,
   getVisibleLogEntries,
+  imageGenerationImages,
+  imageGenerationMode,
+  imageGenerationPromptTitle,
+  imageGenerationVerb,
   isVagueError,
   rawInputHasEditPayload,
   rawInputHasReadOnlyParsedCommand,
   sameOrNestedPath,
   statusBullet,
   toolVerb,
+  type ImageGenerationMode,
   type StatusBullet,
   uniqueStrings,
   type ToolCategory,
 } from "./tool-card-analysis";
 import "./ToolCallCard.css";
 
-const DIFF_OPTIONS = {
+const DIFF_OPTIONS_BASE = {
   diffStyle: "unified",
   disableFileHeader: true,
   hunkSeparators: "metadata",
   lineDiffType: "word",
   overflow: "wrap",
-  themeType: "dark",
 } as const;
+
+/**
+ * Diff options for the transcript's inline patch.
+ *
+ * pierre resolves `theme` / `themeType` in JavaScript before its shadow DOM
+ * paints, so the light theme cannot reach it through CSS variables. This card
+ * was the last place asking for the dark palette unconditionally, which left a
+ * dark diff block (dark rows, dark syntax) inside the light-theme transcript.
+ * Every other surface here is token-driven and flips on its own.
+ */
+function toolDiffOptions(appTheme: AppTheme) {
+  return {
+    ...DIFF_OPTIONS_BASE,
+    theme: appTheme === "light" ? "pierre-light" : "pierre-dark",
+    themeType: appTheme === "light" ? "light" : "dark",
+  } as const;
+}
 
 // Snapshots cap large tool text (raw_output at 8K chars, raw_input/detail at
 // 4K). When a capped card is expanded we fetch the uncapped stored detail
@@ -142,6 +165,10 @@ interface ToolRenderModel {
   shellPresentation: ToolPresentation | null;
   needsPermission: boolean;
   hasDetail: boolean;
+  /// 生图/改图工具身份；`null` 表示普通工具。
+  imageGeneration: ImageGenerationMode | null;
+  /// 生图/改图结果里的图片引用（原始形态，显示 URL 在渲染层转换）。
+  imageRefs: string[];
 }
 
 const toolRenderModelCache = new WeakMap<ToolInvocation, ToolRenderModel>();
@@ -207,7 +234,13 @@ function computeToolRenderModel(tool: ToolInvocation): ToolRenderModel {
   const verbCategory: ToolCategory = showAsExecutedWithoutDiff
     ? "executing"
     : category;
-  const verb = toolVerb(tool.status, verbCategory);
+  // 生图/改图工具用专属动词（已生图 / 已改图 / 生图中…），并在卡片下方
+  // 直接展示生成结果的大图预览。
+  const imageGeneration = imageGenerationMode(tool);
+  const imageRefs = imageGeneration ? imageGenerationImages(tool) : [];
+  const verb = imageGeneration
+    ? imageGenerationVerb(tool.status, imageGeneration)
+    : toolVerb(tool.status, verbCategory);
   // When we demote a finished edit to "已运行", also leave the edit-only
   // expand path so the shell/run panel can show the actual command.
   const effectiveCategory: ToolCategory = showAsExecutedWithoutDiff
@@ -219,14 +252,15 @@ function computeToolRenderModel(tool: ToolInvocation): ToolRenderModel {
     effectiveCategory === "editing" ? trackedDiffPaths : [],
   );
   const headerTitle =
-    effectiveCategory === "editing"
+    (imageGeneration ? imageGenerationPromptTitle(tool) : null) ??
+    (effectiveCategory === "editing"
       ? extractHeaderTitle(tool, trackedDiffPaths)
       : showAsExecutedWithoutDiff
       ? executedEditHeaderTitle(tool, cmdDetail, trackedDiffPaths) ??
         extractHeaderTitle(tool, trackedDiffPaths)
       : presentation.presentationKind === "command"
       ? commandHeaderTitle(presentation.command, effectiveCategory, tool)
-      : extractHeaderTitle(tool, trackedDiffPaths);
+      : extractHeaderTitle(tool, trackedDiffPaths));
 
   // raw_output as expandable content (for non-terminal tools like Read, Search, etc.)
   const rawOutputLines = getRawOutputLines(tool);
@@ -308,6 +342,8 @@ function computeToolRenderModel(tool: ToolInvocation): ToolRenderModel {
     shellPresentation,
     needsPermission,
     hasDetail,
+    imageGeneration,
+    imageRefs,
   };
 }
 
@@ -319,6 +355,30 @@ interface Props {
   hiddenPermissionRequestIds?: ReadonlySet<string>;
   onCancelTurn?: () => Promise<void> | void;
   onStopTool?: (toolCallId: string) => Promise<void> | void;
+}
+
+/// 把生图结果的原始引用（data URL / `file://` / `asset://` / 本地路径）转换
+/// 为 webview 可渲染的显示 URL。Windows 路径统一为**原生反斜杠形态**再走
+/// `convertFileSrc`：正斜杠形态解析出的 asset URL 在本机 webview 里取不到
+/// 文件（坏图），与 companion 预览等既有可用路径的形态保持一致。
+function resolveImageDisplaySrc(ref: string): string {
+  if (/^(data:image\/|asset:\/\/)/i.test(ref)) return ref;
+  let path = ref;
+  if (path.startsWith("file://")) {
+    path = path.slice("file://".length);
+    // file:///C:/x → C:/x（POSIX 的 file:///home/x 保留为 /home/x）
+    if (path.startsWith("/") && /^[A-Za-z]:/.test(path.slice(1))) {
+      path = path.slice(1);
+    }
+  }
+  if (/^[A-Za-z]:[\\/]/.test(path)) {
+    path = path.replace(/\//g, "\\");
+  }
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return path;
+  }
 }
 
 function ToolCallCardImpl({
@@ -336,6 +396,7 @@ function ToolCallCardImpl({
   const [expanded, setExpanded] = useState(false);
   const [rawDetailsOpen, setRawDetailsOpen] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [detailedTool, setDetailedTool] = useState<ToolInvocation | null>(
     () => toolDetailCache.get(tool.id) ?? null,
   );
@@ -406,7 +467,9 @@ function ToolCallCardImpl({
     shellPresentation,
     needsPermission,
     hasDetail,
+    imageRefs,
   } = toolRenderModel(tool);
+  const imagePreviews = imageRefs.map(resolveImageDisplaySrc);
   const canStopTool =
     !!onStopTool &&
     tool.can_stop &&
@@ -466,6 +529,45 @@ function ToolCallCardImpl({
           </button>
         )}
       </div>
+
+      {/* 生图/改图结果大图预览：紧跟卡片，不折叠进展开区 */}
+      {imagePreviews.length > 0 && (
+        <div className="tc-image-previews">
+          {imagePreviews.map((src, index) => (
+            <button
+              key={imageRefs[index] ?? src}
+              type="button"
+              className="tc-image-preview"
+              onClick={() => setPreviewImage(src)}
+              aria-label={`预览 生成的图片 ${index + 1}`}
+            >
+              <img
+                src={src}
+                alt={`生成的图片 ${index + 1}`}
+                onError={(event) => {
+                  // 转换后的 URL 取不到文件时回退原始引用（file:// / 原生
+                  // 路径），绝不留坏图占位。
+                  const img = event.currentTarget;
+                  const fallback = imageRefs[index];
+                  if (!fallback || img.dataset.fallbackApplied === "1") return;
+                  img.dataset.fallbackApplied = "1";
+                  img.src = fallback;
+                }}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+      {previewImage && (
+        <div
+          className="tc-image-lightbox"
+          role="dialog"
+          aria-label="图片预览"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img src={previewImage} alt="生成的图片" />
+        </div>
+      )}
 
       {needsPermission && (
         <div className="tc-permission-panel">
@@ -736,6 +838,8 @@ function ShellToolPanel({
 
 function ToolDiffPreviewCard({ preview }: { preview: ToolDiffPreview }) {
   const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>();
+  const appTheme = useCurrentAppTheme();
+  const diffOptions = useMemo(() => toolDiffOptions(appTheme), [appTheme]);
 
   return (
     <div className="tc-diff-preview">
@@ -747,7 +851,7 @@ function ToolDiffPreviewCard({ preview }: { preview: ToolDiffPreview }) {
         <PatchDiff
           patch={previewToCompactPatch(preview)}
           className="tc-pierre-diff"
-          options={DIFF_OPTIONS}
+          options={diffOptions}
           disableWorkerPool
         />
       </div>
