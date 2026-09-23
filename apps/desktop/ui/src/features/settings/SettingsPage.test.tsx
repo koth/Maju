@@ -2678,7 +2678,7 @@ describe("SettingsPage LSP settings", () => {
     const dashboard = await screen.findByLabelText("用量仪表盘");
     expect(
       screen.getByText(
-        "暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。",
+        "暂无用量记录。可上报详细用量的智能体（Codex、Claude、DeepSeek Harness）尚未产生数据。",
       ),
     ).toBeInTheDocument();
     expect(within(dashboard).queryByRole("table")).not.toBeInTheDocument();

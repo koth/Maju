@@ -6,13 +6,13 @@
 
 ## 这是什么
 
-Maju（码具）是一个 **ACP-powered coding editor**：Rust/Tauri 承载本地能力，React + Monaco 提供编辑体验，把**智能体对话、代码编辑、Git 审阅、终端**放在同一个工作台里。智能体负责生成和执行方案，Maju 负责把上下文、文件、变更和权限边界托住。
+Maju（码具）是一个**智能体编码工作台**：Rust/Tauri 承载本地能力，React + Monaco 提供编辑体验，把**智能体对话、代码编辑、Git 审阅、终端**放在同一个工作台里。智能体负责生成和执行方案，Maju 负责把上下文、文件、变更和权限边界托住。
 
 | 工作台总览 |
 |---|
 | ![Maju 工作台总览](screenshots/kodex-workbench.png) |
 
-核心概念一句话：Maju 本身**不含模型**，它通过 ACP 协议接入智能体（Codex / Claude / DeepSeek Harness 等），模型来自你自己的 API Key（BYOK 模式）。
+核心概念一句话：Maju 本身**不含模型**，它通过 ACP 协议接入 Codex / Claude 智能体，并原生集成 DeepSeek Harness（dsh，经 host RPC 桥接，不走 ACP）；模型来自你自己的 API Key（BYOK 模式）。
 
 ## 一、安装与启动
 
@@ -67,7 +67,6 @@ cargo tauri dev
 | DeepSeek | 「DeepSeek API key」 | deepseek-v4-pro、deepseek-v4-flash | DeepSeek 官方 |
 | Kimi Code | 「Kimi API key」 | kimi-for-coding | Kimi 编程专线 |
 | Xiaomi Token Plan | 「Xiaomi Token Plan API key」 | MiMo-V2.5-Pro、MiMo-V2.5 | 小米 MiMo |
-| CodeBuddy | 「CodeBuddy proxy API key」 | 默认 claude-sonnet-5 | 走本机 CodeBuddy 反向代理（见 3.8） |
 
 > 注意：设置页**不会回显**已保存的 Key（明文存于本机 `~/.kodex/config/provider-secrets.json`），已配置的来源输入框会变成「输入新的 … API key 以替换」，并有「清除设置」操作。
 
@@ -86,7 +85,7 @@ cargo tauri dev
 
 设置 → 通用 → 某个 agent tab →「设为默认」（已默认的显示「当前默认」）。要点：
 
-- 三个 tab 共用 BYOK 池，**选谁主要取决于你习惯哪个智能体的行为**；Codex 偏“全自动执行”，Claude 次之，DeepSeek Harness 是另一条技术栈（见 3.9）。
+- 三个 tab 共用 BYOK 池，**选谁主要取决于你习惯哪个智能体的行为**；Codex 偏“全自动执行”，Claude 次之，DeepSeek Harness 是另一条技术栈（见 3.8）。
 - 按钮要求对应 CLI 已安装，否则报「… is not installed」——用各 tab 里的「下载 / 安装」按钮一键装到 `~/.kodex/bin/`（优先用安装包内置版本，未内置时在线下载）。
 - 如果设了环境变量 `ACP_AGENT_COMMAND`，设置页顶部会出现警告「`ACP_AGENT_COMMAND` 已设置,将覆盖此选择」且选择被禁用（开发调试用途）。
 - 兜底：默认选了 Claude 但没配 key、而 Codex 已配好时，新建会话会自动落到 Codex。
@@ -110,11 +109,7 @@ cargo tauri dev
 
 建议在这里固定一个**非推理模型**（如 `kimi_code / k3`）：「模型来源」+「标题模型」成对选择，保存后显示「已固定」徽标，对**新建会话**生效（已有会话标题不会重算）。留空来源即恢复「跟随会话模型」。
 
-### 3.8 CodeBuddy 反向代理（可选）
-
-如果你本机装了 CodeBuddy CLI（`npm install -g @tencent-ai/codebuddy-code`），可以把它变成模型池的一条来源：设置侧栏**「CodeBuddy」页 → 「CodeBuddy 反向代理」**——设端口（默认 17856）、填代理 API 密钥、选网络环境（「国内 (internal)」/「内网 (ioa)」），点「启动」。之后在 BYOK 模型来源里选 **codebuddy** 即可（「连接信息」里有地址和「复制」按钮）。
-
-### 3.9 DeepSeek Harness（dsh）
+### 3.8 DeepSeek Harness（dsh）
 
 第三个 tab，不是 ACP agent，而是本机跑 `dsh web` 服务（需 `npm i -g @deepseek-ai/dsh`，tab 里有「检测更新」「升级到最新」）。特点：
 
@@ -122,7 +117,7 @@ cargo tauri dev
 - 有 **agent 预设（模式）**概念：tab 里「默认模式」下拉（首项「跟随 dsh 默认」），新建 dsh 会话时还可在创建弹窗里逐会话选预设；**预设在建会话时固定，之后只读**；
 - 配合「会话标题」设置（3.7）使用体验最好。
 
-### 3.10 配置落盘与手改须知（高级）
+### 3.9 配置落盘与手改须知（高级）
 
 全部配置在 `~/.kodex/`（可用环境变量 `KODEX_DATA_ROOT` 整体重定向）：
 
@@ -198,7 +193,7 @@ cargo tauri dev
 
 ## 五、设置页其他分节速览
 
-设置入口：欢迎页右上角齿轮，或会话列表底部「设置」。左侧导航共 11 个分节：
+设置入口：欢迎页右上角齿轮，或会话列表底部「设置」。左侧导航共 10 个分节：
 
 | 分节 | 干什么 |
 |---|---|
@@ -210,9 +205,8 @@ cargo tauri dev
 | 「会话标题」 | 固定非推理标题模型（见 3.7） |
 | 「已归档」 | 已归档会话的搜索/恢复/删除（「全部删除」有确认） |
 | 「陪伴角色」 | 3D 桌宠开关与外观（全本地运行，可选 .vrm 模型，语气强度三档） |
-| 「用量」 | token 用量仪表盘：按 模型/智能体/工作区/会话 分组，今天/7 天/30 天/全部 筛选；含总 tokens、请求数、「每日趋势」堆叠图与分组明细表（输入/输出/缓存读/缓存写/推理、延迟、TTFT、速度）。仅 Codex/Claude 上报详细用量，CodeBuddy 等不纳入 |
+| 「用量」 | token 用量仪表盘：按 模型/智能体/工作区/会话 分组，今天/7 天/30 天/全部 筛选；含总 tokens、请求数、「每日趋势」堆叠图与分组明细表（输入/输出/缓存读/缓存写/推理、延迟、TTFT、速度）。Codex / Claude / DeepSeek Harness 上报详细用量 |
 | 「LSP」 | 编辑器的 language server 管理（启用开关、命令/参数、探测/保存/重置） |
-| 「CodeBuddy」 | CodeBuddy 反向代理的端口/密钥/网络环境与启停（见 3.8） |
 
 ## 六、进阶
 

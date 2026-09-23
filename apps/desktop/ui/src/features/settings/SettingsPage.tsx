@@ -3973,7 +3973,7 @@ export function SettingsPage({
           )}
           {!usageLoading && usageRows.length === 0 && (
             <div className="settings-empty-panel settings-usage-empty">
-              暂无用量记录。可上报详细用量的智能体（Codex、Claude）尚未产生数据；不可上报详细用量的第三方智能体（如 CodeBuddy）不纳入统计。
+              暂无用量记录。可上报详细用量的智能体（Codex、Claude、DeepSeek Harness）尚未产生数据。
             </div>
           )}
         </div>
@@ -5333,7 +5333,7 @@ function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "sessionTitle")
     return "配置 DeepSeek Harness 会话标题由哪个模型生成。标题生成是一个独立的小请求，默认继承该会话自己的模型，遇到推理模型时容易失败并退回「原始提问截断」的标题。";
   if (pane === "usage")
-    return "汇总可上报智能体（Codex、Claude）的 token 用量与性能指标。CodeBuddy 等第三方智能体不纳入统计。";
+    return "汇总可上报智能体（Codex、Claude、DeepSeek Harness）的 token 用量与性能指标。";
   if (pane === "lsp")
     return "管理编辑器诊断、悬浮提示和补全使用的 language server。";
   return "外观、默认提供者和智能体配置。";

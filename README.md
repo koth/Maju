@@ -2,9 +2,11 @@
 
 > 码具：码农的工具
 
-Maju 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，用 React + Monaco 提供编辑体验，把智能体对话、代码编辑、Git 审阅和终端放在同一个工作台里。
+Maju 是一个智能体编码工作台：用 Rust/Tauri 承载本地能力，用 React + Monaco 提供编辑体验，把智能体对话、代码编辑、Git 审阅和终端放在同一个工作台里。
 
 它适合需要“边聊边改、边看 diff 边落地”的工程场景：智能体负责生成和执行方案，Maju 负责把上下文、文件、变更和权限边界稳稳托住。
+
+Maju 本身不含模型。它通过 **ACP** 接入 Codex ACP、Claude Agent ACP，并原生集成 **DeepSeek Harness**（dsh，经私有 host RPC 桥接，不走 ACP）；模型来源是你自己的 API Key（BYOK 模式）。配套的手机端 App 可以通过中继服务器远程查看会话、发送指令、审批权限。
 
 ## 截图
 
@@ -19,27 +21,39 @@ Maju 是一个 ACP-powered coding editor：用 Rust/Tauri 承载本地能力，�
 ## 亮点
 
 - **一个窗口完成编码闭环**：对话、Monaco 编辑器、diff review、Git changes、集成终端同屏协作。
-- **ACP 原生**：后端通过 ACP 接入 CodeBuddy、Codex ACP、Claude Agent ACP 等智能体。
+- **多智能体后端**：ACP 接入 Codex ACP / Claude Agent ACP；原生集成 DeepSeek Harness（`dsh-bridge` 经 dsh host RPC 桥接，支持会话恢复、预设模式与用量上报）。
+- **手机端遥控**：桌面端连上中继服务器后，用手机 App 远程发指令、看进度、批权限、收完成提醒；流量端到端加密，中继只转发密文。
+- **定时任务**：可编排自动化调度，到点由指定智能体在工作区里执行提示词，桌面端与手机端均可查看运行记录。
 - **变更可审阅**：智能体写文件、终端命令和手动编辑都会进入变更视图，方便逐文件检查和回滚。
-- **工作区级上下文**：文件树、会话列表、历史消息、工具调用和仓库状态围绕当前 workspace 组织。
 - **本地优先**：Rust 后端负责会话、权限、Git、SQLite 持久化和文件系统访问，前端只消费共享 DTO。
 
-## 初次使用
+## 使用
 
-1. 启动 Maju 后，先进入设置页选择默认智能体。
-2. 如果有自己的模型 Key，选择 **BYOK** 模式，从 **CommandCode**、**DeepSeek**、**Kimi Code**、**Xiaomi Token Plan** 等模型来源中选择一个，填入对应的 API Key。
-3. 如果本机已经安装 CodeBuddy CLI，也可以选择 CodeBuddy 作为 ACP 后端。
-4. 打开一个代码目录作为 workspace，在底部输入需求；智能体执行后的文件改动会出现在右侧 Review/Git 区域。
+> 📖 上手指南：[桌面端](docs/desktop-user-guide.md) · [手机端](docs/mobile-user-guide.md)
 
-> 📖 更详细的上手指南：[桌面端](docs/desktop-user-guide.md) · [手机端](docs/mobile-user-guide.md)
+安装、首次设置、BYOK 配置、远程目录、常见工作流等操作说明都在上面的指南里，此处不再重复。
 
-## 常见工作流
+## 智能体后端
 
-- **让智能体改代码**：在 composer 里描述目标，必要时引用 workspace 文件，等待工具调用完成后审阅 diff。
-- **人工接管编辑**：从文件树或变更列表打开文件，直接在 Monaco 中修改并保存。
-- **审阅和提交**：在右侧 Review 面板查看当前会话、当前轮次或 Git worktree 的变更，再选择 stage/unstage。
-- **运行命令**：打开底部终端执行测试、启动服务或切换环境；终端会按 workspace 复用。
-- **切换会话**：左侧会话列表保留历史上下文，支持在同一 workspace 下恢复不同任务。
+| 后端 | 接入方式 | 说明 |
+| ---- | -------- | ---- |
+| Codex ACP（`codex-acp`） | ACP | 打包内置，设置页可选为默认智能体 |
+| Claude Agent ACP（`claude-agent-acp`） | ACP | 打包内置，设置页可选为默认智能体 |
+| DeepSeek Harness（`dsh`） | 私有 host RPC（非 ACP） | `npm i -g @deepseek-ai/dsh` 后可用，由 `dsh-bridge` 桥接 |
+
+开发时可用环境变量覆盖后端命令，例如用 mock agent 跑集成测试：
+
+```bash
+ACP_AGENT_COMMAND='cargo run -p mock-acp-agent --quiet --' \
+  cargo tauri dev --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+PowerShell equivalent:
+
+```powershell
+$env:ACP_AGENT_COMMAND='cargo run -p mock-acp-agent --quiet --'
+cargo tauri dev --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
 
 ## 架构概览
 
@@ -48,29 +62,43 @@ Maju 保持 protocol、state、services、presentation 的边界清晰：
 ```text
 workspace-model  ← pure shared DTOs
   ↑
-git-service / session-store / acp-core
+git-service / session-store / acp-core / dsh-bridge
   ↑
 app-core         ← orchestration and reducer state
   ↑
 maju-desktop    ← Tauri command bridge + React UI
+  ↑
+relay-client → maju-relay-server ← 手机端 App（端到端加密）
 ```
+
+- `acp-core`：ACP 传输、会话生命周期、事件映射、权限代理。
+- `dsh-bridge`：DeepSeek Harness 宿主 RPC 桥接；实现 `acp-core` 的 `HarnessBackend` trait，依赖单向（`dsh-bridge` → `acp-core`）。
+- `relay-protocol` / `relay-client` / `server`：手机端遥控的中继通道，X25519 + ChaCha20-Poly1305 端到端加密。
 
 ## 项目结构
 
 ```text
-apps/desktop/
-  src-tauri/       Tauri v2 desktop shell, command bridge, native state wrapper
-  ui/              React + TypeScript frontend (Vite, Monaco Editor)
+apps/
+  desktop/
+    src-tauri/     Tauri v2 desktop shell, command bridge, native state wrapper
+    ui/            React + TypeScript frontend (Vite, Monaco Editor)
+  mobile/          React Native 手机端 App（远程遥控桌面端）
 crates/
   acp-core/        ACP transport, session lifecycle, event mapping, permissions
   app-core/        Application orchestration, reducer-based state, session flow
+  dsh-bridge/      DeepSeek Harness host RPC bridge (harness backend)
   git-service/     Git repository inspection and staging via git2
+  relay-client/    Desktop-side relay client for the mobile companion channel
+  relay-protocol/  Relay wire protocol and end-to-end encryption primitives
   session-store/   SQLite session persistence under the Maju data directory
   terminal-service/ Integrated PTY terminal service
   workspace-model/ Shared DTOs consumed by backend and frontend bindings
+  codebuddy-proxy/ 已下线的 CodeBuddy 集成遗留（不再接入 UI），待清理
+  codebuddy-sdk/   同上
+server/            中继服务器（maju-relay-server），手机端遥控通道
 tools/
   mock-acp-agent/  Mock ACP subprocess for integration testing
-docs/              Architecture notes, screenshots, and technical docs
+docs/              Architecture notes, user guides, screenshots
 openspec/          Feature specifications and change proposals
 ```
 
@@ -84,7 +112,7 @@ openspec/          Feature specifications and change proposals
   cargo install tauri-cli --version "^2"
   ```
 
-- 可选：CodeBuddy CLI、Codex ACP 或 Claude Agent ACP 作为 ACP 后端
+- 可选：`npm i -g @deepseek-ai/dsh` 作为 DeepSeek Harness 后端（Codex ACP / Claude Agent ACP 随安装包内置）
 
 ## 开发
 
@@ -195,26 +223,6 @@ Packaged and development builds store Maju-owned data under `~/.kodex/` (overrid
 ```
 
 Workspace source files, git operations, and file edits remain scoped to the selected workspace. Maju does not create workspace-local `.kodex` application data for new workspaces. Existing `{workspace}/.kodex/sessions.db` files are imported into `~/.kodex/sessions/sessions.db` without deleting the original file.
-
-## ACP 后端
-
-Maju 默认使用 Claude Agent ACP（`claude-agent-acp`）作为 ACP 后端，也可在设置中选择 Codex ACP（`codex-acp`）或 CodeBuddy（`codebuddy`）。
-
-CodeBuddy 对应的启动命令为 `codebuddy --acp`；在 Windows 上，该命令会被解析为 `codebuddy.cmd --acp` 以正确启动子进程。
-
-To override the backend agent command during development, set `ACP_AGENT_COMMAND` before launching:
-
-```bash
-ACP_AGENT_COMMAND='cargo run -p mock-acp-agent --quiet --' \
-  cargo tauri dev --manifest-path apps/desktop/src-tauri/Cargo.toml
-```
-
-PowerShell equivalent:
-
-```powershell
-$env:ACP_AGENT_COMMAND='cargo run -p mock-acp-agent --quiet --'
-cargo tauri dev --manifest-path apps/desktop/src-tauri/Cargo.toml
-```
 
 ## 测试
 
