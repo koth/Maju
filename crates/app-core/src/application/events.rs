@@ -1,5 +1,17 @@
 use super::*;
 
+/// The session's real model for usage-event persistence, or `None` while the
+/// UI still carries the placeholder. "Agent default" means "no explicit
+/// selection yet", not a model name — persisting it made the usage summary
+/// list it as if it were a real model. The empty string (a fresh dsh
+/// session's initial model) is likewise unknown; `append_usage_event` also
+/// filters empties, but keeping the guard here makes the intent explicit at
+/// the call site.
+fn usage_fallback_model(model: &str) -> Option<&str> {
+    let trimmed = model.trim();
+    (!trimmed.is_empty() && trimmed != AGENT_DEFAULT_MODEL_LABEL).then_some(trimmed)
+}
+
 struct MessagePersistenceSnapshot {
     messages_len: usize,
     last_message_id: Option<uuid::Uuid>,
@@ -236,7 +248,7 @@ impl Application {
                 let _ = self.store.append_usage_event(
                     &session_id,
                     usage,
-                    Some(&self.ui.session.model),
+                    usage_fallback_model(&self.ui.session.model),
                     self.ui.session.agent_cli.as_deref(),
                 );
             }
@@ -671,6 +683,15 @@ impl Application {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    #[test]
+    fn usage_fallback_model_drops_placeholder_and_empty() {
+        assert_eq!(usage_fallback_model("Agent default"), None);
+        assert_eq!(usage_fallback_model(""), None);
+        assert_eq!(usage_fallback_model("   "), None);
+        assert_eq!(usage_fallback_model("k3"), Some("k3"));
+        assert_eq!(usage_fallback_model(" glm-5.3 "), Some("glm-5.3"));
+    }
 
     #[test]
     fn extract_markdown_reads_saved_path_to_data_url() {

@@ -3630,10 +3630,12 @@ fn usage_summary_from_events(
 
         let (key, label, model, provider, agent_cli, session_id, workspace_root) = match group_by {
             UsageSummaryGroupBy::Model => {
+                // Never fall back to the agent label: this is the
+                // model-grouped view, and an agent name ("DeepSeek Harness")
+                // is not a model. The agent is already shown in the row meta.
                 let label = event
                     .model
                     .clone()
-                    .or_else(|| event.agent_cli.clone())
                     .unwrap_or_else(|| "Unknown model".into());
                 (
                     format!(
@@ -3737,6 +3739,7 @@ fn usage_summary_from_events(
             .map(|sessions| sessions.len() as u64)
             .unwrap_or(row.session_count);
     }
+    rows.retain(usage_row_has_signal);
     rows.sort_by(|a, b| {
         usage_total_tokens(&b.tokens)
             .cmp(&usage_total_tokens(&a.tokens))
@@ -3803,10 +3806,11 @@ fn usage_daily_series_from_events(
 
         let mut by_model = Vec::<UsageModelSummary>::new();
         for event in day_events {
+            // Same rule as the cross-session summary: no agent-label fallback
+            // in a model-keyed view.
             let label = event
                 .model
                 .clone()
-                .or_else(|| event.agent_cli.clone())
                 .unwrap_or_else(|| "Unknown model".into());
             // `explicit_key = None` + `session_id = None` keys rows by
             // `model:provider:agent_cli` (see `usage_summary_key_by_values`),
@@ -3843,6 +3847,7 @@ fn usage_daily_series_from_events(
                 }
             }
         }
+        by_model.retain(usage_row_has_signal);
         let mut tokens = UsageTokenBreakdown::default();
         let mut day_total: u64 = 0;
         for row in &by_model {
@@ -4162,6 +4167,31 @@ fn has_usage_tokens(tokens: &UsageTokenBreakdown) -> bool {
         || tokens.total_tokens.is_some()
 }
 
+/// A summary row carries signal when it records at least one real request,
+/// any non-zero token component, a context-occupancy sample, or a timing
+/// metric. All-zero rows are noise in the usage panel — historically they
+/// came from dsh's session-start zero `tokenUsage` projection, persisted
+/// before the session model was known (which also left the model column
+/// NULL). Filter them at the aggregate level so existing databases shed the
+/// junk rows without a migration.
+fn usage_row_has_signal(row: &UsageModelSummary) -> bool {
+    row.request_count > 0
+        || row.context_peak_tokens.unwrap_or(0) > 0
+        || row.latency_count > 0
+        || row.ttft_count > 0
+        || row.tps_count > 0
+        || [
+            row.tokens.input_tokens,
+            row.tokens.output_tokens,
+            row.tokens.cache_read_tokens,
+            row.tokens.cache_write_tokens,
+            row.tokens.reasoning_tokens,
+            row.tokens.total_tokens,
+        ]
+        .iter()
+        .any(|value| value.unwrap_or(0) > 0)
+}
+
 fn add_usage_tokens(target: &mut UsageTokenBreakdown, delta: &UsageTokenBreakdown) {
     add_optional_u64(&mut target.input_tokens, delta.input_tokens);
     add_optional_u64(&mut target.output_tokens, delta.output_tokens);
@@ -4198,7 +4228,13 @@ fn subtract_usage_tokens(
 }
 
 fn sub_optional_u64(value: Option<u64>, sub: Option<u64>) -> Option<u64> {
-    Some(value.unwrap_or(0).saturating_sub(sub.unwrap_or(0)))
+    // Preserve "unknown": a field the cumulative total never reported must
+    // stay absent after baseline subtraction. Manufacturing `Some(0)` for a
+    // missing field (e.g. dsh SessionTotals carry no `total_tokens`) poisons
+    // the aggregated row with an authoritative-looking zero, which suppresses
+    // the input+output fallback in `usage_total_tokens` and shows "0" while
+    // the component chips display real millions.
+    value.map(|v| v.saturating_sub(sub.unwrap_or(0)))
 }
 
 fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {

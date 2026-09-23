@@ -1325,6 +1325,13 @@ fn token_usage_projection_event(value: &Value) -> Option<ClientEvent> {
         .uncached_input_tokens
         .saturating_add(usage.cache_read_tokens)
         .saturating_add(usage.cache_write_tokens);
+    if input_tokens == 0 && usage.output_tokens == 0 {
+        // Session-start projection before any model call: an all-zero
+        // SessionTotal carries no information, and persisting it records a
+        // row whose model is still unknown (the summary then surfaced the
+        // agent label as a bogus "model" with 0 requests / 0 tokens).
+        return None;
+    }
     Some(ClientEvent::UsageUpdated {
         usage: UsageEvent {
             scope: UsageEventScope::SessionTotal,
@@ -2122,6 +2129,34 @@ mod tests {
         }));
         let mapped = map_mux_frame(&frame, &sink);
         assert!(mapped.events.is_empty(), "empty projection must not emit");
+    }
+
+    #[test]
+    fn zero_token_usage_projection_is_noop() {
+        // The session-start `tokenUsage` projection reports all-zero buckets
+        // before any model call. Persisting it wrote a zero-token SessionTotal
+        // while the session model was still unknown, which surfaced in the
+        // usage summary as an agent-named "model" row with 0 requests.
+        let (sink, _rx) = test_sink();
+        let frame = mux(serde_json::json!({
+            "type": "session/projection",
+            "sessionId": "s-1",
+            "key": "tokenUsage",
+            "value": {
+                "totals": {
+                    "uncachedInputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0
+                }
+            },
+            "seq": 12
+        }));
+        let mapped = map_mux_frame(&frame, &sink);
+        assert!(
+            mapped.events.is_empty(),
+            "all-zero token usage projection must not emit"
+        );
     }
 
     #[test]

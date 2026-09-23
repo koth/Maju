@@ -2031,6 +2031,215 @@ fn usage_summary_today_range_excludes_baseline_only_models() {
     assert_eq!(rows[0].session_count, 1);
 }
 
+/// Regression: baseline subtraction must preserve "unknown" token fields.
+/// dsh SessionTotals carry component tokens (input/output/cache) but no
+/// `total_tokens`. When a session had a pre-range baseline and only
+/// SessionTotal activity in range, `sub_optional_u64` used to manufacture
+/// `total_tokens = Some(0)` for the missing field; merged into the group row
+/// via `add_usage_tokens`, that fabricated zero suppressed the
+/// input+output fallback in `usage_total_tokens`, so Settings → 用量 showed
+/// TOKENS = 0 while the breakdown chips displayed real millions.
+#[test]
+fn usage_summary_baseline_subtract_preserves_unknown_total_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "k3").unwrap();
+    store.create_session("s2", "k3").unwrap();
+
+    // s1: pre-range SessionTotal (carry-over baseline), then an in-range
+    // SessionTotal. dsh shape: component tokens only, no `total_tokens`, and
+    // no in-range TurnDelta (the session idled after its last request).
+    for (timestamp, input, output) in [
+        ("1752134400", 1_000, 100), // 2026-07-10 — baseline
+        ("1752220800", 1_500, 150), // 2026-07-11 — in range
+    ] {
+        store
+            .append_usage_event(
+                "s1",
+                &UsageEvent {
+                    scope: UsageEventScope::SessionTotal,
+                    model: Some("k3".into()),
+                    provider: None,
+                    agent_cli: Some("DeepSeek Harness".into()),
+                    timestamp: Some(timestamp.into()),
+                    tokens: UsageTokenBreakdown {
+                        input_tokens: Some(input),
+                        output_tokens: Some(output),
+                        ..Default::default()
+                    },
+                    context: UsageContextSnapshot::default(),
+                    raw_json: None,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // s2: one real request in range (TurnDelta, also without total_tokens).
+    store
+        .append_usage_event(
+            "s2",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("k3".into()),
+                provider: None,
+                agent_cli: Some("DeepSeek Harness".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    input_tokens: Some(500),
+                    output_tokens: Some(50),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            from: Some("1752220800".into()),
+            to: Some("1752307200".into()),
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 1, "single k3 row expected, got: {rows:?}");
+    let row = &rows[0];
+    assert_eq!(row.request_count, 1);
+    // (1500 - 1000) + 500 = 1000 input; (150 - 100) + 50 = 100 output.
+    assert_eq!(row.tokens.input_tokens, Some(1_000));
+    assert_eq!(row.tokens.output_tokens, Some(100));
+    assert_eq!(
+        row.tokens.total_tokens, None,
+        "a field no event reported must stay unknown, not materialize as Some(0)"
+    );
+    assert_eq!(
+        usage_total_tokens(&row.tokens),
+        1_100,
+        "with total unknown, the effective total falls back to input + output"
+    );
+}
+
+/// Regression: the model-grouped view must never label a row with the agent
+/// name. dsh usage events persist with `model = NULL` when they arrive before
+/// the session model is known; the summary used to fall back to the agent
+/// label, surfacing "DeepSeek Harness" (an agent) as a model name.
+#[test]
+fn usage_summary_model_group_does_not_label_rows_with_agent_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "").unwrap();
+
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: None,
+                provider: None,
+                agent_cli: Some("DeepSeek Harness".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    input_tokens: Some(100),
+                    output_tokens: Some(10),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].label, "Unknown model");
+    assert_eq!(rows[0].model, None);
+    assert_eq!(rows[0].agent_cli.as_deref(), Some("DeepSeek Harness"));
+}
+
+/// Regression: rows with zero requests, zero tokens and no context/timing
+/// signal are noise. Historically these came from dsh's session-start
+/// all-zero `tokenUsage` projection; existing databases keep those rows, so
+/// the aggregate filters them at read time.
+#[test]
+fn usage_summary_drops_zero_signal_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "").unwrap();
+    store.create_session("s2", "k3").unwrap();
+
+    // s1: all-zero SessionTotal (session-start projection, model unknown).
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: None,
+                provider: None,
+                agent_cli: Some("DeepSeek Harness".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    input_tokens: Some(0),
+                    output_tokens: Some(0),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    // s2: real usage.
+    store
+        .append_usage_event(
+            "s2",
+            &UsageEvent {
+                scope: UsageEventScope::TurnDelta,
+                model: Some("k3".into()),
+                provider: None,
+                agent_cli: Some("DeepSeek Harness".into()),
+                timestamp: Some("1752220800".into()),
+                tokens: UsageTokenBreakdown {
+                    input_tokens: Some(100),
+                    output_tokens: Some(10),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let rows = store
+        .query_usage_summary(UsageSummaryRequest {
+            group_by: UsageSummaryGroupBy::Model,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "the zero-signal row must be dropped, got: {rows:?}"
+    );
+    assert_eq!(rows[0].model.as_deref(), Some("k3"));
+}
+
 /// Regression: when a session switches models mid-day, each model's token
 /// total must come from its own in-range TurnDeltas. Preferring SessionTotal
 /// would dump the whole-session cumulative total onto whichever model was

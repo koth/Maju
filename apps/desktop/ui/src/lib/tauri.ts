@@ -833,43 +833,6 @@ export async function settingsResetProviderModels(
   });
 }
 
-export interface CodebuddyProxyStatus {
-  running: boolean;
-  port: number | null;
-  internet_environment: string;
-  debug: boolean;
-}
-
-export async function codebuddyProxyStatus(): Promise<CodebuddyProxyStatus> {
-  return invoke<CodebuddyProxyStatus>("codebuddy_proxy_status");
-}
-
-export async function codebuddyProxyStart(): Promise<void> {
-  return invoke<void>("codebuddy_proxy_start");
-}
-
-export async function codebuddyProxyStop(): Promise<void> {
-  return invoke<void>("codebuddy_proxy_stop");
-}
-
-export async function settingsSaveCodebuddyConfig(
-  port: number | null,
-  apiKey: string,
-  internetEnvironment: string,
-  debug: boolean,
-): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_save_codebuddy_config", {
-    port,
-    apiKey,
-    internetEnvironment,
-    debug,
-  });
-}
-
-export async function settingsClearCodebuddyConfig(): Promise<AgentSettingsSnapshot> {
-  return invoke<AgentSettingsSnapshot>("settings_clear_codebuddy_config");
-}
-
 export async function settingsSelectClaudeFastModel(
   modelId: string | null,
   remoteProfileId?: string | null,
