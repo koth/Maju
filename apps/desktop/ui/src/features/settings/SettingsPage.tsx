@@ -720,16 +720,27 @@ export function SettingsPage({
   const [usageGroupBy, setUsageGroupBy] =
     useState<UsageSummaryGroupBy>("model");
   const [usageDateRange, setUsageDateRange] = useState<UsageDateRange>("today");
-  const [usageIncludeArchived, setUsageIncludeArchived] = useState(true);
+  // Keep archived sessions opt-in: they are not needed for the default
+  // dashboard view and can add a large number of usage rows to every query.
+  const [usageIncludeArchived, setUsageIncludeArchived] = useState(false);
   const [usageRows, setUsageRows] = useState<UsageSummaryRow[]>([]);
   const [usageDailyBuckets, setUsageDailyBuckets] = useState<
     UsageDailyBucket[]
   >([]);
-  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageLoading, setUsageLoading] = useState(
+    initialPane === "usage",
+  );
+  const [usageSecondaryLoading, setUsageSecondaryLoading] = useState(false);
+  const [usageHasLoaded, setUsageHasLoaded] = useState(
+    initialPane === "usage",
+  );
   const [usageError, setUsageError] = useState<string | null>(null);
   const [usageRequests24h, setUsageRequests24h] = useState<number | null>(
     null,
   );
+  const usageSummaryRequestIdRef = useRef(0);
+  const usageExtrasRequestIdRef = useRef(0);
+  const usageLoadExtrasRef = useRef(true);
   const byokProviderMenuRef = useRef<HTMLDivElement>(null);
   const canUseRemoteSettings = !!remoteContext?.profileId;
   const settingsRemoteProfileId =
@@ -807,8 +818,17 @@ export function SettingsPage({
   }, []);
 
   const loadUsageSummary = useCallback(async () => {
+    const requestId = ++usageSummaryRequestIdRef.current;
+    const loadExtras = usageLoadExtrasRef.current;
+    usageLoadExtrasRef.current = true;
+    const extrasRequestId = loadExtras
+      ? ++usageExtrasRequestIdRef.current
+      : null;
     setUsageLoading(true);
     setUsageError(null);
+    if (loadExtras) {
+      setUsageSecondaryLoading(true);
+    }
     try {
       const range = usageDateRangeBounds(usageDateRange);
       const summaryRequest = {
@@ -844,20 +864,45 @@ export function SettingsPage({
         to: now.toISOString(),
         utc_offset_minutes: now.getTimezoneOffset(),
       };
-      // P2: fetch the model summary and the daily series in parallel so the
-      // "每日用量" chart renders real per-day buckets instead of placeholders.
-      const [rows, dailyBuckets, requests24h] = await Promise.all([
-        usageGetSummary(summaryRequest),
-        usageGetDailySeries(dailySeriesRequest),
-        usageGetRequestCount(requests24hRequest),
-      ]);
+
+      // The summary is the primary payload. Render it as soon as it arrives;
+      // the chart and the small 24-hour card are secondary panels and should
+      // not keep the whole settings page behind a Promise.all barrier. This
+      // matters on Windows where the daily series may still be scanning the
+      // 30-day window while the model summary is already available.
+      const rows = await usageGetSummary(summaryRequest);
+      if (requestId !== usageSummaryRequestIdRef.current) return;
       setUsageRows(rows);
-      setUsageDailyBuckets(dailyBuckets);
-      setUsageRequests24h(requests24h);
-    } catch (e) {
-      setUsageError(String(e));
-    } finally {
+      setUsageHasLoaded(true);
       setUsageLoading(false);
+      if (!loadExtras) return;
+
+      try {
+        const [dailyBuckets, requests24h] = await Promise.all([
+          usageGetDailySeries(dailySeriesRequest),
+          usageGetRequestCount(requests24hRequest),
+        ]);
+        if (extrasRequestId !== usageExtrasRequestIdRef.current) return;
+        setUsageDailyBuckets(dailyBuckets);
+        setUsageRequests24h(requests24h);
+      } catch (e) {
+        if (extrasRequestId === usageExtrasRequestIdRef.current) {
+          setUsageError(String(e));
+        }
+      } finally {
+        if (extrasRequestId === usageExtrasRequestIdRef.current) {
+          setUsageSecondaryLoading(false);
+        }
+      }
+    } catch (e) {
+      if (requestId === usageSummaryRequestIdRef.current) {
+        setUsageHasLoaded(true);
+        setUsageError(String(e));
+      }
+    } finally {
+      if (requestId === usageSummaryRequestIdRef.current) {
+        setUsageLoading(false);
+      }
     }
   }, [usageDateRange, usageGroupBy, usageIncludeArchived]);
 
@@ -874,6 +919,16 @@ export function SettingsPage({
     if (activePane !== "usage") return;
     loadUsageSummary();
   }, [activePane, loadUsageSummary]);
+
+  // Ignore late IPC responses after the settings page is closed.  The Tauri
+  // command itself cannot be cancelled once it has entered SQLite, but the
+  // generation check prevents a stale response from updating the next mount.
+  useEffect(() => {
+    return () => {
+      usageSummaryRequestIdRef.current += 1;
+      usageExtrasRequestIdRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (archivedWorkspaceFilter === "all") return;
@@ -3630,6 +3685,12 @@ export function SettingsPage({
   };
 
   const renderUsagePane = () => {
+    // The first render of the pane happens before its effect starts the IPC
+    // request. Treat that short hand-off window as pending as well, otherwise
+    // the page briefly shows an empty state before the spinner appears.
+    const usageInitialPending =
+      activePane === "usage" && !usageHasLoaded && usageError == null;
+    const usageBusy = usageLoading || usageSecondaryLoading || usageInitialPending;
     const totalTokens = usageRows.reduce(
       (sum, row) => sum + usageTokenTotal(row.tokens),
       0,
@@ -3672,7 +3733,10 @@ export function SettingsPage({
       0,
     );
     const headlineText = formatUsageTokens(totalTokens);
-    const showChartAndTable = !usageLoading && usageRows.length > 0;
+    // Keep the last successful summary visible while a filter refresh is in
+    // flight. Hiding the table on every filter change makes a fast backend
+    // response look like a full-page wait.
+    const showChartAndTable = usageRows.length > 0;
 
     return (
       <section className="settings-section settings-usage-section">
@@ -3700,7 +3764,10 @@ export function SettingsPage({
                   type="button"
                   className={`settings-usage-chip ${usageGroupBy === group ? "is-selected" : ""}`}
                   aria-pressed={usageGroupBy === group}
-                  onClick={() => setUsageGroupBy(group)}
+                  onClick={() => {
+                    usageLoadExtrasRef.current = false;
+                    setUsageGroupBy(group);
+                  }}
                 >
                   {usageGroupLabel(group)}
                 </button>
@@ -3719,7 +3786,10 @@ export function SettingsPage({
                     type="button"
                     className={`settings-usage-chip ${usageDateRange === range ? "is-selected" : ""}`}
                     aria-pressed={usageDateRange === range}
-                    onClick={() => setUsageDateRange(range)}
+                    onClick={() => {
+                      usageLoadExtrasRef.current = false;
+                      setUsageDateRange(range);
+                    }}
                   >
                     {usageDateRangeLabel(range)}
                   </button>
@@ -3731,9 +3801,10 @@ export function SettingsPage({
               <input
                 type="checkbox"
                 checked={usageIncludeArchived}
-                onChange={(event) =>
-                  setUsageIncludeArchived(event.currentTarget.checked)
-                }
+                onChange={(event) => {
+                  usageLoadExtrasRef.current = true;
+                  setUsageIncludeArchived(event.currentTarget.checked);
+                }}
               />
               包含已归档
             </label>
@@ -3742,10 +3813,13 @@ export function SettingsPage({
           <button
             type="button"
             className="settings-btn settings-usage-refresh"
-            disabled={usageLoading}
-            onClick={loadUsageSummary}
+            disabled={usageBusy}
+            onClick={() => {
+              usageLoadExtrasRef.current = true;
+              void loadUsageSummary();
+            }}
           >
-            {usageLoading ? "刷新中..." : "刷新"}
+            {usageBusy ? "刷新中..." : "刷新"}
           </button>
         </div>
 
@@ -3965,13 +4039,17 @@ export function SettingsPage({
           )}
 
           {usageError && <div className="settings-error">{usageError}</div>}
-          {usageLoading && (
+          {usageBusy && (
             <div className="settings-usage-loading">
               <span className="settings-usage-loading-spinner" aria-hidden />
-              <span>正在加载用量...</span>
+              <span>
+                {usageLoading || usageInitialPending
+                  ? "正在加载用量..."
+                  : "正在加载每日趋势..."}
+              </span>
             </div>
           )}
-          {!usageLoading && usageRows.length === 0 && (
+          {!usageBusy && usageRows.length === 0 && (
             <div className="settings-empty-panel settings-usage-empty">
               暂无用量记录。可上报详细用量的智能体（Codex、Claude、DeepSeek Harness）尚未产生数据。
             </div>
@@ -4338,7 +4416,14 @@ export function SettingsPage({
           <button
             type="button"
             className={`settings-nav-item ${activePane === "usage" ? "is-active" : ""}`}
-            onClick={() => setActivePane("usage")}
+            onClick={() => {
+              if (activePane !== "usage") {
+                usageLoadExtrasRef.current = true;
+                setUsageHasLoaded(false);
+                setUsageLoading(true);
+              }
+              setActivePane("usage");
+            }}
           >
             用量
           </button>

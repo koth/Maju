@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -37,6 +38,8 @@ import {
   settingsSaveImageViewSettings,
   settingsSaveCommitAssistantSettings,
   settingsCheckDshUpdate,
+  usageGetDailySeries,
+  usageGetRequestCount,
   usageGetSummary,
 } from "../../lib/tauri";
 import {
@@ -50,6 +53,7 @@ import type {
   ArchivedSessionListItem,
   LspSettingsSnapshot,
   RemoteMachineProfilesSnapshot,
+  UsageDailyBucket,
 } from "../../types";
 
 vi.mock("../../lib/confirm", () => ({
@@ -2581,6 +2585,50 @@ describe("SettingsPage LSP settings", () => {
     expect(within(dashboard).getByText("TTFT")).toBeInTheDocument();
     expect(within(dashboard).getByText("SPEED")).toBeInTheDocument();
     expect(within(dashboard).getAllByText("后端未上报").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("shows the summary before secondary daily data finishes", async () => {
+    let resolveDaily!: (value: UsageDailyBucket[]) => void;
+    let resolveRequests!: (value: number) => void;
+    vi.mocked(usageGetSummary).mockResolvedValue([
+      {
+        label: "gpt-5.1",
+        model: "gpt-5.1",
+        provider: "openai",
+        agent_cli: "codex-acp",
+        workspace_root: "D:\\work\\kodex",
+        session_id: null,
+        tokens: { total_tokens: 1200 },
+        event_count: 1,
+        request_count: 1,
+        session_count: 1,
+      },
+    ]);
+    vi.mocked(usageGetDailySeries).mockReturnValue(
+      new Promise<UsageDailyBucket[]>((resolve) => {
+        resolveDaily = resolve;
+      }),
+    );
+    vi.mocked(usageGetRequestCount).mockReturnValue(
+      new Promise<number>((resolve) => {
+        resolveRequests = resolve;
+      }),
+    );
+
+    render(<SettingsPage onBack={vi.fn()} />);
+    await openSettingsPane("用量");
+
+    const table = await screen.findByRole("table", { name: "模型性能" });
+    expect(within(table).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(screen.getByText("正在加载每日趋势...")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveDaily([]);
+      resolveRequests(0);
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("正在加载每日趋势...")).not.toBeInTheDocument(),
+    );
   });
 
   it("does not invent token breakdowns when usage rows only have context data", async () => {

@@ -1574,6 +1574,79 @@ fn usage_daily_series_reports_incremental_not_cumulative() {
 /// days. Regression guard for the settings "每日用量" chart showing usage in
 /// the user's local timezone instead of UTC.
 #[test]
+fn usage_daily_series_bounded_window_keeps_pre_window_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path(), dir.path()).unwrap();
+    store.create_session("s1", "gpt-5.1").unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
+
+    // The first SessionTotal is outside the requested window. The bounded
+    // query must still load it as the carry-over baseline; otherwise the
+    // in-window 1,500 would be reported as a cumulative total.
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1751328000".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_000),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .append_usage_event(
+            "s1",
+            &UsageEvent {
+                scope: UsageEventScope::SessionTotal,
+                model: Some("gpt-5.1".into()),
+                provider: Some("openai".into()),
+                agent_cli: Some("codex-acp".into()),
+                timestamp: Some("1751414400".into()),
+                tokens: UsageTokenBreakdown {
+                    total_tokens: Some(1_500),
+                    ..Default::default()
+                },
+                context: UsageContextSnapshot::default(),
+                raw_json: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+    let bounded = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            from: Some("1751414400".into()),
+            to: Some("1751500800".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(bounded.len(), 1, "only the requested day should render");
+    assert_eq!(bounded[0].tokens.total_tokens, Some(500));
+
+    // The unbounded compatibility path still returns both days.
+    let all = store
+        .query_usage_daily_series(UsageSummaryRequest {
+            all_workspaces: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].tokens.total_tokens, Some(500));
+}
+
+#[test]
 fn usage_daily_series_buckets_by_local_timezone() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path(), dir.path()).unwrap();

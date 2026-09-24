@@ -960,7 +960,6 @@ function buildTimelineCollapseState({
   hiddenPermissionRequestIds,
   turnIsActive,
   activeTurnStartIndex,
-  turnChangeSetsByMessageId,
 }: {
   timeline: UiSnapshot["timeline"];
   timelineStart: number;
@@ -969,7 +968,6 @@ function buildTimelineCollapseState({
   hiddenPermissionRequestIds?: ReadonlySet<string>;
   turnIsActive: boolean;
   activeTurnStartIndex: number;
-  turnChangeSetsByMessageId: Record<string, TimelineTurnChangeSet>;
 }): TimelineCollapseState {
   const groupsBySummaryIndex = new Map<number, TimelineCollapseGroup>();
   const hiddenIndexes = new Set<number>();
@@ -1016,17 +1014,9 @@ function buildTimelineCollapseState({
       // into the turn summary together with the tools: leaving them expanded
       // sandwiched the summary bar between blocks of assistant prose and it
       // appeared "in the middle of the conversation". They stay reachable by
-      // expanding the summary.
-      //
-      // A row carrying a change set the final reply does NOT carry stays out of
-      // the fold: that change set is drawn on the row it is anchored to (the
-      // reply that produced the edits), not as the turn footer below.
-      if (
-        candidate.message &&
-        turnChangeSetsByMessageId[candidate.message.id]?.files.length
-      ) {
-        return false;
-      }
+      // expanding the summary. The turn's changes bar is rendered by the
+      // timeline footer below, so its original anchor does not force an
+      // earlier message to stay outside the fold.
       return true;
     });
 
@@ -1879,7 +1869,6 @@ export function ConversationTimeline({
         hiddenPermissionRequestIds,
         turnIsActive,
         activeTurnStartIndex,
-        turnChangeSetsByMessageId,
       }),
     [
       activeTurnStartIndex,
@@ -1888,7 +1877,6 @@ export function ConversationTimeline({
       hiddenPermissionRequestIds,
       snapshot.timeline,
       turnIsActive,
-      turnChangeSetsByMessageId,
     ],
   );
   const retryableMessages = useMemo(() => retryableUserMessageIds(snapshot), [snapshot]);
@@ -2024,6 +2012,41 @@ export function ConversationTimeline({
     return changeSet?.files.length ? changeSet : undefined;
   };
 
+  const turnChangeSetByEndIndex = useMemo(() => {
+    const result = new Map<number, TimelineTurnChangeSet>();
+    let pending: TimelineTurnChangeSet | null = null;
+    const flush = (endIndex: number) => {
+      if (pending?.files.length) result.set(endIndex, pending);
+      pending = null;
+    };
+
+    for (const [index, item] of snapshot.timeline.entries()) {
+      if (typeof item !== "object" || !("Message" in item)) continue;
+      const message = messagesById.get(item.Message);
+      if (message && isTurnOpeningMessage(message)) {
+        flush(index - 1);
+        continue;
+      }
+      if (message?.role !== "Assistant") continue;
+      const isStreaming =
+        snapshot.session.status === "Streaming" && index === snapshot.timeline.length - 1;
+      const isCurrentTurnMessage =
+        turnIsActive && (activeTurnStartIndex < 0 || index > activeTurnStartIndex);
+      if (isStreaming || isCurrentTurnMessage) continue;
+      const changeSet = turnChangeSetsByMessageId[message.id];
+      if (changeSet?.files.length) pending = changeSet;
+    }
+    flush(snapshot.timeline.length - 1);
+    return result;
+  }, [
+    activeTurnStartIndex,
+    messagesById,
+    snapshot.session.status,
+    snapshot.timeline,
+    turnChangeSetsByMessageId,
+    turnIsActive,
+  ]);
+
   const renderTurnChangesBar = (changeSet: TimelineTurnChangeSet | undefined) =>
     changeSet && changeSet.files.length > 0 ? (
       <ChangesBar
@@ -2037,10 +2060,7 @@ export function ConversationTimeline({
   const renderTimelineItem = (
     item: TimelineItem,
     i: number,
-    {
-      keyPrefix = "",
-      renderChanges = true,
-    }: { keyPrefix?: string; renderChanges?: boolean } = {},
+    { keyPrefix = "" }: { keyPrefix?: string } = {},
   ) => {
     if (item === "Thinking" || (typeof item === "object" && "Thinking" in item)) {
       // Historical thinking segments are live-only: once a reasoning segment
@@ -2060,12 +2080,9 @@ export function ConversationTimeline({
         isLastMessage(i);
       const isCurrentTurnMessage =
         turnIsActive && (activeTurnStartIndex < 0 || i > activeTurnStartIndex);
-      const changesForMessage = renderChanges
-        ? turnChangeSetForRow(item, i)
-        : undefined;
       const renderMessage = shouldRenderMessage(msg.role, msg.body);
 
-      if (!renderMessage && !changesForMessage?.files.length) {
+      if (!renderMessage) {
         return null;
       }
 
@@ -2108,7 +2125,6 @@ export function ConversationTimeline({
               }
             />
           )}
-          {renderTurnChangesBar(changesForMessage)}
         </Fragment>
       );
     }
@@ -2205,10 +2221,17 @@ export function ConversationTimeline({
           const group = collapseState.groupsBySummaryIndex.get(i);
           if (!group) {
             const renderedItem = renderTimelineItem(item, i);
-            if (i !== activeTurnStartIndex || !turnIsActive) return renderedItem;
+            const changeSetAtEnd = turnChangeSetByEndIndex.get(i);
+            const itemWithChangeBar = changeSetAtEnd ? (
+              <Fragment key={`changes:${i}`}>
+                {renderedItem}
+                {renderTurnChangesBar(changeSetAtEnd)}
+              </Fragment>
+            ) : renderedItem;
+            if (i !== activeTurnStartIndex || !turnIsActive) return itemWithChangeBar;
             return (
               <Fragment key={`active-turn:${activeTurnKey ?? i}`}>
-                {renderedItem}
+                {itemWithChangeBar}
                 <TimelineActiveTurnSummary durationLabel={activeTurnDurationLabel} />
               </Fragment>
             );
@@ -2223,12 +2246,16 @@ export function ConversationTimeline({
                 {items.map((candidate) =>
                   renderTimelineItem(candidate.item, candidate.index, {
                     keyPrefix: `collapsed:${group.key}:`,
-                    renderChanges: false,
                   }),
                 )}
               </div>
             ) : null;
-          const anchorChangeSet = turnChangeSetForRow(item, i);
+          const groupEndIndex = group.items.reduce(
+            (endIndex, candidate) => Math.max(endIndex, candidate.index),
+            i,
+          );
+          const anchorChangeSet =
+            turnChangeSetByEndIndex.get(groupEndIndex) ?? turnChangeSetForRow(item, i);
           return (
             <Fragment key={`collapse:${group.key}`}>
               <TimelineCollapseSummary
@@ -2238,17 +2265,11 @@ export function ConversationTimeline({
                 navUserId={group.userMessageId}
               />
               {expanded && renderExpandedItems(expandedBeforeItems)}
-              {renderTimelineItem(item, i, { renderChanges: !anchorChangeSet })}
+              {renderTimelineItem(item, i)}
               {expanded && renderExpandedItems(expandedAfterItems)}
-              {/* When the change set is anchored to THIS turn's final reply, the
-                  bar is the turn's FOOTER: a turn can keep working after that
-                  reply — an interrupted turn ends on the tool call the user
-                  stopped — and drawing the bar under the reply put "本轮对话"
-                  in the middle of the turn with the agent's last call hanging
-                  below it. With the reply last (the common case) the bar lands
-                  exactly where it always did. A change set anchored to an
-                  EARLIER reply is left on that reply instead (see
-                  `itemsToCollapse`), so it keeps reading as produced-by-that-reply. */}
+              {/* The change bar belongs to the whole turn, not to the message
+                  that first reported it. Keep it after the final visible item
+                  so it cannot appear between two assistant text segments. */}
               {renderTurnChangesBar(anchorChangeSet)}
             </Fragment>
           );

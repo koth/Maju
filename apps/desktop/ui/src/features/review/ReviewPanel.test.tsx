@@ -1305,13 +1305,13 @@ describe("ReviewPanel scoped change sets", () => {
   });
 
   it("reloads the file tree when the active workspace changes", async () => {
-    vi.mocked(fsListDir)
-      .mockResolvedValueOnce([
-        { name: "old-project.ts", kind: "File", path: "old-project.ts" },
-      ])
-      .mockResolvedValueOnce([
-        { name: "new-project.ts", kind: "File", path: "new-project.ts" },
-      ]);
+    let treeRequest = 0;
+    vi.mocked(fsListDir).mockImplementation(async () => {
+      treeRequest += 1;
+      return treeRequest === 1
+        ? [{ name: "old-project.ts", kind: "File" as const, path: "old-project.ts" }]
+        : [{ name: "new-project.ts", kind: "File" as const, path: "new-project.ts" }];
+    });
 
     const { rerender } = render(
       <ReviewPanel
@@ -1345,11 +1345,15 @@ describe("ReviewPanel scoped change sets", () => {
       />,
     );
 
-    expect(await screen.findByText("new-project.ts")).toBeTruthy();
+    // Switching workspace resets the panel to Review. Inactive panels are now
+    // unmounted, so the old file tree must disappear until Files is selected
+    // again; this also prevents stale tree DOM/Pierre work from surviving a
+    // workspace switch.
     expect(screen.queryByText("old-project.ts")).toBeNull();
-    expect(fsListDir).toHaveBeenCalledTimes(2);
-    expect(fsListDir).toHaveBeenNthCalledWith(1, "");
-    expect(fsListDir).toHaveBeenNthCalledWith(2, "");
+    fireEvent.click(screen.getByRole("button", { name: /所有文件/ }));
+    expect(await screen.findByText("new-project.ts")).toBeTruthy();
+    expect(fsListDir).toHaveBeenCalled();
+    expect(fsListDir).toHaveBeenLastCalledWith("");
   });
 
   it("does not list files for disconnected remote workspace snapshots", async () => {

@@ -2112,6 +2112,45 @@ describe("ThinkingIndicator", () => {
     );
   });
 
+  it("renders a turn changes bar after its final assistant segment", () => {
+    const snapshot = makeSnapshot({
+      session: {
+        id: "s-1",
+        workspace_id: "ws-1",
+        title: "test",
+        model: "test-model",
+        mode: null,
+        agent_cli: null,
+        status: "Idle",
+      },
+      timeline: [{ Message: "msg-1" }, { Message: "msg-2" }],
+      messages: [
+        { id: "msg-1", role: "Assistant", body: "先完成第一段说明" },
+        { id: "msg-2", role: "Assistant", body: "再补充最后一段说明" },
+      ],
+    });
+
+    const { container } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        turnChangeSetsByMessageId={{
+          "msg-1": makeTurnChangeSet("turn-msg-1", [
+            makeFileSummary("src/turn.ts", 2, 1, "turn-msg-1"),
+          ]),
+        }}
+      />,
+    );
+
+    const text = container.textContent ?? "";
+    expect(text.indexOf("先完成第一段说明")).toBeLessThan(
+      text.indexOf("再补充最后一段说明"),
+    );
+    expect(text.indexOf("再补充最后一段说明")).toBeLessThan(
+      text.indexOf("已编辑 1 个文件"),
+    );
+  });
+
   it("does not render transient review changes at the end of the timeline", () => {
     const snapshot = makeSnapshot({
       review_changes: [
@@ -2303,7 +2342,7 @@ describe("ThinkingIndicator", () => {
     expect(text.indexOf("second turn")).toBeLessThan(text.indexOf("second.ts"));
   });
 
-  it("keeps a stale change set with the assistant message that produced it", () => {
+  it("keeps a change set at the end of the assistant turn that produced it", () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -2335,12 +2374,12 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
     const text = container.textContent ?? "";
-    expect(text.indexOf("changed files")).toBeLessThan(text.indexOf("changed.ts"));
-    expect(text.indexOf("changed.ts")).toBeLessThan(text.indexOf("answered only"));
+    expect(text.indexOf("changed files")).toBeLessThan(text.indexOf("answered only"));
+    expect(text.indexOf("answered only")).toBeLessThan(text.indexOf("changed.ts"));
     expect(text.lastIndexOf("changed.ts")).toBe(text.indexOf("changed.ts"));
   });
 
-  it("does not attach previous turn changes to a later no-change assistant message", () => {
+  it("keeps previous turn changes at the end of that turn", () => {
     const snapshot = makeSnapshot({
       session: {
         id: "s-1",
@@ -2377,8 +2416,8 @@ describe("ThinkingIndicator", () => {
 
     expect(container.querySelectorAll(".changes-bar")).toHaveLength(1);
     const text = container.textContent ?? "";
-    expect(text.indexOf("edited previous turn")).toBeLessThan(text.indexOf("previous.ts"));
-    expect(text.indexOf("previous.ts")).toBeLessThan(text.indexOf("answered without edits"));
+    expect(text.indexOf("edited previous turn")).toBeLessThan(text.indexOf("answered without edits"));
+    expect(text.indexOf("answered without edits")).toBeLessThan(text.indexOf("previous.ts"));
   });
 
   it("opens timeline changes with the producing change set id", () => {

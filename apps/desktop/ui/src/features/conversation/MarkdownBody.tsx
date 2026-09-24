@@ -231,8 +231,8 @@ const REHYPE_PLUGINS: NonNullable<
  *  re-render of a section re-parses its whole text — during streaming every
  *  commit must therefore re-parse just the growing tail block. The
  *  components map is rebuilt per MarkdownBody render (closures over probe
- *  state) and is intentionally excluded; `pathVersion` (verified-paths
- *  count) signals that clickability state changed. */
+ * state) and is intentionally excluded; `pathVersion` (verified-path count
+ * plus probe round) signals that clickability state changed. */
 const MarkdownSection = memo(
   function MarkdownSection({
     content,
@@ -240,7 +240,7 @@ const MarkdownSection = memo(
   }: {
     content: string;
     components: MarkdownComponents;
-    pathVersion: number;
+    pathVersion: string;
     workspaceRoot?: string;
   }) {
     return (
@@ -290,15 +290,26 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
   // Bump on every probe resolution so the effect re-runs against the freshly
   // populated cache even when nothing was newly verified.
   const [probeRound, setProbeRound] = useState(0);
+  // A startup/reconnect can make the first existence probe fail before the
+  // workspace is ready. Retry a few times for this content/workspace instead
+  // of turning that transient miss into a permanent plain-code span.
+  const filePathProbeRetryRef = useRef({ key: "", attempts: 0 });
 
   useEffect(() => {
     if (!onFilePathClick) return;
+    const retryKey = `${workspaceRoot ?? ""}\u0000${content}`;
+    const retryState = filePathProbeRetryRef.current;
+    if (retryState.key !== retryKey) {
+      retryState.key = retryKey;
+      retryState.attempts = 0;
+    }
     const candidates = [...pendingCandidates.entries()].filter(
       ([key]) =>
         !verifiedPaths.has(key) && filePathExistenceCache.get(key) === undefined,
     );
     if (candidates.length === 0) return;
     let cancelled = false;
+    let retryTimer: number | null = null;
 
     const root = workspaceRoot
       ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
@@ -477,11 +488,19 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
         setProbeRound((round) => round + 1);
       })
       .catch(() => {
-        // Probing failed (e.g. workspace reconnecting): leave spans as plain
-        // code; a later render can retry.
+        // A workspace can still be reconnecting during the first restored
+        // turn. Do not cache this as a real miss; retry the same probe a few
+        // times so links appear without requiring a second manual visit.
+        if (cancelled || retryState.attempts >= 3) return;
+        const delay = [250, 750, 2000][retryState.attempts];
+        retryState.attempts += 1;
+        retryTimer = window.setTimeout(() => {
+          if (!cancelled) setProbeRound((round) => round + 1);
+        }, delay);
       });
     return () => {
       cancelled = true;
+      if (retryTimer != null) window.clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, workspaceRoot, changedFiles, candidatePaths, onFilePathClick, verifiedPaths, probeRound]);
@@ -500,6 +519,15 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
       }
     },
     [onFilePathClick, workspaceRoot],
+  );
+
+  const handleInlineCodeKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.currentTarget.click();
+    },
+    [],
   );
 
   const components: MarkdownComponents = {
@@ -536,6 +564,14 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
               ? barePathOverrides.get(filePathCacheKey(resolved, workspaceRoot)) ??
                 resolved.path
               : undefined;
+          const fileLinkInteractionProps = clickable
+            ? {
+                role: "link" as const,
+                tabIndex: 0,
+                onKeyDown: handleInlineCodeKeyDown,
+                "aria-label": `打开文件 ${openPath ?? resolved?.path ?? codeString}${resolved?.lineNumber ? `:${resolved.lineNumber}` : ""}`,
+              }
+            : {};
           return (
             <code
               className={clickable ? "md-inline-code md-file-path" : "md-inline-code"}
@@ -546,9 +582,10 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
               }
               title={openPath ? `${openPath} — 点击打开` : undefined}
               {...props}
+              {...fileLinkInteractionProps}
             >
               {clickable && (
-                <FileCode size={12} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
+                <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
               )}
               {children}
             </code>
@@ -651,7 +688,7 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
   // streaming commit (the "卡成翔 while the LLM types" cost). Splitting into
   // top-level blocks lets every finished block bail out of parsing; only the
   // block under the cursor re-parses per commit.
-  const pathVersion = verifiedPaths.size;
+  const pathVersion = `${verifiedPaths.size}:${probeRound}`;
 
   return (
     // Clickable inline-code file paths are delegated from this wrapper so a
@@ -679,6 +716,18 @@ interface ResolvedFilePath {
    *  (`commands/fs.rs`) for partial relative paths. Absent for absolute
    *  paths that do not need disambiguation. */
   matchTail?: string;
+}
+
+/** Accept compound filenames such as `MarkdownBody.test.tsx`, `types.d.ts`,
+ * and `bundle.min.js` while still rejecting bare directories and identifiers. */
+function isFileNameWithExtension(value: string): boolean {
+  const parts = value.split(".");
+  return (
+    parts.length > 1 &&
+    parts[0].length > 0 &&
+    parts.slice(1).every((part) => part.length > 0) &&
+    parts[parts.length - 1].length <= 10
+  );
 }
 
 /**
@@ -731,12 +780,12 @@ export function resolveClickableFilePath(
     // the workspace-wide name search (fsFindByName) stays gated on a line
     // number to avoid misidentifying common names in prose.
     if (!workspaceRoot) return null;
-    if (!/^[^./\\]+\.[^./\\]{1,10}$/.test(candidate)) return null;
+    if (!isFileNameWithExtension(candidate)) return null;
     return { path: candidate, lineNumber, matchTail: candidate };
   }
   // Must carry a file extension so bare directories / URLs do not match.
   const lastSegment = candidate.replace(/\\/g, "/").split("/").pop() ?? "";
-  if (!/^[^./]+\.[^./]{1,10}$/.test(lastSegment)) {
+  if (!isFileNameWithExtension(lastSegment)) {
     return null;
   }
   if (/^https?:\/\//i.test(candidate)) {

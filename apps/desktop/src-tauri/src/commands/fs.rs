@@ -99,17 +99,16 @@ pub fn fs_reveal(state: State<'_, AppState>, path: String, select: bool) -> Resu
 
 /// Cheap existence check used by the chat renderer to decide whether an
 /// inline-code span is a real, openable workspace file before rendering it
-/// as a clickable link. Returns false for anything outside the workspace,
-/// missing, or not a regular file — never errors.
+/// as a clickable link. Returns `false` for missing/outside/dir paths, but
+/// propagates a workspace/reconnect error so the UI can retry instead of
+/// caching a transient startup failure as a permanent dead link.
 #[tauri::command]
 pub async fn fs_path_exists(app: AppHandle, paths: Vec<String>) -> Result<Vec<bool>, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        // Never fail the command for probe errors — a reconnecting remote or
-        // transient FS blip must leave spans as plain code, not crash the UI.
-        Ok(state
+        state
             .with_app(|app| app.workspace_paths_exist(&paths))
-            .unwrap_or_else(|_| paths.iter().map(|_| false).collect()))
+            .map_err(|error| format!("Path existence probe unavailable: {error}"))
     })
     .await
     .map_err(|e| format!("Path exists task failed: {e}"))?

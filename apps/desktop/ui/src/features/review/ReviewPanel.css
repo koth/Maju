@@ -423,6 +423,8 @@
   min-width: 0;
   overflow: visible;
   border-top: 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 36px;
 }
 
 .review-change-card.is-focused .review-change-header {

@@ -82,6 +82,12 @@
   --sidebar-accent-strong: rgba(255, 255, 255, 0.14);
   --sidebar-accent-border: rgba(255, 255, 255, 0.16);
 
+  /* File links are an intentional affordance exception to the neutral
+     palette: a quiet blue treatment makes a path immediately recognizable as
+     an actionable file reference, like the ChatGPT transcript surface. */
+  --file-link: #79b7ef;
+  --file-link-hover: #a8d4ff;
+
   /* --- Semantic: status only ---------------------------------------------- */
   --success: var(--agent-success);
   --success-soft: rgba(87, 194, 138, 0.14);
@@ -281,6 +287,8 @@
   --sidebar-accent-soft: rgba(13, 13, 13, 0.06);
   --sidebar-accent-strong: rgba(13, 13, 13, 0.10);
   --sidebar-accent-border: rgba(13, 13, 13, 0.16);
+  --file-link: #1769aa;
+  --file-link-hover: #0c4f83;
 
   /* --- Semantic ----------------------------------------------------------- */
   --success: var(--agent-success);

@@ -135,8 +135,20 @@ describe("MarkdownBody", () => {
         "md-file-path",
       ),
     );
+    const fileLink = screen.getByRole("link", { name: /usage\.rs/ });
+    expect(fileLink).toHaveAttribute("tabindex", "0");
+    expect(fileLink.querySelector(".md-file-path-icon")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
     expect(fsPathExists).toHaveBeenCalledWith(["crates/codebuddy-proxy/src/usage.rs"]);
-    fireEvent.click(screen.getByText("crates/codebuddy-proxy/src/usage.rs:75"));
+    fireEvent.keyDown(fileLink, { key: "Enter" });
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "crates/codebuddy-proxy/src/usage.rs",
+      75,
+    );
+    onFilePathClick.mockClear();
+    fireEvent.click(fileLink);
     expect(onFilePathClick).toHaveBeenCalledWith(
       "crates/codebuddy-proxy/src/usage.rs",
       75,
@@ -146,6 +158,32 @@ describe("MarkdownBody", () => {
     expect(plainCode).not.toHaveClass("md-file-path");
     fireEvent.click(plainCode);
     expect(onFilePathClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a transient workspace probe failure after session restore", async () => {
+    let attempts = 0;
+    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("workspace reconnecting");
+      return paths.map(() => true);
+    });
+
+    render(
+      <MarkdownBody
+        content={"恢复会话中的 `crates/app-core/src/lib.rs` 文件链接。"}
+        workspaceRoot="D:\\work\\kodex"
+        onFilePathClick={vi.fn()}
+      />,
+    );
+
+    await waitFor(
+      () =>
+        expect(screen.getByText("crates/app-core/src/lib.rs")).toHaveClass(
+          "md-file-path",
+        ),
+      { timeout: 2000 },
+    );
+    expect(attempts).toBeGreaterThan(1);
   });
 
   it("keeps non-existent paths as plain code", async () => {
@@ -173,6 +211,7 @@ describe("MarkdownBody", () => {
     );
     expect(screen.getByText("to_openai_usage")).not.toHaveClass("md-file-path");
     expect(screen.getByText("cargo test")).not.toHaveClass("md-file-path");
+    expect(screen.getByText("to_openai_usage")).not.toHaveAttribute("role", "link");
   });
 
   it("resolves bare file names via the changeset as the priority source", async () => {
@@ -550,6 +589,21 @@ describe("resolveClickableFilePath", () => {
 
   it("requires a workspace root for relative paths", () => {
     expect(resolveClickableFilePath("crates/x.rs:1")).toBeNull();
+  });
+
+  it("accepts compound filename extensions", () => {
+    expect(
+      resolveClickableFilePath(
+        "apps/desktop/ui/src/features/conversation/MarkdownBody.test.tsx",
+        root,
+      ),
+    ).toMatchObject({
+      path: "apps/desktop/ui/src/features/conversation/MarkdownBody.test.tsx",
+    });
+    expect(resolveClickableFilePath("MarkdownBody.test.tsx", root)).toMatchObject({
+      path: "MarkdownBody.test.tsx",
+    });
+    expect(resolveClickableFilePath("foo..tsx", root)).toBeNull();
   });
 
   it("treats bare file names with a line reference as name-search candidates", () => {

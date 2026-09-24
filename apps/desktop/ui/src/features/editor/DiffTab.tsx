@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
 import type { SessionFileChange, FileChangeRecord, FileChangeType, AppTheme } from "../../types";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
@@ -18,7 +18,7 @@ interface Props {
   onToggleFileTree?: () => void;
 }
 
-export function DiffTab({
+export const DiffTab = memo(function DiffTab({
   change,
   appTheme,
   toolbarMode = "default",
@@ -110,7 +110,7 @@ export function DiffTab({
       </div>
     </div>
   );
-}
+});
 
 function DiffBreadcrumbs({
   path,

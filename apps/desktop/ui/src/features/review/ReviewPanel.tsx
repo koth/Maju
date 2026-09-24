@@ -17,6 +17,7 @@ import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import { appConfirm, rejectPatchConfirmRequest, trackConfirmRequest } from "../../lib/confirm";
 import { useHorizontalScrollControls } from "../../lib/use-horizontal-scroll-controls";
+import { useNearViewportOnce } from "../conversation/useNearViewportOnce";
 import "./ReviewPanel.css";
 
 export type ReviewPanelTab = "Review" | "Diff" | "Files";
@@ -525,6 +526,7 @@ export function ReviewPanel({
   );
 
   useEffect(() => {
+    if (activeBaseTab !== "Review") return;
     if (!workspaceConnected || !hydrated) {
       loadedChangeSetSessionIdRef.current = null;
       setChangeSetState({ summaries: [], filesById: {}, filesSignatureById: {} });
@@ -585,6 +587,7 @@ export function ReviewPanel({
     // revision advances on every streaming event while the change-set list only
     // changes when file changes land.
   }, [
+    activeBaseTab,
     focusRequestKey,
     hydrated,
     liveChangesSignature,
@@ -718,7 +721,8 @@ export function ReviewPanel({
         )}
       </div>
 
-      <div className="review-tab-panel review-tab-panel-review" hidden={activeBaseTab !== "Review"}>
+      {activeBaseTab === "Review" && (
+        <div className="review-tab-panel review-tab-panel-review">
         <ReviewChangesView
           changeSetState={effectiveChangeSetState}
           onLoadChangeSetFiles={handleLoadChangeSetFiles}
@@ -731,9 +735,11 @@ export function ReviewPanel({
           focusPath={focusRequest?.path ?? null}
           focusToken={focusRequest?.token ?? null}
         />
-      </div>
+        </div>
+      )}
 
-      <div className="review-tab-panel review-tab-panel-files" hidden={activeBaseTab !== "Files"}>
+      {activeBaseTab === "Files" && (
+        <div className="review-tab-panel review-tab-panel-files">
         {workspaceConnected ? (
           <FileTree
             workspaceRoot={snapshot.workspace.root}
@@ -745,9 +751,11 @@ export function ReviewPanel({
         ) : (
           <div className="review-empty-state">远程工作区未连接</div>
         )}
-      </div>
+        </div>
+      )}
 
-      <div className="review-tab-panel review-tab-panel-git" hidden={activeBaseTab !== "Diff"}>
+      {activeBaseTab === "Diff" && (
+        <div className="review-tab-panel review-tab-panel-git">
         {!hydrated ? (
           <div className="review-loading-state">
             <span className="review-loading-dot" />
@@ -775,7 +783,8 @@ export function ReviewPanel({
             />
           </>
         )}
-      </div>
+        </div>
+      )}
       {activeFilePath && renderFileTab && (
         <div className={`review-tab-panel review-tab-panel-editor review-tab-panel-file-editor ${editorFileTreeVisible && workspaceConnected ? "has-filetree" : ""}`}>
           <div className="review-editor-main">
@@ -1690,22 +1699,24 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
   const [hydrationFailed, setHydrationFailed] = useState(false);
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   const cardRef = useRef<HTMLElement | null>(null);
+  const nearViewport = useNearViewportOnce(cardRef, !collapsed);
   const displayChange = hydratedChange ?? change;
   const needsHydration = useMemo(() => needsDiffHydration(change), [change]);
   const diffPreview = useMemo(
     () =>
-      collapsed
+      collapsed || !nearViewport
         ? null
         : hydrationFailed
         ? { kind: "message" as const, text: "这个差异记录暂时无法加载" }
         : buildPierreDiff(displayChange),
-    [collapsed, displayChange, hydrationFailed],
+    [collapsed, displayChange, hydrationFailed, nearViewport],
   );
   const diffOptions = useMemo(
     () => pierreDiffOptions(appTheme, "unified"),
     [appTheme],
   );
   const horizontalScroll = useHorizontalScrollControls<HTMLDivElement>({
+    enabled: !collapsed && nearViewport,
     resolveScrollTarget: resolvePierreDiffHorizontalScrollTarget,
   });
 
@@ -1728,7 +1739,7 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
   }, [focusToken]);
 
   useEffect(() => {
-    if (collapsed) return;
+    if (collapsed || !nearViewport) return;
     if (!needsHydration) {
       setHydratedChange(null);
       setHydrationFailed(false);
@@ -1759,6 +1770,7 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
     change.updated_at,
     changeSetId,
     needsHydration,
+    nearViewport,
   ]);
 
   return (
@@ -1802,7 +1814,10 @@ const ReviewChangeCard = memo(function ReviewChangeCard({
               disableWorkerPool
             />
           ) : (
-            <div className="review-inline-message">{diffPreview?.text ?? "正在准备差异..."}</div>
+            <div className="review-inline-message">
+              {diffPreview?.text ??
+                (nearViewport ? "正在准备差异..." : "滚动到此处加载差异...")}
+            </div>
           )}
         </div>
       )}

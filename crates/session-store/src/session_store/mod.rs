@@ -282,6 +282,22 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_change_set_files_change_set ON change_set_files(change_set_id);
             CREATE INDEX IF NOT EXISTS idx_usage_events_session ON usage_events(session_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_usage_events_workspace ON usage_events(workspace_root, created_at);
+            -- Usage summaries normalize mixed legacy ISO/epoch timestamps with
+            -- CAST(created_at AS INTEGER).  Keep the expression indexed so the
+            -- settings dashboard can seek by date instead of scanning and
+            -- sorting the entire usage_events table on every open.  The id
+            -- suffix makes the index cover the stable insertion-order tiebreak
+            -- used by the summary queries.
+            CREATE INDEX IF NOT EXISTS idx_usage_events_created_epoch_id
+                ON usage_events(CAST(created_at AS INTEGER), id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_workspace_created_epoch_id
+                ON usage_events(workspace_root, CAST(created_at AS INTEGER), id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_session_created_epoch_id
+                ON usage_events(session_id, CAST(created_at AS INTEGER), id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_scope_created_epoch_id
+                ON usage_events(scope, CAST(created_at AS INTEGER), id);
+            CREATE INDEX IF NOT EXISTS idx_usage_events_scope_session_created_epoch_id
+                ON usage_events(scope, session_id, CAST(created_at AS INTEGER), id);
             ",
         )?;
 
@@ -1178,19 +1194,30 @@ impl SessionStore {
         &self,
         request: UsageSummaryRequest,
     ) -> Result<Vec<UsageDailyBucket>> {
-        // Load with a widened lower bound (no `from`) so we can compute
-        // per-day baselines; the daily series function itself splits into
-        // per-day increments. The `to` bound still applies.
-        let utc_offset_minutes = request.utc_offset_minutes;
-        let baseline_request = UsageSummaryRequest {
-            from: None,
-            ..request.clone()
+        // Only the requested window is needed for the visible buckets. The
+        // previous implementation loaded every historical event (`from = None`)
+        // and rebuilt all baselines in Rust. That made opening Settings -> 用量
+        // scan the full history even when the chart only shows 30 days, which
+        // is particularly expensive on Windows. Fetch the in-range rows plus
+        // the latest pre-range SessionTotal per session/model instead; the
+        // daily reducer receives the same baseline semantics without
+        // materializing old events.
+        let events = self.load_usage_events_for_summary(&request)?;
+        let events = if let Some(from_epoch) = request
+            .from
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .and_then(parse_instant_to_epoch_secs)
+        {
+            let baseline = self.load_usage_baseline_before(&request, from_epoch)?;
+            merge_baseline_events(events, baseline)
+        } else {
+            events
         };
-        let events = self.load_usage_events_for_summary(&baseline_request)?;
         Ok(usage_daily_series_from_events(
             &events,
             request.from.as_deref(),
-            utc_offset_minutes,
+            request.utc_offset_minutes,
         ))
     }
 
@@ -1205,17 +1232,27 @@ impl SessionStore {
     /// is excluded, as is `ContextSnapshot` occupancy-only telemetry.
     /// Unlike [`query_usage_summary`], this does NOT merge carry-over
     /// baseline events, so the count reflects only in-range requests.
-   pub fn query_usage_request_count(
-       &self,
-       request: UsageSummaryRequest,
-   ) -> Result<u64> {
-       let events = self.load_usage_events_for_summary(&request)?;
-       let count = events
-           .iter()
-            .filter(|event| matches!(event.scope, UsageEventScope::TurnDelta))
-           .count() as u64;
-       Ok(count)
-   }
+    pub fn query_usage_request_count(
+        &self,
+        request: UsageSummaryRequest,
+    ) -> Result<u64> {
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id",
+        );
+        let mut params_vec = Vec::<String>::new();
+        sql.push_str(&self.usage_event_filter_sql(
+            &request,
+            &mut params_vec,
+            Some("turn_delta"),
+        ));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let count: i64 = stmt.query_row(
+            params_from_iter(params_vec.iter().map(|value| value as &dyn ToSql)),
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
 
     fn load_usage_events_for_session(&self, session_id: &str) -> Result<Vec<StoredUsageEvent>> {
         let mut stmt = self.conn.prepare(
@@ -1236,32 +1273,26 @@ impl SessionStore {
         Ok(events)
     }
 
-    fn load_usage_events_for_summary(
+    /// Build the common usage-event predicates used by the read-only
+    /// aggregate queries.  Keeping these predicates in one place makes the
+    /// optimized request-count path apply exactly the same workspace, archive,
+    /// agent and date filters as the event-loading path.
+    fn usage_event_filter_sql(
         &self,
         request: &UsageSummaryRequest,
-    ) -> Result<Vec<StoredUsageEvent>> {
-        let mut sql = String::from(
-            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
-                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
-                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
-                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
-             FROM usage_events u
-             LEFT JOIN sessions s ON s.id = u.session_id
-             WHERE 1 = 1",
-        );
-        let mut params_vec = Vec::<String>::new();
-        // Exclude non-reporting third-party agents (e.g. CodeBuddy) from the
-        // cross-session historical summary. They only ever emit empty
-        // `ContextSnapshot` rows (no token breakdown) and would otherwise
-        // surface as empty groups under "按智能体" or pollute "按模型". The
-        // single-session snapshot path (`load_usage_events_for_session`) is
-        // intentionally untouched, so live context occupancy in the dock
-        // still works for those sessions. We filter on the joined session's
-        // `agent_cli` first, falling back to the `usage_events` row's own
-        // `agent_cli` (which `append_usage_event` populates from the same
-        // source) so a missing session row is still excluded.
+        params: &mut Vec<String>,
+        scope: Option<&str>,
+    ) -> String {
+        let mut sql = String::from(" WHERE 1 = 1");
+        // Historical summaries exclude third-party agents that only emit
+        // context-occupancy telemetry. The single-session snapshot path does
+        // not use this helper, so the live dock remains unaffected.
         sql.push_str(" AND COALESCE(s.agent_cli, u.agent_cli, '') != ?");
-        params_vec.push(NON_REPORTING_AGENT_CLI.to_string());
+        params.push(NON_REPORTING_AGENT_CLI.to_string());
+        if let Some(scope) = scope {
+            sql.push_str(" AND u.scope = ?");
+            params.push(scope.to_string());
+        }
         if !request.all_workspaces {
             let workspace_root = request
                 .workspace_root
@@ -1277,7 +1308,7 @@ impl SessionStore {
                 });
             if let Some(workspace_root) = workspace_root {
                 sql.push_str(" AND u.workspace_root = ?");
-                params_vec.push(workspace_root);
+                params.push(workspace_root);
             }
         }
         if !request.include_archived {
@@ -1289,23 +1320,16 @@ impl SessionStore {
             .filter(|value| !value.trim().is_empty())
         {
             sql.push_str(" AND u.session_id = ?");
-            params_vec.push(session_id.to_string());
+            params.push(session_id.to_string());
         }
-        // Date bounds are compared as epoch seconds (numeric) rather than as
-        // raw text. The desktop UI sends ISO-8601 UTC bounds (e.g. "2026-06-30T00:00:00.000Z")
-        // while `usage_events.created_at` is stored as a decimal-seconds string
-        // (e.g. "1780185600"); textual comparison breaks across formats. We
-        // parse the bound with `parse_instant_to_epoch_secs` (which also accepts
-        // raw decimal seconds for backward compatibility) and cast the stored
-        // column to INTEGER so SQLite compares both sides as numbers.
-        let from_epoch = request
+        if let Some(from) = request
             .from
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .and_then(parse_instant_to_epoch_secs);
-        if let Some(from) = from_epoch {
+            .and_then(parse_instant_to_epoch_secs)
+        {
             sql.push_str(" AND CAST(u.created_at AS INTEGER) >= ?");
-            params_vec.push(from.to_string());
+            params.push(from.to_string());
         }
         if let Some(to) = request
             .to
@@ -1314,13 +1338,30 @@ impl SessionStore {
             .and_then(parse_instant_to_epoch_secs)
         {
             sql.push_str(" AND CAST(u.created_at AS INTEGER) <= ?");
-            params_vec.push(to.to_string());
+            params.push(to.to_string());
         }
+        sql
+    }
+
+    fn load_usage_events_for_summary(
+        &self,
+        request: &UsageSummaryRequest,
+    ) -> Result<Vec<StoredUsageEvent>> {
+        let mut sql = String::from(
+            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
+                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
+                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
+                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
+             FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id",
+        );
+        let mut params_vec = Vec::<String>::new();
+        sql.push_str(&self.usage_event_filter_sql(request, &mut params_vec, None));
         // Stable tiebreaker by primary key so events sharing the same
         // epoch-second timestamp (e.g. a SessionTotal + TurnDelta pair
         // emitted from one ACP frame) always come back in insertion order,
         // making aggregation deterministic across queries.
-        sql.push_str(" ORDER BY u.created_at ASC, u.id ASC");
+        sql.push_str(" ORDER BY CAST(u.created_at AS INTEGER) ASC, u.id ASC");
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs = params_vec.iter().map(|value| value as &dyn ToSql);
@@ -1344,67 +1385,54 @@ impl SessionStore {
         request: &UsageSummaryRequest,
         from_epoch: i64,
     ) -> Result<Vec<StoredUsageEvent>> {
-        // For each (session, model, provider, agent_cli), pick the latest
-        // SessionTotal row before `from`. We rely on a correlated subquery to
-        // select the single newest baseline row per group.
+        // Pick the newest baseline row per group with a window function. The
+        // previous correlated `NOT EXISTS` query repeatedly searched every
+        // candidate row's session and became pathologically slow on large
+        // Windows databases (minutes for a single dashboard open).
+        let baseline_request = UsageSummaryRequest {
+            from: None,
+            to: None,
+            ..request.clone()
+        };
         let mut sql = String::from(
-            "SELECT u.session_id, s.title, u.workspace_root, u.agent_cli, u.provider, u.model, u.scope,
-                    u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens,
-                    u.reasoning_tokens, u.total_tokens, u.context_used_tokens, u.context_window_tokens,
-                    u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second
-             FROM usage_events u
-             LEFT JOIN sessions s ON s.id = u.session_id
-             WHERE u.scope = 'session_total'
-               AND CAST(u.created_at AS INTEGER) < ?
-               AND COALESCE(s.agent_cli, u.agent_cli, '') != ?",
+            "WITH ranked AS (
+                 SELECT u.id, u.session_id, s.title, u.workspace_root, u.agent_cli,
+                        u.provider, u.model, u.scope,
+                        u.input_tokens, u.output_tokens, u.cache_read_tokens,
+                        u.cache_write_tokens, u.reasoning_tokens, u.total_tokens,
+                        u.context_used_tokens, u.context_window_tokens,
+                        u.created_at, u.latency_ms, u.ttft_ms, u.tokens_per_second,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY u.session_id,
+                                         COALESCE(u.model, ''),
+                                         COALESCE(u.provider, ''),
+                                         COALESCE(u.agent_cli, '')
+                            ORDER BY CAST(u.created_at AS INTEGER) DESC, u.id DESC
+                        ) AS usage_row_number
+                 FROM usage_events u
+                 LEFT JOIN sessions s ON s.id = u.session_id",
         );
-        let mut params_vec = vec![from_epoch.to_string(), NON_REPORTING_AGENT_CLI.to_string()];
-        if !request.all_workspaces {
-            if let Some(workspace_root) = request
-                .workspace_root
-                .as_deref()
-                .filter(|v| !v.trim().is_empty())
-                .map(str::to_string)
-                .or_else(|| {
-                    if self.workspace_root.is_empty() {
-                        None
-                    } else {
-                        Some(self.workspace_root.clone())
-                    }
-                })
-            {
-                sql.push_str(" AND u.workspace_root = ?");
-                params_vec.push(workspace_root);
-            }
-        }
-        if !request.include_archived {
-            sql.push_str(" AND s.archived_at IS NULL");
-        }
-        if let Some(session_id) = request
-            .session_id
-            .as_deref()
-            .filter(|v| !v.trim().is_empty())
-        {
-            sql.push_str(" AND u.session_id = ?");
-            params_vec.push(session_id.to_string());
-        }
-        // Keep only the newest baseline per (session, model, provider,
-        // agent_cli) via a correlated subquery on `created_at, id`.
+        let mut params_vec = Vec::<String>::new();
+        sql.push_str(&self.usage_event_filter_sql(
+            &baseline_request,
+            &mut params_vec,
+            None,
+        ));
         sql.push_str(
-            " AND NOT EXISTS (
-                 SELECT 1 FROM usage_events u2
-                 WHERE u2.session_id = u.session_id
-                   AND COALESCE(u2.model, '') = COALESCE(u.model, '')
-                   AND COALESCE(u2.provider, '') = COALESCE(u.provider, '')
-                   AND COALESCE(u2.agent_cli, '') = COALESCE(u.agent_cli, '')
-                   AND u2.scope = 'session_total'
-                   AND CAST(u2.created_at AS INTEGER) < ?
-                   AND (CAST(u2.created_at AS INTEGER), u2.id) > (CAST(u.created_at AS INTEGER), u.id)
-             ) ORDER BY u.created_at ASC, u.id ASC",
+            " AND u.scope = 'session_total'
+               AND CAST(u.created_at AS INTEGER) < ?
+             )
+             SELECT session_id, title, workspace_root, agent_cli, provider, model, scope,
+                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                    reasoning_tokens, total_tokens, context_used_tokens, context_window_tokens,
+                    created_at, latency_ms, ttft_ms, tokens_per_second
+             FROM ranked
+             WHERE usage_row_number = 1
+             ORDER BY CAST(created_at AS INTEGER) ASC, id ASC",
         );
         params_vec.push(from_epoch.to_string());
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs = params_vec.iter().map(|v| v as &dyn ToSql);
+        let param_refs = params_vec.iter().map(|value| value as &dyn ToSql);
         let rows = stmt.query_map(params_from_iter(param_refs), stored_usage_event_from_row)?;
         let mut events = Vec::new();
         for row in rows {
