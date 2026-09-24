@@ -1338,17 +1338,19 @@ function getTimestamp(value: string) {
 }
 
 function FolderIcon({ open }: { open: boolean }) {
+  // 折叠/展开用同一族文件夹字形（Lucide folder / folder-open）：两种状态
+  // 同格同笔画粗细，切换时文字不跳、基线不歪。折叠=闭合文件夹，展开=掀盖
+  // 打开的文件夹，与 ChatGPT 侧栏一致。
   if (open) {
     return (
-      <svg className="sl-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
-        <path d="M2.5 8.2h15" />
+      <svg className="sl-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6A2 2 0 0 1 18.45 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
       </svg>
     );
   }
   return (
-    <svg className="sl-nav-icon" viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M2.5 6.2c0-1 .8-1.8 1.8-1.8h3.4l1.5 1.6h6.5c1 0 1.8.8 1.8 1.8v6.7c0 1-.8 1.8-1.8 1.8H4.3c-1 0-1.8-.8-1.8-1.8V6.2Z" />
+    <svg className="sl-nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
     </svg>
   );
 }
