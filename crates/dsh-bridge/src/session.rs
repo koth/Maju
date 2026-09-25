@@ -10,6 +10,7 @@
 //! One in-flight prompt per session; parallel across sessions sharing a host.
 
 use acp_core::{ClientEvent, PermissionBroker, RuntimeCommand, SessionConfig, ShutdownSignal};
+use serde_json::Value;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -151,6 +152,19 @@ pub fn run_harness_session(
                 follow_shutdown,
             )
             .await;
+        });
+    }
+
+    // dsh 0.1.7 moved background jobs off `session/control` into the
+    // `jobController` remote service: `job/list` streams the per-session
+    // roster as whole-set frames. Pump it here so the context dock's 后台任务
+    // list keeps updating.
+    {
+        let jobs_client = client.clone();
+        let jobs_session_id = session_id.clone();
+        let jobs_shutdown = shutdown_signal.clone();
+        host.runtime().spawn(async move {
+            run_job_list(jobs_client, jobs_session_id, jobs_shutdown).await;
         });
     }
 
@@ -331,7 +345,8 @@ pub fn run_harness_session(
                         // The prompt never started, so no turn is in flight.
                         inflight.store(false, AtomicOrdering::Release);
                         let _ = tx_events.send(ClientEvent::Interrupted {
-                            reason: format!("session.prompt failed: {err}"),
+                            reason: crate::rpc_types::friendly_rpc_error(&err)
+                                .unwrap_or_else(|| format!("session.prompt failed: {err}")),
                         });
                         if let Some(tx) = accepted_tx {
                             let _ = tx.send(Err(err));
@@ -524,7 +539,8 @@ pub fn run_harness_session(
                         refreshed
                     }
                     Err(err) => vec![ClientEvent::Interrupted {
-                        reason: format!("session.selectModel failed: {err}"),
+                        reason: crate::rpc_types::friendly_rpc_error(&err)
+                            .unwrap_or_else(|| format!("session.selectModel failed: {err}")),
                     }],
                 };
                 let _ = reply_tx.send(Ok(events));
@@ -760,7 +776,8 @@ pub fn run_harness_session(
                             refreshed
                         }
                         Err(err) => vec![ClientEvent::Interrupted {
-                            reason: format!("session.selectModel failed: {err}"),
+                            reason: crate::rpc_types::friendly_rpc_error(&err)
+                                .unwrap_or_else(|| format!("session.selectModel failed: {err}")),
                         }],
                     }
                 } else {
@@ -1739,6 +1756,85 @@ async fn shutdown_wait(shutdown: &ShutdownSignal) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// Pump the per-session `job/list` stream (dsh 0.1.7 `jobController` remote
+/// service) into the jobs registry. Each frame is the whole roster, so every
+/// push replaces the snapshot. Reconnects with a bounded backoff — an older
+/// harness without the endpoint (or a transient close) must not spin the
+/// reconnect loop at full rate.
+async fn run_job_list(
+    client: crate::transport::HttpClient,
+    session_id: SessionId,
+    shutdown: ShutdownSignal,
+) {
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        if shutdown.is_requested() {
+            return;
+        }
+        let mut stream = match client.open_job_list(&session_id).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let backoff = job_list_backoff(consecutive_failures);
+                tracing::warn!(
+                    target: "dsh-bridge::session::jobs",
+                    session_id = %session_id,
+                    error = %err,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "job list open failed; retrying"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = shutdown_wait(&shutdown) => return,
+                }
+                continue;
+            }
+        };
+        consecutive_failures = 0;
+        loop {
+            if shutdown.is_requested() {
+                return;
+            }
+            let value = match stream.next_item().await {
+                Some(FollowStreamItem::Item(value)) => value,
+                other => {
+                    let reason = match &other {
+                        Some(FollowStreamItem::Failed(error)) => format!("error: {error}"),
+                        _ => "end".to_string(),
+                    };
+                    tracing::debug!(
+                        target: "dsh-bridge::session::jobs",
+                        session_id = %session_id,
+                        reason = %reason,
+                        "job list stream finished; reconnecting"
+                    );
+                    break;
+                }
+            };
+            // Roster frame: `{ type: "rows", jobs: [ … ] }`. Unknown frame
+            // shapes are ignored so additive host changes never break the pump.
+            if value.get("type").and_then(Value::as_str) == Some("rows")
+                && let Some(jobs) = value.get("jobs").and_then(Value::as_array)
+            {
+                crate::jobs::record_session_jobs(&session_id, jobs);
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            _ = shutdown_wait(&shutdown) => return,
+        }
+    }
+}
+
+/// Backoff for `job/list` reconnects: 500ms doubling to a 30s ceiling. The
+/// ceiling keeps a permanently-failing endpoint (e.g. a harness without the
+/// job controller) from flooding the logs while still recovering promptly
+/// after a transient close.
+fn job_list_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(6);
+    std::time::Duration::from_millis(500u64 << shift)
 }
 
 #[cfg(test)]

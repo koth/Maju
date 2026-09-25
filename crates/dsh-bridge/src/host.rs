@@ -831,8 +831,10 @@ impl HarnessHost {
                 );
             }
             ControlFrame::Baseline { value } => {
-                // Background jobs at the cut (`Record<SessionId, SessionJob[]>`)
-                // feed the context dock's "后台任务" list.
+                // Background jobs at the cut (`Record<SessionId, SessionJob[]>`).
+                // dsh 0.1.7 removed the key from the baseline (jobs moved to
+                // the per-session `job/list` stream, `session.rs::run_job_list`),
+                // so this arm only fires on older harnesses.
                 if let Some(jobs) = value.get("jobs").and_then(Value::as_object) {
                     for (session_id, jobs) in jobs {
                         if let Some(jobs) = jobs.as_array() {
@@ -859,6 +861,8 @@ impl HarnessHost {
             }
             // A `jobs` control frame is the FULL job snapshot for one session
             // (后台任务); recorded for the context dock (no ClientEvent).
+            // dsh 0.1.7 no longer sends these (jobs moved to the per-session
+            // `job/list` stream); kept for older harnesses.
             ControlFrame::Jobs { session_id, jobs } => {
                 crate::jobs::record_session_jobs(&session_id, &jobs);
             }

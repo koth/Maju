@@ -1,10 +1,12 @@
 //! Registry of dsh harness background jobs (后台任务) per harness session id.
 //!
-//! The harness pushes per-session job snapshots over `session/jobs` (pre-0.1.5
-//! mux frames) and `session/control` (`jobs` frames plus the opening
-//! `baseline`). They are session-level state, not turn events, so nothing is
-//! mapped into `ClientEvent` — the mapping layer records the latest snapshot
-//! here and `app-core` reads it for the visible session ("后台任务" in the
+//! dsh 0.1.7 moved jobs off the `session/control` stream (pre-0.1.7 mux
+//! `session/jobs` frames and the control `jobs` frames/baseline) into the
+//! `jobController` Typert Remote service: a per-session `job/list` stream
+//! pushes the whole roster as `{type:"rows", jobs:[…]}` frames (see
+//! `session.rs::run_job_list`). They are session-level state, not turn events,
+//! so nothing is mapped into `ClientEvent` — the roster is recorded here and
+//! `app-core` reads it for the visible session ("后台任务" in the
 //! conversation's context dock). Each push carries the FULL list for the
 //! session, so recording replaces the previous snapshot.
 

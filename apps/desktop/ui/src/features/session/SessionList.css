@@ -1174,15 +1174,12 @@
 }
 
 /* 18px like every other sidebar icon column, so this row's label lands on the
-   same left edge as the project names and session titles (46px). */
+   same left edge as the project names and session titles (46px). The icon
+   inherits the row's text color so it never reads dimmer than its label. */
 .sl-quick-nav-item .sl-action-icon {
   width: 18px;
   height: 18px;
-  color: var(--text-soft);
-}
-
-.sl-quick-nav-item:hover .sl-action-icon {
-  color: var(--text-strong);
+  color: currentColor;
 }
 
 .sl-coming-soon {
@@ -1236,7 +1233,6 @@
   width: 11px;
   height: 11px;
   flex-shrink: 0;
-  opacity: 0.55;
 }
 
 .sl-workspaces.is-hidden {
@@ -1495,10 +1491,6 @@
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 1.75;
-}
-
-.sl-nav-icon {
-  color: var(--text-soft);
 }
 
 /* Sessions nest under their project: a hairline guide plus an inset that puts

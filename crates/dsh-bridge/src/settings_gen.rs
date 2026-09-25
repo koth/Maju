@@ -1,12 +1,18 @@
 //! Generate/merge the dsh `settings.yaml` document from Kodex's BYOK provider
 //! catalog before spawning `dsh web`.
 //!
-//! Kodex owns two settings sections — `llm-pi-ai` (the LLM provider routes)
-//! and `agent-default-model` (the default route+model for new sessions) —
-//! and rewrites them on each bring-up from its current provider catalog.
-//! Other sections (`ui-onboarding`, `agent-presets`, anything the user
-//! hand-edited under other namespaces) are preserved by a YAML round-trip
-//! that replaces only those two top-level keys.
+//! Kodex owns the `llm-pi-ai` settings section (the LLM provider routes) plus
+//! the conditional `web-search-deepseek` / `llm-deepseek` sections, and
+//! rewrites them on each bring-up from its current provider catalog. Other
+//! sections (`ui-onboarding`, anything the user hand-edited under other
+//! namespaces) are preserved by a YAML round-trip that replaces only those
+//! keys.
+//!
+//! The default model and default agent preset travel in the `--patch` overlay
+//! instead (`render_harness_patch`): dsh 0.1.7 moved both out of the settings
+//! document into cordis plugin config (`agent-default-model` and
+//! `agent-preset-registry` rows), so a `settings.yaml` section of those names
+//! is no longer read by the harness.
 //!
 //! See `design-dsh-settings.md` for the full rationale.
 
@@ -65,23 +71,31 @@ pub struct DshModelEntry {
 }
 
 /// The default model selection for new dsh sessions.
-#[derive(Debug, Clone, Default, Serialize)]
+///
+/// Carried to the harness through the `agent-default-model` row of the patch
+/// overlay (dsh ≥ 0.1.7); the settings.yaml section of the same name is no
+/// longer read.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct DshDefaultModel {
     pub provider: String,
     pub model: String,
 }
 
-/// The full settings document Kodex writes/merges. The `llm-pi-ai` and
-/// `agent-default-model` sections are owned by Kodex and replaced wholesale on
-/// each bring-up; `web-search-deepseek` is written when
-/// `web_search_api_key_env` is set and removed when it is `None`, so a revoked
-/// key never leaves a dangling credential reference behind.
+/// The full settings document Kodex writes/merges. The `llm-pi-ai` section is
+/// owned by Kodex and replaced wholesale on each bring-up; `web-search-deepseek`
+/// is written when `web_search_api_key_env` is set and removed when it is
+/// `None`, so a revoked key never leaves a dangling credential reference
+/// behind. `default_model` / `default_preset` do NOT land in this document —
+/// dsh ≥ 0.1.7 reads them from the patch overlay's plugin rows
+/// (`render_harness_patch`); they ride this struct only so the bring-up can
+/// forward them there.
 #[derive(Debug, Clone, Default)]
 pub struct DshSettingsConfig {
     pub providers: Vec<DshProviderRoute>,
     pub default_model: DshDefaultModel,
-    /// Default agent preset for new sessions (`agent-presets.default`). `None`
-    /// leaves any existing value untouched (the dsh deployment default).
+    /// Default agent preset for new sessions. Forwarded to the patch overlay
+    /// (`agent-preset-registry` row); not written to settings.yaml. `None`
+    /// leaves the harness's shipped default (`standard`) untouched.
     pub default_preset: Option<String>,
     /// Credential reference for dsh's `web-search-deepseek` plugin. Set when
     /// the DeepSeek BYOK provider is configured: Kodex injects the secret into
@@ -160,14 +174,6 @@ fn build_llm_section(providers: &[DshProviderRoute]) -> Value {
     Value::Object(llm)
 }
 
-/// Build the `agent-default-model` section value.
-fn build_default_model_section(default: &DshDefaultModel) -> Value {
-    let mut section = serde_json::Map::new();
-    section.insert("provider".into(), Value::String(default.provider.clone()));
-    section.insert("model".into(), Value::String(default.model.clone()));
-    Value::Object(section)
-}
-
 /// Build the `web-search-deepseek` section value.
 fn build_web_search_section(api_key_env: &str) -> Value {
     let mut section = serde_json::Map::new();
@@ -184,9 +190,9 @@ fn build_llm_deepseek_disabled_section() -> Value {
     Value::Object(section)
 }
 
-/// Write the merged `settings.yaml` to `path`, replacing the `llm-pi-ai` and
-/// `agent-default-model` sections and preserving all other top-level keys.
-/// The parent directory is created if missing.
+/// Write the merged `settings.yaml` to `path`, replacing the Kodex-owned
+/// sections and preserving all other top-level keys. The parent directory is
+/// created if missing.
 pub fn write_settings(path: &Path, config: &DshSettingsConfig) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -204,21 +210,15 @@ pub fn write_settings(path: &Path, config: &DshSettingsConfig) -> anyhow::Result
         .as_object_mut()
         .ok_or_else(|| anyhow!("dsh settings.yaml root is not a mapping"))?;
     obj.insert("llm-pi-ai".into(), build_llm_section(&config.providers));
-    obj.insert(
-        "agent-default-model".into(),
-        build_default_model_section(&config.default_model),
-    );
-    // Default agent preset for new sessions: only written when configured so
-    // an unset value leaves the dsh deployment default (or a user's own
-    // hand-edited `agent-presets.default`) untouched.
-    if let Some(preset) = &config.default_preset {
-        let presets_section = obj
-            .entry("agent-presets".to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        if let Some(map) = presets_section.as_object_mut() {
-            map.insert("default".into(), Value::String(preset.clone()));
-        }
-    }
+    // dsh ≥ 0.1.7 reads the default model and the default preset from cordis
+    // plugin config (the `agent-default-model` / `agent-preset-registry` rows
+    // of the patch overlay), not from these settings sections. Drop the
+    // sections Kodex wrote for older harnesses so the file carries no dead
+    // keys — including `agent-preset-registry`, whose stale `selectedDefault`
+    // would otherwise override the patched default preset.
+    obj.remove("agent-default-model");
+    obj.remove("agent-presets");
+    obj.remove("agent-preset-registry");
     match &config.web_search_api_key_env {
         Some(api_key_env) => {
             obj.insert(
@@ -297,6 +297,15 @@ pub struct HarnessMcpServer {
 pub struct HarnessPatchConfig {
     pub title_provider: Option<String>,
     pub title_model: Option<String>,
+    /// Default model for new sessions — the `agent-default-model` row's
+    /// `config` (dsh ≥ 0.1.7 reads it from plugin config, not from the
+    /// settings.yaml section of the same name). `None` (or a pair with a
+    /// blank half) keeps the shipped deployment default.
+    pub default_model: Option<DshDefaultModel>,
+    /// Default agent preset for new sessions — the `agent-preset-registry`
+    /// row's `config.default`. `None` leaves the shipped default
+    /// (`standard`) untouched.
+    pub default_preset: Option<String>,
     /// Local MCP servers to mount for every harness session. Empty = mount
     /// none (dsh's own built-in tools are unaffected either way).
     pub mcp_servers: Vec<HarnessMcpServer>,
@@ -316,8 +325,31 @@ impl HarnessPatchConfig {
         Self {
             title_provider: Some(provider),
             title_model: Some(model),
-            mcp_servers: Vec::new(),
+            ..Self::default()
         }
+    }
+
+    /// Pin the default model new sessions boot with. A blank provider or
+    /// model drops the override (dsh rejects a half-configured pair).
+    pub fn with_default_model(mut self, default: &DshDefaultModel) -> Self {
+        let provider = default.provider.trim();
+        let model = default.model.trim();
+        if !provider.is_empty() && !model.is_empty() {
+            self.default_model = Some(DshDefaultModel {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            });
+        }
+        self
+    }
+
+    /// Pin the default agent preset for new sessions. Blank keeps the
+    /// harness's own default.
+    pub fn with_default_preset(mut self, preset: Option<&str>) -> Self {
+        if let Some(preset) = preset.map(str::trim).filter(|p| !p.is_empty()) {
+            self.default_preset = Some(preset.to_string());
+        }
+        self
     }
 
     /// Attach the local MCP servers the harness should mount.
@@ -352,10 +384,11 @@ fn yaml_quote(value: &str) -> String {
 /// Render the Kodex-owned dsh patch overlay, applied with `--patch` AFTER the
 /// profile layer (bundle patches + the user's own `cordis.patch.yml`).
 ///
-/// `settings.yaml` can only carry the two sections Kodex owns (`llm-pi-ai`,
-/// `agent-default-model`); plugin configuration lives in the cordis patch
-/// stack instead, so anything Kodex needs to change inside a bundle row has to
-/// travel as an overlay like this one.
+/// `settings.yaml` carries only the provider-route sections (`llm-pi-ai` and
+/// friends); plugin configuration lives in the cordis patch stack instead, so
+/// anything Kodex needs to change inside a bundle row — the session-title
+/// budget and route, the default model, the default preset, the mounted MCP
+/// servers — has to travel as an overlay like this one.
 ///
 /// **An id-targeted entry replaces the targeted row's whole `config`, it does
 /// not merge.** Every field the row declares must therefore be restated here in
@@ -406,6 +439,22 @@ pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
     if let (Some(provider), Some(model)) = (&config.title_provider, &config.title_model) {
         out.push_str(&format!("    provider: {}\n", yaml_quote(provider)));
         out.push_str(&format!("    model: {}\n", yaml_quote(model)));
+    }
+
+    // dsh ≥ 0.1.7 plugin-config rows (see the module docs): the default model
+    // and the default preset are cordis row config now, not settings.yaml
+    // sections. Both rows ship with exactly the keys restated here, so an
+    // id-targeted override carries the row's whole config.
+    if let Some(default) = &config.default_model {
+        out.push_str("- id: agent-default-model\n");
+        out.push_str("  config:\n");
+        out.push_str(&format!("    provider: {}\n", yaml_quote(&default.provider)));
+        out.push_str(&format!("    model: {}\n", yaml_quote(&default.model)));
+    }
+    if let Some(preset) = &config.default_preset {
+        out.push_str("- id: agent-preset-registry\n");
+        out.push_str("  config:\n");
+        out.push_str(&format!("    default: {}\n", yaml_quote(preset)));
     }
 
     if !config.mcp_servers.is_empty() {
@@ -534,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn write_creates_file_with_two_sections() {
+    fn write_creates_file_with_provider_routes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.yaml");
         let cfg = DshSettingsConfig {
@@ -552,8 +601,9 @@ mod tests {
         assert!(text.contains("llm-pi-ai:"));
         assert!(text.contains("apiKeyEnv: KODEX_DSH_DEEPSEEK_KEY"));
         assert!(text.contains("baseURL: https://api.deepseek.com/v1"));
-        assert!(text.contains("agent-default-model:"));
-        assert!(text.contains("provider: deepseek"));
+        // The default model rides the patch overlay (dsh ≥ 0.1.7), not this
+        // document.
+        assert!(!text.contains("agent-default-model:"));
         assert!(!text.contains("web-search-deepseek:"));
         assert!(!text.contains("llm-deepseek:"));
     }
@@ -700,7 +750,7 @@ mod tests {
         let path = dir.path().join("settings.yaml");
         std::fs::write(
             &path,
-            "ui-onboarding:\n  welcomeNoticeVersion: '1'\nagent-presets:\n  default: code\n",
+            "ui-onboarding:\n  welcomeNoticeVersion: '1'\nagent-presets:\n  default: code\nagent-default-model:\n  provider: deepseek\n  model: deepseek-v4-pro\n",
         )
         .unwrap();
         let cfg = DshSettingsConfig {
@@ -717,8 +767,14 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("ui-onboarding:"));
         assert!(text.contains("welcomeNoticeVersion"));
-        assert!(text.contains("agent-presets:"));
         assert!(text.contains("llm-pi-ai:"));
+        // dsh ≥ 0.1.7 reads the default model/preset from the patch overlay's
+        // plugin rows; the settings sections are dead keys and must be dropped
+        // so a stale `agent-preset-registry.selectedDefault` (or an old
+        // `agent-presets.default`) cannot override the patched default.
+        assert!(!text.contains("agent-presets:"));
+        assert!(!text.contains("agent-default-model:"));
+        assert!(!text.contains("agent-preset-registry:"));
     }
 
     #[test]
@@ -758,7 +814,8 @@ mod tests {
         assert!(text.contains("KODEX_DSH_KIMI_KEY"));
         // The old deepseek route is gone (the section is replaced wholesale).
         assert!(!text.contains("KODEX_DSH_DEEPSEEK_KEY"));
-        assert!(text.contains("model: kimi-k3"));
+        // The default model rides the patch overlay, not settings.yaml.
+        assert!(!text.contains("kimi-k3"));
     }
 
     // ---- harness patch overlay ----
@@ -845,6 +902,57 @@ mod tests {
             config.get("model").and_then(|v| v.as_str()),
             Some("mo\"del #x")
         );
+    }
+
+    /// Parse the rendered overlay and return the entry whose `id` matches.
+    fn parsed_entry(config: &HarnessPatchConfig, id: &str) -> Option<serde_yaml::Value> {
+        let text = render_harness_patch(config);
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("rendered overlay is not valid YAML: {e}\n{text}"));
+        doc.as_sequence()
+            .expect("overlay must be a top-level array")
+            .iter()
+            .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some(id))
+            .cloned()
+    }
+
+    #[test]
+    fn harness_patch_pins_default_model_and_preset_as_plugin_rows() {
+        // dsh ≥ 0.1.7 reads both from cordis plugin config, not settings.yaml.
+        let config = HarnessPatchConfig::default()
+            .with_default_model(&DshDefaultModel {
+                provider: "kimi_code".into(),
+                model: "k3".into(),
+            })
+            .with_default_preset(Some("code"));
+        let model_row = parsed_entry(&config, "agent-default-model")
+            .expect("agent-default-model row missing");
+        let model_config = model_row.get("config").expect("row must carry config");
+        assert_eq!(
+            model_config.get("provider").and_then(|v| v.as_str()),
+            Some("kimi_code")
+        );
+        assert_eq!(model_config.get("model").and_then(|v| v.as_str()), Some("k3"));
+
+        let preset_row = parsed_entry(&config, "agent-preset-registry")
+            .expect("agent-preset-registry row missing");
+        assert_eq!(
+            preset_row
+                .get("config")
+                .and_then(|c| c.get("default"))
+                .and_then(|v| v.as_str()),
+            Some("code")
+        );
+    }
+
+    #[test]
+    fn harness_patch_omits_blank_default_model_and_preset() {
+        let config = HarnessPatchConfig::default()
+            .with_default_model(&DshDefaultModel::default())
+            .with_default_preset(None)
+            .with_default_preset(Some("  "));
+        assert!(parsed_entry(&config, "agent-default-model").is_none());
+        assert!(parsed_entry(&config, "agent-preset-registry").is_none());
     }
 
     #[test]
@@ -938,6 +1046,7 @@ mod tests {
                 title_provider: Some("kimi_code".into()),
                 title_model: Some("k3".into()),
                 mcp_servers: Vec::new(),
+                ..HarnessPatchConfig::default()
             }
         );
         for half in [

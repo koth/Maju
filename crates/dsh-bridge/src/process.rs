@@ -351,17 +351,24 @@ pub(crate) fn parse_ps_rows(output: &str) -> Vec<PsRow> {
         .collect()
 }
 
-/// Whether a `ps` command line looks like a `dsh web` server: some token
-/// whose basename is `dsh` (bare name, npm shim path, or absolute path all
-/// end in `dsh`) followed by the `web` subcommand. Matching the adjacent
-/// subcommand keeps `dsh acp`, `dsh --version`, or an editor running on a
-/// file named `dsh` from matching.
+/// Whether a `ps` command line looks like a `dsh web` server. Two invocation
+/// shapes are recognised:
+///
+/// - dsh ≥ 0.1.7 (current Kodex spawn): a `dsh` token followed later by the
+///   `--profile web` pair — `node …/bin.js --profile web --patch …`.
+/// - dsh ≤ 0.1.6 (orphans left by older Kodex builds): a `dsh` token directly
+///   followed by the `web` positional subcommand.
+///
+/// Requiring the `web` profile marker keeps `dsh acp`, `dsh --version`, or an
+/// editor running on a file named `dsh` from matching.
 #[cfg(any(unix, test))]
 pub(crate) fn is_dsh_web_command(command: &str) -> bool {
     let tokens: Vec<&str> = command.split_whitespace().collect();
-    tokens
-        .windows(2)
-        .any(|pair| is_dsh_token(pair[0]) && pair[1] == "web")
+    let has_dsh = tokens.iter().any(|token| is_dsh_token(token));
+    has_dsh
+        && tokens
+            .windows(2)
+            .any(|pair| pair[1] == "web" && (is_dsh_token(pair[0]) || pair[0] == "--profile"))
 }
 
 #[cfg(any(unix, test))]
@@ -568,16 +575,24 @@ impl Default for SpawnDshWebConfig {
 /// the caller can prompt the user to `npm i -g @deepseek-ai/dsh`.
 /// Build the `dsh web` argv.
 ///
-/// Ordering is load-bearing: the dsh launcher forwards everything from the
-/// first argument it does not recognise onward to the booted app
-/// (`passThroughOptions`). `--patch` is a *launcher* flag, so it must be
-/// emitted before the passthrough flags (`--port`, `--no-open`); putting it
-/// after them sends it to the web app, which rejects it and boots without the
-/// overlay. `--port 0` lets the OS pick a free loopback port and the readiness
-/// line reports the actual bound port; `--no-open` suppresses the
-/// default-browser handoff.
+/// dsh 0.1.7 switched the CLI to profile-based boot (`dsh --profile <name>`).
+/// Two ordering rules are load-bearing:
+///
+/// - `--profile`/`--patch` are *launcher* flags and must precede the web app's
+///   own flags: the launcher forwards everything from the first argument it
+///   does not recognise onward (`passThroughOptions`), so a `--patch` emitted
+///   after `--port`/`--no-open` is sent to the web app, which rejects it with
+///   `unknown option '--patch'` and the overlay never loads. And with `--patch`
+///   present, the launcher requires the profile to be named explicitly —
+///   `dsh --patch f web` fails with `--profile <name> is required`.
+/// - `--port 0` lets the OS pick a free loopback port and the readiness line
+///   reports the actual bound port; `--no-open` suppresses the
+///   default-browser handoff.
+///
+/// This argv requires dsh ≥ 0.1.7 (older harnesses have no `--profile` flag);
+/// the settings page's DeepSeek Harness tab offers the upgrade.
 fn web_launch_args(patch_overlay: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = vec!["web".to_string()];
+    let mut args: Vec<String> = vec!["--profile".to_string(), "web".to_string()];
     if let Some(patch) = patch_overlay.map(str::trim).filter(|p| !p.is_empty()) {
         args.push("--patch".to_string());
         args.push(patch.to_string());
@@ -1462,16 +1477,17 @@ mod tests {
 
     // ---- `dsh web` argv ----
 
-    /// Regression guard for the ordering contract: the dsh launcher treats the
-    /// first unrecognised argument as the start of the app's own argv, so a
-    /// `--patch` emitted after `--port`/`--no-open` would be swallowed by the
-    /// web app and the overlay would never load.
+    /// Regression guard for the ordering contract: dsh 0.1.7's launcher is
+    /// profile-based, so the profile must be named explicitly once `--patch`
+    /// is present, and `--patch` must precede the web app's passthrough flags
+    /// (`--port`/`--no-open`) or the overlay is never loaded.
     #[test]
     fn web_launch_args_places_patch_before_passthrough_flags() {
         let args = web_launch_args(Some("/tmp/kodex.patch.yml"));
         assert_eq!(
             args,
             vec![
+                "--profile",
                 "web",
                 "--patch",
                 "/tmp/kodex.patch.yml",
@@ -1493,7 +1509,10 @@ mod tests {
     #[test]
     fn web_launch_args_omits_a_blank_patch() {
         for blank in [None, Some(""), Some("   ")] {
-            assert_eq!(web_launch_args(blank), vec!["web", "--port", "0", "--no-open"]);
+            assert_eq!(
+                web_launch_args(blank),
+                vec!["--profile", "web", "--port", "0", "--no-open"]
+            );
         }
     }
 
@@ -1561,11 +1580,15 @@ mod tests {
     fn is_dsh_web_command_matches_only_the_server_invocation() {
         // Kodex spawns `dsh web` via a shell wrapper, so the argv may carry an
         // absolute path (script shim), a bare `dsh`, or a node-prefixed line.
+        // dsh ≥ 0.1.7 is profile-based (`--profile web`); the positional
+        // `dsh web` form belongs to orphans left by older Kodex builds.
         for line in [
+            "node /opt/homebrew/bin/dsh --profile web --patch /tmp/kodex.patch.yml --port 0 --no-open",
+            "/opt/homebrew/bin/dsh --profile web --port 0 --no-open",
+            "/bin/sh -c /opt/homebrew/bin/dsh --profile web --port 0",
             "node /opt/homebrew/bin/dsh web --port 0 --no-open",
             "/opt/homebrew/bin/dsh web --port 0 --no-open",
             "dsh web",
-            "/bin/sh -c /opt/homebrew/bin/dsh web --port 0",
         ] {
             assert!(is_dsh_web_command(line), "should match: {line}");
         }
@@ -1577,10 +1600,13 @@ mod tests {
         for line in [
             "dsh acp",
             "dsh --version",
+            "dsh --profile tui",
+            "dsh --profile headless",
             "dshweb serve",
             "sleep 60",
             "/opt/homebrew/bin/dshx web",
             "/opt/homebrew/bin/dsh website",
+            "/opt/homebrew/bin/dsh --profile website",
         ] {
             assert!(!is_dsh_web_command(line), "should NOT match: {line}");
         }

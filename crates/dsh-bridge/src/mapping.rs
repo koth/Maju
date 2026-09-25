@@ -578,12 +578,24 @@ pub fn map_session_event(
         }
         "tool/result" => {
             let data: Option<ToolResultData> = event.data();
+            // v4 (dsh ≥ 0.1.7): `message.toolCallId` on the first-class
+            // tool-role message. v3 fallback: the single `tool-result`
+            // wrapper block inside the user-role message.
             let call_id = data
                 .as_ref()
-                .and_then(|d| d.message.content.first())
-                .and_then(|b| match b {
-                    ContentBlock::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-                    _ => None,
+                .and_then(|d| {
+                    d.message.tool_call_id.clone().or_else(|| {
+                        d.message.content.iter().find_map(|block| {
+                            (block.get("type").and_then(Value::as_str) == Some("tool-result"))
+                                .then(|| {
+                                    block
+                                        .get("toolCallId")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string)
+                                })
+                                .flatten()
+                        })
+                    })
                 })
                 .unwrap_or_default();
             let mut out = Vec::new();
@@ -658,7 +670,16 @@ pub fn map_session_event(
                     error: data
                         .as_ref()
                         .and_then(|d| d.error.as_ref())
-                        .map(|e| format!("{}: {}", e.name, e.code))
+                        .map(|e| {
+                            // v4 carries a raw user-facing reason; fall back to
+                            // the `name: code` identity pair when absent.
+                            e.reason
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|r| !r.is_empty())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("{}: {}", e.name, e.code))
+                        })
                         .unwrap_or_else(|| "tool error".to_string()),
                     raw_output,
                     terminal_output,
@@ -1136,10 +1157,12 @@ fn result_outcome(data: &ToolResultData) -> String {
 }
 
 /// Model-facing result text: concatenate text blocks of the tool-result
-/// message, INCLUDING text nested inside `tool-result` blocks. Nested blocks
-/// that are not plain text (e.g. an MCP `generate_image` JSON result) are kept
-/// as compact JSON instead of being dropped — the tool card's image preview
-/// and the expanded raw view both read them from `raw_output`.
+/// message. In session format v4 (dsh ≥ 0.1.7) the message `content` holds
+/// the result payload blocks directly; v3 wrapped them in a single
+/// `tool-result` block whose `content` carried the payload. Blocks that are
+/// not plain text (e.g. an MCP `generate_image` JSON result) are kept as
+/// compact JSON instead of being dropped — the tool card's image preview and
+/// the expanded raw view both read them from `raw_output`.
 fn result_text(data: &ToolResultData) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     collect_result_text(&data.message.content, &mut parts);
@@ -1150,21 +1173,26 @@ fn result_text(data: &ToolResultData) -> Option<String> {
     }
 }
 
-fn collect_result_text(blocks: &[ContentBlock], out: &mut Vec<String>) {
+fn collect_result_text(blocks: &[Value], out: &mut Vec<String>) {
     for block in blocks {
-        match block {
-            ContentBlock::Text { text } => out.push(text.clone()),
-            ContentBlock::ToolResult { content, .. } => {
-                for value in content {
-                    let text = value.get("text").and_then(Value::as_str);
-                    let is_text = value.get("type").and_then(Value::as_str) == Some("text");
-                    match (text, is_text) {
-                        (Some(text), true) => out.push(text.to_string()),
-                        _ => out.push(json_compact_no_escape(value)),
-                    }
-                }
-            }
-            _ => {}
+        let block_type = block.get("type").and_then(Value::as_str);
+        if block_type == Some("text")
+            && let Some(text) = block.get("text").and_then(Value::as_str)
+        {
+            out.push(text.to_string());
+            continue;
+        }
+        // v3 wrapper: the payload lived one level down inside the
+        // `tool-result` block's own `content` array.
+        if block_type == Some("tool-result")
+            && let Some(content) = block.get("content").and_then(Value::as_array)
+        {
+            collect_result_text(content, out);
+            continue;
+        }
+        // Non-text payload (MCP JSON results, …) survives as compact JSON.
+        if block.is_object() || block.is_array() {
+            out.push(json_compact_no_escape(block));
         }
     }
 }
@@ -2802,6 +2830,146 @@ mod tests {
                                 "type": "json",
                                 "images": [{ "path": "file:///C:/x/.kodex/generated-images/a.png" }]
                             }]
+                        }]
+                    }
+                }
+            }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        let raw = mapped
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::ToolCompleted { raw_output, .. } => raw_output.clone(),
+                _ => None,
+            })
+            .expect("expected ToolCompleted carrying raw_output");
+        assert!(raw.contains("generated-images"), "raw_output: {raw}");
+    }
+
+    #[test]
+    fn v4_first_class_tool_result_completes_the_call() {
+        // Session format v4 (dsh ≥ 0.1.7): the tool result is a first-class
+        // `role: "tool"` message — `toolCallId`/`isError` live on the message
+        // and `content` holds the payload blocks directly (no `tool-result`
+        // wrapper). The completion must correlate with the running call and
+        // carry the payload text as raw_output.
+        let (sink, _rx) = test_sink();
+        let call = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/call",
+                "seq": 2,
+                "time": 0.0,
+                "data": { "turn": 1, "step": 1, "callId": "call-v4", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+            }
+        }));
+        let _ = map_mux_frame(&call, &sink);
+
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 3,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "msg-1",
+                        "role": "tool",
+                        "source": { "kind": "tool", "callId": "call-v4" },
+                        "toolCallId": "call-v4",
+                        "content": [{ "type": "text", "text": "file-a\nfile-b" }]
+                    }
+                }
+            }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        let completed = mapped
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::ToolCompleted {
+                    id, raw_output, ..
+                } => Some((id.clone(), raw_output.clone())),
+                _ => None,
+            })
+            .expect("expected ToolCompleted for the v4 tool result");
+        assert_eq!(completed.0, "call-v4", "completion must carry the call id");
+        assert!(
+            completed.1.as_deref().is_some_and(|raw| raw.contains("file-a")),
+            "raw_output must carry the v4 payload text: {:?}",
+            completed.1
+        );
+    }
+
+    #[test]
+    fn v4_tool_failure_surfaces_the_reason() {
+        // v4 failure: `error.reason` is the raw user-facing reason and the
+        // closer messages dsh synthesizes at a fork boundary rely on it.
+        let (sink, _rx) = test_sink();
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 3,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "msg-2",
+                        "role": "tool",
+                        "source": { "kind": "tool", "callId": "call-x" },
+                        "toolCallId": "call-x",
+                        "isError": true,
+                        "content": [{ "type": "text", "text": "tool outcome is unknown" }]
+                    },
+                    "error": {
+                        "name": "ToolOutcomeUnknownError",
+                        "code": "tool/outcome-unknown",
+                        "reason": "会话在工具结果落地前被分叉，该工具的结局未知。"
+                    }
+                }
+            }
+        }));
+        let mapped = map_mux_frame(&result, &sink);
+        let failed = mapped
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::ToolFailed { id, error, .. } => Some((id.clone(), error.clone())),
+                _ => None,
+            })
+            .expect("expected ToolFailed for the v4 error result");
+        assert_eq!(failed.0, "call-x");
+        assert_eq!(failed.1, "会话在工具结果落地前被分叉，该工具的结局未知。");
+    }
+
+    #[test]
+    fn v4_tool_result_keeps_mcp_json_payload_as_raw_output() {
+        // v4 shape + an MCP JSON payload block (generate_image): the payload
+        // must survive into raw_output for the image preview.
+        let (sink, _rx) = test_sink();
+        let result = mux(serde_json::json!({
+            "type": "session/event",
+            "sessionId": "s-1",
+            "event": {
+                "type": "tool/result",
+                "seq": 3,
+                "time": 0.0,
+                "data": {
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "msg-3",
+                        "role": "tool",
+                        "source": { "kind": "tool", "callId": "call-img" },
+                        "toolCallId": "call-img",
+                        "content": [{
+                            "type": "json",
+                            "images": [{ "path": "file:///x/.kodex/generated-images/a.png" }]
                         }]
                     }
                 }

@@ -219,14 +219,39 @@ impl std::fmt::Display for RpcError {
 /// Extract the dsh error `code` from a `call()` failure. `call()` formats
 /// business errors via `RpcError`'s Display as `"{code}: {message}"`, so the
 /// code is recoverable from the message prefix before the first `": "`.
+/// Codes are namespaced with `/` (`session/writer-held`,
+/// `gateway/arguments-invalid`) and hyphenated (`agent-preset-locked`).
 pub fn rpc_error_code(err: &anyhow::Error) -> Option<String> {
     let msg = format!("{err}");
     msg.split(": ")
         .next()
         .filter(|code| {
-            !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '/')
         })
         .map(|code| code.to_string())
+}
+
+/// User-facing text for a harness RPC failure the user can act on. Returns
+/// `None` for codes without a better message (the raw error text is shown).
+///
+/// dsh 0.1.7 introduced the `session/*` namespaced variants below; without a
+/// mapping the UI surfaces the raw code string, which reads as gibberish.
+pub fn friendly_rpc_error(err: &anyhow::Error) -> Option<String> {
+    let code = rpc_error_code(err)?;
+    let text = match code.as_str() {
+        "session/provider-credentials-unavailable" => {
+            "模型提供方的凭据不可用（API Key 未配置或已失效），请在设置 → BYOK 中检查对应提供方。"
+        }
+        "session/provider-models-unavailable" => {
+            "模型提供方的模型列表获取失败，请检查网络连接或提供方配置。"
+        }
+        "session/writer-held" => "会话日志正被其他实例占用，请稍后重试。",
+        _ => return None,
+    };
+    Some(text.to_string())
 }
 
 /// Whether a `commands/execute` failure is the gateway refusing the args shape
@@ -960,6 +985,34 @@ mod tests {
             message: String::new(),
         };
         assert!(receipt.accepted());
+    }
+
+    #[test]
+    fn rpc_error_code_accepts_namespaced_codes() {
+        // dsh 0.1.7 namespaced codes (`session/writer-held`) must extract —
+        // the pre-0.1.7 filter dropped codes containing `/`, which made the
+        // friendly-error mapping unreachable for exactly the new codes.
+        let err = anyhow::anyhow!("session/writer-held: another writer owns the log");
+        assert_eq!(
+            rpc_error_code(&err).as_deref(),
+            Some("session/writer-held")
+        );
+        let err = anyhow::anyhow!("agent-preset-locked: preset fixed");
+        assert_eq!(rpc_error_code(&err).as_deref(), Some("agent-preset-locked"));
+        // Not a code-shaped prefix: no extraction.
+        let err = anyhow::anyhow!("connection refused: no host on 127.0.0.1");
+        assert!(rpc_error_code(&err).is_none());
+    }
+
+    #[test]
+    fn friendly_rpc_error_maps_the_new_session_codes() {
+        let err = anyhow::anyhow!("session/provider-credentials-unavailable: no key");
+        assert_eq!(
+            friendly_rpc_error(&err).as_deref(),
+            Some("模型提供方的凭据不可用（API Key 未配置或已失效），请在设置 → BYOK 中检查对应提供方。")
+        );
+        let err = anyhow::anyhow!("session/not-found: gone");
+        assert!(friendly_rpc_error(&err).is_none());
     }
 
     #[test]

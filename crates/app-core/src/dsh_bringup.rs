@@ -176,12 +176,15 @@ impl DshBringup {
             .map_err(|e| format!("failed to write dsh settings.yaml: {e}"))?;
 
         // 1.05 Write the Kodex-owned cordis patch overlay. `settings.yaml` only
-        //      carries the two sections Kodex owns; bundle-row plugin config
-        //      (the session-title token budget, the optional pinned route, and
-        //      the local MCP servers) has to travel as a `--patch` overlay
+        //      carries the provider-route sections; bundle-row plugin config
+        //      (the session-title token budget and pinned route, the default
+        //      model and default preset — both plugin config since dsh 0.1.7 —
+        //      and the local MCP servers) has to travel as a `--patch` overlay
         //      applied after the profile layer.
         let title_route = crate::settings::session_title_route(paths);
         let patch_config = HarnessPatchConfig::with_title_route(title_route)
+            .with_default_model(&config.default_model)
+            .with_default_preset(config.default_preset.as_deref())
             .with_mcp_servers(exposed_mcp.rows.clone());
         write_harness_patch(&paths.dsh_patch_path(), &patch_config)
             .map_err(|e| format!("failed to write dsh patch overlay: {e}"))?;

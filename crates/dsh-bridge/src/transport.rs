@@ -677,6 +677,28 @@ impl HttpClient {
         Ok(stream)
     }
 
+    /// Open one `job/list` logical stream for `session_id`.
+    ///
+    /// dsh 0.1.7 moved background jobs off the `session/control` stream into
+    /// the `jobController` Typert Remote service (`dsh-api-job-controller`):
+    /// `job/list` mirrors the roster one session can see as whole-set frames
+    /// (`{type:"rows", jobs:[…]}`) — one on open, then one after each
+    /// coalesced burst of lifecycle commits. The bridge records each roster
+    /// into [`crate::jobs`] for the context dock's 后台任务 list.
+    pub async fn open_job_list(&self, session_id: &str) -> anyhow::Result<SseStream> {
+        let request = serde_json::json!({
+            "type": "open",
+            "streamId": uuid::Uuid::new_v4().to_string(),
+            "endpoint": "job/list",
+            "payload": { "args": { "request": { "sessionId": session_id } } }
+        });
+        let text = serde_json::to_string(&request)?;
+        tracing::info!(target: "dsh-bridge::ws", session_id = %session_id, "opening dsh job list");
+        let stream = self.open_ws("remote.mux", Some(text)).await?;
+        tracing::info!(target: "dsh-bridge::ws", session_id = %session_id, "dsh job list opened");
+        Ok(stream)
+    }
+
     /// Open one `session/follow` logical stream for `session_id`.
     ///
     /// The dsh gateway multiplexes Typert Remote streams over a single

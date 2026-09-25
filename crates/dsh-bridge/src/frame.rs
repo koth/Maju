@@ -648,16 +648,41 @@ pub struct ToolResultData {
     pub meta: Option<Value>,
 }
 
+/// The `message` of a `tool/result` event.
+///
+/// dsh 0.1.7 (session format v4) made the tool result a first-class
+/// `role: "tool"` message: the call correlation (`toolCallId`) and the error
+/// flag (`isError`) live on the message itself, and `content` holds the
+/// result payload blocks DIRECTLY. v3 wrapped everything in a user-role
+/// message whose single `tool-result` content block carried the same fields
+/// (dsh migrates stored logs to v4 on read, so a 0.1.7 host only ever emits
+/// the v4 shape; the wrapper handling stays as a safety net).
+///
+/// `content` is kept as raw JSON values: MCP tool results (e.g. kodex-image
+/// `generate_image` returning `images[].path`) use block shapes outside the
+/// typed schema, and routing them through a typed enum silently dropped the
+/// payload (the tool card's image preview and the expanded raw view both read
+/// them from `raw_output`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolResultMessage {
     pub role: String,
-    pub content: Vec<ContentBlock>,
+    /// v4: call correlation on the message itself.
+    #[serde(default, rename = "toolCallId")]
+    pub tool_call_id: Option<String>,
+    /// v4: error flag on the message itself.
+    #[serde(default, rename = "isError")]
+    pub is_error: Option<bool>,
+    #[serde(default)]
+    pub content: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolResultError {
     pub name: String,
     pub code: String,
+    /// v4: raw user-facing failure reason (outside the model-facing content).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// `TokenUsage` — `{ inputTokens, outputTokens, cacheReadTokens?, ... }`.
