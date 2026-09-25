@@ -3201,3 +3201,78 @@ describe("ConversationTimeline – turn-based history folding", () => {
     ).toHaveLength(0);
   });
 });
+
+describe("file path links", () => {
+  it("renders file links once the workspace root lands", () => {
+    // Regression: the workspace root used to ride a module-level variable
+    // read inside memoized rows. A row mounted before the root arrived (fresh
+    // app launch restoring a history session) kept the empty value forever —
+    // memo bailed on later updates — so the spans never became links. Links
+    // are now shape-only and fixed at render; the root still gates the shape
+    // check, and it must reach the rows as a real prop.
+    const body = "改动在 `src/main.ts:3` 这里";
+    const withRoot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [{ id: "msg-1", role: "Assistant", body }],
+    });
+    const withoutRoot = {
+      ...withRoot,
+      workspace: { ...withRoot.workspace, root: "" },
+    };
+    const { container, rerender } = render(
+      <ConversationTimeline
+        snapshot={withoutRoot}
+        onPermissionSelect={() => {}}
+        onFilePathClick={() => {}}
+      />,
+    );
+    // No root → relative paths cannot resolve → plain code.
+    expect(container.querySelector("code.md-file-path")).toBeNull();
+
+    rerender(
+      <ConversationTimeline
+        snapshot={withRoot}
+        onPermissionSelect={() => {}}
+        onFilePathClick={() => {}}
+      />,
+    );
+    expect(container.querySelector("code.md-file-path")).toBeTruthy();
+    expect(
+      container.querySelector("code.md-file-path")?.getAttribute("data-file-path"),
+    ).toContain("src/main.ts#3");
+  });
+
+  it("keeps file links fixed across parent re-renders", () => {
+    // Rendering is a pure function of content + workspace root: re-rendering
+    // the timeline with fresh callback identities must not change the markup.
+    // (The old probe pipeline recomputed clickability per render and could
+    // lose links to in-flight probe cancellations.)
+    const snapshot = makeSnapshot({
+      timeline: [{ Message: "msg-1" }],
+      messages: [
+        {
+          id: "msg-1",
+          role: "Assistant",
+          body: "改了 `crates/dsh-bridge/src/process.rs` 这个文件",
+        },
+      ],
+    });
+    const { container, rerender } = render(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onFilePathClick={() => {}}
+      />,
+    );
+    expect(container.querySelector("code.md-file-path")).toBeTruthy();
+    const first = container.querySelector(".msg-content-assistant")!.innerHTML;
+    rerender(
+      <ConversationTimeline
+        snapshot={snapshot}
+        onPermissionSelect={() => {}}
+        onFilePathClick={() => {}}
+      />,
+    );
+    expect(container.querySelector(".msg-content-assistant")!.innerHTML).toBe(first);
+  });
+});

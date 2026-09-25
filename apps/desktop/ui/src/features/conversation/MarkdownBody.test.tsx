@@ -1,38 +1,17 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import MarkdownBody, {
-  clearFilePathLinkCacheForTests,
   pathMatchesFragment,
   resolveClickableFilePath,
 } from "./MarkdownBody";
-import { fsPathExists } from "../../lib/tauri";
-
-vi.mock("../../lib/tauri", async () => {
-  const actual = await vi.importActual<typeof import("../../lib/tauri")>(
-    "../../lib/tauri",
-  );
-  return {
-    ...actual,
-    fsPathExists: vi.fn(async (paths: string[]) => paths.map(() => true)),
-  };
-});
 
 const originalClipboard = navigator.clipboard;
 
 describe("MarkdownBody", () => {
-  beforeEach(() => {
-    // Pool matches now always go through fsPathExists; restore a permissive
-    // default after tests that force every probe to false.
-    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) =>
-      paths.map(() => true),
-    );
-  });
-
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
     vi.clearAllMocks();
-    clearFilePathLinkCacheForTests();
     if (originalClipboard) {
       Object.defineProperty(navigator, "clipboard", {
         value: originalClipboard,
@@ -116,7 +95,9 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("renders existing inline-code file paths as clickable links with line numbers", async () => {
+  it("renders inline-code file paths as fixed file links with line numbers", () => {
+    // Deterministic: the shape decides at render time — no existence probe,
+    // no async flip. Click-time resolution hands the editor the file.
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -127,21 +108,16 @@ describe("MarkdownBody", () => {
       />,
     );
 
-    const pathCode = screen.getByText("crates/codebuddy-proxy/src/usage.rs:75");
-    // Renders as plain code until the existence probe resolves.
-    expect(pathCode).not.toHaveClass("md-file-path");
-    await waitFor(() =>
-      expect(screen.getByText("crates/codebuddy-proxy/src/usage.rs:75")).toHaveClass(
-        "md-file-path",
-      ),
-    );
-    const fileLink = screen.getByRole("link", { name: /usage\.rs/ });
+    const fileLink = screen.getByText("crates/codebuddy-proxy/src/usage.rs:75");
+    expect(fileLink).toHaveClass("md-file-path");
     expect(fileLink).toHaveAttribute("tabindex", "0");
     expect(fileLink.querySelector(".md-file-path-icon")).toHaveAttribute(
       "aria-hidden",
       "true",
     );
-    expect(fsPathExists).toHaveBeenCalledWith(["crates/codebuddy-proxy/src/usage.rs"]);
+    expect(fileLink.getAttribute("data-file-path")).toBe(
+      "crates/codebuddy-proxy/src/usage.rs#75",
+    );
     fireEvent.keyDown(fileLink, { key: "Enter" });
     expect(onFilePathClick).toHaveBeenCalledWith(
       "crates/codebuddy-proxy/src/usage.rs",
@@ -160,45 +136,79 @@ describe("MarkdownBody", () => {
     expect(onFilePathClick).toHaveBeenCalledTimes(1);
   });
 
-  it("retries a transient workspace probe failure after session restore", async () => {
-    let attempts = 0;
-    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => {
-      attempts += 1;
-      if (attempts === 1) throw new Error("workspace reconnecting");
-      return paths.map(() => true);
-    });
-
-    render(
-      <MarkdownBody
-        content={"恢复会话中的 `crates/app-core/src/lib.rs` 文件链接。"}
-        workspaceRoot="D:\\work\\kodex"
-        onFilePathClick={vi.fn()}
-      />,
+  it("renders identical markup across re-renders (fixed, no per-render re-computation)", () => {
+    // The render must be a pure function of content + workspace root. An
+    // earlier probe-based design recomputed clickability per render and could
+    // flip or lose links depending on async timing.
+    const content = "改了 `crates/dsh-bridge/src/process.rs` 这个文件";
+    const { container, rerender } = render(
+      <MarkdownBody content={content} workspaceRoot="/test" onFilePathClick={vi.fn()} />,
     );
-
-    await waitFor(
-      () =>
-        expect(screen.getByText("crates/app-core/src/lib.rs")).toHaveClass(
-          "md-file-path",
-        ),
-      { timeout: 2000 },
+    const first = container.querySelector(".md-body")!.innerHTML;
+    rerender(
+      <MarkdownBody content={content} workspaceRoot="/test" onFilePathClick={vi.fn()} />,
     );
-    expect(attempts).toBeGreaterThan(1);
+    expect(container.querySelector(".md-body")!.innerHTML).toBe(first);
+    expect(container.querySelector("code")!).toHaveClass("md-file-path");
   });
 
-  it("keeps non-existent paths as plain code", async () => {
-    vi.mocked(fsPathExists).mockResolvedValueOnce([false]);
+  it("markdown links to workspace files render as fixed file links that open", () => {
+    // Regression: `[label](crates/foo.rs#L12)` rendered as a dead relative-URL
+    // anchor — the `#L…` fragment broke path resolution and the url transform
+    // stripped the href, so clicking did nothing. File links open the editor
+    // like inline-code paths do.
+    const onFilePathClick = vi.fn();
     render(
       <MarkdownBody
-        content={"残缺的 `codex_api_proxy/mod.rs:3880` 不应渲染成链接。"}
-        workspaceRoot="D:\\work\\kodex"
+        content={"见 [usage.rs](crates/codebuddy-proxy/src/usage.rs#L75) 里的改动。"}
+        workspaceRoot="/test"
+        onFilePathClick={onFilePathClick}
+      />,
+    );
+    const fileLink = screen.getByRole("link", { name: /usage\.rs/ });
+    expect(fileLink).toHaveClass("md-file-path");
+    expect(fileLink.getAttribute("data-file-path")).toBe(
+      "crates/codebuddy-proxy/src/usage.rs#75",
+    );
+    fireEvent.click(fileLink);
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "crates/codebuddy-proxy/src/usage.rs",
+      75,
+    );
+  });
+
+  it("keeps external links as plain external anchors", async () => {
+    render(
+      <MarkdownBody
+        content={"见 [官网](https://example.com/docs) 了解详情。"}
+        workspaceRoot="/test"
         onFilePathClick={vi.fn()}
       />,
     );
+    const link = screen.getByRole("link", { name: "官网" });
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    expect(link).not.toHaveClass("md-file-path");
+  });
 
-    const code = screen.getByText("codex_api_proxy/mod.rs:3880");
-    await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
-    expect(code).not.toHaveClass("md-file-path");
+  it("renders non-existent file references as fixed links too", () => {
+    // Deterministic rendering: the shape decides, never an existence probe —
+    // a hallucinated path still renders as a link, and the editor reports the
+    // miss on open. Stable markup beats precise-but-flaky markup.
+    const onFilePathClick = vi.fn();
+    render(
+      <MarkdownBody
+        content={"见 [ghost](crates/nope/ghost.rs) 和 `crates/nope/missing.rs:9`。"}
+        workspaceRoot="/test"
+        onFilePathClick={onFilePathClick}
+      />,
+    );
+    for (const label of ["ghost", "crates/nope/missing.rs:9"]) {
+      const el = screen.getByText(label);
+      expect(el).toHaveClass("md-file-path");
+      fireEvent.click(el);
+    }
+    expect(onFilePathClick).toHaveBeenCalledWith("crates/nope/ghost.rs", undefined);
+    expect(onFilePathClick).toHaveBeenCalledWith("crates/nope/missing.rs", 9);
   });
 
   it("does not mark identifiers or prose as file paths", () => {
@@ -214,7 +224,7 @@ describe("MarkdownBody", () => {
     expect(screen.getByText("to_openai_usage")).not.toHaveAttribute("role", "link");
   });
 
-  it("resolves bare file names via the changeset as the priority source", async () => {
+  it("resolves bare file names via the changeset at click time", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -228,16 +238,9 @@ describe("MarkdownBody", () => {
         ]}
       />,
     );
-    await waitFor(() =>
-      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
-    );
+    // Fixed chips at render; the pool resolves the real path on click.
+    expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path");
     expect(screen.getByText("ConversationTimeline.css:848")).toHaveClass("md-file-path");
-    expect(fsPathExists).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        "apps/desktop/ui/src/features/composer/Composer.tsx",
-        "apps/desktop/ui/src/features/conversation/ConversationTimeline.css",
-      ]),
-    );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "apps/desktop/ui/src/features/composer/Composer.tsx",
@@ -245,7 +248,7 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("resolves partial relative paths via the changeset", async () => {
+  it("resolves partial relative paths via the changeset at click time", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -256,9 +259,6 @@ describe("MarkdownBody", () => {
         changedFiles={["apps/desktop/src-tauri/src/commands/fs.rs"]}
       />,
     );
-    await waitFor(() =>
-      expect(screen.getByText("commands/fs.rs:138")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("commands/fs.rs:138"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "apps/desktop/src-tauri/src/commands/fs.rs",
@@ -266,7 +266,7 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("resolves bare file names without a line number via the changeset", async () => {
+  it("resolves bare file names without a line number via the changeset at click time", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -277,9 +277,6 @@ describe("MarkdownBody", () => {
         changedFiles={["apps/desktop/ui/src/features/conversation/MarkdownBody.tsx"]}
       />,
     );
-    await waitFor(() =>
-      expect(screen.getByText("MarkdownBody.tsx")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("MarkdownBody.tsx"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "apps/desktop/ui/src/features/conversation/MarkdownBody.tsx",
@@ -287,7 +284,7 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("matches space-separated path fragments as a whole against the candidate pool", async () => {
+  it("matches space-separated path fragments as a whole at click time", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -298,10 +295,6 @@ describe("MarkdownBody", () => {
         candidatePaths={["crates/app-core/src/state.rs"]}
       />,
     );
-
-    await waitFor(() =>
-      expect(screen.getByText("app-core / src / state.rs")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("app-core / src / state.rs"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "crates/app-core/src/state.rs",
@@ -309,11 +302,11 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("does not resolve a relative path to a deeper sibling that shares its segments", async () => {
+  it("does not resolve a relative path to a deeper sibling that shares its segments", () => {
     // Regression: `runtime/tests.rs` used to link to
     // `.../runtime/permissions/tests.rs` because the matcher only anchored on
     // the trailing file name and treated the fragment as a loose subsequence.
-    // The whole fragment must now line up contiguously, so the contiguous
+    // The whole fragment must line up contiguously, so the contiguous
     // `.../runtime/tests.rs` wins and the deeper sibling never matches.
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
@@ -328,10 +321,6 @@ describe("MarkdownBody", () => {
         ]}
       />,
     );
-
-    await waitFor(() =>
-      expect(screen.getByText("runtime/tests.rs")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("runtime/tests.rs"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "crates/acp-core/src/runtime/tests.rs",
@@ -339,7 +328,7 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("matches partial relative paths against the candidate pool without a changeset", async () => {
+  it("matches partial relative paths against the candidate pool at click time", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -350,10 +339,6 @@ describe("MarkdownBody", () => {
         candidatePaths={["apps/desktop/src-tauri/src/commands/fs.rs"]}
       />,
     );
-
-    await waitFor(() =>
-      expect(screen.getByText("commands/fs.rs:144")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("commands/fs.rs:144"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "apps/desktop/src-tauri/src/commands/fs.rs",
@@ -361,44 +346,50 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("keeps spans as plain code when neither the changeset nor the candidate pool matches", async () => {
-    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => paths.map(() => false));
+  it("opens the raw span when neither the changeset nor the candidate pool matches", () => {
+    const onFilePathClick = vi.fn();
     render(
       <MarkdownBody
         content={"`SomeUnrelated.tsx:12` 不在本轮上下文里。"}
         workspaceRoot="D:\\work\\kodex"
-        onFilePathClick={vi.fn()}
+        onFilePathClick={onFilePathClick}
         changedFiles={["apps/desktop/ui/src/features/composer/Composer.tsx"]}
         candidatePaths={["crates/app-core/src/state.rs"]}
       />,
     );
 
-    await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
-    expect(screen.getByText("SomeUnrelated.tsx:12")).not.toHaveClass("md-file-path");
+    const el = screen.getByText("SomeUnrelated.tsx:12");
+    expect(el).toHaveClass("md-file-path");
+    fireEvent.click(el);
+    // Fixed chip; the editor receives the span as written.
+    expect(onFilePathClick).toHaveBeenCalledWith("SomeUnrelated.tsx", 12);
   });
 
-  it("keeps pool-matched paths as plain code when the resolved file does not exist", async () => {
-    vi.mocked(fsPathExists).mockImplementation(async (paths: string[]) => paths.map(() => false));
+  it("resolves pool matches at click time even when the file no longer exists", () => {
+    // Existence is the editor's problem — rendering never probes, so a
+    // deleted file still renders and resolves like any other reference.
+    const onFilePathClick = vi.fn();
     render(
       <MarkdownBody
         content={"提到 `transport.rs:16` 和 `docs/relay-service-requirements.md`。"}
         workspaceRoot="D:\\work\\kodex"
-        onFilePathClick={vi.fn()}
+        onFilePathClick={onFilePathClick}
         candidatePaths={[
           "server/src/transport.rs",
           "docs/relay-service-requirements.md",
         ]}
       />,
     );
-
-    await waitFor(() => expect(fsPathExists).toHaveBeenCalled());
-    expect(screen.getByText("transport.rs:16")).not.toHaveClass("md-file-path");
-    expect(screen.getByText("docs/relay-service-requirements.md")).not.toHaveClass(
-      "md-file-path",
+    fireEvent.click(screen.getByText("transport.rs:16"));
+    expect(onFilePathClick).toHaveBeenCalledWith("server/src/transport.rs", 16);
+    fireEvent.click(screen.getByText("docs/relay-service-requirements.md"));
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "docs/relay-service-requirements.md",
+      undefined,
     );
   });
 
-  it("strips trailing line references from candidate pool matches", async () => {
+  it("strips trailing line references from candidate pool matches", () => {
     const onFilePathClick = vi.fn();
     const root = "D:\\work\\kodex";
     render(
@@ -410,10 +401,6 @@ describe("MarkdownBody", () => {
         candidatePaths={["apps/desktop/src-tauri/src/commands/fs.rs:1"]}
       />,
     );
-
-    await waitFor(() =>
-      expect(screen.getByText("commands/fs.rs:144")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("commands/fs.rs:144"));
     expect(onFilePathClick).toHaveBeenCalledWith(
       "apps/desktop/src-tauri/src/commands/fs.rs",
@@ -421,7 +408,9 @@ describe("MarkdownBody", () => {
     );
   });
 
-  it("does not carry link resolution across workspace switches", async () => {
+  it("resolves against the CURRENT workspace at click time across workspace switches", () => {
+    // Stateless resolution: no module caches survive a workspace switch, so
+    // the click target always follows the current props.
     const rootA = "D:\\work\\repoA";
     const rootB = "D:\\work\\repoB";
     const onFilePathClick = vi.fn();
@@ -434,16 +423,10 @@ describe("MarkdownBody", () => {
         changedFiles={["apps/Composer.tsx"]}
       />,
     );
-    await waitFor(() =>
-      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
-    );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
     expect(onFilePathClick).toHaveBeenCalledWith("apps/Composer.tsx", 548);
     onFilePathClick.mockClear();
 
-    // Switching to a different workspace must not reuse repoA's cached
-    // resolved location — that override lives under a path inside repoA and
-    // would be rejected as outside the workspace when clicked in repoB.
     rerender(
       <MarkdownBody
         content={"改在 `Composer.tsx:548` 里。"}
@@ -451,9 +434,6 @@ describe("MarkdownBody", () => {
         onFilePathClick={onFilePathClick}
         changedFiles={["src/Composer.tsx"]}
       />,
-    );
-    await waitFor(() =>
-      expect(screen.getByText("Composer.tsx:548")).toHaveClass("md-file-path"),
     );
     fireEvent.click(screen.getByText("Composer.tsx:548"));
     expect(onFilePathClick).toHaveBeenCalledWith("src/Composer.tsx", 548);

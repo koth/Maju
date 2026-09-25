@@ -23,15 +23,11 @@ import { buildHandoffDigest } from "./handoff";
 import { useProxyRetry, proxyRetryReasonLabel } from "./useProxyRetry";
 import { useNearViewportOnce } from "./useNearViewportOnce";
 
-/** Workspace root for resolving relative file paths inside markdown messages.
- *  Set once per timeline render; module-level so the memoized streaming
- *  component can read it without prop drilling through the stream store. */
-let visibleWorkspaceRoot: string | undefined;
-
-/** Paths of files in the current git changeset — the strongest signal for
- *  resolving bare file names (`Composer.tsx:548`) mentioned in assistant
- *  messages, since the assistant almost always discusses files it changed. */
-let visibleChangedFiles: string[] = [];
+/** Workspace root and git changeset travel as PROPS down to the memoized
+ *  message rows (they used to be module-level variables read inside memoized
+ *  renders — a row that mounted before the workspace root landed kept the
+ *  empty value forever because memo bailed on later updates, so freshly
+ *  opened history sessions rendered no clickable file links at all). */
 
 const INITIAL_TIMELINE_WINDOW = 80;
 const TIMELINE_WINDOW_STEP = 80;
@@ -165,6 +161,14 @@ interface MessageRowProps {
   retryable?: boolean;
   onRetry?: (messageId: string, text: string) => Promise<void> | void;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  /** Workspace root for resolving relative file paths in the message body.
+   *  A real prop (not a module global) so a late-arriving root re-renders
+   *  the row and the file-link probe can finally run. */
+  workspaceRoot?: string;
+  /** Paths of files in the current git changeset — the strongest signal for
+   *  resolving bare file names, since the assistant usually discusses files
+   *  it just changed. Identity-stable (parent memoizes by path signature). */
+  changedFiles?: string[];
   /** Readonly pool-owned array: identity stability is what lets memoized
    *  MessageRows skip re-render (and markdown re-parse) on streaming deltas. */
   candidatePaths?: readonly string[];
@@ -183,6 +187,7 @@ interface StreamingMarkdownProps {
   id: string;
   body: string;
   onFilePathClick?: (filePath: string, lineNumber?: number) => void;
+  workspaceRoot?: string;
   changedFiles?: string[];
   candidatePaths?: readonly string[];
   onImagePreview?: (src: string, alt?: string) => void;
@@ -268,7 +273,7 @@ function contextCompactionDividerLabel(body: string, state: ContextCompactionSta
   return trimmed;
 }
 
-const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: StreamingMarkdownProps) {
+const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePathClick, workspaceRoot, changedFiles, candidatePaths, onImagePreview }: StreamingMarkdownProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [content, setContent] = useState(() => ensureStreamingMessageBody(id, body));
   const contentRef = useRef(content);
@@ -339,7 +344,7 @@ const StreamingMarkdown = memo(function StreamingMarkdown({ id, body, onFilePath
 
   return (
     <div ref={hostRef} className="msg-streaming-markdown">
-      <MarkdownBody content={content} workspaceRoot={visibleWorkspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} onImagePreview={onImagePreview} />
+      <MarkdownBody content={content} workspaceRoot={workspaceRoot} onFilePathClick={onFilePathClick} changedFiles={changedFiles} candidatePaths={candidatePaths} onImagePreview={onImagePreview} />
     </div>
   );
 });
@@ -507,6 +512,8 @@ const MessageRow = memo(function MessageRow({
   retryable = false,
   onRetry,
   onFilePathClick,
+  workspaceRoot,
+  changedFiles,
   candidatePaths,
   showActions = false,
   onForkOpen,
@@ -669,13 +676,13 @@ const MessageRow = memo(function MessageRow({
         <span className="msg-prefix msg-prefix-assistant">{"\u2022"} </span>
         <div className="msg-content msg-content-assistant" ref={markdownHostRef}>
           {streaming ? (
-            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} changedFiles={visibleChangedFiles} candidatePaths={candidatePaths} onImagePreview={handleImagePreview} />
+            <StreamingMarkdown id={id} body={body} onFilePathClick={onFilePathClick} workspaceRoot={workspaceRoot} changedFiles={changedFiles} candidatePaths={candidatePaths} onImagePreview={handleImagePreview} />
           ) : nearViewport ? (
             <MarkdownBody
               content={body}
-              workspaceRoot={visibleWorkspaceRoot}
+              workspaceRoot={workspaceRoot}
               onFilePathClick={onFilePathClick}
-              changedFiles={visibleChangedFiles}
+              changedFiles={changedFiles}
               candidatePaths={candidatePaths}
               onImagePreview={handleImagePreview}
             />
@@ -1142,7 +1149,7 @@ export function ConversationTimeline({
   const [handoffMessageId, setHandoffMessageId] = useState<string | null>(null);
   // Remote workspaces store a synthetic ssh:// key in workspace.root. File
   // link resolution/open needs the real remote filesystem root instead.
-  visibleWorkspaceRoot =
+  const workspaceRoot =
     snapshot.workspace.location?.kind === "remote_linux"
       ? snapshot.workspace.location.remote_path
       : snapshot.workspace.root;
@@ -1231,7 +1238,6 @@ export function ConversationTimeline({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [changedFilePathsSignature],
   );
-  visibleChangedFiles = stableChangedFilePaths;
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -2098,6 +2104,8 @@ export function ConversationTimeline({
               retryable={retryableMessages.has(msg.id)}
               onRetry={onRetryUserMessage}
               onFilePathClick={onFilePathClick}
+              workspaceRoot={workspaceRoot}
+              changedFiles={stableChangedFilePaths}
               candidatePaths={
                 msg.role === "Assistant"
                   ? filePathCandidatePool.byMessageId.get(msg.id) ?? filePathCandidatePool.all

@@ -70,7 +70,6 @@ const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
     </div>
   );
 });
-import { fsPathExists } from "../../lib/tauri";
 import { useCurrentAppTheme } from "../../lib/use-app-theme";
 import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
 import { maskMarkdownMath } from "./markdown-math";
@@ -95,49 +94,6 @@ interface Props {
   /** Called when a markdown image is clicked; omitted in non-chat surfaces. */
   onImagePreview?: (src: string, alt?: string) => void;
 }
-
-/** Cross-message cache of `fs_path_exists` results so the same file link is
- *  not re-probed for every assistant message that mentions it. */
-const filePathExistenceCache = new Map<string, boolean>();
-
-/** Workspace-relative (or absolute) path that a bare file name was located
- *  at, keyed by the same `path#line` cache key so the click handler opens
- *  the real file instead of the placeholder name. */
-const barePathOverrides = new Map<string, string>();
-
-/** Build the cache key for a resolved file reference. The workspace root is
- *  part of the key so that the same path mentioned across different
- *  workspaces (or before/after a workspace switch) does not inherit a stale
- *  existence probe or a stale resolved-location override from the other
- *  workspace — bare names such as `Composer.tsx:548` resolve to a different
- *  absolute path under each workspace, and reusing the old override would
- *  point the link outside the current workspace and fail to open. */
-function filePathCacheKey(
-  resolved: Pick<ResolvedFilePath, "path" | "lineNumber">,
-  workspaceRoot?: string,
-): string {
-  return `${workspaceRoot ?? ""}\u0000${resolved.path}#${resolved.lineNumber ?? 0}`;
-}
-
-/** Test hook: clear the module-level existence cache between cases. */
-export function clearFilePathLinkCacheForTests() {
-  filePathExistenceCache.clear();
-  barePathOverrides.clear();
-}
-
-const EMPTY_CANDIDATE_POOL: readonly string[] = [];
-
-/** Per-pool match cache: normalized source paths + per-span pool-match
- *  results, keyed by the pool array identity (the pool is rebuilt only when
-  *  the timeline/tool structure changes). See the probe effect's Pass 0. */
-const poolMatchCacheByPool = new WeakMap<
-  readonly string[],
-  {
-    changedFiles: readonly string[] | null;
-    normalizedSources: string[];
-    matches: Map<string, { rank: number; relative: string } | null>;
-  }
->();
 
 /** Value-keyed per-block compact-repair cache. Blocks are stable strings
  *  across streaming commits, so every finished block repairs once and all
@@ -227,12 +183,12 @@ const REHYPE_PLUGINS: NonNullable<
 > = [[rehypeKatex, KATEX_OPTIONS]];
 
 /** One top-level markdown block. Memo compares ONLY the block text and the
- *  file-path verification epoch: react-markdown has no parse cache, so a
- *  re-render of a section re-parses its whole text — during streaming every
- *  commit must therefore re-parse just the growing tail block. The
- *  components map is rebuilt per MarkdownBody render (closures over probe
- * state) and is intentionally excluded; `pathVersion` (verified-path count
- * plus probe round) signals that clickability state changed. */
+ *  workspace root: react-markdown has no parse cache, so a re-render of a
+ *  section re-parses its whole text — during streaming every commit must
+ *  therefore re-parse just the growing tail block. File links are now
+ *  deterministic (shape-only; no async verification state), so the block
+ *  text and the root fully determine the rendered markup. The components
+ *  map is rebuilt per MarkdownBody render and intentionally excluded. */
 const MarkdownSection = memo(
   function MarkdownSection({
     content,
@@ -240,7 +196,6 @@ const MarkdownSection = memo(
   }: {
     content: string;
     components: MarkdownComponents;
-    pathVersion: string;
     workspaceRoot?: string;
   }) {
     return (
@@ -255,9 +210,7 @@ const MarkdownSection = memo(
     );
   },
   (prev, next) =>
-    prev.content === next.content &&
-    prev.pathVersion === next.pathVersion &&
-    prev.workspaceRoot === next.workspaceRoot,
+    prev.content === next.content && prev.workspaceRoot === next.workspaceRoot,
 );
 
 function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, candidatePaths, onImagePreview }: Props) {
@@ -280,248 +233,35 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
     [math],
   );
   const blocks = useMemo(() => splitMarkdownBlocks(normalized), [normalized]);
-  // Inline-code spans that look like file paths are only rendered as links
-  // once the backend confirmed they exist (incomplete paths like
-  // `codex_api_proxy/mod.rs:3880` stay plain code).
-  const [verifiedPaths, setVerifiedPaths] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const pendingCandidates = new Map<string, ResolvedFilePath>();
-  // Bump on every probe resolution so the effect re-runs against the freshly
-  // populated cache even when nothing was newly verified.
-  const [probeRound, setProbeRound] = useState(0);
-  // A startup/reconnect can make the first existence probe fail before the
-  // workspace is ready. Retry a few times for this content/workspace instead
-  // of turning that transient miss into a permanent plain-code span.
-  const filePathProbeRetryRef = useRef({ key: "", attempts: 0 });
 
-  useEffect(() => {
-    if (!onFilePathClick) return;
-    const retryKey = `${workspaceRoot ?? ""}\u0000${content}`;
-    const retryState = filePathProbeRetryRef.current;
-    if (retryState.key !== retryKey) {
-      retryState.key = retryKey;
-      retryState.attempts = 0;
-    }
-    const candidates = [...pendingCandidates.entries()].filter(
-      ([key]) =>
-        !verifiedPaths.has(key) && filePathExistenceCache.get(key) === undefined,
-    );
-    if (candidates.length === 0) return;
-    let cancelled = false;
-    let retryTimer: number | null = null;
-
-    const root = workspaceRoot
-      ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
-      : "";
-
-    // Pass 0: changeset + turn candidate pool. A candidate's matchTail
-    //  (`Composer.tsx`, `commands/fs.rs` or `app-core / src / state.rs`) must
-    //  be a contiguous trailing run of a source path's segments — the whole
-    //  fragment is matched, never just the basename, so a deeper sibling like
-    //  `.../runtime/permissions/tests.rs` cannot capture `runtime/tests.rs`.
-    //  Hits only produce a better path to probe; existence is always confirmed
-    //  via fsPathExists so stale/hallucinated pool entries cannot become dead
-    //  links.
-    //
-    //  Both the source normalisation and the per-span match results are
-    //  cached per pool identity (the pool array is rebuilt only when the
-    //  timeline/tool structure changes): scanning a turn pool of a few
-    //  thousand entries per unresolved span on EVERY streaming commit was a
-    //  main "history-lag" amplifier.
-    const poolCacheKey = candidatePaths ?? EMPTY_CANDIDATE_POOL;
-    let poolMatchCache = poolMatchCacheByPool.get(poolCacheKey);
-    if (!poolMatchCache || poolMatchCache.changedFiles !== (changedFiles ?? null)) {
-      poolMatchCache = {
-        changedFiles: changedFiles ?? null,
-        normalizedSources: [...(changedFiles ?? []), ...(candidatePaths ?? [])].map(
-          (sourcePath) =>
-            sourcePath.replace(/\\/g, "/").replace(/:\d+(?::\d+)?$/, ""),
-        ),
-        matches: new Map(),
-      };
-      poolMatchCacheByPool.set(poolCacheKey, poolMatchCache);
-    }
-    const normalizedSources = poolMatchCache.normalizedSources;
-    const poolResolved = new Map<string, string>();
-    if (normalizedSources.length > 0) {
-      for (const [key, resolved] of candidates) {
-        if (poolResolved.has(key) || !resolved.matchTail) continue;
-        const cachedMatch = poolMatchCache.matches.get(key);
-        if (cachedMatch !== undefined) {
-          if (cachedMatch) poolResolved.set(key, cachedMatch.relative);
-          continue;
-        }
-        const tail = resolved.matchTail.replace(/\\/g, "/");
-        // `pathMatchesFragment` only accepts contiguous trailing runs, so at
-        // most one shape of fragment matches a given candidate — but several
-        // candidates may end in the same fragment. Pick the strongest (fewest
-        // leading segments dropped); ties keep the earliest source.
-        let best: { rank: number; relative: string } | null = null;
-        for (const normalized of normalizedSources) {
-          const rank = rankFragmentMatch(normalized, tail);
-          if (rank === null) continue;
-          // Strict improvement only, so the earliest source wins ties.
-          if (best !== null && rank >= best.rank) continue;
-          // Keep the open/probe target workspace-relative. Absolute pool
-          // entries (shell cwd dumps) are stripped against the workspace root
-          // so the editor never receives a synthetic absolute path that later
-          // fails strip-on-click.
-          const relative = toWorkspaceRelativePath(normalized, root || undefined);
-          if (!relative) continue;
-          best = { rank, relative };
-        }
-        poolMatchCache.matches.set(key, best);
-        if (best) poolResolved.set(key, best.relative);
-      }
-    }
-
-    // Directories of already-resolved full paths in this message give bare
-    // names (`Composer.tsx:12`) a same-directory first guess before falling
-    // back to probing the raw span as-is.
-    const contextDirs = [
-      ...new Set(
-        [...pendingCandidates.values()]
-          .filter((resolved) => !resolved.matchTail)
-          .map((resolved) => {
-            const normalized = toWorkspaceRelativePath(
-              resolved.path,
-              root || undefined,
-            ).replace(/\\/g, "/");
-            const lastSlash = normalized.lastIndexOf("/");
-            return lastSlash > 0 ? normalized.slice(0, lastSlash) : null;
-          })
-          .filter((dir): dir is string => dir != null),
-      ),
-    ];
-
-    // Pass 1: probe every candidate path with fsPathExists. Pool matches are
-    // probed at their resolved location; everything else uses the literal
-    // span path. No candidate becomes clickable without a true result.
-    const probeEntries = candidates.map(([key, resolved]) => {
-      const probePath = poolResolved.get(key) ?? resolved.path;
-      return {
-        key,
-        resolved,
-        probePath,
-        fromPool: poolResolved.has(key),
-      };
-    });
-    const allPaths = [...new Set(probeEntries.map((entry) => entry.probePath))];
-    fsPathExists(allPaths)
-      .then(async (results) => {
-        if (cancelled) return;
-        const existsByPath = new Map(
-          allPaths.map((path, index) => [path, results[index] === true]),
-        );
-        const newlyVerified: string[] = [];
-        const unresolved: typeof probeEntries = [];
-        for (const entry of probeEntries) {
-          const exists = existsByPath.get(entry.probePath) === true;
-          if (exists) {
-            filePathExistenceCache.set(entry.key, true);
-            const openPath = toWorkspaceRelativePath(
-              entry.probePath,
-              root || undefined,
-            );
-            if (openPath && (entry.fromPool || openPath !== entry.resolved.path)) {
-              barePathOverrides.set(entry.key, openPath);
-            }
-            newlyVerified.push(entry.key);
-            continue;
-          }
-          // Keep matchTail candidates open for a context-dir retry; cache a
-          // definitive miss only when there is nothing left to try.
-          if (entry.resolved.matchTail) {
-            unresolved.push(entry);
-          } else {
-            filePathExistenceCache.set(entry.key, false);
-          }
-        }
-
-        // Pass 2: candidates that failed fsPathExists but have a matchTail
-        // (bare names or partial paths) get a second chance via context dirs.
-        const resolvedByKey = new Map<string, string | null>();
-
-        const guesses: { key: string; guess: string }[] = [];
-        for (const { key, resolved } of unresolved) {
-          const tail = resolved.matchTail!.replace(/\\/g, "/");
-          for (const dir of contextDirs) {
-            guesses.push({
-              key,
-              guess: toWorkspaceRelativePath(`${dir}/${tail}`, root || undefined),
-            });
-          }
-        }
-        if (guesses.length > 0) {
-          const uniqueGuesses = [...new Set(guesses.map((guess) => guess.guess))];
-          const guessResults = await fsPathExists(uniqueGuesses);
-          const exists = new Map(
-            uniqueGuesses.map((guess, index) => [guess, guessResults[index] === true]),
-          );
-          for (const { key, guess } of guesses) {
-            if (!resolvedByKey.has(key) && exists.get(guess)) {
-              resolvedByKey.set(key, guess);
-            }
-          }
-        }
-
-        for (const { key } of unresolved) {
-          const resolvedPath = resolvedByKey.get(key) ?? null;
-          filePathExistenceCache.set(key, resolvedPath != null);
-          if (resolvedPath != null) {
-            barePathOverrides.set(
-              key,
-              toWorkspaceRelativePath(resolvedPath, root || undefined),
-            );
-            newlyVerified.push(key);
-          }
-        }
-
-        if (newlyVerified.length > 0) {
-          setVerifiedPaths((prev) => {
-            const next = new Set(prev);
-            for (const key of newlyVerified) next.add(key);
-            return next;
-          });
-        }
-        setProbeRound((round) => round + 1);
-      })
-      .catch(() => {
-        // A workspace can still be reconnecting during the first restored
-        // turn. Do not cache this as a real miss; retry the same probe a few
-        // times so links appear without requiring a second manual visit.
-        if (cancelled || retryState.attempts >= 3) return;
-        const delay = [250, 750, 2000][retryState.attempts];
-        retryState.attempts += 1;
-        retryTimer = window.setTimeout(() => {
-          if (!cancelled) setProbeRound((round) => round + 1);
-        }, delay);
-      });
-    return () => {
-      cancelled = true;
-      if (retryTimer != null) window.clearTimeout(retryTimer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [content, workspaceRoot, changedFiles, candidatePaths, onFilePathClick, verifiedPaths, probeRound]);
-
-  const handleInlineCodeClick = useCallback(
+  // Delegated from the wrapper so both inline-code chips and markdown-link
+  // file links share one handler (no per-node closures). The target is
+  // resolved at CLICK time — rendering stays a deterministic shape check.
+  const handleFileLinkClick = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       if (!onFilePathClick) return;
-      const codeEl = (event.target as HTMLElement).closest("code.md-file-path");
-      const raw = codeEl?.getAttribute("data-file-path");
+      const linkEl = (event.target as HTMLElement).closest(".md-file-path");
+      const raw = linkEl?.getAttribute("data-file-path");
       if (!raw) return;
+      if (linkEl instanceof HTMLAnchorElement) event.preventDefault();
       const [path, line] = raw.split("#");
       const lineNumber = line && Number(line) > 0 ? Number(line) : undefined;
-      const resolved = { path, lineNumber };
-      if (resolved) {
-        onFilePathClick(resolved.path, resolved.lineNumber);
-      }
+      // Bare names / partial paths (`Composer.tsx`, `commands/fs.rs`) resolve
+      // against the changeset + turn candidate pool when possible; a pool hit
+      // opens the real file instead of the fragment. Falls back to the span
+      // itself, which the editor opens relative to the workspace root.
+      const target = resolveFileLinkTarget(
+        path,
+        changedFiles,
+        candidatePaths,
+        workspaceRoot,
+      );
+      onFilePathClick(target, lineNumber);
     },
-    [onFilePathClick, workspaceRoot],
+    [onFilePathClick, workspaceRoot, changedFiles, candidatePaths],
   );
 
-  const handleInlineCodeKeyDown = useCallback(
+  const handleFileLinkKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLElement>) => {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
@@ -547,46 +287,33 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
             );
           }
 
+          // File-shaped spans render as FIXED file links — a pure shape check,
+          // no async verification and no per-render recomputation. Click-time
+          // resolution opens the real file (see handleFileLinkClick).
           const resolved =
             onFilePathClick != null
               ? resolveClickableFilePath(codeString, workspaceRoot)
               : null;
-          let clickable = false;
-          if (resolved) {
-            const cacheKey = filePathCacheKey(resolved, workspaceRoot);
-            pendingCandidates.set(cacheKey, resolved);
-            clickable =
-              verifiedPaths.has(cacheKey) ||
-              filePathExistenceCache.get(cacheKey) === true;
+          if (!resolved) {
+            return (
+              <code className="md-inline-code" {...props}>
+                {children}
+              </code>
+            );
           }
-          const openPath =
-            clickable && resolved
-              ? barePathOverrides.get(filePathCacheKey(resolved, workspaceRoot)) ??
-                resolved.path
-              : undefined;
-          const fileLinkInteractionProps = clickable
-            ? {
-                role: "link" as const,
-                tabIndex: 0,
-                onKeyDown: handleInlineCodeKeyDown,
-                "aria-label": `打开文件 ${openPath ?? resolved?.path ?? codeString}${resolved?.lineNumber ? `:${resolved.lineNumber}` : ""}`,
-              }
-            : {};
+          const label = `${resolved.path}${resolved.lineNumber ? `:${resolved.lineNumber}` : ""}`;
           return (
             <code
-              className={clickable ? "md-inline-code md-file-path" : "md-inline-code"}
-              data-file-path={
-                openPath
-                  ? `${openPath}#${resolved?.lineNumber ?? 0}`
-                  : undefined
-              }
-              title={openPath ? `${openPath} — 点击打开` : undefined}
+              className="md-inline-code md-file-path"
+              data-file-path={`${resolved.path}#${resolved.lineNumber ?? 0}`}
+              title={`${label} — 点击打开`}
+              role="link"
+              tabIndex={0}
+              onKeyDown={handleFileLinkKeyDown}
+              aria-label={`打开文件 ${label}`}
               {...props}
-              {...fileLinkInteractionProps}
             >
-              {clickable && (
-                <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
-              )}
+              <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
               {children}
             </code>
           );
@@ -633,6 +360,34 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           return <hr className="md-hr" />;
         },
         a({ href, children }) {
+          // Markdown links whose target is a workspace file reference
+          // (`[MarkdownBody.tsx](apps/…/MarkdownBody.tsx)`, `…#L3251`) render
+          // as FIXED file links — same shape-only rule as inline-code paths,
+          // opened by the wrapper's delegated click handler.
+          if (href && onFilePathClick != null && !/^(?:https?:|mailto:|#)/i.test(href)) {
+            const resolved = resolveClickableFilePath(
+              markdownFileHrefToSpan(href.trim()),
+              workspaceRoot,
+            );
+            if (resolved) {
+              const label = `${resolved.path}${resolved.lineNumber ? `:${resolved.lineNumber}` : ""}`;
+              return (
+                <a
+                  className="md-link md-file-path"
+                  role="link"
+                  tabIndex={0}
+                  href={undefined}
+                  data-file-path={`${resolved.path}#${resolved.lineNumber ?? 0}`}
+                  title={`${label} — 点击打开`}
+                  aria-label={`打开文件 ${label}`}
+                  onKeyDown={handleFileLinkKeyDown}
+                >
+                  <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
+                  {children}
+                </a>
+              );
+            }
+          }
           return (
             <a className="md-link" href={href} target="_blank" rel="noopener noreferrer">
               {children}
@@ -688,19 +443,18 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
   // streaming commit (the "卡成翔 while the LLM types" cost). Splitting into
   // top-level blocks lets every finished block bail out of parsing; only the
   // block under the cursor re-parses per commit.
-  const pathVersion = `${verifiedPaths.size}:${probeRound}`;
 
   return (
-    // Clickable inline-code file paths are delegated from this wrapper so a
-    // streaming re-render does not need per-node handlers.
+    // File links (inline-code chips and markdown-link targets) are delegated
+    // from this wrapper so a streaming re-render does not need per-node
+    // handlers.
     // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
-    <div className="md-body" onClick={handleInlineCodeClick}>
+    <div className="md-body" onClick={handleFileLinkClick}>
       {blocks.map((block, index) => (
         <MarkdownSection
           key={index}
           content={math.restore(repairBlockCached(block))}
           components={components}
-          pathVersion={pathVersion}
           workspaceRoot={workspaceRoot}
         />
       ))}
@@ -716,6 +470,47 @@ interface ResolvedFilePath {
    *  (`commands/fs.rs`) for partial relative paths. Absent for absolute
    *  paths that do not need disambiguation. */
   matchTail?: string;
+}
+
+/** Convert a markdown-link href to the span form the path resolver
+ *  understands: `path#L12` / `path#L10-L20` → `path:12` / `path:10`. Without
+ *  this the `#L…` fragment stays glued to the file name and neither the
+ *  shape check nor the click-time resolution would recognise the path. */
+function markdownFileHrefToSpan(href: string): string {
+  const lineMatch = href.match(/^(.*?)#L(\d+)(?:-L?\d+)?$/);
+  return lineMatch ? `${lineMatch[1]}:${lineMatch[2]}` : href;
+}
+
+/** Resolve a clicked file span to the path handed to `onFilePathClick`. Pure
+ *  and synchronous — no probes, no caches. Bare names and partial paths
+ *  (`Composer.tsx:548`, `commands/fs.rs`) are matched against the changeset +
+ *  turn candidate pool as a CONTIGUOUS trailing run of segments (never just
+ *  the basename, so a deeper sibling like `.../runtime/permissions/tests.rs`
+ *  cannot capture `runtime/tests.rs`); the strongest match (fewest leading
+ *  segments dropped) wins, ties keep the earliest source. Anything without a
+ *  pool hit opens as written — relative to the workspace root. */
+function resolveFileLinkTarget(
+  span: string,
+  changedFiles?: readonly string[],
+  candidatePaths?: readonly string[],
+  workspaceRoot?: string,
+): string {
+  const root = workspaceRoot
+    ? normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "")
+    : "";
+  const tail = span.replace(/\\/g, "/");
+  let best: { rank: number; relative: string } | null = null;
+  for (const source of [...(changedFiles ?? []), ...(candidatePaths ?? [])]) {
+    const normalized = source.replace(/\\/g, "/").replace(/:\d+(?::\d+)?$/, "");
+    const rank = rankFragmentMatch(normalized, tail);
+    if (rank === null) continue;
+    // Strict improvement only, so the earliest source wins ties.
+    if (best !== null && rank >= best.rank) continue;
+    const relative = toWorkspaceRelativePath(normalized, root || undefined);
+    if (!relative) continue;
+    best = { rank, relative };
+  }
+  return best?.relative ?? span;
 }
 
 /** Accept compound filenames such as `MarkdownBody.test.tsx`, `types.d.ts`,
@@ -979,6 +774,13 @@ function safeMarkdownUrl(url: string) {
     return url;
   }
   if (/^(https?:|mailto:)/i.test(url) || url.startsWith("/") || url.startsWith("#")) {
+    return url;
+  }
+  // Relative/workspace paths (file references such as `crates/foo.rs`) pass
+  // through so the anchor renderer can turn verified ones into clickable file
+  // links. Anything WITH an untrusted scheme (javascript:, data:text/html,
+  // …) is still stripped.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
     return url;
   }
   return "";
