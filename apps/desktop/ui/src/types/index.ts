@@ -1018,15 +1018,17 @@ export interface AppSettings {
   claude: ClaudeProviderSettings;
   web_tools: WebToolsSettings;
   dsh_default_preset?: string | null;
-  /** Model that generates dsh session titles. Empty pair = inherit the session route. */
+  /** Model that re-evaluates DSH session titles after each completed turn. Empty pair = inherit the current turn's route. */
   session_title?: SessionTitleSettings;
 }
 
 /**
- * Model that generates each DeepSeek Harness session's title. dsh otherwise
- * inherits the session's own route, which fails on models that cannot answer
- * inside the title token budget — dsh then keeps its fallback title, i.e. the
- * raw first prompt truncated to 40 bytes.
+ * Model that re-evaluates each DeepSeek Harness session's title after every
+ * completed turn through Kodex's self-contained provider. The title changes
+ * only when the conversation's primary task materially changes. The provider
+ * otherwise inherits each turn's route, which can fail on models that cannot
+ * answer inside the title budget and leave the previous/fallback title in
+ * place.
  */
 export interface SessionTitleSettings {
   provider: string;

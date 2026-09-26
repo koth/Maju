@@ -20,6 +20,7 @@ use anyhow::{Context, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 /// The env-var name Kodex injects for a provider's API key. dsh reads it via
 /// the `apiKeyEnv` credential ref in `settings.yaml`.
@@ -257,12 +258,14 @@ pub fn patch_path_for_root(root: &Path) -> PathBuf {
 
 /// Which model generates a dsh session title.
 ///
-/// dsh titles a session with a small auxiliary LLM request; by default that
-/// request inherits whatever route the session's first main turn used. That
-/// fails on routes whose model cannot answer inside the shipped 64-token
-/// budget, and dsh then keeps its deterministic fallback title (the first human
-/// message truncated to 40 bytes — i.e. the raw prompt). Pinning a pair here
-/// routes title generation to a model known to work.
+/// dsh titles a session with a small auxiliary LLM request. Kodex mounts a
+/// self-contained provider beside its patch overlay: DSH handles the first
+/// prompt, and the provider explicitly refreshes after each completed turn.
+/// By default each request inherits the exact route logged for that turn.
+/// That can fail on models which cannot answer inside the title output budget,
+/// leaving the previous title (or, initially, the deterministic first-prompt
+/// fallback). Pinning a pair here routes every title check to a model known to
+/// work.
 ///
 /// One external MCP server Kodex exposes to the harness.
 ///
@@ -291,12 +294,16 @@ pub struct HarnessMcpServer {
     pub tool_call_timeout_ms: u64,
 }
 
-/// `None` = keep dsh's default (inherit the session route). dsh rejects a
-/// half-configured pair, so both fields are always present or both absent.
+/// `None` = keep dsh's default (inherit the current turn's route). dsh rejects
+/// a half-configured pair, so both fields are always present or both absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HarnessPatchConfig {
     pub title_provider: Option<String>,
     pub title_model: Option<String>,
+    /// Absolute `file://` URL of Kodex's self-contained title provider.
+    /// `None` keeps the legacy renderer shape for callers that only need a
+    /// config preview; `write_harness_patch` always fills this in.
+    pub title_plugin_url: Option<String>,
     /// Default model for new sessions — the `agent-default-model` row's
     /// `config` (dsh ≥ 0.1.7 reads it from plugin config, not from the
     /// settings.yaml section of the same name). `None` (or a pair with a
@@ -327,6 +334,11 @@ impl HarnessPatchConfig {
             title_model: Some(model),
             ..Self::default()
         }
+    }
+
+    fn with_title_plugin_url(mut self, url: String) -> Self {
+        self.title_plugin_url = Some(url);
+        self
     }
 
     /// Pin the default model new sessions boot with. A blank provider or
@@ -360,11 +372,23 @@ impl HarnessPatchConfig {
 }
 
 /// Shipped `session-title-llm` budget. Raised from dsh's 64: a reasoning model
-/// spends the whole 64-token budget on its `reasoning_content` preamble and
-/// returns an empty `content` with `finish_reason: length`, which the title
-/// provider reads as invalid output. 2048 leaves room for the preamble plus
-/// the title.
-const TITLE_MAX_OUTPUT_TOKENS: u32 = 2048;
+/// spends part of the budget on its `reasoning_content` preamble and can
+/// otherwise return an empty `content` with `finish_reason: length`. 8192
+/// leaves enough room for that preamble plus the title on high-effort models.
+const TITLE_MAX_OUTPUT_TOKENS: u32 = 8192;
+
+/// Bounded aggregate user-message budget for the turn-end title provider.
+/// The old 4 KiB first-prompt cap stopped title evaluation after only a few
+/// turns; 64 KiB keeps long sessions revisable while still bounding each
+/// auxiliary request. DSH retains the previous title when this cap is hit.
+const TITLE_MAX_INPUT_BYTES: u32 = 65_536;
+
+/// File written beside the Kodex-owned patch and loaded by DSH through a
+/// `file://` module entry. Keeping the provider in the repository avoids
+/// modifying the user's installed DSH npm package.
+const KODEX_SESSION_TITLE_PLUGIN_FILE: &str = "kodex-session-title-all-prompts.mjs";
+const KODEX_SESSION_TITLE_PLUGIN_SOURCE: &str =
+    include_str!("../assets/kodex-session-title-all-prompts.mjs");
 
 /// Quote a scalar for a double-quoted YAML flow scalar.
 fn yaml_quote(value: &str) -> String {
@@ -383,6 +407,12 @@ fn yaml_quote(value: &str) -> String {
 
 /// Render the Kodex-owned dsh patch overlay, applied with `--patch` AFTER the
 /// profile layer (bundle patches + the user's own `cordis.patch.yml`).
+///
+/// Kodex disables DSH's shipped `session-title-llm` row and mounts its
+/// self-contained title provider from a generated `file://` module. The
+/// overlay therefore remains self-contained and never edits the installed npm
+/// package. DSH treats a truthy `name` in an id-targeted patch as an assertion
+/// rather than a provider rename.
 ///
 /// `settings.yaml` carries only the provider-route sections (`llm-pi-ai` and
 /// friends); plugin configuration lives in the cordis patch stack instead, so
@@ -410,12 +440,13 @@ pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
         "# An id-targeted entry REPLACES the row's whole `config` (it does not merge), so",
         "# every field of an overridden row is restated here in full.",
         "#",
-        "# session-title-llm: the shipped `maxOutputTokens: 64` is exhausted by the",
-        "# reasoning preamble on the reasoning models Kodex routes to, which leaves an",
-        "# empty `content` and makes the title provider keep the 40-byte fallback title",
-        "# (the raw first prompt). The optional provider/model pair pins title",
-        "# generation to a route configured in Settings → DeepSeek Harness →",
-        "# 会话标题模型; without it the provider inherits the session's own route.",
+        "# session-title-llm: Kodex raises the shipped 64-token output budget because",
+        "# reasoning models can spend all of it on the reasoning preamble and leave an",
+        "# empty `content`. The provider is also configured with a bounded turn-end",
+        "# input so it can re-evaluate the title after later completed turns without",
+        "# growing an auxiliary request without limit. The optional provider/model pair",
+        "# pins every title check to a route configured in Settings → DeepSeek Harness →",
+        "# 会话标题模型; without it the provider inherits the current turn's route.",
         "#",
         "# The trailing `insert:` block mounts Kodex's own local MCP servers so harness",
         "# sessions get the tools configured in Kodex Settings: the web tools provider",
@@ -429,16 +460,42 @@ pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out.push_str("- id: session-title-llm\n");
-    out.push_str("  config:\n");
-    out.push_str("    targetWords: 5\n");
-    out.push_str("    targetCjkCharacters: 10\n");
-    out.push_str("    maxInputBytes: 4096\n");
-    out.push_str(&format!("    maxOutputTokens: {TITLE_MAX_OUTPUT_TOKENS}\n"));
-    out.push_str("    timeoutMs: 60000\n");
+    let title_config_indent = if config.title_plugin_url.is_some() {
+        "      "
+    } else {
+        "    "
+    };
+    if let Some(plugin_url) = &config.title_plugin_url {
+        // Disable DSH's shipped first-prompt row and mount Kodex's
+        // self-contained turn-end title provider from the generated data root.
+        out.push_str("- id: session-title-llm\n");
+        out.push_str("  disabled: true\n");
+        out.push_str("- insert:\n");
+        out.push_str("  - id: kodex-session-title-all-prompts\n");
+        out.push_str(&format!("    name: {}\n", yaml_quote(plugin_url)));
+        out.push_str("    config:\n");
+    } else {
+        out.push_str("- id: session-title-llm\n");
+        out.push_str("  config:\n");
+    }
+    out.push_str(&format!("{title_config_indent}targetWords: 5\n"));
+    out.push_str(&format!("{title_config_indent}targetCjkCharacters: 10\n"));
+    out.push_str(&format!(
+        "{title_config_indent}maxInputBytes: {TITLE_MAX_INPUT_BYTES}\n"
+    ));
+    out.push_str(&format!(
+        "{title_config_indent}maxOutputTokens: {TITLE_MAX_OUTPUT_TOKENS}\n"
+    ));
+    out.push_str(&format!("{title_config_indent}timeoutMs: 60000\n"));
     if let (Some(provider), Some(model)) = (&config.title_provider, &config.title_model) {
-        out.push_str(&format!("    provider: {}\n", yaml_quote(provider)));
-        out.push_str(&format!("    model: {}\n", yaml_quote(model)));
+        out.push_str(&format!(
+            "{title_config_indent}provider: {}\n",
+            yaml_quote(provider)
+        ));
+        out.push_str(&format!(
+            "{title_config_indent}model: {}\n",
+            yaml_quote(model)
+        ));
     }
 
     // dsh ≥ 0.1.7 plugin-config rows (see the module docs): the default model
@@ -486,18 +543,39 @@ pub fn render_harness_patch(config: &HarnessPatchConfig) -> String {
     out
 }
 
-/// Write the Kodex-owned dsh patch overlay to `path`. The parent directory is
-/// created if missing, and an unchanged overlay is left alone so repeated
-/// bring-ups do not rewrite the file.
+/// Write the Kodex-owned dsh patch overlay to `path`, together with the
+/// self-contained title provider module it references. The parent directory is
+/// created if missing, and unchanged files are left alone so repeated bring-ups
+/// do not rewrite them.
 pub fn write_harness_patch(path: &Path, config: &HarnessPatchConfig) -> anyhow::Result<()> {
-    let rendered = render_harness_patch(config);
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create dsh patch dir {}", parent.display())
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create dsh patch dir {}", parent.display()))?;
+    }
+
+    let plugin_path = path.with_file_name(KODEX_SESSION_TITLE_PLUGIN_FILE);
+    let existing_plugin = std::fs::read_to_string(&plugin_path).ok();
+    if existing_plugin.as_deref() != Some(KODEX_SESSION_TITLE_PLUGIN_SOURCE) {
+        std::fs::write(&plugin_path, KODEX_SESSION_TITLE_PLUGIN_SOURCE).with_context(|| {
+            format!(
+                "failed to write Kodex DSH title provider {}",
+                plugin_path.display()
+            )
         })?;
     }
+    let plugin_path = std::fs::canonicalize(&plugin_path).with_context(|| {
+        format!(
+            "failed to resolve Kodex DSH title provider {}",
+            plugin_path.display()
+        )
+    })?;
+    let plugin_url = Url::from_file_path(&plugin_path)
+        .map_err(|_| anyhow!("failed to build file URL for DSH title provider"))?
+        .to_string();
+    let rendered = render_harness_patch(&config.clone().with_title_plugin_url(plugin_url));
+
     let existing = std::fs::read_to_string(path).ok();
     if existing.as_deref() == Some(rendered.as_str()) {
         return Ok(());
@@ -858,11 +936,19 @@ mod tests {
             config.get("maxOutputTokens").and_then(|v| v.as_u64()),
             Some(u64::from(TITLE_MAX_OUTPUT_TOKENS))
         );
+        assert_eq!(
+            config.get("maxInputBytes").and_then(|v| v.as_u64()),
+            Some(u64::from(TITLE_MAX_INPUT_BYTES))
+        );
         assert!(
             TITLE_MAX_OUTPUT_TOKENS > 64,
             "must exceed dsh's shipped 64-token budget"
         );
-        // No route configured => the provider inherits the session's own route.
+        assert!(
+            TITLE_MAX_INPUT_BYTES >= 16_384,
+            "turn-end checks need more than the old 4 KiB first-prompt cap"
+        );
+        // No route configured => the provider inherits the current turn's route.
         assert!(config.get("provider").is_none());
         assert!(config.get("model").is_none());
     }
@@ -1087,7 +1173,49 @@ mod tests {
         )));
         write_harness_patch(&path, &config).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
-        assert!(first.contains("maxOutputTokens: 2048"));
+        assert!(first.contains("maxOutputTokens: 8192"));
+        assert!(first.contains("disabled: true"));
+        assert!(first.contains("kodex-session-title-all-prompts"));
+        let entries = serde_yaml::from_str::<serde_yaml::Value>(&first)
+            .unwrap()
+            .as_sequence()
+            .cloned()
+            .expect("generated patch must be a YAML sequence");
+        assert_eq!(entries.len(), 2, "disabled base row + local provider row");
+        assert_eq!(
+            entries[0].get("disabled").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        let plugin_row = entries[1]
+            .get("insert")
+            .and_then(|value| value.as_sequence())
+            .and_then(|rows| rows.first())
+            .expect("local provider row must be inserted");
+        assert_eq!(
+            plugin_row.get("id").and_then(|value| value.as_str()),
+            Some("kodex-session-title-all-prompts")
+        );
+        let plugin_config = plugin_row
+            .get("config")
+            .expect("local provider config must be nested under config");
+        assert_eq!(
+            plugin_config.get("maxOutputTokens").and_then(|value| value.as_u64()),
+            Some(8192)
+        );
+        assert_eq!(
+            plugin_config.get("provider").and_then(|value| value.as_str()),
+            Some("kimi_code")
+        );
+        assert_eq!(
+            plugin_config.get("model").and_then(|value| value.as_str()),
+            Some("k3")
+        );
+        assert!(plugin_row.get("targetWords").is_none());
+        let plugin_path = path.with_file_name(KODEX_SESSION_TITLE_PLUGIN_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&plugin_path).unwrap(),
+            KODEX_SESSION_TITLE_PLUGIN_SOURCE
+        );
 
         // Regenerating is a no-op, and a changed route rewrites the file.
         write_harness_patch(&path, &config).unwrap();

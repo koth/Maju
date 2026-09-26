@@ -3325,14 +3325,13 @@ export function SettingsPage({
   /**
    * Session-title model pane.
    *
-   * dsh titles a session with its own small auxiliary request. By default that
-   * request inherits the route of the session's first main turn; on the
-   * reasoning models Kodex routes to, the shipped output budget was consumed
-   * entirely by the reasoning preamble, the provider saw empty content, and the
-   * session kept dsh's deterministic fallback title — the first human message
-   * truncated to 40 bytes, i.e. the raw prompt. Kodex raises that budget via its
-   * `--patch` overlay; this pane pins the route so title generation does not
-   * depend on whichever model a given conversation happens to use.
+   * Kodex mounts a self-contained title provider beside its DSH patch. DSH
+   * handles the first prompt; later completed turns trigger a small detached
+   * refresh. By default each request inherits that turn's route; on reasoning
+   * models the shipped output budget was historically consumed by the reasoning
+   * preamble, leaving empty content and retaining the previous (or
+   * deterministic fallback) title. Kodex raises that budget and bounds the
+   * turn-end input; this pane can also pin one route for every title check.
    */
   const renderSessionTitleSection = () => {
     const status = snapshot?.session_title;
@@ -3345,10 +3344,7 @@ export function SettingsPage({
         <div className="settings-general-card settings-capability-intro">
           <h2 className="settings-section-title">会话标题</h2>
           <p className="settings-section-desc">
-            DeepSeek Harness 用一个独立的小请求为每个会话生成标题，这条请求默认
-            <b>继承该会话自己的模型</b>。推理模型会把输出预算全花在推理前言上，
-            导致标题请求返回空内容、被判定为失败，会话于是退回
-            「原始提问截断」的标题。在这里固定一个模型即可绕开。
+            Kodex 会在每个完成的对话轮次后用独立小请求检查标题：当前标题仍能概括主任务就保持不变，只有主任务发生实质变化才更新。默认继承该轮会话自己的模型；若模型把输出预算耗在推理前言上，标题检查会失败并保留原标题。可在这里固定一个模型，避免每轮依赖不同会话模型。
           </p>
         </div>
         <div className="settings-provider-config settings-capability-card">
@@ -3421,9 +3417,8 @@ export function SettingsPage({
             </button>
           </div>
           <p className="settings-dsh-preset-hint">
-            留空「模型来源」= 恢复跟随会话模型。保存后对<b>新建会话</b>生效；
-            已有会话的标题是历史事件，dsh 不会回溯重算。
-            Kodex 已把标题请求的输出预算从 dsh 默认的 64 提到 2048（经
+            留空「模型来源」= 恢复跟随会话模型。保存后会在下一次 DSH host 启动或重新 bring-up 时生效；已有会话的标题是历史事件，dsh 不会回溯重算。
+            Kodex 已把标题请求的输出预算从 dsh 默认的 64 提到 8192（经
             <code>--patch</code> 覆盖层），因此推理模型路由也能正常出标题。
           </p>
         </div>
@@ -4764,7 +4759,7 @@ export function SettingsPage({
                           <div className="settings-field settings-dsh-preset-field">
                             <span>会话标题模型</span>
                             <p className="settings-dsh-preset-hint">
-                              标题由哪个模型生成，已移到独立的「会话标题」页配置。
+                              标题检查由哪个模型执行，已移到独立的「会话标题」页配置。
                             </p>
                             <div className="settings-provider-detail">
                               <span
@@ -5416,7 +5411,7 @@ function settingsPaneDescription(pane: SettingsPane): string {
   if (pane === "commit")
     return "配置 AI 生成提交信息的 Commit 助手使用的模型；助手基于 codex agent 运行，不配置时跟随当前会话模型。";
   if (pane === "sessionTitle")
-    return "配置 DeepSeek Harness 会话标题由哪个模型生成。标题生成是一个独立的小请求，默认继承该会话自己的模型，遇到推理模型时容易失败并退回「原始提问截断」的标题。";
+    return "配置 Kodex 本地 DSH 标题检查由哪个模型执行。每个完成的对话轮次都会重新检查，主任务没有实质变化时保持原标题；默认继承该轮会话模型，遇到推理模型时可能保留回退标题。";
   if (pane === "usage")
     return "汇总可上报智能体（Codex、Claude、DeepSeek Harness）的 token 用量与性能指标。";
   if (pane === "lsp")

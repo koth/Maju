@@ -308,7 +308,12 @@ pub fn map_host_frame(frame: &HostFrame) -> MappedEvents {
         }
         HostFrame::HostSessionStatus { running: false, .. } => {
             // A session that stopped running without a turn/end (host-side
-            // failure) surfaces as Interrupted so the UI can react.
+            // failure) surfaces as Interrupted so the UI can react. The live
+            // `api-session/status` path decides this itself after
+            // `TURN_END_SETTLE_GRACE` (see `host.rs`), because the idle
+            // transition races the durable `turn/end` and this immediate
+            // mapping used to interrupt every completed reply; this arm stays
+            // for the legacy `events.host` frame path.
             MappedEvents::single(ClientEvent::Interrupted {
                 reason: "harness session stopped".to_string(),
             })
@@ -710,7 +715,10 @@ pub fn map_session_event(
         // (agent running→idle) at the end of EVERY turn as well as when a host
         // failure stops one mid-turn, and only the durable `turn/end` tells the
         // two apart. Record it so the host-status handler does not turn a
-        // finished turn into an interrupted session.
+        // finished turn into an interrupted session. The boundary ALSO bumps
+        // the sink's turn epoch, which cancels an interruption the
+        // host-status handler already deferred (the status frame rides the
+        // mux and can beat this `turn/end` on the follow stream).
         "turn/start" => {
             sink.set_turn_active(true);
             Vec::new()

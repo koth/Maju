@@ -1188,8 +1188,93 @@ async fn host_status_idle_after_turn_end_does_not_interrupt() {
     let _ = worker.join();
 }
 
+/// The real wire order: `api-session/status(<id>, false)` rides the `$events`
+/// mux while the durable `turn/end` rides the per-session `session/follow`
+/// journal, and the status frame regularly wins the race (observed against a
+/// live dsh host: it beat `turn/end` by ~1ms). The interruption decision must
+/// survive that race — a turn that settles right after the idle transition is
+/// a completed turn, not a host-side stop.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_status_idle_racing_turn_end_does_not_interrupt() {
+    let mut c = default_config();
+    c.mux = vec![MuxScript {
+        frames: vec![
+            mux_subscribed("s-1", 0),
+            mux_session_event("s-1", 1, "turn/start", json!({ "turn": 1 })),
+            // BEFORE the turn's own turn/end — the observed race order.
+            mux_host_event("api-session/status", vec![json!("s-1"), json!(false)]),
+            mux_session_event(
+                "s-1",
+                2,
+                "turn/end",
+                json!({ "turn": 1, "reason": { "kind": "completed" } }),
+            ),
+        ],
+        end: MuxEnd::Hold,
+        hold_frames_until: HoldFramesUntil::SessionRegistered,
+    }];
+    let mock = MockHarness::start(c).await;
+    let registry = Arc::new(HarnessHostRegistry::new());
+
+    let (tx, rx) = mpsc::channel::<ClientEvent>();
+    let (command_tx, command_rx) = mpsc::channel();
+    let config = acp_core::SessionConfig {
+        workspace_root: "/tmp".into(),
+        app_data_root: "/tmp".into(),
+        model: String::new(),
+        agent_command: "dsh".into(),
+        agent_env: Vec::new(),
+        resume_session_id: None,
+        log_id: "test-log".into(),
+        acp_port: 0,
+        remote_ssh: None,
+        mcp_servers: Vec::new(),
+        harness_endpoint: Some(mock.endpoint()),
+        agent_preset: None,
+    };
+    let worker_registry = registry.clone();
+    let worker = std::thread::spawn(move || {
+        dsh_bridge::run_harness_session(
+            worker_registry,
+            config,
+            tx,
+            command_rx,
+            PermissionBroker::default(),
+            acp_core::ShutdownSignal::default(),
+        )
+    });
+
+    // Watch past the deferred-decision grace so a wrongly scheduled
+    // interruption would surface inside this window.
+    let start = std::time::Instant::now();
+    let mut saw_turn_end = false;
+    let mut interrupted = None;
+    while start.elapsed() < Duration::from_secs(4) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(ClientEvent::TurnFinished { .. }) => saw_turn_end = true,
+            Ok(ClientEvent::Interrupted { reason }) => {
+                interrupted = Some(reason);
+                break;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(saw_turn_end, "turn/end was not mapped to TurnFinished");
+    assert_eq!(
+        interrupted, None,
+        "an idle transition racing the turn's own turn/end must not interrupt the session"
+    );
+
+    let _ = command_tx.send(acp_core::RuntimeCommand::Shutdown);
+    let _ = worker.join();
+}
+
 /// The same idle report while a turn is still in flight means the host stopped
-/// the session mid-turn, which the UI must learn about.
+/// the session mid-turn, which the UI must learn about. The decision is
+/// deferred past `TURN_END_SETTLE_GRACE` (a racing `turn/end` cancels it), so
+/// the wait window must outlive that grace.
 #[tokio::test(flavor = "multi_thread")]
 async fn host_status_idle_mid_turn_interrupts() {
     let mut c = default_config();
@@ -1235,7 +1320,7 @@ async fn host_status_idle_mid_turn_interrupts() {
 
     let start = std::time::Instant::now();
     let mut interrupted = false;
-    while start.elapsed() < Duration::from_secs(3) && !interrupted {
+    while start.elapsed() < Duration::from_secs(5) && !interrupted {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(ClientEvent::Interrupted { .. }) => interrupted = true,
             Ok(_) => {}

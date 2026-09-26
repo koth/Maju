@@ -2115,17 +2115,19 @@ pub struct CommitAssistantSettingsStatus {
 
 /// Model that generates each DeepSeek Harness session's title.
 ///
-/// dsh titles a session with a small auxiliary LLM request. By default that
-/// request inherits whatever route the session's first main turn used, which
-/// fails on routes whose model cannot produce an answer inside the shipped
-/// 64-token budget (a reasoning model spends the whole budget on its preamble
-/// and returns empty content). When generation fails, dsh keeps the
-/// deterministic fallback title — the first human message truncated to 40
-/// bytes, i.e. the raw prompt. Pinning a `provider` + `model` pair here routes
-/// title generation to a model known to work.
+/// dsh titles a session with a small auxiliary LLM request. Kodex mounts a
+/// self-contained provider beside its patch overlay: DSH handles the first
+/// prompt, and the provider explicitly refreshes after each completed turn.
+/// The title changes only when the conversation's primary task materially
+/// changes. By default each check inherits the exact route logged for that turn.
+/// That can fail on models which cannot produce an answer inside the title
+/// budget (for example, a reasoning model can exhaust it on the preamble and
+/// return empty content), leaving the previous title or the deterministic
+/// first-prompt fallback. Pinning a `provider` + `model` pair here routes every
+/// title check to a model known to work.
 ///
-/// Both fields empty = keep dsh's default (inherit the session route). dsh
-/// rejects a half-configured pair, so the two are always saved and cleared
+/// Both fields empty = keep dsh's default (inherit the current turn's route).
+/// dsh rejects a half-configured pair, so the two are always saved and cleared
 /// together.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SessionTitleSettings {

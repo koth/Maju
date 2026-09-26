@@ -204,11 +204,75 @@ describe("MarkdownBody", () => {
     );
     for (const label of ["ghost", "crates/nope/missing.rs:9"]) {
       const el = screen.getByText(label);
-      expect(el).toHaveClass("md-file-path");
+      if (label === "ghost") {
+        // The LABEL is not a file — no file treatment (no icon, no file
+        // typography), but the link still opens its target on click.
+        expect(el).not.toHaveClass("md-file-path");
+        expect(el.querySelector(".md-file-path-icon")).toBeNull();
+      } else {
+        expect(el).toHaveClass("md-file-path");
+      }
       fireEvent.click(el);
     }
     expect(onFilePathClick).toHaveBeenCalledWith("crates/nope/ghost.rs", undefined);
     expect(onFilePathClick).toHaveBeenCalledWith("crates/nope/missing.rs", 9);
+  });
+
+  it("renders markdown links with non-file labels without the file treatment", () => {
+    // `[test-name](file.rs)` — the target is a file but the LABEL is not:
+    // rendering it as a file chip (icon + file typography) claimed the text
+    // was a file and its colors clashed with the surrounding inline code.
+    const onFilePathClick = vi.fn();
+    render(
+      <MarkdownBody
+        content={
+          "新增 [`host_status_idle_racing_turn_end_does_not_interrupt`](crates/dsh-bridge/tests/harness_integration.rs) 回归测试。"
+        }
+        workspaceRoot="/test"
+        onFilePathClick={onFilePathClick}
+      />,
+    );
+    const link = screen.getByRole("link", { name: /harness_integration\.rs/ });
+    expect(link).not.toHaveClass("md-file-path");
+    expect(link.querySelector(".md-file-path-icon")).toBeNull();
+    // The label keeps its own inline-code rendering…
+    expect(link.querySelector("code")).toHaveClass("md-inline-code");
+    expect(link.querySelector("code")).not.toHaveClass("md-file-path");
+    // …and the link still opens the target file.
+    fireEvent.click(link);
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "crates/dsh-bridge/tests/harness_integration.rs",
+      undefined,
+    );
+  });
+
+  it("renders markdown links with code file labels with exactly one icon", () => {
+    // `[`live_turn_probe.rs`](path)` used to grow TWO file icons — one from
+    // the anchor and one from the nested code span file-linkifying on its own
+    // — and the nested chip's colors fought the link's file typography.
+    const onFilePathClick = vi.fn();
+    const { container } = render(
+      <MarkdownBody
+        content={
+          "探针保留为 [`live_turn_probe.rs`](crates/dsh-bridge/tests/live_turn_probe.rs) 诊断工具。"
+        }
+        workspaceRoot="/test"
+        onFilePathClick={onFilePathClick}
+      />,
+    );
+    const link = screen.getByRole("link", { name: /live_turn_probe\.rs/ });
+    expect(link).toHaveClass("md-file-path");
+    expect(container.querySelectorAll(".md-file-path-icon")).toHaveLength(1);
+    // The nested code span is just the label: no icon, no second click surface.
+    const label = link.querySelector("code");
+    expect(label).toHaveClass("md-file-path-label");
+    expect(label).not.toHaveAttribute("data-file-path");
+    fireEvent.click(link);
+    expect(onFilePathClick).toHaveBeenCalledTimes(1);
+    expect(onFilePathClick).toHaveBeenCalledWith(
+      "crates/dsh-bridge/tests/live_turn_probe.rs",
+      undefined,
+    );
   });
 
   it("does not mark identifiers or prose as file paths", () => {

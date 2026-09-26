@@ -37,6 +37,16 @@ const REBASELINE_CONCURRENCY: usize = 4;
 const CONTROL_BACKOFF_BASE: Duration = Duration::from_millis(500);
 const CONTROL_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// Grace window before an ambiguous `api-session/status(<id>, false)` is
+/// reported as a mid-turn interruption. The harness emits that idle
+/// transition right after appending the turn's durable `turn/end`, but the two
+/// travel on different streams (the idle transition on the `$events` mux, the
+/// `turn/end` on the per-session `session/follow` journal) and can be
+/// processed in either order — the status frame regularly wins the race. A
+/// `turn/end` that lands within this window cancels the pending interruption;
+/// only a turn that never settles is one the host actually stopped.
+const TURN_END_SETTLE_GRACE: Duration = Duration::from_millis(1500);
+
 /// One pending approval/question entry kind, recorded in the session sink so
 /// the answer path can route the user's decision back to the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +140,11 @@ pub struct SessionSink {
     /// host-side failure stops one mid-turn; this flag is the only signal that
     /// distinguishes them.
     turn_active: AtomicBool,
+    /// Bumped on every `turn/start` / `turn/end` boundary. A deferred
+    /// interruption decision (see `TURN_END_SETTLE_GRACE`) captures this epoch
+    /// and only fires while it is unchanged, so a `turn/end` — or a whole new
+    /// turn — that settles during the grace window cancels it.
+    turn_epoch: AtomicU64,
 }
 
 /// Per-block-stream mojibake repairer table: `(turn, step, block index)` maps
@@ -163,6 +178,7 @@ impl SessionSink {
             removed: AtomicBool::new(false),
             inflight: Mutex::new(None),
             turn_active: AtomicBool::new(false),
+            turn_epoch: AtomicU64::new(0),
         }
     }
 
@@ -319,6 +335,7 @@ impl SessionSink {
 
     /// Record a durable turn boundary (`turn/start` / `turn/end`).
     pub fn set_turn_active(&self, active: bool) {
+        self.turn_epoch.fetch_add(1, Ordering::Release);
         self.turn_active.store(active, Ordering::Release);
     }
 
@@ -326,6 +343,12 @@ impl SessionSink {
     /// the host-status mapping needs it.
     pub fn is_turn_active(&self) -> bool {
         self.turn_active.load(Ordering::Acquire)
+    }
+
+    /// Current turn-boundary epoch. See the field docs for how a deferred
+    /// interruption decision uses it.
+    pub fn turn_epoch(&self) -> u64 {
+        self.turn_epoch.load(Ordering::Acquire)
     }
 
     /// Attach the shared in-flight flag owned by the session thread. The sink
@@ -918,28 +941,41 @@ impl HarnessHost {
                             .and_then(Value::as_bool),
                     ) {
                         // The agent reports `running: false` on every turn end
-                        // (running→idle), not only when a session dies. Only a
-                        // turn still in flight can have been stopped by a
-                        // host-side failure, so an idle transition that follows
-                        // the turn's own `turn/end` must not be surfaced as an
-                        // interruption (it would put the UI into its
-                        // "session disconnected" state after every reply).
-                        if !running
-                            && !self
-                                .router
-                                .get(&session_id.to_string())
-                                .is_some_and(|sink| sink.is_turn_active())
-                        {
+                        // (running→idle), not only when a session dies, and a
+                        // `running: true` transition carries no UI meaning at
+                        // all (the host-frame mapping ignores it).
+                        if running {
                             return;
                         }
-                        let frame = serde_json::json!({
-                            "type": "host/session-status",
-                            "sessionId": session_id,
-                            "running": running
-                        });
-                        if let Ok(frame) = serde_json::from_value::<HostFrame>(frame) {
-                            self.dispatch_host_frame(frame);
+                        let Some(sink) = self.router.get(&session_id.to_string()) else {
+                            return;
+                        };
+                        // An idle transition that follows the turn's own
+                        // `turn/end` must not be surfaced as an interruption
+                        // (it would put the UI into its "session disconnected"
+                        // state after every reply). But the two frames race:
+                        // the idle transition rides the `$events` mux while
+                        // the durable `turn/end` rides the per-session
+                        // `session/follow` journal, and the status frame
+                        // regularly wins the race — against a real dsh host it
+                        // beat `turn/end` by ~1ms. So a turn that has already
+                        // settled is dismissed immediately, while a
+                        // still-active one defers the decision past
+                        // `TURN_END_SETTLE_GRACE`: only a turn that never
+                        // settles is one the host actually stopped.
+                        if !sink.is_turn_active() {
+                            return;
                         }
+                        let deferred = sink.clone();
+                        let epoch = sink.turn_epoch();
+                        self.runtime().spawn(async move {
+                            tokio::time::sleep(TURN_END_SETTLE_GRACE).await;
+                            if deferred.is_turn_active() && deferred.turn_epoch() == epoch {
+                                deferred.send(ClientEvent::Interrupted {
+                                    reason: "harness session stopped".to_string(),
+                                });
+                            }
+                        });
                     }
                 }
                 // dsh 0.1.5 carries agent failures on `api-session/error`

@@ -893,7 +893,7 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
 /// Resolve the session-title model status. `configured` requires both a
 /// provider and a model that resolve in the configured BYOK catalog; an
 /// unconfigured pair surfaces as `configured: false`, which the dsh bring-up
-/// reads as "let dsh inherit the session's own route".
+/// reads as "let the local provider inherit the current turn's route".
 pub fn session_title_settings_status(
     paths: &AppPaths,
     settings: &AppSettings,
@@ -909,9 +909,9 @@ pub fn session_title_settings_status(
     }
 }
 
-/// The configured session-title route, or `None` when dsh should inherit the
-/// session's own route. Consumed by the harness bring-up when it renders the
-/// Kodex patch overlay.
+/// The configured session-title route, or `None` when Kodex's local DSH
+/// provider should inherit the current turn's route. Consumed by the harness
+/// bring-up when it renders the Kodex patch overlay.
 pub fn session_title_route(paths: &AppPaths) -> Option<(String, String)> {
     let settings = load_app_settings(paths);
     let status = session_title_settings_status(paths, &settings);
@@ -920,11 +920,11 @@ pub fn session_title_route(paths: &AppPaths) -> Option<(String, String)> {
 
 /// Persist the session-title model selection.
 ///
-/// The pair is all-or-nothing for two reasons: dsh's title provider rejects a
-/// half-configured route (`provider and model must be supplied together`), and
-/// clearing one field alone would leave the overlay in a state that cannot
-/// boot. Passing an empty provider AND an empty model clears the override so
-/// title generation falls back to dsh's default (the session's own route).
+/// The pair is all-or-nothing for two reasons: Kodex's local DSH title provider
+/// rejects a half-configured route (`provider and model must be supplied
+/// together), and clearing one field alone would leave the overlay in a state
+/// that cannot boot. Passing an empty provider AND an empty model clears the
+/// override so title generation falls back to the current turn's route.
 pub fn save_session_title_settings(
     paths: &AppPaths,
     provider: &str,

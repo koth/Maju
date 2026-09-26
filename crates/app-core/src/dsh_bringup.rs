@@ -177,7 +177,8 @@ impl DshBringup {
 
         // 1.05 Write the Kodex-owned cordis patch overlay. `settings.yaml` only
         //      carries the provider-route sections; bundle-row plugin config
-        //      (the session-title token budget and pinned route, the default
+        //      (the self-contained turn-end title provider, its token/input
+        //      budget and pinned route, the default
         //      model and default preset — both plugin config since dsh 0.1.7 —
         //      and the local MCP servers) has to travel as a `--patch` overlay
         //      applied after the profile layer.

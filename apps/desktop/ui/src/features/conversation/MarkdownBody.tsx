@@ -9,9 +9,11 @@ import "./MarkdownBody.css";
 import { Check, Copy, FileCode } from "lucide-react";
 import {
   Children,
+  createContext,
   isValidElement,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -113,6 +115,26 @@ function repairBlockCached(block: string): string {
 }
 
 type MarkdownComponents = ComponentProps<typeof ReactMarkdown>["components"];
+
+/** True while rendering inside a markdown link that already owns the file
+ *  treatment (icon + file typography). A nested inline-code span must NOT
+ *  file-linkify there on its own — that produced two icons and clashing chip
+ *  colors inside one link (the anchor's file look wrapped the code span's
+ *  independent file chip). Inside the link the code span renders as a plain
+ *  label that inherits the anchor's styling. */
+const InFileLinkContext = createContext(false);
+
+/** Flatten a react-markdown node tree to its plain text. Used only to decide
+ *  whether a link LABEL is file-shaped — rendering keeps the original nodes. */
+function collectTextContent(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(collectTextContent).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return collectTextContent(node.props.children);
+  }
+  return "";
+}
 
 /** Split markdown into top-level blocks at blank lines so each block can be
  *  parsed and memoized independently (see MarkdownSection). Fence-aware:
@@ -237,10 +259,12 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
   // Delegated from the wrapper so both inline-code chips and markdown-link
   // file links share one handler (no per-node closures). The target is
   // resolved at CLICK time — rendering stays a deterministic shape check.
+  // The hook is the `data-file-path` marker (not the `.md-file-path` class):
+  // quiet links carry the marker without the file styling.
   const handleFileLinkClick = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       if (!onFilePathClick) return;
-      const linkEl = (event.target as HTMLElement).closest(".md-file-path");
+      const linkEl = (event.target as HTMLElement).closest("[data-file-path]");
       const raw = linkEl?.getAttribute("data-file-path");
       if (!raw) return;
       if (linkEl instanceof HTMLAnchorElement) event.preventDefault();
@@ -275,6 +299,7 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
           return <br className="md-line-break" />;
         },
         code({ className, children, ...props }) {
+          const inFileLink = useContext(InFileLinkContext);
           const match = /language-(\w+)/.exec(className || "");
           const codeString = (children == null ? "" : String(children)).replace(/\n$/, "");
 
@@ -284,6 +309,17 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
             }
             return (
               <MarkdownCodeBlock language={match[1]} code={codeString} theme={codeTheme} />
+            );
+          }
+
+          // Inside a file link the anchor owns the icon, the typography and
+          // the click surface; the code span is just its label and must render
+          // as one — no second icon, no chip colors fighting the link look.
+          if (inFileLink) {
+            return (
+              <code className="md-file-path-label" {...props}>
+                {children}
+              </code>
             );
           }
 
@@ -361,9 +397,11 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
         },
         a({ href, children }) {
           // Markdown links whose target is a workspace file reference
-          // (`[MarkdownBody.tsx](apps/…/MarkdownBody.tsx)`, `…#L3251`) render
-          // as FIXED file links — same shape-only rule as inline-code paths,
-          // opened by the wrapper's delegated click handler.
+          // (`[MarkdownBody.tsx](apps/…/MarkdownBody.tsx)`, `…#L3251`) open the
+          // file on click. The FILE treatment (icon + file typography) is
+          // gated on the LABEL being file-shaped too: a link labeled with a
+          // test name or prose is not "a file" visually and must not grow a
+          // file icon or fight its label's own colors.
           if (href && onFilePathClick != null && !/^(?:https?:|mailto:|#)/i.test(href)) {
             const resolved = resolveClickableFilePath(
               markdownFileHrefToSpan(href.trim()),
@@ -371,20 +409,31 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
             );
             if (resolved) {
               const label = `${resolved.path}${resolved.lineNumber ? `:${resolved.lineNumber}` : ""}`;
+              const labelIsFile =
+                resolveClickableFilePath(
+                  collectTextContent(children).trim(),
+                  workspaceRoot,
+                ) != null;
               return (
-                <a
-                  className="md-link md-file-path"
-                  role="link"
-                  tabIndex={0}
-                  href={undefined}
-                  data-file-path={`${resolved.path}#${resolved.lineNumber ?? 0}`}
-                  title={`${label} — 点击打开`}
-                  aria-label={`打开文件 ${label}`}
-                  onKeyDown={handleFileLinkKeyDown}
-                >
-                  <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
-                  {children}
-                </a>
+                <InFileLinkContext.Provider value={labelIsFile}>
+                  <a
+                    className={
+                      labelIsFile ? "md-link md-file-path" : "md-file-link-quiet"
+                    }
+                    role="link"
+                    tabIndex={0}
+                    href={undefined}
+                    data-file-path={`${resolved.path}#${resolved.lineNumber ?? 0}`}
+                    title={`${label} — 点击打开`}
+                    aria-label={`打开文件 ${label}`}
+                    onKeyDown={handleFileLinkKeyDown}
+                  >
+                    {labelIsFile && (
+                      <FileCode size={14} strokeWidth={2} className="md-file-path-icon" aria-hidden="true" />
+                    )}
+                    {children}
+                  </a>
+                </InFileLinkContext.Provider>
               );
             }
           }

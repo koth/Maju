@@ -74,11 +74,12 @@ impl AppPaths {
     }
 
     /// `~/.kodex/dsh/kodex.patch.yml` — the Kodex-owned cordis patch overlay
-    /// passed to `dsh web` as `--patch`. `settings.yaml` can only carry the two
-    /// sections Kodex owns, so bundle-row plugin configuration (e.g. the
-    /// session-title token budget) travels here. Regenerated on every
-    /// bring-up; the user's own `profiles/<name>/cordis.patch.yml` is left
-    /// untouched because this overlay is applied *after* it.
+    /// passed to `dsh web` as `--patch`, alongside the generated local title
+    /// provider module. `settings.yaml` can only carry the two sections Kodex
+    /// owns, so bundle-row plugin configuration (e.g. the session-title token
+    /// budget) travels here. Regenerated on every bring-up; the user's own
+    /// `profiles/<name>/cordis.patch.yml` is left untouched because this overlay
+    /// is applied *after* it.
     pub fn dsh_patch_path(&self) -> PathBuf {
         self.dsh_dir().join("kodex.patch.yml")
     }

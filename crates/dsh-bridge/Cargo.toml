@@ -19,6 +19,7 @@ tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "io-util"] }
 tracing = "0.1"
 uuid.workspace = true
+url = "2"
 workspace-model = { path = "../workspace-model" }
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 

@@ -619,6 +619,14 @@ impl Application {
         self.needs_title = false;
         self.provisional_prompt_title = None;
 
+        // The title service may re-evaluate after later prompts/turns. When
+        // the model decides the existing title is still accurate it emits the
+        // same durable projection value; acknowledge that protocol state
+        // above, but do not churn the reducer, revision, or SQLite row.
+        if self.ui.session.title == trimmed {
+            return None;
+        }
+
         Some(ClientEvent::SessionTitleUpdated {
             title: trimmed.to_string(),
         })

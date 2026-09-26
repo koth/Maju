@@ -1091,6 +1091,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
  "workspace-model",

@@ -733,6 +733,9 @@ fn agent_title_matching_prompt_acknowledges_protocol_sync() {
     app.agent_title_received = false;
     app.ui.session.title = "修复登录".into();
     app.provisional_prompt_title = Some("修复登录".into());
+    app.store
+        .update_session_title(&app.ui.session.id.to_string(), "修复登录")
+        .unwrap();
     app.ui.messages.clear();
     app.ui.timeline.clear();
 
@@ -766,6 +769,31 @@ fn agent_title_matching_prompt_acknowledges_protocol_sync() {
     }
 
     assert_eq!(app.ui.session.title, "修复登录");
+    app.session.shutdown();
+}
+
+#[test]
+fn unchanged_agent_title_acknowledges_protocol_without_snapshot_churn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app(&dir);
+
+    app.needs_title = false;
+    app.agent_title_received = true;
+    app.ui.session.title = "稳定的主任务".into();
+    app.store
+        .update_session_title(&app.ui.session.id.to_string(), "稳定的主任务")
+        .unwrap();
+    let revision_before = app.ui.revision;
+
+    assert!(app.prepare_session_title_update("稳定的主任务").is_none());
+    app.apply_event_with_dirty_tracking(&ClientEvent::SessionTitleUpdated {
+        title: "稳定的主任务".into(),
+    });
+
+    assert_eq!(app.ui.session.title, "稳定的主任务");
+    assert_eq!(app.ui.revision, revision_before);
+    assert!(app.agent_title_received);
+    assert!(!app.needs_title);
     app.session.shutdown();
 }
 
