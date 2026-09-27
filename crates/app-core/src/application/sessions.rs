@@ -12,6 +12,8 @@ struct PreparedSessionRuntime {
     agent_preset: Option<String>,
     web_tools_mcp: Option<crate::web_tools_mcp::WebToolsLease>,
     image_mcp: Option<crate::image_mcp::ImageMcpLease>,
+    /// This session's browser registration, when the tools were injected.
+    browser_mcp: Option<crate::browser_server::BrowserServerLease>,
     image_capabilities: workspace_model::ImageCapabilities,
 }
 
@@ -68,6 +70,60 @@ pub(super) fn prepare_web_tools_mcp(
     Ok((vec![server], Some(lease)))
 }
 
+/// Register this session on the browser MCP server, if browser tools apply.
+///
+/// Returns the MCP servers to inject plus the lease that keeps the registration
+/// alive for as long as the session runs. `Ok((vec![], None))` is a normal
+/// outcome — disabled, remote, unsupported agent, failed preflight, or a
+/// provider that has not advertised tools yet — and never an error, because
+/// the user gets a withheld reason in the UI rather than a failed session.
+pub(crate) fn prepare_browser_mcp(
+    app_paths: &AppPaths,
+    agent_command: &str,
+    remote_session: bool,
+    session_id: &str,
+) -> Result<
+    (
+        Vec<acp_core::McpServer>,
+        Option<crate::browser_server::BrowserServerLease>,
+    ),
+    String,
+> {
+    let settings = crate::settings::load_app_settings(app_paths);
+    let servers = crate::shared_mcp::shared_mcp()
+        .browser_server(app_paths, &settings.browser)
+        .map_err(|error| format!("failed to start Kodex browser MCP server: {error}"))?;
+    let adapter = servers.adapter();
+    let input = crate::browser_injection::input_for(
+        app_paths,
+        agent_command,
+        remote_session,
+        adapter.exposed_tools().len(),
+    );
+
+    let decision = crate::browser_injection::resolve(&input);
+    if let Some(reason) = crate::browser_injection::reason_key(&decision) {
+        crate::startup_perf::mark(
+            "browser_mcp/withheld",
+            format!("reason={reason} remote_session={remote_session}"),
+        );
+        return Ok((Vec::new(), None));
+    }
+
+    let lease = crate::browser_server::BrowserServerLease::register(servers.handle(), session_id)
+        .map_err(|error| format!("failed to register browser session: {error}"))?;
+    let server = acp_core::http_mcp_server(
+        "kodex-browser",
+        lease.url().to_string(),
+        [(
+            "x-kodex-browser-token".to_string(),
+            lease.token().to_string(),
+        )],
+    );
+    crate::startup_perf::mark("browser_mcp/ready", format!("url={}", lease.url()));
+    Ok((vec![server], Some(lease)))
+}
+
 /// Register this session's provider client on the shared `kodex-web-tools`
 /// server. `Ok(None)` = web tools disabled or missing the provider key, which
 /// is not an error.
@@ -86,7 +142,9 @@ pub(crate) fn web_tools_lease(
 
 /// The configured web-tools provider, or `None` when the feature is off or its
 /// API key is missing.
-fn web_tools_config(app_paths: &AppPaths) -> Result<Option<crate::web_tools::WebToolsConfig>, String> {
+fn web_tools_config(
+    app_paths: &AppPaths,
+) -> Result<Option<crate::web_tools::WebToolsConfig>, String> {
     let settings = crate::settings::load_app_settings(app_paths);
     if !settings.web_tools.enabled {
         crate::startup_perf::mark(
@@ -162,10 +220,7 @@ pub(super) fn prepare_image_mcp(
     let server = acp_core::http_mcp_server(
         "kodex-image",
         lease.url().to_string(),
-        [(
-            "x-kodex-image-token".to_string(),
-            lease.token().to_string(),
-        )],
+        [("x-kodex-image-token".to_string(), lease.token().to_string())],
     );
     Ok((vec![server], Some(lease), attached_caps))
 }
@@ -181,7 +236,13 @@ fn image_lease(
     app_paths: &AppPaths,
     workspace_root: &str,
     caps: workspace_model::ImageCapabilities,
-) -> Result<Option<(crate::image_mcp::ImageMcpLease, workspace_model::ImageCapabilities)>, String> {
+) -> Result<
+    Option<(
+        crate::image_mcp::ImageMcpLease,
+        workspace_model::ImageCapabilities,
+    )>,
+    String,
+> {
     let Some(config) = image_mcp_config(app_paths, workspace_root)? else {
         return Ok(None);
     };
@@ -285,11 +346,12 @@ pub(crate) fn harness_exposed_mcp(app_paths: &AppPaths) -> crate::dsh_bringup::H
             // generation timeout into the mount row with a little slack, so
             // our own HTTP timeout fires first (clear message) and the client
             // deadline only acts as the backstop.
-            let mut timeout_seconds =
-                crate::settings::load_app_settings(app_paths).image.generate.timeout_seconds;
+            let mut timeout_seconds = crate::settings::load_app_settings(app_paths)
+                .image
+                .generate
+                .timeout_seconds;
             if timeout_seconds == 0 {
-                timeout_seconds =
-                    workspace_model::ImageGenerateSettings::default().timeout_seconds;
+                timeout_seconds = workspace_model::ImageGenerateSettings::default().timeout_seconds;
             }
             let tool_call_timeout_ms = (u64::from(timeout_seconds) + 15) * 1000;
             exposed.rows.push(dsh_mcp_row(
@@ -306,7 +368,73 @@ pub(crate) fn harness_exposed_mcp(app_paths: &AppPaths) -> crate::dsh_bringup::H
         Err(error) => crate::startup_perf::mark("dsh/image_mcp_failed", error),
     }
 
+    // The harness ignores ACP MCP config, so browser tools reach a dsh session
+    // only through this row. It points at the *same* shared server the ACP
+    // channel uses, so both channels expose one tool list from one catalog.
+    //
+    // One lease covers the whole harness process rather than per session: the
+    // harness serves every dsh session at once, and its registration cannot be
+    // trimmed the way an ACP session's is. A single token still means a dsh
+    // session cannot address an ACP session's browser, because each session
+    // acquires its own behind that token.
+    match harness_browser_lease(app_paths) {
+        Ok(Some(lease)) => {
+            // `dsh-mcp-client` caps calls at `toolCallTimeoutMs` and its own
+            // 60s default is shorter than a slow first page load, so carry the
+            // configured browser timeout with a little slack and let our own
+            // deadline act as the backstop.
+            let settings = crate::settings::load_app_settings(app_paths);
+            let tool_call_timeout_ms = settings.browser.tool_call_timeout_ms + 15_000;
+            exposed.rows.push(dsh_mcp_row(
+                "kodex-browser-mcp",
+                "kodex_browser",
+                lease.url(),
+                "x-kodex-browser-token",
+                lease.token(),
+                tool_call_timeout_ms,
+            ));
+            exposed.browser = Some(lease);
+        }
+        Ok(None) => {}
+        Err(error) => crate::startup_perf::mark("dsh/browser_mcp_failed", error),
+    }
+
     exposed
+}
+
+/// Register the harness process on the shared browser server.
+///
+/// `Ok(None)` when browser tools do not apply, which is a normal outcome. The
+/// harness is always local — a remote workspace is handled before a dsh host is
+/// brought up — so only the enabled and preflight gates can withhold the row.
+pub(crate) fn harness_browser_lease(
+    app_paths: &AppPaths,
+) -> Result<Option<crate::browser_server::BrowserServerLease>, String> {
+    let settings = crate::settings::load_app_settings(app_paths);
+    let servers = crate::shared_mcp::shared_mcp()
+        .browser_server(app_paths, &settings.browser)
+        .map_err(|error| format!("failed to start Kodex browser MCP server: {error}"))?;
+
+    // The harness has no ACP agent command to check, so the unsupported-agent
+    // gate is skipped here; the other gates are the same ones the ACP channel
+    // applies, which is what keeps the two channels in step.
+    let input = crate::browser_injection::input_for(
+        app_paths,
+        crate::browser_injection::HARNESS_AGENT_COMMAND,
+        false,
+        servers.adapter().exposed_tools().len(),
+    );
+    if crate::browser_injection::reason_key(&crate::browser_injection::resolve(&input)).is_some() {
+        return Ok(None);
+    }
+
+    let lease = crate::browser_server::BrowserServerLease::register(
+        servers.handle(),
+        crate::browser_injection::HARNESS_SESSION_ID,
+    )
+    .map_err(|error| format!("failed to register harness browser session: {error}"))?;
+    crate::startup_perf::mark("dsh/browser_mcp_ready", format!("url={}", lease.url()));
+    Ok(Some(lease))
 }
 
 fn dsh_mcp_row(
@@ -545,9 +673,7 @@ impl Application {
             // the `agent-preset-conflict` error.
             let agent_preset = preset_override
                 .filter(|preset| !preset.trim().is_empty())
-                .or_else(|| {
-                    crate::settings::load_app_settings(&self.app_paths).dsh_default_preset
-                });
+                .or_else(|| crate::settings::load_app_settings(&self.app_paths).dsh_default_preset);
             // Attach the `kodex-image` fallback when image settings are enabled
             // so text-only harness models (e.g. DeepSeek) accept image
             // attachments degraded through the view model — mirroring the
@@ -556,21 +682,24 @@ impl Application {
             // handle for prompt-level degradation. A misconfigured view
             // provider must not block session creation, so fall back to "no
             // image support" on error (matching the bootstrap path).
-            let (image_mcp, image_capabilities) =
-                match prepare_image_mcp(&self.app_paths, agent_command, model, &workspace_root, false)
-                {
-                    Ok((_image_servers, handle, caps)) => (handle, caps),
-                    Err(error) => {
-                        crate::startup_perf::mark("dsh/image_mcp_failed", error);
-                        (None, workspace_model::ImageCapabilities::default())
-                    }
-                };
+            let (image_mcp, image_capabilities) = match prepare_image_mcp(
+                &self.app_paths,
+                agent_command,
+                model,
+                &workspace_root,
+                false,
+            ) {
+                Ok((_image_servers, handle, caps)) => (handle, caps),
+                Err(error) => {
+                    crate::startup_perf::mark("dsh/image_mcp_failed", error);
+                    (None, workspace_model::ImageCapabilities::default())
+                }
+            };
             // The harness's own `kodex-image` registration is process-wide, so
             // point it at this session's capabilities: the model that is active
             // decides whether `view_image` is mounted at all. A vision model
             // must not be handed a tool that says it cannot see images.
-            crate::dsh_bringup::dsh_bringup()
-                .update_harness_image_capabilities(image_capabilities);
+            crate::dsh_bringup::dsh_bringup().update_harness_image_capabilities(image_capabilities);
             return Ok(PreparedSessionRuntime {
                 workspace_root,
                 agent_env: Vec::new(),
@@ -581,6 +710,7 @@ impl Application {
                 agent_preset,
                 web_tools_mcp: None,
                 image_mcp,
+                browser_mcp: None,
                 image_capabilities,
             });
         }
@@ -600,6 +730,15 @@ impl Application {
             false,
         )?;
         mcp_servers.extend(image_servers);
+        let (browser_servers, _browser_lease) = prepare_browser_mcp(
+            &self.app_paths,
+            agent_command,
+            false,
+            // Placeholder registration: replaced below once the session id
+            // exists. The gate decision does not depend on it.
+            "pending",
+        )?;
+        mcp_servers.extend(browser_servers);
         Ok(PreparedSessionRuntime {
             workspace_root,
             agent_env: crate::settings::agent_env_for_command(agent_command, &self.app_paths),
@@ -610,6 +749,7 @@ impl Application {
             agent_preset: None,
             web_tools_mcp,
             image_mcp,
+            browser_mcp: None,
             image_capabilities,
         })
     }
@@ -650,8 +790,48 @@ impl Application {
             agent_preset: None,
             web_tools_mcp: None,
             image_mcp: None,
+            browser_mcp: None,
             image_capabilities: workspace_model::ImageCapabilities::assumed_native(),
         })
+    }
+
+    /// Register this session on the shared browser server.
+    ///
+    /// Runs at lease-adoption time, where the session row exists, so the
+    /// registration is keyed by the real id the panel and the agent will use.
+    /// `None` when browser tools were withheld, which is a normal outcome.
+    fn register_browser_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::browser_server::BrowserServerLease> {
+        let settings = crate::settings::load_app_settings(&self.app_paths);
+        let servers = crate::shared_mcp::shared_mcp()
+            .browser_server(&self.app_paths, &settings.browser)
+            .ok()?;
+        let input = crate::browser_injection::input_for(
+            &self.app_paths,
+            &self.agent_command,
+            self.is_remote_workspace(),
+            servers.adapter().exposed_tools().len(),
+        );
+        if crate::browser_injection::reason_key(&crate::browser_injection::resolve(&input))
+            .is_some()
+        {
+            return None;
+        }
+        crate::browser_server::BrowserServerLease::register(servers.handle(), session_id).ok()
+    }
+
+    /// Release this session's browser, if it has one.
+    ///
+    /// Called on session switch and on shutdown. A browser that is already gone
+    /// is not an error, because both of those paths can run after the other.
+    pub(super) fn release_browser(&mut self, session_id: &str) {
+        self.browser_mcp = None;
+        let shared = crate::shared_mcp::shared_mcp();
+        let _ = crate::shared_mcp::block_on(crate::browser_cleanup::dispose_session(
+            &shared, session_id,
+        ));
     }
 
     pub(super) fn session_config_workspace_root(
@@ -816,19 +996,100 @@ impl Application {
     ) -> Result<(), String> {
         // Reuse the current session when it has no activity yet: opening a
         // workspace bootstraps an empty placeholder session, so a fresh
-        // "��建对话" from the sidebar would otherwise create a second empty
-        // session alongside the bootstrap one. Activating the placeholder
-        // (optionally switching the agent) avoids the duplicate.
-        if self.ui.workspace.root == self.app_paths.chats_workspace_root()
-            && !self
-                .store
-                .session_has_activity(&self.ui.session.id.to_string())
-                .unwrap_or(true)
-        {
-            self.poll_current_runtime_progress();
-            self.bump_revision();
-            return Ok(());
+        // "新建对话" from the sidebar reuses that placeholder instead of stacking a
+        // second empty session next to it. The guards live in
+        // `is_reusable_placeholder_session` (a deleted/archived row is never
+        // reused) and `activate_placeholder_session` (the chosen agent is
+        // applied to the reused row).
+        if self.is_reusable_placeholder_session() {
+            return self.activate_placeholder_session(agent, preset);
         }
+        self.create_visible_session(agent, preset)
+    }
+
+    /// Reuse the current session when it is still the workspace's empty
+    /// bootstrap placeholder: opening a workspace bootstraps an empty session
+    /// row, so a fresh "新建对话" from the sidebar would otherwise create a
+    /// second empty session alongside it.
+    ///
+    /// Two guards keep that shortcut honest (both were missing and produced
+    /// user-visible breakage):
+    /// - the row must still be a VISIBLE session — after deleting/archiving the
+    ///   last chat the in-memory id pointed at a row the sidebar no longer
+    ///   lists, so "creating" a chat silently did nothing and the sidebar sat
+    ///   on "暂无会话" for good;
+    /// - only the CHATS workspace takes the shortcut (project workspaces always
+    ///   get a real new session).
+    fn is_reusable_placeholder_session(&self) -> bool {
+        if self.ui.workspace.root != self.app_paths.chats_workspace_root() {
+            return false;
+        }
+        let session_id = self.ui.session.id.to_string();
+        let visible = self.store.session_is_visible(&session_id).unwrap_or(false);
+        visible && !self.store.session_has_activity(&session_id).unwrap_or(true)
+    }
+
+    /// Turn the existing empty placeholder row into the requested conversation.
+    ///
+    /// When the caller picked a different agent (or a non-default preset) the
+    /// runtime is rebuilt for the SAME row: the placeholder booted with the
+    /// workspace's default agent, and only bumping the revision there is what
+    /// made "新建对话 → 选择 dsh" hand back a Codex session. Without an agent
+    /// argument this stays the previous no-op bump.
+    fn activate_placeholder_session(
+        &mut self,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(requested_agent) = agent {
+            let requested_command =
+                self.prepare_agent_command_for_new_session(Some(requested_agent))?;
+            if self.placeholder_needs_agent_rebuild(&requested_command, preset.as_deref()) {
+                let session_id = self.ui.session.id;
+                let runtime = self.runtime_for_reused_placeholder(session_id, agent, preset)?;
+                let background_runtime = self.install_runtime_as_visible(runtime);
+                self.runtime_registry.insert(background_runtime);
+            }
+        }
+        self.poll_current_runtime_progress();
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Whether the placeholder runtime was booted with a different agent (or
+    /// dsh preset) than the caller just asked for. The agent is compared by
+    /// its user-visible label — the same roster the picker shows.
+    fn placeholder_needs_agent_rebuild(
+        &self,
+        requested_command: &str,
+        preset: Option<&str>,
+    ) -> bool {
+        let requested_label = crate::settings::agent_label_for_command(requested_command);
+        if self.ui.session.agent_cli.as_deref() != Some(requested_label.as_str()) {
+            return true;
+        }
+        match preset.map(str::trim).filter(|preset| !preset.is_empty()) {
+            Some(requested) => {
+                self.store
+                    .get_session_agent_preset(&self.ui.session.id.to_string())
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    != Some(requested)
+            }
+            None => false,
+        }
+    }
+
+    /// Start a brand-new (non-resumed) session and make it visible. Always
+    /// allocates a fresh row: callers that must not fall back to the
+    /// placeholder shortcut (the delete/archive replacement path) use this
+    /// directly.
+    fn create_visible_session(
+        &mut self,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+    ) -> Result<(), String> {
         let runtime = self.runtime_for_new_session(agent, preset)?;
         let background_runtime = self.install_runtime_as_visible(runtime);
         self.runtime_registry.insert(background_runtime);
@@ -865,8 +1126,7 @@ impl Application {
         // turn counter diverges from kodex's turn-opening count (the dsh
         // harness counts injected turns like subagent notifications and
         // splice-joined prompts). The prompt text pins the exact turn.
-        let (user_message_text, user_message_occurrence) =
-            self.fork_prompt_anchor(message_id);
+        let (user_message_text, user_message_occurrence) = self.fork_prompt_anchor(message_id);
         // Backend fork → child agent-side session id (harness session id for
         // dsh, ACP session id for codex). Blocking reply: the fork is a fast
         // control-plane call, and the local row needs the id before it can be
@@ -965,10 +1225,7 @@ impl Application {
     /// Walks the session's FULL persisted history: the visible UI only holds a
     /// tail window on long sessions, and the fork picker must be able to anchor
     /// on any turn.
-    pub(super) fn fork_turn_ordinal_for_message(
-        &self,
-        message_id: &str,
-    ) -> Result<u64, String> {
+    pub(super) fn fork_turn_ordinal_for_message(&self, message_id: &str) -> Result<u64, String> {
         let session_id = self.ui.session.id.to_string();
         let messages = self
             .store
@@ -1122,13 +1379,28 @@ impl Application {
             if let Some(replacement_id) = replacement_id {
                 self.session_switch(&replacement_id)?;
             } else {
-                self.session_create(None, None)?;
+                // Always a brand-new session: the row being removed IS the
+                // visible one, so the placeholder shortcut in `session_create`
+                // must not be allowed to "reuse" it (that left the workspace
+                // with zero visible sessions and the sidebar stuck on
+                // "暂无会话").
+                self.create_visible_session(None, None)?;
             }
         }
 
         if let Some(mut runtime) = self.runtime_registry.remove_all_state(id) {
             runtime.session.shutdown();
         }
+
+        // A deleted session's browser and its screenshots go with it. The
+        // browser is a running process and the captures are files on disk, so
+        // neither is covered by the session store's cascade.
+        let shared = crate::shared_mcp::shared_mcp();
+        let _ = crate::shared_mcp::block_on(async {
+            crate::browser_cleanup::dispose_session(&shared, id).await;
+            crate::screenshot_pipeline::remove_session_captures(&shared, id).await;
+        });
+
         self.store.delete_session(id).map_err(|e| e.to_string())
     }
 
@@ -1145,7 +1417,9 @@ impl Application {
             if let Some(replacement_id) = replacement_id {
                 self.session_switch(&replacement_id)?;
             } else {
-                self.session_create(None, None)?;
+                // Brand-new session, never the placeholder shortcut — see
+                // `session_delete`.
+                self.create_visible_session(None, None)?;
             }
         }
 
@@ -1216,12 +1490,17 @@ impl Application {
             Some(current_mode),
         );
 
+        // Read the id before the handle is moved into `self.session`: the
+        // browser registration is keyed by the id the panel and the agent use.
+        let browser_session_id = session.id.to_string();
+
         self.session = session;
         self.agent_command = agent_command;
         self.acp_port = prepared_runtime.acp_port;
         self.remote_ssh = prepared_runtime.remote_ssh;
         self.web_tools_mcp = prepared_runtime.web_tools_mcp;
         self.image_mcp = prepared_runtime.image_mcp;
+        self.browser_mcp = self.register_browser_for_session(&browser_session_id);
         self.ui.image_capabilities = prepared_runtime.image_capabilities;
         self.ui.session.status = SessionStatus::Idle;
         self.ui.prompt_capabilities = Default::default();
@@ -1483,6 +1762,7 @@ impl Application {
             remote_ssh: prepared_runtime.remote_ssh,
             web_tools_mcp: prepared_runtime.web_tools_mcp,
             image_mcp: prepared_runtime.image_mcp,
+            browser_mcp: prepared_runtime.browser_mcp,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -1516,17 +1796,44 @@ impl Application {
         preset: Option<String>,
     ) -> Result<SessionRuntime, String> {
         let new_id = uuid::Uuid::new_v4();
-        let initial_model = if crate::settings::is_deepseek_harness_command(&self.agent_command) {
-            String::new()
-        } else {
-            AGENT_DEFAULT_MODEL_LABEL.to_string()
-        };
+        let initial_model = self.initial_model_for_new_session();
         self.store
             .create_session(&new_id.to_string(), &initial_model)
             .map_err(|e| e.to_string())?;
+        self.runtime_for_fresh_session(new_id, initial_model, agent, preset)
+    }
 
+    /// Fresh (non-resumed) runtime for the ALREADY PERSISTED empty placeholder
+    /// row. Only `session_create`'s chats shortcut reaches this, when the caller
+    /// asked for an agent/preset the placeholder was not booted with.
+    fn runtime_for_reused_placeholder(
+        &mut self,
+        session_id: uuid::Uuid,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+    ) -> Result<SessionRuntime, String> {
+        let initial_model = self.initial_model_for_new_session();
+        self.runtime_for_fresh_session(session_id, initial_model, agent, preset)
+    }
+
+    fn initial_model_for_new_session(&self) -> String {
+        if crate::settings::is_deepseek_harness_command(&self.agent_command) {
+            String::new()
+        } else {
+            AGENT_DEFAULT_MODEL_LABEL.to_string()
+        }
+    }
+
+    fn runtime_for_fresh_session(
+        &mut self,
+        session_id: uuid::Uuid,
+        initial_model: String,
+        agent: Option<AgentCliId>,
+        preset: Option<String>,
+    ) -> Result<SessionRuntime, String> {
         let agent_command = self.prepare_agent_command_for_new_session(agent)?;
-        let prepared_runtime = self.prepare_session_runtime(&agent_command, &initial_model, preset)?;
+        let prepared_runtime =
+            self.prepare_session_runtime(&agent_command, &initial_model, preset)?;
 
         let agent_cli_label = crate::settings::agent_label_for_command(&agent_command);
         let mut session = SessionHandle::start(SessionConfig {
@@ -1552,7 +1859,7 @@ impl Application {
         );
 
         let mut ui = self.ui.clone();
-        ui.session.id = new_id;
+        ui.session.id = session_id;
         ui.session.title = "新会话".to_string();
         ui.session.model = initial_model;
         ui.session.mode = Some("Build".into());
@@ -1585,22 +1892,22 @@ impl Application {
         ui.usage = Default::default();
 
         let _ = self.store.update_session_model_mode(
-            &new_id.to_string(),
+            &session_id.to_string(),
             &ui.session.model,
             ui.session.mode.as_deref(),
         );
         let _ = self
             .store
-            .update_session_agent_cli(&new_id.to_string(), &agent_cli_label);
+            .update_session_agent_cli(&session_id.to_string(), &agent_cli_label);
         if is_codex_agent_label(&agent_cli_label) {
             let provider = crate::settings::codex_current_provider(&self.app_paths);
             let _ = self
                 .store
-                .update_session_codex_provider(&new_id.to_string(), &provider);
+                .update_session_codex_provider(&session_id.to_string(), &provider);
         }
 
         Ok(SessionRuntime {
-            local_session_id: new_id,
+            local_session_id: session_id,
             ui,
             session,
             agent_command,
@@ -1608,6 +1915,7 @@ impl Application {
             remote_ssh: prepared_runtime.remote_ssh,
             web_tools_mcp: prepared_runtime.web_tools_mcp,
             image_mcp: prepared_runtime.image_mcp,
+            browser_mcp: prepared_runtime.browser_mcp,
             in_flight_prompt: None,
             seq_counter: 1,
             needs_title: true,

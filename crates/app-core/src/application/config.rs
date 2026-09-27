@@ -69,7 +69,10 @@ mod harness_question_tests {
         let wire = partition_question_answers(&questions, &answers);
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].question_id, "q1");
-        assert!(wire[0].selected.is_empty(), "non-label must not be selected");
+        assert!(
+            wire[0].selected.is_empty(),
+            "non-label must not be selected"
+        );
         assert_eq!(wire[0].custom.as_deref(), Some("maybe later"));
     }
 

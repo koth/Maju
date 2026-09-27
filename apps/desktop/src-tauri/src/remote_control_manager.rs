@@ -9,7 +9,7 @@
 
 use crate::commands::remote_control::RemoteControlStatus;
 use relay_client::{
-    AccountSession, DeviceIdentity, LoginClient, PairingCode, DEFAULT_PAIRING_TTL,
+    AccountSession, DEFAULT_PAIRING_TTL, DeviceIdentity, LoginClient, PairingCode,
     auth_base_url_from_ws_endpoint, build_qr_payload, relay_host_port,
 };
 use std::sync::{Arc, Mutex};
@@ -162,22 +162,26 @@ fn local_egress_ip(relay_endpoint: &str) -> Option<String> {
 
 /// Run a command and return its trimmed stdout, or `None` on any failure.
 fn run_command(program: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program).args(args).output().ok()?;
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 impl RemoteControlManager {
     pub fn new(app_paths: app_core::AppPaths) -> Self {
         let enabled = std::env::var("KODEX_REMOTE_CONTROL")
-            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+            .map(|v| {
+                !matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off"
+                )
+            })
             .unwrap_or(true);
         // Plain ws:// during the no-domain dev window: the mobile companion's
         // React Native WebSocket can't skip self-signed TLS verification, so
@@ -403,7 +407,10 @@ impl RemoteControlManager {
     /// endpoint (development against a self-signed host). Driven by the
     /// `KODEX_RELAY_INSECURE_TLS` env var; defaults to off.
     pub fn insecure_tls(&self) -> bool {
-        self.inner.lock().expect("rc manager mutex poisoned").insecure_tls
+        self.inner
+            .lock()
+            .expect("rc manager mutex poisoned")
+            .insecure_tls
     }
 
     /// Load (or create) the device identity from the persisted key file.

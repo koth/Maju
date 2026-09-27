@@ -439,15 +439,23 @@ mod tests {
         let suggestions = collect_mention_suggestions(&root, "src");
 
         // The matching directory itself is surfaced, not just its files.
-        assert!(suggestions
-            .iter()
-            .any(|item| item.kind == FileEntryKind::Directory && item.path == "src"));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| item.kind == FileEntryKind::Directory && item.path == "src")
+        );
         // A file whose path contains the query is also surfaced.
-        assert!(suggestions
-            .iter()
-            .any(|item| item.kind == FileEntryKind::File && item.path == "src/Composer.tsx"));
+        assert!(
+            suggestions
+                .iter()
+                .any(|item| item.kind == FileEntryKind::File && item.path == "src/Composer.tsx")
+        );
         // Skipped directories are never suggested.
-        assert!(!suggestions.iter().any(|item| item.path.starts_with("target")));
+        assert!(
+            !suggestions
+                .iter()
+                .any(|item| item.path.starts_with("target"))
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -494,7 +502,11 @@ mod tests {
         ];
         if known_locations.iter().any(|path| path.is_file()) {
             let path = resolved.expect("rg should resolve via augmented search paths");
-            assert!(path.is_file(), "resolved rg path should exist: {}", path.display());
+            assert!(
+                path.is_file(),
+                "resolved rg path should exist: {}",
+                path.display()
+            );
         }
     }
 

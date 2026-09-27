@@ -1,0 +1,189 @@
+.browser-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  max-width: 60ch;
+}
+
+.browser-settings__heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.browser-settings__blurb {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2, #9aa3af);
+}
+
+.browser-settings__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-1, #e6e8eb);
+}
+
+.browser-settings__row > span:first-of-type {
+  min-width: 12ch;
+  color: var(--text-2, #9aa3af);
+}
+
+.browser-settings__row select,
+.browser-settings__row input[type="text"],
+.browser-settings__row input:not([type]) {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: inherit;
+  background: var(--surface-2, #1b1e24);
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+}
+
+.browser-settings__attach {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--warning, #fbbf24);
+  background: var(--surface-2, #1b1e24);
+  border-radius: 0 4px 4px 0;
+}
+
+.browser-settings__preflight {
+  padding: 8px 10px;
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+}
+
+.browser-settings__preflight-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2, #9aa3af);
+  margin-bottom: 6px;
+}
+
+.browser-settings__preflight-head button,
+.browser-settings__actions button {
+  padding: 3px 10px;
+  font-size: 12px;
+  color: inherit;
+  background: var(--surface-2, #1b1e24);
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.browser-settings__actions button:disabled {
+  color: var(--text-3, #6b7280);
+  cursor: default;
+}
+
+.browser-settings__ok,
+.browser-settings__pending {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2, #9aa3af);
+}
+
+.browser-settings__ok {
+  color: var(--success, #4ade80);
+}
+
+.browser-settings__blocked-detail,
+.browser-settings__blocked-remedy {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.browser-settings__blocked-remedy {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-2, #9aa3af);
+}
+
+.browser-settings__warning {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning, #fbbf24);
+}
+
+.browser-settings__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger, #f87171);
+}
+
+.browser-settings__blocker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.browser-settings__install button,
+.browser-settings__blocker > button {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: inherit;
+  background: var(--surface-2, #1b1e24);
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.browser-settings__install button:disabled {
+  color: var(--text-3, #6b7280);
+  cursor: default;
+}
+
+.browser-settings__install-status {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-2, #9aa3af);
+}
+
+.browser-settings__install-status--ok {
+  color: var(--success, #4ade80);
+}
+
+/* The installer's own reason: npm's error text, a spawn failure. Monospace so
+ * a package manager's wording stays readable, and left on its own line because
+ * it is often long. */
+.browser-settings__install-detail {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-2, #9aa3af);
+  background: var(--surface-2, #1b1e24);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.browser-settings__profile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--surface-2, #1b1e24);
+  border-radius: 4px;
+}
+
+.browser-settings__note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2, #9aa3af);
+}

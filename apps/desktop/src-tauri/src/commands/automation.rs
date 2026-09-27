@@ -59,7 +59,9 @@ fn record_from_input(
         workspace_root: input.workspace_root.trim().to_string(),
         // Default execution agent: DeepSeek Harness (dsh).
         agent_cli: input.agent_cli.or(Some(AgentCliId::DeepSeekHarness)),
-        agent_preset: input.agent_preset.filter(|preset| !preset.trim().is_empty()),
+        agent_preset: input
+            .agent_preset
+            .filter(|preset| !preset.trim().is_empty()),
         next_run_at_ms: app_core::automation::next_run_at_ms(&input.schedule, now_ms),
         schedule: input.schedule,
         enabled,
@@ -159,12 +161,7 @@ pub async fn automation_run_now(
             .get_automation(&id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "自动化不存在".to_string())?;
-        automation_scheduler::dispatch_run(
-            &app,
-            &store,
-            &automation,
-            AutomationRunTrigger::Manual,
-        )
+        automation_scheduler::dispatch_run(&app, &store, &automation, AutomationRunTrigger::Manual)
     })
     .await
     .map_err(|error| format!("Automation run task failed: {error}"))?

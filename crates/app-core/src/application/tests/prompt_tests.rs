@@ -68,7 +68,9 @@ fn retry_user_message_updates_failed_prompt_and_removes_failure_artifacts() {
         ..Default::default()
     });
     app.ui.timeline.push(TimelineItem::Message(user_id));
-    app.ui.timeline.push(TimelineItem::Thinking(Default::default()));
+    app.ui
+        .timeline
+        .push(TimelineItem::Thinking(Default::default()));
     app.ui.timeline.push(TimelineItem::Message(system_id));
     app.store
         .insert_message(&session_id, &user_id.to_string(), "User", "old prompt", 1)
@@ -200,6 +202,7 @@ fn resumed_codex_session_applies_replayed_tool_completed() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
     app.ui.timeline.push(TimelineItem::Tool(tool_id));
 
@@ -284,6 +287,7 @@ fn resume_replay_keeps_terminal_tool_events_only_for_known_call_ids() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
     let known = ClientEvent::ToolCompleted {
         id: known_id,
@@ -309,7 +313,6 @@ fn resume_replay_keeps_terminal_tool_events_only_for_known_call_ids() {
 
     app.session.shutdown();
 }
-
 
 #[test]
 fn retry_user_message_is_rejected_after_assistant_started() {

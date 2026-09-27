@@ -1569,7 +1569,17 @@ pub(super) fn is_read_only_tool_identity(kind: &str, name: &str) -> bool {
     kind_and_name_tokens(kind, name).any(|token| {
         matches!(
             token.as_str(),
-            "read" | "view" | "open" | "cat" | "search" | "grep" | "glob" | "find" | "list" | "ls" | "query"
+            "read"
+                | "view"
+                | "open"
+                | "cat"
+                | "search"
+                | "grep"
+                | "glob"
+                | "find"
+                | "list"
+                | "ls"
+                | "query"
         )
     })
 }
@@ -1597,8 +1607,7 @@ pub(super) fn tool_start_should_record_write_baseline(
     if shell_shaped {
         return true;
     }
-    raw_input_has_write_payload(raw_input)
-        || !tool_command_write_hint_paths(raw_input).is_empty()
+    raw_input_has_write_payload(raw_input) || !tool_command_write_hint_paths(raw_input).is_empty()
 }
 
 fn canonical_unavailable_diff(

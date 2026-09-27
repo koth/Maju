@@ -35,6 +35,7 @@ use workspace_model::{
 };
 
 mod change_set_tests;
+mod chats_session_tests;
 mod diff_tests;
 mod fork_tests;
 mod image_injection_tests;
@@ -288,7 +289,11 @@ fn harness_exposed_mcp_mounts_the_configured_local_servers() {
 
     crate::settings::save_web_tools_provider_key(&app_paths, "brave", "test-secret").unwrap();
     let exposed = super::sessions::harness_exposed_mcp(&app_paths);
-    assert_eq!(exposed.rows.len(), 1, "web tools only until image is enabled");
+    assert_eq!(
+        exposed.rows.len(),
+        1,
+        "web tools only until image is enabled"
+    );
     let row = &exposed.rows[0];
     assert_eq!(row.id, "kodex-web-tools-mcp");
     assert_eq!(row.server_name, "kodex_web_tools");
@@ -324,7 +329,8 @@ fn every_session_shares_one_server_per_tool_set() {
         .unwrap();
 
     // One assistant session (ACP) and the harness.
-    let (_, acp_web) = super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
+    let (_, acp_web) =
+        super::sessions::prepare_web_tools_mcp(&app_paths, "codex-acp", false).unwrap();
     let acp_web = acp_web.expect("configured web tools must register a session");
     let (_, acp_image, _) = super::sessions::prepare_image_mcp(
         &app_paths,
@@ -566,7 +572,8 @@ fn reject_review_file_change_reverts_modified_file_to_baseline() {
 
     let app_paths = crate::paths::AppPaths::from_root(dir.path().join("home").join(".kodex"));
     let mut app =
-        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None).unwrap();
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None)
+            .unwrap();
 
     fs::write(dir.path().join("main.rs"), "one\ntwo\n").unwrap();
     app.refresh_repository();
@@ -691,7 +698,8 @@ fn local_workspace_smoke_preserves_file_git_shell_and_restore_paths() {
     };
 
     let restored =
-        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None).unwrap();
+        Application::bootstrap_with_app_paths(dir.path(), mock_agent_command(), app_paths, None)
+            .unwrap();
     assert!(!restored.is_remote_workspace());
     assert!(matches!(
         restored.ui.workspace.location,
@@ -2085,10 +2093,7 @@ fn loopback_remote_control_drives_gateway() {
     // short-circuit instead of re-transferring the snapshot...
     let held_revision = snapshot.revision;
     let up_to_date = rt
-        .block_on(control.get_state(Some((
-            session_id.clone(),
-            held_revision,
-        ))))
+        .block_on(control.get_state(Some((session_id.clone(), held_revision))))
         .expect("get_state with known state should succeed");
     assert!(
         matches!(up_to_date, RemoteGetState::UpToDate),
@@ -2165,6 +2170,7 @@ fn remote_mode_blocks_full_access_auto_resolve() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     };
     app.ui.tools.push(tool);
 

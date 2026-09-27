@@ -428,13 +428,16 @@ impl SessionStore {
             .prepare("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'is_steer'")?
             .query_row([], |row| row.get(0))?;
         if !has_is_steer_col {
-            self.conn
-                .execute_batch("ALTER TABLE messages ADD COLUMN is_steer INTEGER NOT NULL DEFAULT 0;")?;
+            self.conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN is_steer INTEGER NOT NULL DEFAULT 0;",
+            )?;
         }
 
         let has_latency_col: bool = self
             .conn
-            .prepare("SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = 'latency_ms'")?
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = 'latency_ms'",
+            )?
             .query_row([], |row| row.get(0))?;
         if !has_latency_col {
             self.conn.execute_batch(
@@ -641,6 +644,21 @@ impl SessionStore {
             params![now_iso(), id],
         )?;
         Ok(())
+    }
+
+    /// Whether `id` is a session the sidebar would still list: the row exists
+    /// and has not been archived. Callers that fall back to "reuse the current
+    /// session" must check this — after a delete/archive the in-memory id can
+    /// point at a row that is gone (or hidden), and reusing it left the chats
+    /// workspace with zero visible sessions ("暂无会话") while the app kept
+    /// working against the invisible row.
+    pub fn session_is_visible(&self, id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE id = ?1 AND archived_at IS NULL",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn session_has_activity(&self, id: &str) -> Result<bool> {
@@ -1179,7 +1197,11 @@ impl SessionStore {
             let baseline = self.load_usage_baseline_before(&request, from)?;
             events = merge_baseline_events(events, baseline);
         }
-        Ok(usage_summary_from_events(&events, request.group_by, from_epoch))
+        Ok(usage_summary_from_events(
+            &events,
+            request.group_by,
+            from_epoch,
+        ))
     }
 
     /// P2: real daily usage series for the settings "每日用量" chart. Loads the
@@ -1232,20 +1254,13 @@ impl SessionStore {
     /// is excluded, as is `ContextSnapshot` occupancy-only telemetry.
     /// Unlike [`query_usage_summary`], this does NOT merge carry-over
     /// baseline events, so the count reflects only in-range requests.
-    pub fn query_usage_request_count(
-        &self,
-        request: UsageSummaryRequest,
-    ) -> Result<u64> {
+    pub fn query_usage_request_count(&self, request: UsageSummaryRequest) -> Result<u64> {
         let mut sql = String::from(
             "SELECT COUNT(*) FROM usage_events u
              LEFT JOIN sessions s ON s.id = u.session_id",
         );
         let mut params_vec = Vec::<String>::new();
-        sql.push_str(&self.usage_event_filter_sql(
-            &request,
-            &mut params_vec,
-            Some("turn_delta"),
-        ));
+        sql.push_str(&self.usage_event_filter_sql(&request, &mut params_vec, Some("turn_delta")));
         let mut stmt = self.conn.prepare(&sql)?;
         let count: i64 = stmt.query_row(
             params_from_iter(params_vec.iter().map(|value| value as &dyn ToSql)),
@@ -1413,11 +1428,7 @@ impl SessionStore {
                  LEFT JOIN sessions s ON s.id = u.session_id",
         );
         let mut params_vec = Vec::<String>::new();
-        sql.push_str(&self.usage_event_filter_sql(
-            &baseline_request,
-            &mut params_vec,
-            None,
-        ));
+        sql.push_str(&self.usage_event_filter_sql(&baseline_request, &mut params_vec, None));
         sql.push_str(
             " AND u.scope = 'session_total'
                AND CAST(u.created_at AS INTEGER) < ?
@@ -1608,6 +1619,7 @@ impl SessionStore {
                         can_stop: false,
                         stop_kind: None,
                         stop_status: None,
+                        screenshots: Vec::new(),
                     });
                     timeline.push(TimelineItem::Tool(id));
                 }
@@ -1622,11 +1634,7 @@ impl SessionStore {
     /// count and the earliest loaded seq. Keeps long sessions from
     /// materializing their entire history into memory on load; older entries
     /// are paged in on demand via `load_history_before`.
-    pub fn load_session_window(
-        &self,
-        id: &str,
-        limit: usize,
-    ) -> Result<SessionHistoryWindow> {
+    pub fn load_session_window(&self, id: &str, limit: usize) -> Result<SessionHistoryWindow> {
         let total = self.history_entry_count(id)?;
         let (messages, tools, timeline) = self.load_timeline_entries(id, None, Some(limit))?;
         let earliest_seq = self.earliest_loaded_seq(id, limit, total)?;
@@ -1733,7 +1741,12 @@ impl SessionStore {
         id: &str,
         before_seq: i64,
         limit: usize,
-    ) -> Result<(Vec<ChatMessage>, Vec<ToolInvocation>, Vec<TimelineItem>, Option<i64>)> {
+    ) -> Result<(
+        Vec<ChatMessage>,
+        Vec<ToolInvocation>,
+        Vec<TimelineItem>,
+        Option<i64>,
+    )> {
         let (messages, tools, timeline) =
             self.load_timeline_entries(id, Some(before_seq), Some(limit))?;
         // Next cursor = smallest seq actually loaded in this page. When the
@@ -1749,12 +1762,7 @@ impl SessionStore {
     }
 
     /// Smallest seq among the `limit` entries strictly before `before_seq`.
-    fn page_earliest_seq(
-        &self,
-        id: &str,
-        before_seq: i64,
-        limit: usize,
-    ) -> Result<Option<i64>> {
+    fn page_earliest_seq(&self, id: &str, before_seq: i64, limit: usize) -> Result<Option<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT seq FROM (
                SELECT seq FROM messages WHERE session_id = ?1 AND seq < ?2
@@ -1816,11 +1824,7 @@ impl SessionStore {
 
     /// Fetch one tool invocation's full stored detail (uncapped raw fields +
     /// diff previews) so expanded tool cards can lazy-load large text.
-    pub fn load_tool_detail(
-        &self,
-        session_id: &str,
-        tool_id: &str,
-    ) -> Result<ToolInvocation> {
+    pub fn load_tool_detail(&self, session_id: &str, tool_id: &str) -> Result<ToolInvocation> {
         let mut stmt = self.conn.prepare(
             "SELECT id, call_id, parent_call_id, name, kind, summary, status, raw_input, raw_output, error, diff_paths, diff_previews
              FROM tool_invocations WHERE session_id = ?1 AND id = ?2",
@@ -1864,6 +1868,7 @@ impl SessionStore {
             can_stop: false,
             stop_kind: None,
             stop_status: None,
+            screenshots: Vec::new(),
         })
     }
 
@@ -1993,6 +1998,7 @@ impl SessionStore {
                         can_stop: false,
                         stop_kind: None,
                         stop_status: None,
+                        screenshots: Vec::new(),
                     }),
                 ))
             })?;
@@ -2210,7 +2216,10 @@ impl SessionStore {
              ORDER BY started_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![automation_id, limit as i64], automation_run_from_row)?;
+        let rows = stmt.query_map(
+            params![automation_id, limit as i64],
+            automation_run_from_row,
+        )?;
         let mut runs = Vec::new();
         for row in rows {
             runs.push(row?);
@@ -2630,10 +2639,7 @@ impl SessionStore {
     }
 
     /// Full-text file records behind a change set (metadata + texts).
-    fn change_set_file_records(
-        &self,
-        change_set_id: &str,
-    ) -> Result<Vec<FileChangeRecord>> {
+    fn change_set_file_records(&self, change_set_id: &str) -> Result<Vec<FileChangeRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT change_set_id, path, change_type, base_text, target_text, added_lines, removed_lines, quality, updated_at
              FROM change_set_files
@@ -2759,8 +2765,7 @@ impl SessionStore {
             if let (Some(assistant_id), Ok(records)) = (
                 assistant_id.as_ref(),
                 self.change_set_file_records(&change_set_id),
-            )
-                && let Some(message_id) = uuid::Uuid::parse_str(&assistant_id).ok()
+            ) && let Some(message_id) = uuid::Uuid::parse_str(&assistant_id).ok()
             {
                 let changes = records
                     .iter()
@@ -2783,11 +2788,7 @@ impl SessionStore {
         Ok(repaired)
     }
 
-    fn finalize_pending_change_set(
-        &self,
-        change_set_id: &str,
-        message_id: Option<&str>,
-    ) -> bool {
+    fn finalize_pending_change_set(&self, change_set_id: &str, message_id: Option<&str>) -> bool {
         self.conn
             .execute(
                 "UPDATE change_sets
@@ -3021,7 +3022,8 @@ impl SessionStore {
         // diff text of the session just to sum it up. On a long session this
         // ran on every change-set listing (panel refresh, timeline bars, git
         // refresh), which is what made the panel crawl.
-        if let Some(aggregate) = self.load_session_change_aggregate("session_file_changes", session_id)?
+        if let Some(aggregate) =
+            self.load_session_change_aggregate("session_file_changes", session_id)?
         {
             summaries.push(summarize_change_aggregate(
                 legacy_agent_conversation_id(session_id),
@@ -3445,12 +3447,11 @@ fn session_usage_snapshot_from_events(events: &[StoredUsageEvent]) -> SessionUsa
     // this path.
     if !saw_session_total
         && !saw_turn_delta
-        && let Some(total) = events
-            .iter()
-            .rev()
-            .find_map(|e| matches!(e.scope, UsageEventScope::ContextSnapshot)
+        && let Some(total) = events.iter().rev().find_map(|e| {
+            matches!(e.scope, UsageEventScope::ContextSnapshot)
                 .then(|| e.tokens.total_tokens)
-                .flatten())
+                .flatten()
+        })
     {
         // P6: this branch only fires for sessions persisted by older Kodex
         // builds that mislabelled a single-total payload as
@@ -3810,8 +3811,7 @@ fn usage_daily_series_from_events(
     for (date, day_events) in &events_by_date {
         // Compute the epoch boundary for the start of this day so
         // `compute_per_session_model_totals` can split baseline vs in-day.
-        let day_start_epoch =
-            epoch_start_of_date_local(date, utc_offset_minutes).unwrap_or(0);
+        let day_start_epoch = epoch_start_of_date_local(date, utc_offset_minutes).unwrap_or(0);
         // Skip days entirely before the `from` bound (they only served to
         // build the running baseline).
         if let Some(from) = from_epoch {
@@ -3823,11 +3823,8 @@ fn usage_daily_series_from_events(
         }
         // Pre-compute per-(session, model) effective totals for this day,
         // subtracting the running baseline (last SessionTotal before this day).
-        let per_session_model = compute_daily_day_totals(
-            day_events,
-            &running_baseline,
-            day_start_epoch,
-        );
+        let per_session_model =
+            compute_daily_day_totals(day_events, &running_baseline, day_start_epoch);
         // Advance the baseline for the NEXT day with this day's SessionTotals.
         advance_baseline(&mut running_baseline, day_events);
         let mut contributed: HashSet<(String, String)> = HashSet::new();
@@ -3869,7 +3866,10 @@ fn usage_daily_series_from_events(
                         event.provider.as_deref(),
                         event.agent_cli.as_deref(),
                     );
-                    if let Some(index) = by_model.iter().position(|row| usage_row_matches_key(row, &key)) {
+                    if let Some(index) = by_model
+                        .iter()
+                        .position(|row| usage_row_matches_key(row, &key))
+                    {
                         add_usage_tokens(&mut by_model[index].tokens, total);
                     }
                 }
@@ -4063,18 +4063,27 @@ fn update_usage_summary_row(
     // token SessionTotal/TurnDelta accounting below.
     if let Some(v) = event.tokens.latency_ms {
         row.latency_count += 1;
-        row.avg_latency_ms =
-            Some(rolling_avg(row.avg_latency_ms, v as f64, row.latency_count as f64));
+        row.avg_latency_ms = Some(rolling_avg(
+            row.avg_latency_ms,
+            v as f64,
+            row.latency_count as f64,
+        ));
     }
     if let Some(v) = event.tokens.ttft_ms {
         row.ttft_count += 1;
-        row.avg_ttft_ms =
-            Some(rolling_avg(row.avg_ttft_ms, v as f64, row.ttft_count as f64));
+        row.avg_ttft_ms = Some(rolling_avg(
+            row.avg_ttft_ms,
+            v as f64,
+            row.ttft_count as f64,
+        ));
     }
     if let Some(v) = event.tokens.tokens_per_second {
         row.tps_count += 1;
-        row.avg_tokens_per_second =
-            Some(rolling_avg(row.avg_tokens_per_second, v, row.tps_count as f64));
+        row.avg_tokens_per_second = Some(rolling_avg(
+            row.avg_tokens_per_second,
+            v,
+            row.tps_count as f64,
+        ));
     }
     // Token handling is only active for the single-session snapshot path
     // (`track_tokens = true`), where `has_session_total` is effectively
@@ -4271,9 +4280,9 @@ fn usage_total_tokens(tokens: &UsageTokenBreakdown) -> u64 {
     // `output_tokens`, so the fallback total is input + output. The cache /
     // reasoning fields remain display-only breakdown chips; the authoritative
     // `total_tokens` is preferred when present.
-    tokens.total_tokens.unwrap_or_else(|| {
-        tokens.input_tokens.unwrap_or(0) + tokens.output_tokens.unwrap_or(0)
-    })
+    tokens
+        .total_tokens
+        .unwrap_or_else(|| tokens.input_tokens.unwrap_or(0) + tokens.output_tokens.unwrap_or(0))
 }
 
 fn opt_i64(value: Option<u64>) -> Option<i64> {
@@ -4286,9 +4295,7 @@ fn opt_u64(value: Option<i64>) -> Option<u64> {
 
 /// Row mapper shared by the two turn-file-change readers so both project the
 /// same columns into the same shape.
-fn turn_file_change_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(String, SessionFileChange)> {
+fn turn_file_change_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, SessionFileChange)> {
     let change_type_str: String = row.get(2)?;
     Ok((
         row.get::<_, String>(0)?,
@@ -4347,8 +4354,7 @@ fn automation_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Autom
         name: row.get(1)?,
         prompt: row.get(2)?,
         workspace_root: row.get(3)?,
-        agent_cli: agent_cli_json
-            .and_then(|json| serde_json::from_str::<AgentCliId>(&json).ok()),
+        agent_cli: agent_cli_json.and_then(|json| serde_json::from_str::<AgentCliId>(&json).ok()),
         agent_preset: row.get(5)?,
         schedule: serde_json::from_str::<AutomationSchedule>(&schedule_json).unwrap_or_default(),
         enabled: row.get::<_, i64>(7)? != 0,

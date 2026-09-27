@@ -43,10 +43,13 @@ impl RemoteControl for DesktopRemoteControl {
         // in the workspace the user picked on the phone, not whichever
         // workspace happens to be active on the desktop (mirrors the local
         // `session_create` command's `with_workspace_app` routing).
-        let result = self.app.state::<AppState>().with_workspace_app(workspace_root, |app| {
-            app.session_create(agent, preset)?;
-            Ok(app.ui.session.id.to_string())
-        });
+        let result = self
+            .app
+            .state::<AppState>()
+            .with_workspace_app(workspace_root, |app| {
+                app.session_create(agent, preset)?;
+                Ok(app.ui.session.id.to_string())
+            });
         async move { result }
     }
 
@@ -56,10 +59,9 @@ impl RemoteControl for DesktopRemoteControl {
         value_id: String,
         provider: Option<String>,
     ) -> impl std::future::Future<Output = Result<SessionConfigState, String>> + Send {
-        let result = self
-            .app
-            .state::<AppState>()
-            .with_app(|app| app.set_session_config_control(&control_id, &value_id, provider.as_deref()));
+        let result = self.app.state::<AppState>().with_app(|app| {
+            app.set_session_config_control(&control_id, &value_id, provider.as_deref())
+        });
         async move { result }
     }
 
@@ -85,15 +87,12 @@ impl RemoteControl for DesktopRemoteControl {
         &self,
         prompt: Vec<UserPromptContent>,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send {
-        let result = self
-            .app
-            .state::<AppState>()
-            .with_app(|app| {
-                app.set_remote_mode(true);
-                app.send_prompt_content_background(prompt)
-                    .map(|_outcome| ())
-                    .map_err(|e| e.to_string())
-            });
+        let result = self.app.state::<AppState>().with_app(|app| {
+            app.set_remote_mode(true);
+            app.send_prompt_content_background(prompt)
+                .map(|_outcome| ())
+                .map_err(|e| e.to_string())
+        });
         async move { result }
     }
 

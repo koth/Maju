@@ -166,7 +166,9 @@ impl ImageMcpHandle {
 
     /// The capabilities registered for one session token.
     pub fn capabilities(&self, token: &str) -> Option<ImageCapabilities> {
-        self.service.session(token).map(|state| state.capabilities())
+        self.service
+            .session(token)
+            .map(|state| state.capabilities())
     }
 
     /// Shared cross-session view cache.
@@ -331,7 +333,8 @@ async fn handle_http_request(
     }
     // The token names the session, so it is also the MCP session id: every
     // client (one per assistant session, one per harness process) gets its own,
-    // and a request may never carry another session's id.
+    // and a request may never carry another session's id. Taken before the body
+    // is consumed.
     let Some(token) = request_token(&request) else {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
@@ -367,7 +370,23 @@ async fn handle_http_request(
             ));
         }
     };
-    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str()) {
+
+    // The version probe is answered between authentication and the session
+    // check. It does carry the token — verified by capturing the probe's headers
+    // rather than assumed — so authentication was never the issue. What it cannot
+    // carry is a session id: sessions are issued by `initialize`, and this
+    // request runs before that. Refusing it there produces a 401 the SDK reads as
+    // a missing authProvider, which is terminal.
+    if let Some(reply) = crate::mcp_version::discover_response(&payload) {
+        let id = payload.get("id").cloned().unwrap_or(Value::Null);
+        return Ok(json_response(
+            StatusCode::OK,
+            json!({"jsonrpc": "2.0", "id": id, "result": reply}),
+        ));
+    }
+
+    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str())
+    {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
@@ -448,15 +467,18 @@ async fn handle_json_rpc_call(
     let caps = session.capabilities();
     let result = match method {
         "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": crate::mcp_version::negotiate(payload.get("params")),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "kodex-image", "version": env!("CARGO_PKG_VERSION")}
         })),
         "tools/list" => Ok(json!({"tools": trimmed_tool_schemas(&caps)})),
         "tools/call" => {
-            let result =
-                handle_tool_call(payload.get("params").cloned().unwrap_or_default(), &service, &session)
-                    .await;
+            let result = handle_tool_call(
+                payload.get("params").cloned().unwrap_or_default(),
+                &service,
+                &session,
+            )
+            .await;
             return Some(json_rpc_call_result(id, result));
         }
         "resources/list" => Ok(json!({"resources": [tool_manifest_resource()]})),
@@ -754,6 +776,11 @@ mod tests {
         assert_eq!(
             payload["result"]["serverInfo"]["name"].as_str(),
             Some("kodex-image")
+        );
+        assert_eq!(
+            payload["result"]["protocolVersion"].as_str(),
+            Some("2025-11-25"),
+            "the harness rejects a reply in a revision it does not support"
         );
         session_id
     }
@@ -1090,7 +1117,10 @@ mod tests {
                         .collect::<Vec<_>>()
                 }
             };
-            (list(text_only_token.clone()).await, list(multimodal_token.clone()).await)
+            (
+                list(text_only_token.clone()).await,
+                list(multimodal_token.clone()).await,
+            )
         });
 
         assert!(text_only.contains(&"view_image".to_string()));

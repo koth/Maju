@@ -245,6 +245,8 @@ fn settings_round_trip() {
             enabled: true,
             provider: WEB_TOOLS_PROVIDER_BRAVE.to_string(),
         },
+        browser: workspace_model::BrowserSettings::default(),
+        computer_use: workspace_model::ComputerUseSettings::default(),
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
@@ -348,6 +350,8 @@ fn legacy_goose_selection_migrates_to_codebuddy_when_codex_is_missing() {
         selected_claude_provider_profile_id: None,
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
+        browser: workspace_model::BrowserSettings::default(),
+        computer_use: workspace_model::ComputerUseSettings::default(),
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
@@ -391,6 +395,8 @@ model_provider = "timiai"
         selected_claude_provider_profile_id: Some("legacy-claude".to_string()),
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
+        browser: workspace_model::BrowserSettings::default(),
+        computer_use: workspace_model::ComputerUseSettings::default(),
         image: ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
@@ -726,10 +732,12 @@ fn selected_codex_acp_resolves_with_codex_home_env() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -842,10 +850,12 @@ fn remote_codex_proxy_config_strips_local_only_paths() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -901,10 +911,12 @@ fn remote_codex_model_catalog_content_includes_byok_provider_models() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -943,10 +955,12 @@ fn remote_codex_byok_env_starts_local_proxy_before_scrubbing_keys() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1850,10 +1864,12 @@ fn codex_byok_session_launch_repairs_legacy_source_provider_catalog() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -1942,10 +1958,12 @@ fn codex_byok_session_launch_repairs_misencoded_kimi_model_provider() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -2477,10 +2495,12 @@ fn env_override_wins_over_persisted_selection() {
             selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
             claude: ClaudeProviderSettings::default(),
             web_tools: WebToolsSettings::default(),
+            browser: workspace_model::BrowserSettings::default(),
+            computer_use: workspace_model::ComputerUseSettings::default(),
             image: ImageSettings::default(),
             commit_assistant: workspace_model::CommitAssistantSettings::default(),
             dsh_default_preset: None,
-        session_title: workspace_model::SessionTitleSettings::default(),
+            session_title: workspace_model::SessionTitleSettings::default(),
         },
     )
     .unwrap();
@@ -2800,7 +2820,9 @@ fn commit_assistant_settings_validate_availability_and_support_clearing() {
     save_provider_models(
         &paths,
         "deepseek",
-        vec![workspace_model::ModelAttributesInput::from_slug("deepseek-chat")],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            "deepseek-chat",
+        )],
     )
     .unwrap();
 
@@ -2840,7 +2862,9 @@ fn session_title_settings_validate_availability_and_support_clearing() {
     save_provider_models(
         &paths,
         "deepseek",
-        vec![workspace_model::ModelAttributesInput::from_slug("deepseek-chat")],
+        vec![workspace_model::ModelAttributesInput::from_slug(
+            "deepseek-chat",
+        )],
     )
     .unwrap();
 

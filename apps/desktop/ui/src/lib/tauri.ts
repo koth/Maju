@@ -55,6 +55,12 @@ import type {
   AutomationRecord,
   AutomationRunRecord,
   SessionJobRecord,
+  RemoteSkill,
+  InstalledSkill,
+  SkillHubSkill,
+  BrowserInstallState,
+  BrowserPreflight,
+  BrowserSettings,
 } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -1055,8 +1061,124 @@ export async function automationListRuns(
   return invoke<AutomationRunRecord[]>("automation_list_runs", { id, limit });
 }
 
+// ── Skills (技能) ──
+
+export async function skillsListRemote(
+  repo?: string,
+  path?: string,
+): Promise<RemoteSkill[]> {
+  return invoke<RemoteSkill[]>("skills_list_remote", { repo, path });
+}
+
+export async function skillsListInstalled(): Promise<InstalledSkill[]> {
+  return invoke<InstalledSkill[]>("skills_list_installed");
+}
+
+export async function skillsInstall(
+  repo: string,
+  skillPath: string,
+): Promise<InstalledSkill> {
+  return invoke<InstalledSkill>("skills_install", { repo, skillPath });
+}
+
+export async function skillsUninstall(name: string): Promise<void> {
+  return invoke<void>("skills_uninstall", { name });
+}
+
+export async function skillsGetDefaultDir(): Promise<string> {
+  return invoke<string>("skills_get_default_dir");
+}
+
+export async function skillsGetDefaultRepo(): Promise<string> {
+  return invoke<string>("skills_get_default_repo");
+}
+
+export async function skillsGetDefaultPath(): Promise<string> {
+  return invoke<string>("skills_get_default_path");
+}
+
+// ── SkillHub ──
+
+export async function skillhubStatus(): Promise<boolean> {
+  return invoke<boolean>("skillhub_status");
+}
+
+export async function skillhubInstallCli(): Promise<string> {
+  return invoke<string>("skillhub_install_cli");
+}
+
+export async function skillhubSearch(
+  query: string,
+): Promise<SkillHubSkill[]> {
+  return invoke<SkillHubSkill[]>("skillhub_search", { query });
+}
+
+export async function skillhubRankings(
+  rankingType: string,
+): Promise<SkillHubSkill[]> {
+  return invoke<SkillHubSkill[]>("skillhub_rankings", { rankingType });
+}
+
+/** Install a skill; resolves to the installed folder path. */
+export async function skillhubInstall(slug: string): Promise<string> {
+  return invoke<string>("skillhub_install", { slug });
+}
+
 /** Background jobs (后台任务) the dsh harness reports for the visible
  *  session (empty for non-harness agents). */
 export async function sessionListBackgroundJobs(): Promise<SessionJobRecord[]> {
   return invoke<SessionJobRecord[]>("session_list_background_jobs");
+}
+
+/** Navigate a session's browser to a URL. The agent is not involved; this is
+ *  the user driving the same browser the agent sees. */
+export async function browserNavigate(
+  sessionId: string,
+  url: string,
+): Promise<void> {
+  return invoke<void>("browser_navigate", { request: { session_id: sessionId, url } });
+}
+
+/** Re-capture the current page for the panel. */
+export async function browserRefresh(sessionId: string): Promise<void> {
+  return invoke<void>("browser_refresh", { request: { session_id: sessionId } });
+}
+
+/** Dispose a session's browser. A later tool call starts a fresh one. */
+export async function browserClose(sessionId: string): Promise<void> {
+  return invoke<void>("browser_close", { request: { session_id: sessionId } });
+}
+
+/** Run browser preflight and return the result for the settings pane. */
+export async function browserPreflight(): Promise<BrowserPreflight> {
+  return invoke<BrowserPreflight>("browser_preflight");
+}
+
+/** Persist browser-use settings. Validation happens on the Rust side, so an
+ *  unusable configuration is refused where the user made the change. */
+export async function settingsSaveBrowserSettings(
+  settings: BrowserSettings,
+): Promise<AgentSettingsSnapshot> {
+  return invoke<AgentSettingsSnapshot>("settings_save_browser_settings", { settings });
+}
+
+/** Re-run browser preflight without saving. */
+export async function settingsBrowserPreflight(): Promise<BrowserPreflight> {
+  return invoke<BrowserPreflight>("settings_browser_preflight");
+}
+
+/** Install the pinned browser provider, or join an install already running. */
+export async function browserInstall(): Promise<BrowserInstallState> {
+  return invoke<BrowserInstallState>("browser_install");
+}
+
+/** Read install progress without starting anything. */
+export async function browserInstallState(): Promise<BrowserInstallState> {
+  return invoke<BrowserInstallState>("browser_install_state");
+}
+
+/** Re-run browser preflight, so a finished install clears the warning
+ *  without reopening settings. */
+export async function browserRefreshPreflight(): Promise<BrowserPreflight> {
+  return invoke<BrowserPreflight>("browser_refresh_preflight");
 }

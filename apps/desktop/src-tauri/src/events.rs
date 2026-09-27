@@ -1,8 +1,18 @@
 use tauri::{AppHandle, Emitter};
 use terminal_service::TerminalServiceEvent;
 use workspace_model::{
-    AutomationFiredEvent, ProxyRetryStatus, RemoteOpenProgressEvent, UiSnapshot, UiSnapshotPatch,
+    AutomationFiredEvent, CapabilityStateEvent, ProxyRetryStatus, RemoteOpenProgressEvent,
+    UiSnapshot, UiSnapshotPatch,
 };
+
+/// Push a browser or computer-use state change.
+///
+/// Capability state is pushed rather than left to the snapshot poll because a
+/// screenshot or a navigation should appear as soon as it happens, and because
+/// a desktop capture can arrive while no turn is running.
+pub fn emit_capability_event(app: &AppHandle, event: &CapabilityStateEvent) {
+    let _ = app.emit("capability:state", event);
+}
 
 pub fn emit_ui_snapshot(app: &AppHandle, snapshot: &UiSnapshot) {
     let _ = app.emit("ui:snapshot", snapshot);

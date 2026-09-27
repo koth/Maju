@@ -122,7 +122,6 @@ impl Application {
         self.refresh_repository();
         Ok(result)
     }
-
 }
 
 fn expand_to_status_listed(
@@ -153,4 +152,3 @@ fn expand_to_status_listed(
     }
     expanded
 }
-

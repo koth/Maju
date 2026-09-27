@@ -314,6 +314,122 @@ export interface TerminalSession {
   rows: number;
 }
 
+/** Lifecycle of a capability's per-session resource. */
+export type CapabilityResourceStatus =
+  | "idle"
+  | "active"
+  | "closing"
+  | "closed"
+  | "failed";
+
+/**
+ * A persisted screenshot. Bytes live in attachment storage; the UI only ever
+ * sees this handle, never the image itself.
+ */
+export interface ScreenshotHandle {
+  path: string;
+  width: number;
+  height: number;
+  byte_size: number;
+  media_type: string;
+}
+
+export type BrowserMode = "launch" | "attach" | "persistent";
+
+export interface BrowserSessionState {
+  session_id: string;
+  status: CapabilityResourceStatus;
+  mode: BrowserMode;
+  current_url: string;
+  page_title: string;
+  /** Downscaled base64 PNG for the panel, or null when none fits. */
+  panel_rendition: string | null;
+  latest_screenshot: ScreenshotHandle | null;
+  version: number;
+}
+
+export interface ComputerSessionState {
+  session_id: string;
+  status: CapabilityResourceStatus;
+  cursor_x: number | null;
+  cursor_y: number | null;
+  latest_screenshot: ScreenshotHandle | null;
+  unavailable_facilities: string[];
+  overlapping_sessions: string[];
+  version: number;
+}
+
+/** A browser or computer-use state change pushed outside the snapshot poll. */
+export type CapabilityStateEvent =
+  | { kind: "browser"; state: BrowserSessionState }
+  | { kind: "computer"; state: ComputerSessionState }
+  | { kind: "browserClosed"; session_id: string }
+  | { kind: "computerClosed"; session_id: string }
+  | {
+      kind: "unavailable";
+      capability: string;
+      detail: string;
+      remedy: string;
+    };
+
+/** Why a session did not receive browser tools. */
+export type WithheldReason =
+  | "disabled"
+  | "remote-workspace"
+  | "unsupported-agent"
+  | "unavailable";
+
+export interface BrowserSettings {
+  enabled: boolean;
+  mode: BrowserMode;
+  headless: boolean;
+  executable_path: string;
+  endpoint: string;
+  allow_attach: boolean;
+  /** Which Kodex-owned profile `persistent` mode uses. */
+  profile_name: string;
+  provider_version: string;
+  tool_call_timeout_ms: number;
+}
+
+export interface BrowserPreflight {
+  state:
+    | { state: "ready" }
+    | {
+        state: "missing";
+        detail: string;
+        remedy: string;
+        fix: PreflightFix;
+      }
+    | {
+        state: "invalid";
+        detail: string;
+        remedy: string;
+        fix: PreflightFix;
+      };
+  node_executable?: string;
+  provider_version: string;
+}
+
+/** How a user resolves an unsatisfied prerequisite. */
+export type PreflightFix = "install" | "configure";
+
+export type BrowserInstallPhase =
+  | { phase: "resolving" }
+  | { phase: "installingPackage" }
+  | { phase: "installingChromium" }
+  | { phase: "verifying" }
+  | { phase: "complete"; verified: boolean }
+  | { phase: "failed"; step: string; detail: string };
+
+export interface BrowserInstallState {
+  phase: BrowserInstallPhase;
+  label: string;
+  running: boolean;
+  verified: boolean;
+  installed: boolean;
+}
+
 export interface TerminalOpenRequest {
   workspace_root?: string | null;
   force_new?: boolean;
@@ -420,6 +536,9 @@ export interface ToolInvocation {
   can_stop: boolean;
   stop_kind: string | null;
   stop_status: string | null;
+  /** Screenshots a capture tool produced. Handles only — the card never
+   *  receives image bytes. */
+  screenshots?: ScreenshotHandle[];
 }
 
 export interface DiffStats {
@@ -1017,6 +1136,7 @@ export interface AppSettings {
   selected_claude_provider_profile_id: string | null;
   claude: ClaudeProviderSettings;
   web_tools: WebToolsSettings;
+  browser?: BrowserSettings;
   dsh_default_preset?: string | null;
   /** Model that re-evaluates DSH session titles after each completed turn. Empty pair = inherit the current turn's route. */
   session_title?: SessionTitleSettings;
@@ -1101,6 +1221,9 @@ export interface AgentSettingsSnapshot {
   codex_acp: CodexAcpSettingsStatus;
   claude: ClaudeProviderSettingsStatus;
   web_tools: WebToolsSettingsStatus;
+  /** Browser preflight, resolved with the rest of the settings so the pane
+   *  paints without a second round trip. */
+  browser?: BrowserPreflight;
   image?: ImageSettingsStatus;
   commit_assistant?: CommitAssistantSettingsStatus;
   session_title?: SessionTitleSettingsStatus;
@@ -1167,4 +1290,34 @@ export interface AgentInstallResult {
   message: string;
   manual_instruction: string | null;
   snapshot: AgentSettingsSnapshot;
+}
+
+// ── Skills (技能) ──
+
+/** A skill entry from the remote repository. */
+export interface RemoteSkill {
+  name: string;
+  path: string;
+  description?: string | null;
+}
+
+/** A locally installed skill. */
+export interface InstalledSkill {
+  name: string;
+  path: string;
+  description?: string | null;
+  is_system: boolean;
+}
+
+/** A skill entry from SkillHub search results. */
+export interface SkillHubSkill {
+  slug: string;
+  name: string;
+  summary: string;
+  author: string;
+  downloads?: number | null;
+  score?: number | null;
+  /** 上架时间（epoch 毫秒）——「最新」按它降序，卡片上也会显示。 */
+  created_at?: number | null;
+  namespace?: { handle?: string; display_name?: string } | null;
 }

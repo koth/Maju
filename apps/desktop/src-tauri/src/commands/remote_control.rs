@@ -43,10 +43,7 @@ pub struct RemoteControlStatus {
 /// Kill switch: disable the relay-client (fail-open to "disconnected"; local
 /// sessions are unaffected). Persists for the process lifetime.
 #[tauri::command]
-pub fn remote_control_set_enabled(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
+pub fn remote_control_set_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     state.remote_control().set_enabled(enabled);
     Ok(())
 }
@@ -55,9 +52,7 @@ pub fn remote_control_set_enabled(
 /// endpoint + PC device public key). Returns the JSON string for the
 /// frontend to render as a QR.
 #[tauri::command]
-pub fn remote_control_pairing_qr(
-    state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+pub fn remote_control_pairing_qr(state: State<'_, AppState>) -> Result<Option<String>, String> {
     state.remote_control().mint_pairing_qr()
 }
 
@@ -88,10 +83,7 @@ pub async fn remote_control_login(
     email: String,
     code: String,
 ) -> Result<(), String> {
-    state
-        .remote_control()
-        .login_with_code(&email, &code)
-        .await
+    state.remote_control().login_with_code(&email, &code).await
 }
 
 /// Forget the locally stored account session (logout). Does not affect the

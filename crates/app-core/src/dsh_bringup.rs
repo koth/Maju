@@ -41,6 +41,8 @@ pub struct HarnessExposedMcp {
     /// process's sessions from the shared servers.
     pub web_tools: Option<crate::web_tools_mcp::WebToolsLease>,
     pub image: Option<crate::image_mcp::ImageMcpLease>,
+    /// The harness process's browser registration, held for the same reason.
+    pub browser: Option<crate::browser_server::BrowserServerLease>,
 }
 
 /// Initialize the process-wide bring-up singleton. The registry is shared with
@@ -207,10 +209,14 @@ impl DshBringup {
         let provider_keys = dsh_provider_keys(paths);
         let spawn_config = SpawnDshWebConfig {
             dsh_home: home,
+            codex_home: paths.root().display().to_string(),
             provider_keys,
             extra_env: vec![
                 ("DSH_TELEMETRY_DISABLED".to_string(), "1".to_string()),
-                ("DSH_PERMISSION_MODE".to_string(), "danger-full-access".to_string()),
+                (
+                    "DSH_PERMISSION_MODE".to_string(),
+                    "danger-full-access".to_string(),
+                ),
             ],
             patch_overlay: Some(paths.dsh_patch_path().display().to_string()),
         };

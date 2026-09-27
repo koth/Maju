@@ -1,0 +1,10 @@
+{
+  "state": {
+    "state": "missing",
+    "detail": "尚未安装固定版本的浏览器 provider（v0.0.82）。",
+    "remedy": "Kodex 可以为你一键安装，也可以自行运行 `npm install`。",
+    "fix": "install"
+  },
+  "node_executable": "/opt/homebrew/bin/node",
+  "provider_version": "0.0.82"
+}

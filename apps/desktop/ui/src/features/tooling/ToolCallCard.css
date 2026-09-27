@@ -645,3 +645,34 @@
   max-height: 92vh;
   border-radius: 8px;
 }
+
+/* Browser/desktop captures. Only the thumbnail reaches the card; the
+   full-resolution image stays in attachment storage. */
+.tc-captures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tc-capture {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tc-capture-image {
+  max-width: 320px;
+  max-height: 200px;
+  object-fit: contain;
+  object-position: top left;
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.tc-capture-caption {
+  font-size: 11px;
+  color: var(--text-2, #9aa3af);
+}

@@ -153,8 +153,7 @@ fn resolve_with_declared(
     let native_view = declared
         .or_else(|| classify_image_input(decoded_model))
         .unwrap_or(!is_harness);
-    let native_generate =
-        is_codex && decoded_provider == Some(DEFAULT_PROVIDER_ID) && !is_claude;
+    let native_generate = is_codex && decoded_provider == Some(DEFAULT_PROVIDER_ID) && !is_claude;
     // kodex-claude has no native generation path; BYOK codex providers go
     // through Responses→Completions conversion and never emit generation events.
     let native_edit = false;
@@ -290,7 +289,8 @@ mod tests {
         // look at a picture itself. The user's per-model declaration is
         // authoritative, exactly as it is for the codex catalog.
         const DSH_CMD: &str = "dsh";
-        let (_dir, paths) = paths_with_declared_image_input("custom_tencent", "deepseek-flash", true);
+        let (_dir, paths) =
+            paths_with_declared_image_input("custom_tencent", "deepseek-flash", true);
 
         let caps = resolve_image_capabilities_for_paths(
             &paths,
@@ -324,7 +324,10 @@ mod tests {
             DSH_CMD,
         );
         assert!(!caps.native_view);
-        assert_eq!(harness_model_input(caps.native_view), vec!["text".to_string()]);
+        assert_eq!(
+            harness_model_input(caps.native_view),
+            vec!["text".to_string()]
+        );
     }
 
     #[test]
@@ -332,7 +335,8 @@ mod tests {
         // No declaration, no keyword match: the harness default is unchanged,
         // because dsh would reject a raw image for an undeclared model.
         const DSH_CMD: &str = "dsh";
-        let (_dir, paths) = paths_with_declared_image_input("custom_tencent", "unrelated-model", true);
+        let (_dir, paths) =
+            paths_with_declared_image_input("custom_tencent", "unrelated-model", true);
 
         let caps = resolve_image_capabilities_for_paths(
             &paths,
@@ -399,19 +403,15 @@ mod tests {
         // Encoded form (as sent to `reapply_image_capabilities` on model switch):
         // must decode to `k3` and NOT false-positive on the `kimi_code` provider
         // segment matching the `kimi` multimodal keyword.
-        let caps_encoded = resolve_image_capabilities(
-            "kodex-provider/kimi_code/k3",
-            Some("kimi_code"),
-            DSH_CMD,
-        );
+        let caps_encoded =
+            resolve_image_capabilities("kodex-provider/kimi_code/k3", Some("kimi_code"), DSH_CMD);
         assert!(
             !caps_encoded.native_view,
             "encoded `kodex-provider/kimi_code/k3` must decode to `k3` and be text-only"
         );
         // The codex-acp channel keeps the capable default for the same id so
         // its catalog's authoritative per-model override still wins upstream.
-        let caps_codex =
-            resolve_image_capabilities("k3", Some("kimi_code"), CODEX_CMD);
+        let caps_codex = resolve_image_capabilities("k3", Some("kimi_code"), CODEX_CMD);
         assert!(
             caps_codex.native_view,
             "codex-acp unknown model must keep the image-capable default"

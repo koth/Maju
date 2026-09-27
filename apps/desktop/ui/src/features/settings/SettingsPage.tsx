@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { ModelEntrySelect } from "./ModelEntrySelect";
 import { SettingsSelect } from "./SettingsSelect";
+import type { BrowserSettings } from "../../types";
+import { BrowserSettingsPane } from "./BrowserSettingsPane";
 import { CompanionSettingsSection } from "../companion/ui/CompanionSettingsSection";
 import type {
   AgentCliId,
@@ -98,6 +100,7 @@ export type AgentSettingsTab = Extract<
 export type SettingsPane =
   | "general"
   | "web"
+  | "browser"
   | "image"
   | "commit"
   | "sessionTitle"
@@ -2824,6 +2827,47 @@ export function SettingsPage({
       document.body,
     );
   };
+  // Browser settings live in their own pane rather than inside Web tools:
+  // they gate a different capability, and a user enabling browsing should not
+  // have to wonder why a search box appeared too.
+  const renderBrowserSection = () => {
+    if (!snapshot) return null;
+    if (editingRemoteSettings) {
+      return (
+        <section className="settings-section settings-capability-section">
+          <p className="settings-section-note">
+            浏览器工具在本地主机上运行，远程工作区的会话无法使用。
+          </p>
+        </section>
+      );
+    }
+
+    // A snapshot written before browser-use existed has no `browser` key; the
+    // defaults are the feature off, which is exactly what it should be.
+    const browser: BrowserSettings = {
+      enabled: false,
+      mode: "launch",
+      headless: true,
+      executable_path: "",
+      endpoint: "",
+      allow_attach: false,
+      profile_name: "default",
+      provider_version: "",
+      tool_call_timeout_ms: 30000,
+      ...snapshot.settings.browser,
+    };
+
+    return (
+      <section className="settings-section settings-capability-section">
+        <BrowserSettingsPane
+          onSaved={setSnapshot}
+          preflight={snapshot.browser ?? null}
+          settings={browser}
+        />
+      </section>
+    );
+  };
+
   const renderWebToolsSection = () => {
     if (!snapshot) return null;
     if (editingRemoteSettings) {
@@ -4375,6 +4419,13 @@ export function SettingsPage({
           </button>
           <button
             type="button"
+            className={`settings-nav-item ${activePane === "browser" ? "is-active" : ""}`}
+            onClick={() => setActivePane("browser")}
+          >
+            浏览器
+          </button>
+          <button
+            type="button"
             className={`settings-nav-item ${activePane === "image" ? "is-active" : ""}`}
             onClick={() => setActivePane("image")}
           >
@@ -4806,6 +4857,7 @@ export function SettingsPage({
         )}
 
         {activePane === "web" && renderWebToolsSection()}
+        {activePane === "browser" && renderBrowserSection()}
         {activePane === "companion" && <CompanionSettingsSection />}
 
         {activePane === "image" && renderImageSection()}
@@ -5390,6 +5442,7 @@ function settingsPaneTitle(pane: SettingsPane): string {
   if (pane === "companion") return "陪伴角色";
   if (pane === "remote") return "远程";
   if (pane === "web") return "Web 工具";
+  if (pane === "browser") return "浏览器";
   if (pane === "image") return "图像能力";
   if (pane === "commit") return "Commit 助手";
   if (pane === "sessionTitle") return "会话标题";
@@ -5406,6 +5459,8 @@ function settingsPaneDescription(pane: SettingsPane): string {
     return "管理远程 Linux 开发机，并在打开远程目录前验证 SSH。";
   if (pane === "web")
     return "配置 Codex 和 Claude 本机会话可用的搜索与网页抓取能力。";
+  if (pane === "browser")
+    return "让 agent 驱动真实浏览器：导航、点击、截图，并决定是否在会话间保留登录状态。";
   if (pane === "image")
     return "配置识图、生图、改图的降级 MCP 工具：识图复用对话模型，生/改图独立配置协议与模型。";
   if (pane === "commit")

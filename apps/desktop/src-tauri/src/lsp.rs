@@ -494,6 +494,8 @@ impl Default for LanguageServerRegistry {
                 selected_codex_provider_profile_id: None,
                 selected_claude_provider_profile_id: None,
                 claude: workspace_model::ClaudeProviderSettings::default(),
+                browser: workspace_model::BrowserSettings::default(),
+                computer_use: workspace_model::ComputerUseSettings::default(),
                 web_tools: workspace_model::WebToolsSettings::default(),
                 image: workspace_model::ImageSettings::default(),
                 commit_assistant: workspace_model::CommitAssistantSettings::default(),

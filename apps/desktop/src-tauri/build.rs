@@ -37,10 +37,6 @@ fn should_stage_claude_agent_acp() -> bool {
         || env::var_os("KODEX_STAGE_CLAUDE_AGENT_ACP").is_some()
 }
 
-
-
-
-
 fn stage_claude_agent_acp() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir

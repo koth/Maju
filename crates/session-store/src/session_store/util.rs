@@ -133,9 +133,15 @@ pub(super) fn parse_instant_to_epoch_secs(s: &str) -> Option<i64> {
             _ => return None,
         };
         let (h, m) = if body.len() == 5 && body.as_bytes()[2] == b':' {
-            (body[0..2].parse::<i64>().ok()?, body[3..5].parse::<i64>().ok()?)
+            (
+                body[0..2].parse::<i64>().ok()?,
+                body[3..5].parse::<i64>().ok()?,
+            )
         } else if body.len() == 4 {
-            (body[0..2].parse::<i64>().ok()?, body[2..4].parse::<i64>().ok()?)
+            (
+                body[0..2].parse::<i64>().ok()?,
+                body[2..4].parse::<i64>().ok()?,
+            )
         } else {
             return None;
         };
@@ -302,11 +308,20 @@ mod tests {
     fn instant_to_iso_utc_normalizes_mixed_formats() {
         assert_eq!(instant_to_iso_utc("1782777600"), "2026-06-30T00:00:00Z");
         // Offset normalized to UTC.
-        assert_eq!(instant_to_iso_utc("2026-06-30T08:00:00+08:00"), "2026-06-30T00:00:00Z");
+        assert_eq!(
+            instant_to_iso_utc("2026-06-30T08:00:00+08:00"),
+            "2026-06-30T00:00:00Z"
+        );
         // Subseconds dropped.
-        assert_eq!(instant_to_iso_utc("2026-06-30T00:00:00.123Z"), "2026-06-30T00:00:00Z");
+        assert_eq!(
+            instant_to_iso_utc("2026-06-30T00:00:00.123Z"),
+            "2026-06-30T00:00:00Z"
+        );
         // Already-canonical ISO passes through unchanged.
-        assert_eq!(instant_to_iso_utc("2026-06-30T00:00:00Z"), "2026-06-30T00:00:00Z");
+        assert_eq!(
+            instant_to_iso_utc("2026-06-30T00:00:00Z"),
+            "2026-06-30T00:00:00Z"
+        );
         // Unparseable input is returned trimmed, not corrupted.
         assert_eq!(instant_to_iso_utc("  yesterday  "), "yesterday");
     }
@@ -314,8 +329,14 @@ mod tests {
     #[test]
     fn parses_decimal_seconds() {
         assert_eq!(parse_instant_to_epoch_secs("0"), Some(0));
-        assert_eq!(parse_instant_to_epoch_secs("1751328000"), Some(1_751_328_000));
-        assert_eq!(parse_instant_to_epoch_secs("  1751328000  "), Some(1_751_328_000));
+        assert_eq!(
+            parse_instant_to_epoch_secs("1751328000"),
+            Some(1_751_328_000)
+        );
+        assert_eq!(
+            parse_instant_to_epoch_secs("  1751328000  "),
+            Some(1_751_328_000)
+        );
     }
 
     #[test]

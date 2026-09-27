@@ -271,9 +271,8 @@ pub(super) async fn run_command_loop(
                             // Manual compaction is a DeepSeek Harness surface;
                             // the ACP backend rejects it (see the outer loop arm).
                             RuntimeCommand::ForceCompact { reply_tx } => {
-                                let _ = reply_tx.send(Err(anyhow::anyhow!(
-                                    "当前会话后端不支持强制压缩"
-                                )));
+                                let _ = reply_tx
+                                    .send(Err(anyhow::anyhow!("当前会话后端不支持强制压缩")));
                             }
                             // Forking requires an idle turn boundary; a queued
                             // prompt would only race the seed cut.
@@ -660,9 +659,7 @@ pub(super) async fn run_command_loop(
             // agent-side flows (e.g. codex `/compact`), so this backend
             // rejects the command.
             RuntimeCommand::ForceCompact { reply_tx } => {
-                let _ = reply_tx.send(Err(anyhow::anyhow!(
-                    "当前会话后端不支持强制压缩"
-                )));
+                let _ = reply_tx.send(Err(anyhow::anyhow!("当前会话后端不支持强制压缩")));
             }
             // Conversation fork (`session/fork`, ACP unstable extension): ask
             // the agent to seed a new session with the source's committed

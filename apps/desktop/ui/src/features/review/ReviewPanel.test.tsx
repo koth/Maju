@@ -1751,4 +1751,36 @@ describe("ReviewPanel scoped change sets", () => {
     );
     expect(fileListCalls).toBeGreaterThanOrEqual(2);
   });
+
+  it("lists change sets while Git hydration is still pending", async () => {
+    // The change-set list is SQLite-backed; Git hydration gates the Diff tab,
+    // not this list. Gating it here made the panel claim "上轮对话暂无文件变化"
+    // for a turn whose files the timeline bar was still listing.
+    vi.mocked(sessionListChangeSets).mockResolvedValue([
+      makeChangeSet("turn-1", "AgentTurn", "2026-05-12T03:00:00Z"),
+    ]);
+    vi.mocked(sessionListChangeSetFiles).mockResolvedValue({
+      change_set_id: "turn-1",
+      files: [makeSummary("turn-1", "quicksort.py")],
+    });
+
+    render(
+      <ReviewPanel
+        snapshot={makeSnapshot({
+          messages: [{ id: "turn-1-message", role: "Assistant", body: "done" }],
+          timeline: [{ Message: "turn-1-message" }],
+        })}
+        refreshing={false}
+        hydrated={false}
+        onRefresh={() => {}}
+        onFileSelect={() => {}}
+        onFileOpen={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryAllByText("quicksort.py").length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText("上轮对话暂无文件变化")).toBeNull();
+  });
 });

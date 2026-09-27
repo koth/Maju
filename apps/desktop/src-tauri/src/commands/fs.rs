@@ -17,7 +17,9 @@ pub async fn fs_mention_suggest(app: AppHandle, query: String) -> Result<Vec<Fil
         if let Some(slash) = query.rfind('/') {
             let dir = &query[..slash];
             let prefix = query[slash + 1..].to_lowercase();
-            let entries = state.list_workspace_dir(dir.to_string()).unwrap_or_default();
+            let entries = state
+                .list_workspace_dir(dir.to_string())
+                .unwrap_or_default();
             return Ok(filter_mention_dir_entries(entries, &prefix));
         }
 
@@ -138,7 +140,9 @@ pub async fn companion_stage_model(source_path: String) -> Result<String, String
             .map(|meta| meta.len() as f64 / 1_048_576.0)
             .unwrap_or(0.0);
         if size_mb > 64.0 {
-            return Err(format!("模型文件过大（{size_mb:.1}MB > 64MB），请压缩贴图后重试"));
+            return Err(format!(
+                "模型文件过大（{size_mb:.1}MB > 64MB），请压缩贴图后重试"
+            ));
         }
 
         let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
@@ -200,7 +204,9 @@ fn copy_with_replace_retry(source: &Path, target: &Path) -> std::io::Result<()> 
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(120 * (attempt as u64 + 1)));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        120 * (attempt as u64 + 1),
+                    ));
                     continue;
                 }
             }
@@ -225,7 +231,10 @@ fn ensure_local_workspace(app: &app_core::Application) -> Result<(), String> {
 /// exact name. Returns null when no match exists so the span stays plain
 /// code. Skips heavy directories so the walk stays cheap.
 #[tauri::command]
-pub async fn fs_find_by_name(app: AppHandle, names: Vec<String>) -> Result<Vec<Option<String>>, String> {
+pub async fn fs_find_by_name(
+    app: AppHandle,
+    names: Vec<String>,
+) -> Result<Vec<Option<String>>, String> {
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let root = state
@@ -234,7 +243,11 @@ pub async fn fs_find_by_name(app: AppHandle, names: Vec<String>) -> Result<Vec<O
                     return Ok(None);
                 }
                 let root = app.ui.workspace.root.clone();
-                Ok(if root.as_os_str().is_empty() { None } else { Some(root) })
+                Ok(if root.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(root)
+                })
             })
             .ok()
             .flatten();
@@ -242,13 +255,20 @@ pub async fn fs_find_by_name(app: AppHandle, names: Vec<String>) -> Result<Vec<O
             return Ok(names.iter().map(|_| None).collect());
         };
         const SKIP_DIRS: &[&str] = &[
-            "node_modules", "target", "dist", ".git", "build", "out",
-            ".next", ".turbo", "coverage", "__pycache__",
+            "node_modules",
+            "target",
+            "dist",
+            ".git",
+            "build",
+            "out",
+            ".next",
+            ".turbo",
+            "coverage",
+            "__pycache__",
         ];
         let mut remaining: std::collections::HashSet<&str> =
             names.iter().map(String::as_str).collect();
-        let mut found: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+        let mut found: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
             if remaining.is_empty() {
@@ -280,10 +300,7 @@ pub async fn fs_find_by_name(app: AppHandle, names: Vec<String>) -> Result<Vec<O
                 }
             }
         }
-        Ok(names
-            .iter()
-            .map(|name| found.get(name).cloned())
-            .collect())
+        Ok(names.iter().map(|name| found.get(name).cloned()).collect())
     })
     .await
     .map_err(|e| format!("Find-by-name task failed: {e}"))?

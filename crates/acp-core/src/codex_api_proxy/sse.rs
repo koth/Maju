@@ -747,7 +747,8 @@ pub(super) struct TimiaiResponsesSseSanitizer {
 #[cfg(test)]
 impl TimiaiResponsesSseSanitizer {
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
+        self.buffer
+            .push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -947,7 +948,8 @@ impl ChatSseStreamConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
+        self.buffer
+            .push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -1002,7 +1004,8 @@ impl ChatAnthropicSseStreamConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
+        self.buffer
+            .push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -1375,7 +1378,8 @@ impl AnthropicSseToResponsesConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
+        self.buffer
+            .push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);
@@ -1996,7 +2000,8 @@ impl ResponsesSseToAnthropicConverter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.buffer.push_str(&drain_utf8_complete(&mut self.pending, chunk));
+        self.buffer
+            .push_str(&drain_utf8_complete(&mut self.pending, chunk));
         let mut output = String::new();
         while let Some((event, consumed)) = next_sse_event(&self.buffer) {
             self.buffer.drain(..consumed);

@@ -961,6 +961,7 @@ fn command_write_hint_retries_for_shell_tools_across_agents() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.completed_tool_has_detectable_write_hint("call-bash"));
@@ -1127,6 +1128,7 @@ fn completed_shell_write_hint_without_tool_baseline_does_not_use_git_fallback() 
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(!app.detect_file_writes_from_tools(&["call-shell".into()]));
@@ -1184,6 +1186,7 @@ fn completed_codebuddy_python_write_without_tool_baseline_does_not_use_git_fallb
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(!app.detect_file_writes_from_tools(&["call-codebuddy-python".into()]));
@@ -2110,6 +2113,7 @@ fn pending_review_change_set_merges_landed_hunks_from_intermediate_detection_bas
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.apply_tracker_changes(
@@ -2533,10 +2537,7 @@ fn dsh_edit_tool_still_records_write_baseline() {
     assert!(result.had_file_changes);
     assert_eq!(app.ui.session_changes.len(), 1);
     assert_eq!(app.ui.session_changes[0].path, relative_path);
-    assert_eq!(
-        app.ui.session_changes[0].old_text.as_deref(),
-        Some(before)
-    );
+    assert_eq!(app.ui.session_changes[0].old_text.as_deref(), Some(before));
     assert_eq!(app.ui.session_changes[0].new_text, after);
 }
 
@@ -2580,6 +2581,7 @@ fn completed_read_tool_does_not_claim_preexisting_git_change() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(!app.detect_file_writes_from_tools(&["read-main".into()]));
@@ -2629,6 +2631,7 @@ fn completed_tool_preview_does_not_claim_preexisting_git_change() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(!app.detect_file_writes_from_tools(&["preview-main".into()]));
@@ -2671,6 +2674,7 @@ fn completed_chinese_edit_summary_without_tool_baseline_does_not_use_git_fallbac
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(!app.detect_file_writes_from_tools(&["edit-proposal".into()]));
@@ -2737,6 +2741,7 @@ fn failed_tool_without_recorded_file_change_discards_speculative_diff() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.discard_failed_tool_speculative_diffs("write-tags"));
@@ -2806,6 +2811,7 @@ fn failed_tool_does_not_discard_previous_successful_change_for_same_path() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
     app.ui.tools.push(ToolInvocation {
         id: uuid::Uuid::new_v4(),
@@ -2845,6 +2851,7 @@ fn failed_tool_does_not_discard_previous_successful_change_for_same_path() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.discard_failed_tool_speculative_diffs("failed-write-tags"));
@@ -2967,6 +2974,7 @@ fn late_codebuddy_edit_prefers_exact_turn_diff_over_git_cumulative_diff() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.detect_file_writes_from_tools(&["edit-frontend-preview".into()]));
@@ -3049,6 +3057,7 @@ fn late_codebuddy_unified_diff_recovers_turn_base_when_git_diff_is_smaller() {
             can_stop: false,
             stop_kind: None,
             stop_status: None,
+            screenshots: Vec::new(),
     });
 
     assert!(app.detect_file_writes_from_tools(&["edit-main".into()]));
@@ -3139,6 +3148,7 @@ fn review_uses_landed_tool_preview_instead_of_narrow_exact_edit() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.apply_tracker_changes(
@@ -3501,6 +3511,7 @@ fn raw_output_diff_preview_replaces_larger_single_fragment_with_multi_hunk_snaps
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     });
 
     assert!(app.apply_tracker_changes(
@@ -4186,7 +4197,6 @@ fn preview_before_file_create_does_not_retry_into_review_after_landing() {
     assert!(turns.is_empty());
 }
 
-
 #[test]
 fn dsh_write_tool_created_file_survives_coalesced_poll_batch() {
     // Regression: dsh emits `tool/call` and `tool/result` back-to-back, so the
@@ -4295,7 +4305,11 @@ fn dsh_str_replace_editor_create_enters_review_when_batch_is_coalesced() {
     // `str_replace_editor` with `command: "create"` carries `path` + `file_text`
     // and replies with "New file created successfully at: ...".
     let dir = tempfile::tempdir().unwrap();
-    let file_path = dir.path().join("features").join("ui").join("EmptyState.tsx");
+    let file_path = dir
+        .path()
+        .join("features")
+        .join("ui")
+        .join("EmptyState.tsx");
     let new_text = "export function EmptyState() {\n  return null;\n}\n";
     fs::create_dir_all(file_path.parent().unwrap()).unwrap();
     fs::write(&file_path, new_text).unwrap();
@@ -4322,15 +4336,16 @@ fn dsh_str_replace_editor_create_enters_review_when_batch_is_coalesced() {
             id: "call-c1".into(),
             name: None,
             outcome: "completed".into(),
-            raw_output: Some(
-                "New file created successfully at: EmptyState.tsx".into(),
-            ),
+            raw_output: Some("New file created successfully at: EmptyState.tsx".into()),
             terminal_output: None,
         },
     ]);
     assert!(result.had_file_changes);
     assert_eq!(app.ui.review_changes.len(), 1);
-    assert_eq!(app.ui.review_changes[0].change_type, FileChangeType::Created);
+    assert_eq!(
+        app.ui.review_changes[0].change_type,
+        FileChangeType::Created
+    );
     assert_eq!(app.ui.review_changes[0].new_text, new_text);
 }
 #[test]
@@ -4814,7 +4829,8 @@ fn dsh_str_replace_editor_old_str_populates_review_changes() {
     let relative_path = "crates/app-core/src/image_capability.rs";
     let file_path = dir.path().join(relative_path);
     fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-    let before = "pub fn classify_image_input(input: &str) -> bool {\n    input.starts_with(\"image\")\n}\n";
+    let before =
+        "pub fn classify_image_input(input: &str) -> bool {\n    input.starts_with(\"image\")\n}\n";
     let after = "pub fn classify_image_input(input: &str) -> ImageInputKind {\n    if input.starts_with(\"image\") {\n        ImageInputKind::Image\n    } else {\n        ImageInputKind::Other\n    }\n}\n";
     fs::write(&file_path, after).unwrap();
 

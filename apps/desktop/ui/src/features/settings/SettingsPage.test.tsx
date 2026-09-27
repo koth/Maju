@@ -8,6 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import missingProviderPreflight from "./fixtures/browser-preflight-missing.json";
 import { appConfirm } from "../../lib/confirm";
 import { SettingsPage } from "./SettingsPage";
 import {
@@ -51,6 +52,7 @@ import type {
   AgentProviderProfile,
   AgentSettingsSnapshot,
   ArchivedSessionListItem,
+  BrowserPreflight,
   LspSettingsSnapshot,
   RemoteMachineProfilesSnapshot,
   UsageDailyBucket,
@@ -62,6 +64,15 @@ vi.mock("../../lib/confirm", () => ({
   clearProviderConfirmRequest: (label: string) => ({ label }),
   deleteAllArchivedConfirmRequest: () => ({}),
 }));
+
+vi.mock("../../lib/events", async () => {
+  const actual =
+    await vi.importActual<typeof import("../../lib/events")>("../../lib/events");
+  return {
+    ...actual,
+    onBrowserInstallProgress: vi.fn().mockResolvedValue(() => {}),
+  };
+});
 
 vi.mock("../../lib/updater", () => ({
   checkForAppUpdate: vi.fn(),
@@ -100,6 +111,11 @@ vi.mock("../../lib/tauri", async () => {
     settingsSelectClaudeFastModel: vi.fn(),
     settingsSaveWebToolsProviderKey: vi.fn(),
     settingsSaveWebToolsSettings: vi.fn(),
+    settingsSaveBrowserSettings: vi.fn(),
+    browserInstall: vi.fn(),
+    browserInstallState: vi.fn(),
+    browserRefreshPreflight: vi.fn(),
+    browserPreflight: vi.fn(),
     settingsSaveImageViewSettings: vi.fn(),
     settingsSaveCommitAssistantSettings: vi.fn(),
     settingsSaveAgentProviderSecret: vi.fn(),
@@ -616,6 +632,74 @@ async function selectByokProvider(name: string | RegExp) {
   fireEvent.click(within(option).getByRole("button", { name }));
   return screen.getByLabelText("byok_provider_profile");
 }
+
+describe("SettingsPage browser pane", () => {
+  beforeEach(() => {
+    vi.mocked(getCurrentAppVersion).mockResolvedValue("0.1.0");
+    vi.mocked(checkForAppUpdate).mockResolvedValue(null);
+    vi.mocked(installPendingAppUpdate).mockResolvedValue(undefined);
+    vi.mocked(appConfirm).mockResolvedValue(true);
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      browser: { state: { state: "ready" }, provider_version: "0.0.82" },
+    });
+    vi.mocked(settingsGetLspSnapshot).mockResolvedValue(lspSnapshot());
+    vi.mocked(settingsGetRemoteProfiles).mockResolvedValue({ profiles: [] });
+    vi.mocked(sessionListArchived).mockResolvedValue([]);
+    vi.mocked(sessionUnarchive).mockResolvedValue(undefined);
+    vi.mocked(sessionDeleteArchived).mockResolvedValue(undefined);
+    vi.mocked(sessionDeleteAllArchived).mockResolvedValue(undefined);
+  });
+
+  // This file's other blocks clean up individually; without it the previous
+  // test's nav button makes the next one see two of them.
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("is reachable from the nav, not just present as a component", async () => {
+    // Regression guard. The BrowserSettingsPane component and its own tests
+    // existed while the pane was mounted nowhere, so every unit test passed
+    // and the feature was unreachable in the app. This asserts the nav entry
+    // and that clicking it renders the pane.
+    render(<SettingsPage onBack={() => {}} />);
+
+    const nav = await screen.findByRole("button", { name: "浏览器" });
+    fireEvent.click(nav);
+
+    expect(await screen.findByRole("heading", { name: "浏览器工具" })).toBeTruthy();
+  });
+
+  it("offers the install action for a missing provider", async () => {
+    // The fixture is the exact payload `workspace_model::BrowserPreflight`
+    // serializes to, and a Rust test asserts it still round-trips. Hand-writing
+    // the object here is what let a flattening bug ship: this test fed a
+    // plausible shape straight to a mocked command, skipping the only boundary
+    // that was broken, and stayed green while the real app showed no button.
+    //
+    // The cast is only there because a JSON import widens `"missing"` to
+    // `string`; the assertion below is what actually checks the shape.
+    const preflight = missingProviderPreflight as unknown as BrowserPreflight;
+    vi.mocked(settingsGetAgentSnapshot).mockResolvedValue({
+      ...agentSnapshot,
+      browser: preflight,
+    });
+
+    render(<SettingsPage onBack={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "浏览器" }));
+
+    expect(await screen.findByRole("button", { name: "帮我安装" })).toBeTruthy();
+  });
+
+  it("shows the ready state without needing a re-check", async () => {
+    render(<SettingsPage onBack={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "浏览器" }));
+
+    // The pane must be usable, not blank, once the snapshot carries a
+    // preflight result.
+    expect(await screen.findByText("已就绪")).toBeTruthy();
+  });
+});
 
 describe("SettingsPage LSP settings", () => {
   beforeEach(() => {

@@ -18,12 +18,24 @@ export function useWorkbenchGit({
 }: UseWorkbenchGitArgs) {
   const [gitRefreshing, setGitRefreshing] = useState(false);
   const [gitHydrated, setGitHydrated] = useState(false);
+  // Bumped by `resetGitHydration` so the hydration effect re-runs even when
+  // every other dependency (session id, workspace root, connection state) is
+  // unchanged — see the comment on `resetGitHydration`.
+  const [gitHydrationEpoch, setGitHydrationEpoch] = useState(0);
   const gitRefreshInFlight = useRef(false);
   const gitRefreshPending = useRef(false);
   const gitHydrationKey = useRef(0);
 
   const resetGitHydration = useCallback(() => {
+    // Clearing without re-hydrating is a trap: the effect below only re-runs
+    // when its dependencies change, and callers that reset on a no-op switch
+    // (creating a chat reuses the empty placeholder session in the chats
+    // workspace, clicking the already active session) leave all of them
+    // identical. `gitHydrated` then stayed false forever, and every
+    // hydration-gated consumer — the review panel's change-set list — showed
+    // "暂无文件变化" for a turn whose files the timeline still listed.
     setGitHydrated(false);
+    setGitHydrationEpoch((epoch) => epoch + 1);
   }, []);
 
   const handleRefreshGit = useCallback(async () => {
@@ -112,6 +124,7 @@ export function useWorkbenchGit({
     };
   }, [
     setSnapshot,
+    gitHydrationEpoch,
     snapshot?.session.id,
     snapshot?.workspace.location?.kind,
     snapshot?.workspace.root,

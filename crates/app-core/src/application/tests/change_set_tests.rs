@@ -40,7 +40,13 @@ fn late_closing_reply_reanchors_turn_changes_to_last_assistant() {
     // the transcript like the real apply paths do.
     let session_id = app.ui.session.id.to_string();
     app.store
-        .insert_message(&session_id, &user_id.to_string(), "User", "optimize rendering", 1)
+        .insert_message(
+            &session_id,
+            &user_id.to_string(),
+            "User",
+            "optimize rendering",
+            1,
+        )
         .unwrap();
     app.store
         .insert_message(
@@ -71,7 +77,13 @@ fn late_closing_reply_reanchors_turn_changes_to_last_assistant() {
     });
     app.ui.timeline.push(TimelineItem::Message(closing_id));
     app.store
-        .insert_message(&session_id, &closing_id.to_string(), "Assistant", "all done", 3)
+        .insert_message(
+            &session_id,
+            &closing_id.to_string(),
+            "Assistant",
+            "all done",
+            3,
+        )
         .unwrap();
 
     assert!(app.reanchor_turn_file_changes_to_last_assistant(user_id));
@@ -82,7 +94,10 @@ fn late_closing_reply_reanchors_turn_changes_to_last_assistant() {
     );
     assert_eq!(app.ui.turn_changes[0].message_id, closing_id);
 
-    let turns = app.store.load_recent_turn_file_changes(&session_id, 10).unwrap();
+    let turns = app
+        .store
+        .load_recent_turn_file_changes(&session_id, 10)
+        .unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].message_id, closing_id);
     assert_eq!(turns[0].changes.len(), 1);

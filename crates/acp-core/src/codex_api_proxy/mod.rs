@@ -4,10 +4,10 @@ use futures::StreamExt;
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::CONTENT_TYPE;
-use reqwest::header::ACCEPT_LANGUAGE;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use reqwest::header::ACCEPT_LANGUAGE;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::convert::Infallible;
@@ -34,6 +34,7 @@ use sse::{
     chat_sse_to_responses_sse, responses_sse_to_anthropic_sse,
 };
 
+use provider::{ANTHROPIC_VERSION_HEADER, anthropic_messages_base_request};
 use provider::{
     decode_provider_model_id, mapped_proxy_provider_for_model, normalize_proxy_provider,
     normalized_model_key, proxy_provider_for_model, proxy_provider_from_path,
@@ -41,7 +42,6 @@ use provider::{
     timiai_authorization_log_state, upstream_chat_completion_model, upstream_chat_completions_url,
     upstream_messages_url, upstream_native_anthropic_model, with_timiai_headers,
 };
-use provider::{ANTHROPIC_VERSION_HEADER, anthropic_messages_base_request};
 #[cfg(test)]
 use provider::{is_claude_family_model, timiai_authorization_header_value};
 
@@ -163,8 +163,8 @@ fn upstream_client() -> reqwest::Client {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
- .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
- .pool_max_idle_per_host(8)
+                .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+                .pool_max_idle_per_host(8)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new())
         })
@@ -235,9 +235,8 @@ const MAX_UPSTREAM_RETRIES: u32 = 5;
 /// that session. Cleanup is RAII via [`RetryGuard`] (see
 /// [`send_upstream_with_retry`]): dropping the future clears the entry on
 /// every path including cancellation.
-static CODEX_API_PROXY_RETRY_STATUS: OnceLock<
-    Arc<RwLock<BTreeMap<String, RetryRegistryEntry>>>,
-> = OnceLock::new();
+static CODEX_API_PROXY_RETRY_STATUS: OnceLock<Arc<RwLock<BTreeMap<String, RetryRegistryEntry>>>> =
+    OnceLock::new();
 
 #[derive(Clone)]
 struct RetryRegistryEntry {
@@ -448,7 +447,7 @@ async fn send_upstream_with_retry(
     // Fast path: if the request cannot be cloned, send exactly once. Our
     // request bodies are always bytes so try_clone succeeds in practice.
     if request.try_clone().is_none() {
-append_codex_api_proxy_log(&format!(
+        append_codex_api_proxy_log(&format!(
             "upstream_retry_skipped provider={} session={} reason=uncloneable_request",
             provider, sid,
         ));
@@ -666,7 +665,9 @@ pub fn configure_codex_api_proxy_model_provider_map(value: &str) {
         match parse_model_provider_map(value) {
             Ok(parsed) => parsed,
             Err(error) => {
-                append_codex_api_proxy_log(&format!("model_provider_map_parse_failed error={error}"));
+                append_codex_api_proxy_log(&format!(
+                    "model_provider_map_parse_failed error={error}"
+                ));
                 return;
             }
         };
@@ -832,7 +833,12 @@ fn parse_model_provider_map(
             }
         }
     }
-    Ok((model_providers, provider_configs, model_reasoning_efforts, duplicate_count))
+    Ok((
+        model_providers,
+        provider_configs,
+        model_reasoning_efforts,
+        duplicate_count,
+    ))
 }
 
 fn parse_proxy_provider_protocol(protocol: &str) -> Option<ProxyProviderProtocol> {
@@ -982,7 +988,13 @@ async fn proxy_codex_api_request(
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.trim().to_string());
     if path.ends_with("/messages") {
-        return proxy_anthropic_messages_request(request, config, explicit_provider, acp_session_id.as_deref()).await;
+        return proxy_anthropic_messages_request(
+            request,
+            config,
+            explicit_provider,
+            acp_session_id.as_deref(),
+        )
+        .await;
     }
     if path.ends_with("/chat/completions") {
         return proxy_chat_completions_passthrough_request(
@@ -1360,8 +1372,10 @@ async fn proxy_chat_completions_passthrough_request(
     let body = request.into_body().collect().await?.to_bytes();
     let config_arc = config.clone();
     let (config, project_name) = {
-        let guard = config.read().map(|guard| guard.clone()).unwrap_or_else(|_| {
-            CodexApiProxyConfig {
+        let guard = config
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| CodexApiProxyConfig {
                 provider: "timiai".to_string(),
                 api_key: String::new(),
                 api_keys: BTreeMap::new(),
@@ -1370,8 +1384,7 @@ async fn proxy_chat_completions_passthrough_request(
                 provider_configs: BTreeMap::new(),
                 model_reasoning_efforts: BTreeMap::new(),
                 project_name: None,
-            }
-        });
+            });
         (guard.clone(), guard.project_name.clone())
     };
     let mut payload: Value = serde_json::from_slice(&body)?;
@@ -1416,7 +1429,11 @@ async fn proxy_chat_completions_passthrough_request(
             "application/json",
         ));
     }
-    let session_id = resolved_proxy_session_id(&config_arc, &provider, &acp_session_id.map(|s| s.to_string()));
+    let session_id = resolved_proxy_session_id(
+        &config_arc,
+        &provider,
+        &acp_session_id.map(|s| s.to_string()),
+    );
     // Upstream URL: a provider configured with a base_url (dsh custom routes)
     // uses it directly; built-in providers fall back to the hardcoded table.
     let upstream_url = config
@@ -1473,7 +1490,13 @@ async fn proxy_chat_completions_passthrough_forward(
         }
     };
     let request_body = serde_json::to_vec(&chat_payload)?;
-    let upstream = match send_upstream_with_retry(Some(session_id), provider, request.body(request_body)).await {
+    let upstream = match send_upstream_with_retry(
+        Some(session_id),
+        provider,
+        request.body(request_body),
+    )
+    .await
+    {
         Ok(upstream) => upstream,
         Err(error) => {
             log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
@@ -1487,9 +1510,19 @@ async fn proxy_chat_completions_passthrough_forward(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
-    log_chat_completions_upstream_response(&provider, upstream_url, &chat_payload, status, &content_type);
+    log_chat_completions_upstream_response(
+        &provider,
+        upstream_url,
+        &chat_payload,
+        status,
+        &content_type,
+    );
     if is_event_stream(&content_type) {
-        return Ok(streaming_passthrough_response(upstream, status, &content_type));
+        return Ok(streaming_passthrough_response(
+            upstream,
+            status,
+            &content_type,
+        ));
     }
     let body = upstream.bytes().await?;
     if !status.is_success() {
@@ -1536,19 +1569,14 @@ async fn proxy_chat_completions_codex_responses_request(
         }
     };
     let request_body = serde_json::to_vec(&chat_payload)?;
-    let upstream = match send_upstream_with_retry(
-        session_id,
-        provider,
-        request.body(request_body),
-    )
-    .await
-    {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
-            return Err(error.into());
-        }
-    };
+    let upstream =
+        match send_upstream_with_retry(session_id, provider, request.body(request_body)).await {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                log_chat_completions_upstream_error(&provider, upstream_url, &chat_payload, &error);
+                return Err(error.into());
+            }
+        };
     let status = StatusCode::from_u16(upstream.status().as_u16())?;
     let content_type = upstream
         .headers()
@@ -1764,7 +1792,14 @@ async fn proxy_anthropic_messages_request(
     }
     match normalize_proxy_provider(&provider).as_str() {
         "commandcode" | "kimi_code" | "xiaomi_mimo" | "timiai" => {
-            proxy_native_anthropic_messages_request(payload, &api_key, &provider, &session_id, acp_session_id).await
+            proxy_native_anthropic_messages_request(
+                payload,
+                &api_key,
+                &provider,
+                &session_id,
+                acp_session_id,
+            )
+            .await
         }
         _ => {
             proxy_completion_to_anthropic_messages_request(
@@ -2444,7 +2479,10 @@ fn responses_payload_to_chat_payload(
         ));
     }
 
-    let stream = payload.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let stream = payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut chat = json!({
         "model": payload.get("model").cloned().unwrap_or_else(|| Value::String("glm-5.1".to_string())),
         "messages": messages,
@@ -2638,7 +2676,11 @@ fn inject_kimi_output_config(mut payload: Value, provider: &str) -> Value {
     if let Some(object) = payload.as_object_mut() {
         object.remove("reasoning_effort");
     }
-    let Some(model) = payload.get("model").and_then(Value::as_str).map(normalized_model_key) else {
+    let Some(model) = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(normalized_model_key)
+    else {
         return payload;
     };
     let Some(effort) = lookup_model_reasoning_effort(&model) else {

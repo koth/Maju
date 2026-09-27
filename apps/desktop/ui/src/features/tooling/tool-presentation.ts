@@ -1,4 +1,5 @@
-import type { ToolInvocation, ToolStatus } from "../../types";
+import type { ScreenshotHandle, ToolInvocation, ToolStatus } from "../../types";
+import { deriveBrowserPresentation, isBrowserTool } from "./browser-presentation";
 
 export type ToolPresentationKind = "command" | "permission" | "diff" | "generic";
 export type ToolFooterTone = "running" | "success" | "danger" | "warning";
@@ -15,6 +16,8 @@ export interface ToolFooterStatus {
 
 export interface ToolPresentation {
   presentationKind: ToolPresentationKind;
+  /** Screenshot handles a capture tool produced, for thumbnail rendering. */
+  browserScreenshots?: ScreenshotHandle[];
   headerLabel: string;
   toolLabel: string;
   command: string | null;
@@ -24,6 +27,13 @@ export interface ToolPresentation {
 }
 
 export function deriveToolPresentation(tool: ToolInvocation): ToolPresentation {
+  // Browser tools carry a namespaced, verbose name and their interesting
+  // argument is not a shell command, so they get their own title and body
+  // before the shell heuristics run.
+  if (isBrowserTool(tool)) {
+    return deriveBrowserToolPresentation(tool);
+  }
+
   const commandLike = isCommandLikeTool(tool);
   const command = commandLike ? extractCommand(tool) : null;
   const primaryOutput = extractPrimaryOutput(tool, commandLike);
@@ -36,6 +46,28 @@ export function deriveToolPresentation(tool: ToolInvocation): ToolPresentation {
     command,
     primaryOutput,
     rawDetails,
+    footerStatus: footerStatus(tool),
+  };
+}
+
+function deriveBrowserToolPresentation(tool: ToolInvocation): ToolPresentation {
+  const browser = deriveBrowserPresentation(tool);
+  const title = browser.subject ? `${browser.verb}: ${browser.subject}` : browser.verb;
+  const body = [browser.detail, browser.isError ? tool.error : null]
+    .filter((part): part is string => Boolean(part && part.trim()))
+    .join("\n");
+
+  return {
+    presentationKind: "generic",
+    browserScreenshots: browser.screenshots,
+    headerLabel: genericHeaderLabel(tool.status),
+    // The card's title comes from `toolLabel`, and the subject rides in
+    // `command` because that is the slot every consumer already reads for
+    // "the thing this tool acted on".
+    toolLabel: title,
+    command: browser.subject,
+    primaryOutput: body || null,
+    rawDetails: extractRawDetails(tool),
     footerStatus: footerStatus(tool),
   };
 }

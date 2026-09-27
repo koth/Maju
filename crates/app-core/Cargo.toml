@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+browser-service = { path = "../browser-service" }
+session-resource = { path = "../session-resource" }
+url = "2"
 acp-core = { path = "../acp-core" }
 anyhow.workspace = true
 base64 = "0.22"
@@ -27,8 +30,10 @@ toml_edit.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 workspace-model = { path = "../workspace-model" }
+zip.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 filetime = "0.2"
 git2.workspace = true
 tempfile.workspace = true

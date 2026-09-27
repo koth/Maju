@@ -447,8 +447,9 @@ impl Application {
         if let Ok(summaries) = self
             .store
             .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
-            && let Some(mut summary) =
-                summaries.into_iter().find(|summary| summary.id == change_set_id)
+            && let Some(mut summary) = summaries
+                .into_iter()
+                .find(|summary| summary.id == change_set_id)
         {
             summary.message_id = Some(anchor_id);
             let _ = self.store.upsert_change_set(&summary);
@@ -507,29 +508,34 @@ impl Application {
                             .find(|change| change.path == path)
                             .map(|change| change.change_type.clone())
                             .unwrap_or(workspace_model::FileChangeType::Modified);
-                        let entry = changes.entry(path.clone()).or_insert_with(|| SessionFileChange {
-                            path,
-                            change_type,
-                            old_text: None,
-                            new_text: String::new(),
-                            added_lines: 0,
-                            removed_lines: 0,
-                            timestamp: String::new(),
-                        });
+                        let entry =
+                            changes
+                                .entry(path.clone())
+                                .or_insert_with(|| SessionFileChange {
+                                    path,
+                                    change_type,
+                                    old_text: None,
+                                    new_text: String::new(),
+                                    added_lines: 0,
+                                    removed_lines: 0,
+                                    timestamp: String::new(),
+                                });
                         entry.added_lines += added;
                         entry.removed_lines += removed;
                     }
                     for path in &tool.diff_paths {
                         let path = path.display().to_string();
-                        changes.entry(path.clone()).or_insert_with(|| SessionFileChange {
-                            path,
-                            change_type: workspace_model::FileChangeType::Modified,
-                            old_text: None,
-                            new_text: String::new(),
-                            added_lines: 0,
-                            removed_lines: 0,
-                            timestamp: String::new(),
-                        });
+                        changes
+                            .entry(path.clone())
+                            .or_insert_with(|| SessionFileChange {
+                                path,
+                                change_type: workspace_model::FileChangeType::Modified,
+                                old_text: None,
+                                new_text: String::new(),
+                                added_lines: 0,
+                                removed_lines: 0,
+                                timestamp: String::new(),
+                            });
                     }
                 }
                 workspace_model::TimelineItem::Message(_)

@@ -33,6 +33,8 @@ interface Props {
   onOpenSettings: () => void;
   /** Opens the automation (定时任务) panel; optional for tests. */
   onOpenAutomation?: () => void;
+  /** Opens the skills (技能) panel; optional for tests. */
+  onOpenSkills?: () => void;
   onSessionChanged: () => void;
   onWorkspaceChanged: (snapshot: UiSnapshot) => void;
   onWorkspaceArchived?: (snapshot: UiSnapshot | null) => void;
@@ -70,6 +72,7 @@ export function SessionList({
   refreshToken,
   onOpenSettings,
   onOpenAutomation,
+  onOpenSkills,
   onSessionChanged,
   onWorkspaceChanged,
   onWorkspaceArchived,
@@ -582,6 +585,15 @@ export function SessionList({
         >
           <AutomationIcon />
           <span>自动化</span>
+        </button>
+        <button
+          className="sl-quick-nav-item"
+          type="button"
+          onClick={() => onOpenSkills?.()}
+          title="技能"
+        >
+          <SkillsIcon />
+          <span>技能</span>
         </button>
       </div>
 
@@ -1360,6 +1372,14 @@ function AutomationIcon() {
     <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
       <circle cx="10" cy="10" r="7.2" />
       <path d="M10 5.8v4.2l2.8 1.7" />
+    </svg>
+  );
+}
+
+function SkillsIcon() {
+  return (
+    <svg className="sl-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 2.5l2.2 4.6 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5L3.9 7.8l5-.7L10 2.5z" />
     </svg>
   );
 }

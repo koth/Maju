@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent, BrowserInstallState, CapabilityStateEvent } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -39,6 +39,27 @@ export function onTerminalStatus(callback: (status: TerminalStatusEvent) => void
 
 export function onTerminalExit(callback: (exit: TerminalExitEvent) => void): Promise<UnlistenFn> {
   return listen<TerminalExitEvent>("terminal:exit", (event) => callback(event.payload));
+}
+
+/**
+ * Browser and computer-use state changes.
+ *
+ * Pushed rather than polled: a screenshot or navigation should appear as soon
+ * as it happens, and a desktop capture can arrive while no turn is running.
+ */
+export function onCapabilityState(callback: (event: CapabilityStateEvent) => void): Promise<UnlistenFn> {
+  return listen<CapabilityStateEvent>("capability:state", (event) => callback(event.payload));
+}
+
+/** Browser provider install progress. Pushed rather than polled: an install
+ *  takes tens of seconds and a pane that looks idle is worse than one that
+ *  says which step is running. */
+export function onBrowserInstallProgress(
+  callback: (state: BrowserInstallState) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserInstallState>("browser:install_progress", (event) =>
+    callback(event.payload),
+  );
 }
 
 export function onRemoteOpenProgress(callback: (progress: RemoteOpenProgressEvent) => void): Promise<UnlistenFn> {

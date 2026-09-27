@@ -1,13 +1,13 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use hyper::header::CONTENT_TYPE;
 use super::{
     COMMANDCODE_UPSTREAM_CHAT_COMPLETIONS_URL, COMMANDCODE_UPSTREAM_MESSAGES_URL,
     DEEPSEEK_UPSTREAM_CHAT_COMPLETIONS_URL, KIMI_UPSTREAM_CHAT_COMPLETIONS_URL,
     KIMI_UPSTREAM_MESSAGES_URL, MIMO_UPSTREAM_CHAT_COMPLETIONS_URL, MIMO_UPSTREAM_MESSAGES_URL,
     PROVIDER_MODEL_ID_PREFIX, TIMIAI_CHAT_COMPLETIONS_URL, TIMIAI_MESSAGES_URL,
 };
+use hyper::header::CONTENT_TYPE;
 
 /// Anthropic Messages API requires this header on every request; without it
 /// the upstream returns `400 invalid_params: The required header

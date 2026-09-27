@@ -13,12 +13,12 @@ mod remote_control_manager;
 mod state;
 
 use app_core::{UiPatchCursor, UiSnapshotUpdate};
-use workspace_model::AgentProviderFamily;
 use state::AppState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::Manager;
+use workspace_model::AgentProviderFamily;
 
 const KODEX_SSH_ASKPASS_ENV: &str = "KODEX_SSH_ASKPASS";
 const KODEX_SSH_ASKPASS_PASSWORD_ENV: &str = "KODEX_SSH_ASKPASS_PASSWORD";
@@ -103,8 +103,15 @@ fn main() {
                         events::emit_terminal_event(&terminal_app, event);
                     }));
                 start_snapshot_bridge(app.handle().clone(), snapshot_bridge_running);
-                if let Err(e) = app.state::<AppState>().remote_control().ensure_device_identity() {
-                    app_core::startup_perf::mark("desktop/remote_control_identity_failed", &e.to_string());
+                if let Err(e) = app
+                    .state::<AppState>()
+                    .remote_control()
+                    .ensure_device_identity()
+                {
+                    app_core::startup_perf::mark(
+                        "desktop/remote_control_identity_failed",
+                        &e.to_string(),
+                    );
                 }
                 start_remote_control_driver(app.handle().clone());
                 // Automation (定时任务) scheduler: ticks in the background,
@@ -144,6 +151,18 @@ fn main() {
             commands::automation::automation_set_enabled,
             commands::automation::automation_run_now,
             commands::automation::automation_list_runs,
+            commands::skills::skills_list_remote,
+            commands::skills::skills_list_installed,
+            commands::skills::skills_install,
+            commands::skills::skills_uninstall,
+            commands::skills::skills_get_default_dir,
+            commands::skills::skills_get_default_repo,
+            commands::skills::skills_get_default_path,
+            commands::skillhub::skillhub_status,
+            commands::skillhub::skillhub_install_cli,
+            commands::skillhub::skillhub_search,
+            commands::skillhub::skillhub_rankings,
+            commands::skillhub::skillhub_install,
             commands::session::session_get_state,
             commands::session::session_get_revision,
             commands::session::session_get_patches_since,
@@ -209,6 +228,8 @@ fn main() {
             commands::settings::settings_detect_agents,
             commands::settings::settings_select_agent,
             commands::settings::settings_select_theme,
+            commands::settings::settings_save_browser_settings,
+            commands::settings::settings_browser_preflight,
             commands::settings::settings_save_web_tools_settings,
             commands::settings::settings_save_web_tools_provider_key,
             commands::settings::settings_save_image_view_settings,
@@ -260,6 +281,13 @@ fn main() {
             commands::workspace::workspace_set_active,
             commands::workspace::workspace_get_recent,
             commands::workspace::workspace_remove_recent,
+            commands::browser::browser_navigate,
+            commands::browser::browser_refresh,
+            commands::browser::browser_close,
+            commands::browser::browser_preflight,
+            commands::browser_install::browser_install,
+            commands::browser_install::browser_install_state,
+            commands::browser_install::browser_refresh_preflight,
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_scrollback,
@@ -298,7 +326,10 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
         let paths = match app_core::AppPaths::resolve() {
             Ok(p) => p,
             Err(e) => {
-                app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &e.to_string());
+                app_core::startup_perf::mark(
+                    "desktop/codebuddy_proxy_start_failed",
+                    &e.to_string(),
+                );
                 return;
             }
         };
@@ -331,7 +362,10 @@ fn try_start_codebuddy_proxy_at_launch(app: tauri::AppHandle) {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &e),
-            Err(e) => app_core::startup_perf::mark("desktop/codebuddy_proxy_start_failed", &format!("join: {e}")),
+            Err(e) => app_core::startup_perf::mark(
+                "desktop/codebuddy_proxy_start_failed",
+                &format!("join: {e}"),
+            ),
         }
     });
 }
@@ -355,8 +389,8 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
     if !manager.status().enabled {
         return;
     }
-    let endpoint = std::env::var("KODEX_RELAY_ENDPOINT")
-        .unwrap_or_else(|_| "ws://120.48.49.190".to_string());
+    let endpoint =
+        std::env::var("KODEX_RELAY_ENDPOINT").unwrap_or_else(|_| "ws://120.48.49.190".to_string());
     // Reuse the manager's TLS policy (it already parsed the env var) so the
     // dial path and the login HTTP client stay consistent.
     let insecure_tls = manager.insecure_tls();
@@ -412,11 +446,10 @@ fn start_remote_control_driver(app: tauri::AppHandle) {
                 ))
             });
             let authenticated = match auth_ok {
-                Some((device_id, pubkey, sig, ts)) => {
-                    conn.authenticate(&device_id, Some(&pubkey), &sig, ts)
-                        .await
-                        .is_ok()
-                }
+                Some((device_id, pubkey, sig, ts)) => conn
+                    .authenticate(&device_id, Some(&pubkey), &sig, ts)
+                    .await
+                    .is_ok(),
                 None => false,
             };
             if !authenticated {
@@ -600,11 +633,7 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
             // proxy backs off), so the snapshot revision does not advance on
             // its own — this dedicated poll keeps the UI animation in sync
             // with retry attempts.
-            let current_proxy_retry = app
-                .state::<AppState>()
-                .proxy_retry_status()
-                .ok()
-                .flatten();
+            let current_proxy_retry = app.state::<AppState>().proxy_retry_status().ok().flatten();
             if current_proxy_retry != last_proxy_retry {
                 last_proxy_retry = current_proxy_retry.clone();
                 events::emit_proxy_retry_status(&app, current_proxy_retry.as_ref());

@@ -4,12 +4,14 @@ members = [
     "server",
     "crates/acp-core",
     "crates/app-core",
+    "crates/browser-service",
     "crates/codebuddy-proxy",
     "crates/codebuddy-sdk",
     "crates/dsh-bridge",
     "crates/git-service",
     "crates/relay-client",
     "crates/relay-protocol",
+    "crates/session-resource",
     "crates/session-store",
     "crates/terminal-service",
     "crates/workspace-model",
@@ -27,6 +29,7 @@ version = "0.1.0"
 agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model", "unstable_session_usage", "unstable_session_fork"] }
 agent-client-protocol-tokio = "0.11.1"
 anyhow = "1.0"
+async-trait = "0.1"
 futures = "0.3"
 flate2 = "1"
 git2 = { version = "0.20", default-features = false }
@@ -42,7 +45,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.23"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["rt", "sync", "time", "net"] }
+tokio = { version = "1.48", features = ["rt", "rt-multi-thread", "sync", "time", "net"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 toml_edit = "0.22"
 tracing = "0.1"
@@ -51,3 +54,4 @@ rusqlite = { version = "0.34", features = ["bundled"] }
 similar = "2.7"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+zip = "4.6.1"

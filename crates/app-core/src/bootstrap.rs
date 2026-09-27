@@ -70,6 +70,8 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
         revision: 1,
         workspace: descriptor.clone(),
         workspace_connected: true,
+        browser: None,
+        computer_use: None,
         session: SessionSummary {
             id: uuid::Uuid::new_v4(),
             workspace_id: descriptor.id,
@@ -112,6 +114,7 @@ fn build_initial_ui_for_descriptor(descriptor: WorkspaceDescriptor) -> anyhow::R
             can_stop: false,
             stop_kind: None,
             stop_status: None,
+            screenshots: Vec::new(),
         }],
         repository,
         inspector_tab: InspectorTab::Diff,

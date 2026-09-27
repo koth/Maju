@@ -527,7 +527,12 @@ export function ReviewPanel({
 
   useEffect(() => {
     if (activeBaseTab !== "Review") return;
-    if (!workspaceConnected || !hydrated) {
+    // The change-set list comes from SQLite (`session_list_change_sets`), not
+    // from Git: `hydrated` used to gate it, so a pending or reset Git
+    // hydration blanked the panel to "上轮对话暂无文件变化" while the timeline
+    // bar (which has no such gate) kept showing the same turn's files. Only the
+    // workspace connection actually gates this query.
+    if (!workspaceConnected) {
       loadedChangeSetSessionIdRef.current = null;
       setChangeSetState({ summaries: [], filesById: {}, filesSignatureById: {} });
       return;
@@ -585,11 +590,11 @@ export function ReviewPanel({
     // Reload triggers: panel focus, session/workspace switch, connection, plus
     // the landed file changes described above. NOT `snapshot.revision`: the
     // revision advances on every streaming event while the change-set list only
-    // changes when file changes land.
+    // changes when file changes land. NOT `hydrated` (Git status) either — see
+    // the gate above.
   }, [
     activeBaseTab,
     focusRequestKey,
-    hydrated,
     liveChangesSignature,
     persistedTurnChangesSignature,
     snapshot.session.id,

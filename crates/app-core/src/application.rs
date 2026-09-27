@@ -20,9 +20,9 @@ use workspace_model::{
     UsageSummaryRequest, UsageSummaryRow, UserPromptContent,
 };
 
+pub(crate) mod automations;
 mod bootstrap;
 mod change_sets;
-pub(crate) mod automations;
 mod commit_assistant;
 mod config;
 pub(crate) mod diff_utils;
@@ -57,7 +57,7 @@ use titles::{
     extract_title_from_prompt, extract_title_from_response, is_placeholder_session_title,
 };
 pub use ui_snapshot::{
-    project_remote_patch, project_remote_snapshot, UiPatchCursor, UiSnapshotUpdate,
+    UiPatchCursor, UiSnapshotUpdate, project_remote_patch, project_remote_snapshot,
 };
 pub use update_signal::AppUpdate;
 
@@ -143,6 +143,7 @@ struct SessionRuntime {
     remote_ssh: Option<RemoteSshSessionConfig>,
     web_tools_mcp: Option<WebToolsLease>,
     image_mcp: Option<ImageMcpLease>,
+    browser_mcp: Option<crate::browser_server::BrowserServerLease>,
     in_flight_prompt: Option<InFlightPrompt>,
     seq_counter: i64,
     needs_title: bool,
@@ -278,6 +279,9 @@ pub struct Application {
     remote_ssh: Option<RemoteSshSessionConfig>,
     web_tools_mcp: Option<WebToolsLease>,
     image_mcp: Option<ImageMcpLease>,
+    /// This session's browser registration. Held so the lease outlives the
+    /// session, and dropped on close so the registration goes with it.
+    browser_mcp: Option<crate::browser_server::BrowserServerLease>,
     in_flight_prompt: Option<InFlightPrompt>,
     /// Tracks the current timeline sequence counter for SQLite persistence
     seq_counter: i64,
@@ -904,5 +908,11 @@ impl Drop for Application {
         for runtime in self.runtime_registry.entries.values_mut() {
             runtime.session.shutdown();
         }
+        // A browser lease's `Drop` only removes the token from the server's
+        // table; the provider process lives in the adapter's registry and is
+        // released asynchronously. Without this, quitting Kodex would leave
+        // a Chromium running for every session that ever used browser tools.
+        let shared = crate::shared_mcp::shared_mcp();
+        let _ = crate::shared_mcp::block_on(crate::browser_cleanup::dispose_all(&shared));
     }
 }

@@ -82,6 +82,10 @@ pub(super) fn decide_permission_with_edit_policy(
         return decide_codebuddy_bash_permission(mode, workspace_root, request);
     }
 
+    if let Some(decision) = decide_mcp_read_only_tool_permission(request) {
+        return decision;
+    }
+
     match mode {
         PermissionPolicyMode::ReadOnly => decide_read_only_permission(workspace_root, request),
         PermissionPolicyMode::Build => decide_build_permission(workspace_root, request),
@@ -337,6 +341,45 @@ fn find_codebuddy_tool_name(value: &serde_json::Value) -> Option<&str> {
         serde_json::Value::Array(items) => items.iter().find_map(find_codebuddy_tool_name),
         _ => None,
     }
+}
+
+/// Namespaces used by the MCP servers Kodex injects for browser-use and
+/// computer-use: the standard `mcp__<server>__<tool>` convention, and the
+/// Cua Driver native prefix, which already carries its own separator.
+const MCP_TOOL_NAMESPACES: [&str; 2] = ["mcp__", "cua_driver_native__"];
+
+/// Browser and computer-use tools reach `decide_permission` with
+/// `ToolKind::Other`, which cannot tell a screenshot from a click. They arrive
+/// namespaced by provider, so the leaf tool name is enough to classify the
+/// read-only ones in every mode. Anything not recognised as a read stays in the
+/// write class and falls through to the normal per-mode policy.
+fn decide_mcp_read_only_tool_permission(
+    request: &RequestPermissionRequest,
+) -> Option<PermissionDecision> {
+    let leaf = mcp_leaf_tool_name(request.tool_call.fields.title.as_deref()?)?;
+    mcp_leaf_tool_name_is_read_only(leaf).then(|| select_permission_option(request, true))
+}
+
+/// Extracts the un-namespaced tool name from an MCP-namespaced tool call.
+fn mcp_leaf_tool_name(title: &str) -> Option<&str> {
+    let title = title.trim();
+    let rest = MCP_TOOL_NAMESPACES
+        .iter()
+        .find_map(|namespace| title.strip_prefix(namespace))?;
+    // `mcp__<server>__<tool>` leaves a server segment behind; the Cua Driver
+    // prefix does not.
+    let leaf = rest.rsplit_once("__").map_or(rest, |(_, leaf)| leaf).trim();
+    (!leaf.is_empty()).then_some(leaf)
+}
+
+/// Read-only tools are the ones whose name ends in a capture verb, so a
+/// provider that renames or extends them (`browser_take_screenshot`,
+/// `browser_snapshot`, `computer_screenshot`) still classifies correctly,
+/// while anything that merely contains a capture verb (`screenshot_and_edit`)
+/// stays in the write class.
+fn mcp_leaf_tool_name_is_read_only(leaf: &str) -> bool {
+    let leaf = leaf.to_ascii_lowercase();
+    leaf.ends_with("screenshot") || leaf.ends_with("snapshot")
 }
 
 fn decide_read_only_permission(

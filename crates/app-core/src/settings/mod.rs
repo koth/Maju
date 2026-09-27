@@ -4,16 +4,14 @@ mod lsp;
 mod remote;
 
 pub use agent_cli::{
-    DSH_NPM_PACKAGE,
-    agent_env_for_command, agent_id_for_label, agent_label_for_command, agent_label_for_id,
-    command_for_agent, command_for_agent_label, command_for_agent_label_with_paths,
-    command_for_agent_with_paths, default_agent_for_new_work, detect_agent,
-    detect_agent_with_paths, dsh_version_info, ensure_agent_ready_for_command,
-    is_claude_agent_acp_command,
-    is_codex_acp_command, is_deepseek_harness_agent, is_deepseek_harness_command,
-    remote_agent_env_for_command, remote_codex_home, remote_codex_proxy_config,
-    remote_linux_command_for_agent, remote_linux_command_for_agent_label,
-    resolve_agent_command_with_settings, search_paths,
+    DSH_NPM_PACKAGE, agent_env_for_command, agent_id_for_label, agent_label_for_command,
+    agent_label_for_id, command_for_agent, command_for_agent_label,
+    command_for_agent_label_with_paths, command_for_agent_with_paths, default_agent_for_new_work,
+    detect_agent, detect_agent_with_paths, dsh_version_info, ensure_agent_ready_for_command,
+    is_claude_agent_acp_command, is_codex_acp_command, is_deepseek_harness_agent,
+    is_deepseek_harness_command, remote_agent_env_for_command, remote_codex_home,
+    remote_codex_proxy_config, remote_linux_command_for_agent,
+    remote_linux_command_for_agent_label, resolve_agent_command_with_settings, search_paths,
 };
 
 use agent_cli::{agent_statuses, binary_name};
@@ -694,6 +692,8 @@ fn default_settings() -> AppSettings {
         selected_claude_provider_profile_id: Some(BYOK_PROVIDER_ID.to_string()),
         claude: ClaudeProviderSettings::default(),
         web_tools: WebToolsSettings::default(),
+        browser: workspace_model::BrowserSettings::default(),
+        computer_use: workspace_model::ComputerUseSettings::default(),
         image: workspace_model::ImageSettings::default(),
         commit_assistant: workspace_model::CommitAssistantSettings::default(),
         dsh_default_preset: None,
@@ -803,7 +803,6 @@ fn infer_legacy_codex_provider_profile_id(paths: &AppPaths, settings: &AppSettin
         .unwrap_or_else(|_| BYOK_PROVIDER_ID.to_string())
 }
 
-
 /// Commit-assistant status: the configured provider+model pair, and whether
 /// it actually resolves to a configured BYOK provider profile whose catalog
 /// contains the model. Unconfigured pairs surface as `configured: false` so
@@ -824,11 +823,7 @@ pub fn commit_assistant_settings_status(
     }
 }
 
-fn commit_assistant_model_is_available(
-    paths: &AppPaths,
-    provider: &str,
-    model: &str,
-) -> bool {
+fn commit_assistant_model_is_available(paths: &AppPaths, provider: &str, model: &str) -> bool {
     byok_model_is_available(paths, provider, model)
 }
 
@@ -879,6 +874,7 @@ pub fn settings_snapshot(paths: &AppPaths) -> AgentSettingsSnapshot {
     let session_title = session_title_settings_status(paths, &settings);
     AgentSettingsSnapshot {
         web_tools: web_tools_settings_status(paths, &settings),
+        browser: browser_preflight(paths).into(),
         image: image_settings_status(paths, &settings),
         commit_assistant,
         session_title,
@@ -900,8 +896,9 @@ pub fn session_title_settings_status(
 ) -> SessionTitleSettingsStatus {
     let provider = settings.session_title.provider.trim().to_string();
     let model = settings.session_title.model.trim().to_string();
-    let configured =
-        !provider.is_empty() && !model.is_empty() && byok_model_is_available(paths, &provider, &model);
+    let configured = !provider.is_empty()
+        && !model.is_empty()
+        && byok_model_is_available(paths, &provider, &model);
     SessionTitleSettingsStatus {
         provider,
         model,
@@ -964,6 +961,8 @@ pub fn select_agent(paths: &AppPaths, agent: AgentCliId) -> Result<AgentSettings
         selected_claude_provider_profile_id: existing.selected_claude_provider_profile_id,
         claude: existing.claude,
         web_tools: existing.web_tools,
+        browser: existing.browser,
+        computer_use: existing.computer_use,
         image: existing.image,
         commit_assistant: existing.commit_assistant,
         dsh_default_preset: existing.dsh_default_preset,
@@ -1510,6 +1509,35 @@ pub fn save_web_tools_settings(
     Ok(settings_snapshot(paths))
 }
 
+/// Persist browser-use settings.
+///
+/// Validation runs before the write, so a configuration that cannot work — an
+/// attach mode with no endpoint, or attach mode without its explicit opt-in —
+/// is rejected where the user made the change rather than surfacing much later
+/// as a capability that silently never appears.
+pub fn save_browser_settings(
+    paths: &AppPaths,
+    candidate: workspace_model::BrowserSettings,
+) -> Result<AgentSettingsSnapshot> {
+    candidate
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("invalid browser settings: {reason}"))?;
+
+    let mut settings = load_app_settings(paths);
+    settings.browser = candidate;
+    save_app_settings(paths, &settings)?;
+    Ok(settings_snapshot(paths))
+}
+
+/// Run browser preflight against the stored settings.
+pub fn browser_preflight(paths: &AppPaths) -> crate::browser_preflight::BrowserPreflight {
+    let settings = load_app_settings(paths);
+    crate::browser_preflight::check_browser(
+        &settings.browser,
+        &crate::browser_preflight::HostEnvironment,
+    )
+}
+
 pub fn save_web_tools_provider_key(
     paths: &AppPaths,
     provider: &str,
@@ -1641,13 +1669,14 @@ fn dsh_provider_route(paths: &AppPaths, provider: &str) -> Option<DshProviderRou
             // `attachment-error`). Declare the same answer Kodex resolves for
             // the session, so both sides agree: the user's per-model override
             // wins, then the keyword table.
-            let supports_image_input = entry
-                .supports_image_input
-                .unwrap_or_else(|| {
-                    crate::image_capability::model_supports_image_input(&entry.slug)
-                });
+            let supports_image_input = entry.supports_image_input.unwrap_or_else(|| {
+                crate::image_capability::model_supports_image_input(&entry.slug)
+            });
             let input = crate::image_capability::harness_model_input(supports_image_input);
-            let name = entry.display_name.clone().unwrap_or_else(|| entry.slug.clone());
+            let name = entry
+                .display_name
+                .clone()
+                .unwrap_or_else(|| entry.slug.clone());
             DshModelEntry {
                 id: entry.slug,
                 name,
@@ -3062,7 +3091,7 @@ fn model_provider_map_env_from_entries(
     let entries = entries
         .iter()
         .map(|(model_entry, provider)| {
-            let model = model_entry.slug.as_str();            // Encode BYOK/custom source providers with their fully-qualified
+            let model = model_entry.slug.as_str(); // Encode BYOK/custom source providers with their fully-qualified
             // `kodex-provider/byok/<provider>/<model>` slug (codex-acp and the
             // proxy index routes by that key). Built-in catalog providers keep
             // the bare provider-scoped slug.

@@ -32,6 +32,7 @@ pub use host::SessionSink;
 pub use host::{HarnessHost, HarnessHostRegistry, HarnessHostRegistryHandle};
 pub use jobs::{clear_session_jobs, record_session_jobs, session_jobs};
 pub use process::{
+    find_binary,
     DshChild, SpawnDshWebConfig, kill_child, reap_orphaned_dsh_web, resolve_dsh_launch,
     resolve_npm_launch, spawn_dsh_web,
 };

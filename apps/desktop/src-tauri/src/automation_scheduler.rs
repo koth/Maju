@@ -128,16 +128,11 @@ pub(crate) fn dispatch_run(
             Ok(run)
         }
         Err(error) => {
-            let _ = store.finish_automation_run(
-                &run.id,
-                AutomationRunStatus::Failed,
-                Some(&error),
-            );
+            let _ = store.finish_automation_run(&run.id, AutomationRunStatus::Failed, Some(&error));
             run.status = AutomationRunStatus::Failed;
-            run.finished_at =
-                Some(session_store::instant_to_iso_utc(
-                    &app_core::automation::now_epoch_secs().to_string(),
-                ));
+            run.finished_at = Some(session_store::instant_to_iso_utc(
+                &app_core::automation::now_epoch_secs().to_string(),
+            ));
             run.error = Some(error.clone());
             fired.error = Some(error);
             events::emit_automation_fired(app, &fired);

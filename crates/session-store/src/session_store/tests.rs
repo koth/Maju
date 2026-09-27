@@ -365,6 +365,7 @@ fn test_insert_and_load_tool_diff_preview() {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     };
 
     store.insert_tool("s1", &tool, 1).unwrap();
@@ -1012,8 +1013,12 @@ fn test_session_usage_snapshot_compatible_with_legacy_context_snapshot_rows() {
         },
         raw_json: None,
     };
-    store.append_usage_event("legacy", &legacy, None, None).unwrap();
-    store.append_usage_event("legacy", &legacy_2, None, None).unwrap();
+    store
+        .append_usage_event("legacy", &legacy, None, None)
+        .unwrap();
+    store
+        .append_usage_event("legacy", &legacy_2, None, None)
+        .unwrap();
 
     let snapshot = store.load_session_usage_snapshot("legacy").unwrap();
     assert_eq!(
@@ -1257,7 +1262,9 @@ fn query_usage_summary_excludes_codebuddy_sessions_by_model() {
         )
         .unwrap();
 
-    store.create_session("codebuddy-session", "codebuddy-model").unwrap();
+    store
+        .create_session("codebuddy-session", "codebuddy-model")
+        .unwrap();
     store
         .update_session_agent_cli("codebuddy-session", "codebuddy")
         .unwrap();
@@ -1278,12 +1285,17 @@ fn query_usage_summary_excludes_codebuddy_sessions_by_model() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(rows.len(), 1, "CodeBuddy row must be excluded, got: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "CodeBuddy row must be excluded, got: {rows:?}"
+    );
     assert_eq!(rows[0].model.as_deref(), Some("gpt-5.1"));
     assert_eq!(rows[0].agent_cli.as_deref(), Some("codex-acp"));
     assert_eq!(rows[0].tokens.total_tokens, Some(500));
     assert!(
-        rows.iter().all(|row| row.agent_cli.as_deref() != Some("codebuddy")),
+        rows.iter()
+            .all(|row| row.agent_cli.as_deref() != Some("codebuddy")),
         "no summary row may come from a CodeBuddy session: {rows:?}"
     );
 
@@ -1373,9 +1385,7 @@ fn query_usage_summary_excludes_codebuddy_via_event_agent_cli_fallback() {
     // Intentionally do NOT call `update_session_agent_cli("b1", "codebuddy")`
     // so `s.agent_cli` stays NULL in this row; the filter must still exclude
     // the event via the `u.agent_cli` fallback.
-    store
-        .append_usage_event("b1", &event, None, None)
-        .unwrap();
+    store.append_usage_event("b1", &event, None, None).unwrap();
 
     let rows = store
         .query_usage_summary(UsageSummaryRequest {
@@ -1383,7 +1393,10 @@ fn query_usage_summary_excludes_codebuddy_via_event_agent_cli_fallback() {
             ..Default::default()
         })
         .unwrap();
-    assert!(rows.is_empty(), "CodeBuddy event must be excluded, got: {rows:?}");
+    assert!(
+        rows.is_empty(),
+        "CodeBuddy event must be excluded, got: {rows:?}"
+    );
 }
 
 #[test]
@@ -1419,9 +1432,7 @@ fn usage_daily_series_buckets_by_utc_day_and_applies_session_total_rules() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path(), dir.path()).unwrap();
     store.create_session("s1", "gpt-5.1").unwrap();
-    store
-        .update_session_agent_cli("s1", "codex-acp")
-        .unwrap();
+    store.update_session_agent_cli("s1", "codex-acp").unwrap();
 
     // Day A (ts "1751328000" == midnight UTC of day N): an authoritative
     // SessionTotal(1000) followed by a TurnDelta(200) later the same day
@@ -1711,12 +1722,8 @@ fn usage_summary_timing_averages_use_per_field_counts() {
     // Three timed TurnDelta events for the same model. Event 2 carries only
     // latency (no ttft/tps — e.g. a zero-output turn). With a shared counter
     // the ttft/tps averages would be divided by 3 instead of 2.
-    let timed_event = |total: u64,
-                       ts: &str,
-                       latency: u64,
-                       ttft: Option<u64>,
-                       tps: Option<f64>| {
-        UsageEvent {
+    let timed_event =
+        |total: u64, ts: &str, latency: u64, ttft: Option<u64>, tps: Option<f64>| UsageEvent {
             scope: UsageEventScope::TurnDelta,
             model: Some("gpt-5.1".into()),
             provider: Some("openai".into()),
@@ -1731,8 +1738,7 @@ fn usage_summary_timing_averages_use_per_field_counts() {
             },
             context: UsageContextSnapshot::default(),
             raw_json: None,
-        }
-    };
+        };
     store
         .append_usage_event(
             "s1",
@@ -1910,8 +1916,7 @@ fn usage_summary_today_range_counts_both_same_day_sessions() {
         .unwrap();
     assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
     assert_eq!(
-        rows[0].session_count,
-        2,
+        rows[0].session_count, 2,
         "both today's sessions must be counted"
     );
     assert_eq!(rows[0].tokens.total_tokens, Some(100));
@@ -2476,7 +2481,11 @@ fn usage_summary_today_prefers_turn_deltas_after_model_switch() {
         .unwrap();
     rows.sort_by(|a, b| a.model.cmp(&b.model));
 
-    assert_eq!(rows.len(), 2, "both models with real requests must appear: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both models with real requests must appear: {rows:?}"
+    );
     assert_eq!(rows[0].model.as_deref(), Some("model-a"));
     assert_eq!(
         rows[0].tokens.total_tokens,
@@ -2763,15 +2772,10 @@ fn usage_summary_default_scope_counts_all_sessions_in_workspace() {
         .unwrap();
     assert_eq!(rows.len(), 1, "single model row expected, got: {rows:?}");
     assert_eq!(
-        rows[0].session_count,
-        2,
+        rows[0].session_count, 2,
         "both sessions in the workspace must be counted"
     );
-    assert_eq!(
-        rows[0].tokens.total_tokens,
-        Some(100),
-        "50 + 50 = 100"
-    );
+    assert_eq!(rows[0].tokens.total_tokens, Some(100), "50 + 50 = 100");
 }
 
 /// Regression: when two sessions use the SAME model, each emitting its own
@@ -2849,8 +2853,7 @@ fn usage_summary_sums_session_totals_across_sessions_with_same_model() {
         "TurnDeltas from two sessions must SUM (75 + 40), not SessionTotals"
     );
     assert_eq!(
-        rows[0].tokens.input_tokens,
-        None,
+        rows[0].tokens.input_tokens, None,
         "TurnDelta fixtures only populate total_tokens"
     );
     assert_eq!(rows[0].session_count, 2, "two sessions expected");
@@ -2898,12 +2901,7 @@ fn usage_summary_turn_delta_session_survives_after_peer_session_total() {
         .unwrap();
     // Session B: only TurnDelta(50), no SessionTotal.
     store
-        .append_usage_event(
-            "b",
-            &make_usage_event("gpt-5.1", 50, "11"),
-            None,
-            None,
-        )
+        .append_usage_event("b", &make_usage_event("gpt-5.1", 50, "11"), None, None)
         .unwrap();
 
     let rows = store
@@ -2945,6 +2943,7 @@ fn make_tool(id: &str, call_id: &str) -> ToolInvocation {
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     }
 }
 
@@ -2956,12 +2955,22 @@ fn windowed_load_keeps_only_recent_entries() {
     // 10 messages (seq 1..=10) + 10 tools (seq 11..=20) = 20 entries.
     for i in 1..=10 {
         store
-            .insert_message("s1", &Uuid::new_v4().to_string(), "User", &format!("m{i}"), i)
+            .insert_message(
+                "s1",
+                &Uuid::new_v4().to_string(),
+                "User",
+                &format!("m{i}"),
+                i,
+            )
             .unwrap();
     }
     for i in 11..=20 {
         store
-            .insert_tool("s1", &make_tool(&Uuid::new_v4().to_string(), &format!("c{i}")), i)
+            .insert_tool(
+                "s1",
+                &make_tool(&Uuid::new_v4().to_string(), &format!("c{i}")),
+                i,
+            )
             .unwrap();
     }
 
@@ -3020,10 +3029,7 @@ fn build_turned_session(
             store
                 .insert_tool(
                     session,
-                    &make_tool(
-                        &Uuid::new_v4().to_string(),
-                        &format!("call-{turn}-{tool}"),
-                    ),
+                    &make_tool(&Uuid::new_v4().to_string(), &format!("call-{turn}-{tool}")),
                     seq,
                 )
                 .unwrap();
@@ -3076,7 +3082,13 @@ fn turn_aligned_window_loads_giant_final_turn_fully() {
     let mut seq = 24i64;
     let final_user_seq = seq + 1;
     store
-        .insert_message("s1", &Uuid::new_v4().to_string(), "User", "final question", final_user_seq)
+        .insert_message(
+            "s1",
+            &Uuid::new_v4().to_string(),
+            "User",
+            "final question",
+            final_user_seq,
+        )
         .unwrap();
     seq = final_user_seq;
     for tool in 0..300 {
@@ -3091,7 +3103,13 @@ fn turn_aligned_window_loads_giant_final_turn_fully() {
     }
     seq += 1;
     store
-        .insert_message("s1", &Uuid::new_v4().to_string(), "Assistant", "final answer", seq)
+        .insert_message(
+            "s1",
+            &Uuid::new_v4().to_string(),
+            "Assistant",
+            "final answer",
+            seq,
+        )
         .unwrap();
 
     let window = store.load_session_window_by_turns("s1", 25, 3).unwrap();
@@ -3100,14 +3118,18 @@ fn turn_aligned_window_loads_giant_final_turn_fully() {
     assert_eq!(window.messages[0].role, MessageRole::User);
     // Crucially the final turn's user prompt is present even though the turn
     // dwarfs the entry floor.
-    assert!(window
-        .messages
-        .iter()
-        .any(|message| message.body == "final question"));
-    assert!(window
-        .messages
-        .iter()
-        .any(|message| message.body == "final answer"));
+    assert!(
+        window
+            .messages
+            .iter()
+            .any(|message| message.body == "final question")
+    );
+    assert!(
+        window
+            .messages
+            .iter()
+            .any(|message| message.body == "final answer")
+    );
 }
 
 #[test]
@@ -3144,7 +3166,13 @@ fn history_before_pages_older_entries_in_order() {
     store.create_session("s1", "gpt-4").unwrap();
     for i in 1..=8 {
         store
-            .insert_message("s1", &Uuid::new_v4().to_string(), "User", &format!("m{i}"), i)
+            .insert_message(
+                "s1",
+                &Uuid::new_v4().to_string(),
+                "User",
+                &format!("m{i}"),
+                i,
+            )
             .unwrap();
     }
 
@@ -3153,7 +3181,11 @@ fn history_before_pages_older_entries_in_order() {
     assert_eq!(timeline.len(), 3);
     assert_eq!(earliest, Some(3), "next cursor is this page's earliest seq");
     let bodies: Vec<&str> = messages.iter().map(|m| m.body.as_str()).collect();
-    assert_eq!(bodies, vec!["m3", "m4", "m5"], "ascending order, most recent 3");
+    assert_eq!(
+        bodies,
+        vec!["m3", "m4", "m5"],
+        "ascending order, most recent 3"
+    );
 }
 
 #[test]
@@ -3169,7 +3201,11 @@ fn load_tool_detail_returns_uncapped_stored_fields() {
     let detail = store.load_tool_detail("s1", &tool_id).unwrap();
     assert_eq!(detail.raw_input.as_deref(), Some("input-call-1"));
     assert_eq!(detail.raw_output.as_deref(), Some("output-call-1"));
-    assert!(store.load_tool_detail("s1", &Uuid::new_v4().to_string()).is_err());
+    assert!(
+        store
+            .load_tool_detail("s1", &Uuid::new_v4().to_string())
+            .is_err()
+    );
 }
 
 #[test]
@@ -3198,12 +3234,17 @@ fn load_session_usage_snapshot_rebuilds_context_from_persisted_events() {
         timestamp: None,
         raw_json: None,
     };
-    store.append_usage_event(session_id, &event, None, None).unwrap();
+    store
+        .append_usage_event(session_id, &event, None, None)
+        .unwrap();
 
     let snapshot = store.load_session_usage_snapshot(session_id).unwrap();
     assert_eq!(snapshot.context.used_tokens, Some(334_459));
     assert_eq!(snapshot.context.window_tokens, Some(500_000));
-    assert!(!snapshot.by_model.is_empty(), "by_model must carry the model summary");
+    assert!(
+        !snapshot.by_model.is_empty(),
+        "by_model must carry the model summary"
+    );
 }
 
 #[test]
@@ -3220,18 +3261,19 @@ fn list_change_sets_filters_by_session_in_sql() {
     store.create_session(&session_b, "gpt-4").unwrap();
 
     for (session_id, id) in [(session_a.as_str(), "set-a"), (session_b.as_str(), "set-b")] {
-        let summary = make_change_set_summary(
-            &store,
-            id,
-            session_id,
-            ChangeSetSource::AgentTurn,
-            None,
-            id,
-        );
+        let summary =
+            make_change_set_summary(&store, id, session_id, ChangeSetSource::AgentTurn, None, id);
         store
             .replace_change_set(
                 &summary,
-                &[make_file_record(id, "src/main.rs", Some("old"), Some("new"), 1, 1)],
+                &[make_file_record(
+                    id,
+                    "src/main.rs",
+                    Some("old"),
+                    Some("new"),
+                    1,
+                    1,
+                )],
             )
             .unwrap();
     }
@@ -3271,7 +3313,9 @@ fn list_change_sets_filters_by_session_in_sql() {
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].id, "set-b");
 
-    let all = store.list_change_sets(None, Some(ChangeSetSource::AgentTurn)).unwrap();
+    let all = store
+        .list_change_sets(None, Some(ChangeSetSource::AgentTurn))
+        .unwrap();
     assert_eq!(all.len(), 3);
 }
 
@@ -3359,13 +3403,19 @@ fn legacy_change_set_summaries_aggregate_turn_totals() {
     assert!(!newer_summary.updated_at.is_empty());
 
     let diff = store
-        .load_change_set_file_diff_with_legacy(&legacy_agent_turn_id("s-agg", &newer), "src/three.rs")
+        .load_change_set_file_diff_with_legacy(
+            &legacy_agent_turn_id("s-agg", &newer),
+            "src/three.rs",
+        )
         .unwrap()
         .expect("newer turn diff");
     assert_eq!(diff.new_text.as_deref(), Some("y"));
     assert!(
         store
-            .load_change_set_file_diff_with_legacy(&legacy_agent_turn_id("s-agg", &newer), "src/one.rs")
+            .load_change_set_file_diff_with_legacy(
+                &legacy_agent_turn_id("s-agg", &newer),
+                "src/one.rs"
+            )
             .unwrap()
             .is_none(),
         "a per-turn lookup must not leak another turn's file"
@@ -3387,7 +3437,13 @@ fn load_recent_turn_file_changes_keeps_newest_and_orders_chronologically() {
     store.create_session("s1", "gpt-4").unwrap();
     for (seq, message_id) in ids.iter().enumerate() {
         store
-            .insert_message("s1", &message_id.to_string(), "Assistant", "body", (seq + 1) as i64)
+            .insert_message(
+                "s1",
+                &message_id.to_string(),
+                "Assistant",
+                "body",
+                (seq + 1) as i64,
+            )
             .unwrap();
         store
             .replace_turn_file_changes(
@@ -3412,7 +3468,10 @@ fn load_recent_turn_file_changes_keeps_newest_and_orders_chronologically() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].message_id, ids[1]);
     assert_eq!(loaded[1].message_id, ids[2]);
-    assert!(loaded[0].changes[0].old_text.is_some(), "texts must be restored for GetFileDiff");
+    assert!(
+        loaded[0].changes[0].old_text.is_some(),
+        "texts must be restored for GetFileDiff"
+    );
 
     // A limit larger than the turn count returns everything, oldest first.
     let loaded = store.load_recent_turn_file_changes("s1", 10).unwrap();
@@ -3439,7 +3498,13 @@ fn repair_pending_agent_turn_change_sets_anchors_assistant_message() {
         .insert_message(&session_id, &user_id.to_string(), "User", "go", 1)
         .unwrap();
     store
-        .insert_message(&session_id, &assistant_id.to_string(), "Assistant", "did it", 2)
+        .insert_message(
+            &session_id,
+            &assistant_id.to_string(),
+            "Assistant",
+            "did it",
+            2,
+        )
         .unwrap();
     store
         .insert_message(&session_id, &next_user_id.to_string(), "User", "next", 3)
@@ -3461,13 +3526,31 @@ fn repair_pending_agent_turn_change_sets_anchors_assistant_message() {
         .replace_change_set(
             &summary,
             &[
-                make_file_record(&change_set_id, "scripts/new.py", None, Some("created"), 9, 0),
-                make_file_record(&change_set_id, "src/main.rs", Some("old"), Some("new"), 2, 1),
+                make_file_record(
+                    &change_set_id,
+                    "scripts/new.py",
+                    None,
+                    Some("created"),
+                    9,
+                    0,
+                ),
+                make_file_record(
+                    &change_set_id,
+                    "src/main.rs",
+                    Some("old"),
+                    Some("new"),
+                    2,
+                    1,
+                ),
             ],
         )
         .unwrap();
 
-    assert_eq!(store.repair_pending_agent_turn_change_sets().unwrap(), 1, "one set repaired");
+    assert_eq!(
+        store.repair_pending_agent_turn_change_sets().unwrap(),
+        1,
+        "one set repaired"
+    );
 
     let summaries = store
         .list_change_sets(Some(&session_id), Some(ChangeSetSource::AgentTurn))
@@ -3498,11 +3581,24 @@ fn list_sessions_emits_iso8601_timestamps_for_phone_date_parse() {
     assert_eq!(sessions.len(), 1);
     let item = &sessions[0];
     // ISO-8601 UTC: `YYYY-MM-DDTHH:MM:SSZ` — unambiguous for every JS engine.
-    assert!(item.updated_at.ends_with('Z'), "updated_at must end with Z: {}", item.updated_at);
-    assert_eq!(item.updated_at.len(), 20, "YYYY-MM-DDTHH:MM:SSZ is 20 chars: {}", item.updated_at);
+    assert!(
+        item.updated_at.ends_with('Z'),
+        "updated_at must end with Z: {}",
+        item.updated_at
+    );
+    assert_eq!(
+        item.updated_at.len(),
+        20,
+        "YYYY-MM-DDTHH:MM:SSZ is 20 chars: {}",
+        item.updated_at
+    );
     assert!(item.created_at.ends_with('Z'));
     assert_eq!(&item.updated_at[10..11], "T");
-    assert!(item.updated_at.starts_with("20"), "sane year: {}", item.updated_at);
+    assert!(
+        item.updated_at.starts_with("20"),
+        "sane year: {}",
+        item.updated_at
+    );
 }
 
 fn make_automation(id: &str, name: &str, next_run_at_ms: Option<i64>) -> AutomationRecord {
@@ -3659,7 +3755,10 @@ fn test_automation_runs_lifecycle_and_aggregation() {
 
     let loaded = store.get_automation("a1").unwrap().unwrap();
     assert_eq!(loaded.run_count, 2);
-    assert_eq!(loaded.last_run.as_ref().map(|run| run.id.as_str()), Some("r2"));
+    assert_eq!(
+        loaded.last_run.as_ref().map(|run| run.id.as_str()),
+        Some("r2")
+    );
 
     // Reconciliation query: nothing is left `running`.
     let running = store

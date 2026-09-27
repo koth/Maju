@@ -775,6 +775,7 @@ function ShellToolPanel({
   stopRequested = false,
 }: ShellToolPanelProps) {
   const hasRawDetails = presentation.rawDetails.length > 0;
+  const browserScreenshots = presentation.browserScreenshots ?? [];
   return (
     <div className="tc-shell-panel">
       <div className="tc-shell-header">
@@ -814,10 +815,29 @@ function ShellToolPanel({
             {presentation.command}
           </pre>
         )}
+        {browserScreenshots.length > 0 ? (
+          // A capture renders as a thumbnail plus its dimensions. The full
+          // image stays in attachment storage; only the handle reaches here.
+          <div className="tc-captures">
+            {browserScreenshots.map((shot) => (
+              <figure className="tc-capture" key={shot.path}>
+                <img
+                  alt={`Browser capture ${shot.width}×${shot.height}`}
+                  className="tc-capture-image"
+                  src={resolveImageDisplaySrc(shot.path)}
+                />
+                <figcaption className="tc-capture-caption">
+                  {shot.width}×{shot.height} · {Math.max(1, Math.round(shot.byte_size / 1024))} KB
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+        ) : null}
         {presentation.primaryOutput && (
           <pre className="tc-shell-output">{presentation.primaryOutput}</pre>
         )}
-        {!presentation.primaryOutput && !presentation.command && (
+        {!presentation.primaryOutput && !presentation.command &&
+          browserScreenshots.length === 0 && (
           <div className="tc-shell-empty">没有可显示的输出</div>
         )}
       </div>

@@ -1,4 +1,6 @@
 pub mod automation;
+pub mod browser;
+pub mod browser_install;
 pub mod editor;
 pub mod fs;
 pub mod git;
@@ -9,5 +11,7 @@ pub mod review;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod skillhub;
+pub mod skills;
 pub mod terminal;
 pub mod workspace;

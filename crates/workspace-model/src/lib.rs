@@ -419,7 +419,7 @@ impl ImageCapabilities {
         self.native_view || self.view_fallback
     }
 
- /// The safe default: assume every native capability is present so that no
+    /// The safe default: assume every native capability is present so that no
     /// fallback override fires when image fallback is inactive or a session's
     /// capabilities have not been resolved yet. (`native_edit` stays `false`
     /// because there is no native editing path, but that only matters once a
@@ -762,6 +762,10 @@ pub struct ToolInvocation {
     pub stop_kind: Option<String>,
     #[serde(default)]
     pub stop_status: Option<String>,
+    /// Screenshots a capture tool produced, so the card can show a thumbnail
+    /// without ever pulling the image bytes out of attachment storage.
+    #[serde(default)]
+    pub screenshots: Vec<ScreenshotHandle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1614,6 +1618,14 @@ pub struct UiSnapshot {
     pub thinking_text: String,
     #[serde(default)]
     pub usage: SessionUsageSnapshot,
+    /// Per-session browser state for the sidebar panel. Carries handles and a
+    /// downscaled panel rendition only — never full-resolution screenshot
+    /// bytes, which would turn every snapshot poll into a megabyte transfer.
+    #[serde(default)]
+    pub browser: Option<BrowserSessionState>,
+    /// Per-session computer-use state. Same constraint on image bytes.
+    #[serde(default)]
+    pub computer_use: Option<ComputerSessionState>,
     /// Steers queued while a turn was running but not yet moved into the
     /// timeline. Rendered as a pending area above the composer by the
     /// frontend until the agent starts responding to them.
@@ -1998,6 +2010,607 @@ fn default_web_tools_provider() -> String {
     "brave".to_string()
 }
 
+/// How a browser session obtains its browser.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BrowserMode {
+    /// Start a fresh isolated Chromium owned by the session. Nothing carries
+    /// over between sessions and the user's own browser is never touched.
+    #[default]
+    Launch,
+    /// Connect to an already-running browser at `endpoint`, using the user's
+    /// real profile and logins.
+    Attach,
+    /// Use a Kodex-owned profile directory that persists between sessions, so
+    /// a login survives a session ending without ever touching the user's own
+    /// browser.
+    ///
+    /// A Chromium profile can only be open in one process at a time, so this
+    /// mode is exclusive like `Attach`.
+    Persistent,
+}
+
+/// Browser-use configuration, mirroring DSH's `BrowserMcpConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: BrowserMode,
+    #[serde(default = "default_browser_headless")]
+    pub headless: bool,
+    /// Chromium executable override; empty means provider discovery.
+    #[serde(default)]
+    pub executable_path: String,
+    /// Debug endpoint for `Attach` mode. Required when `mode` is `Attach`.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Attach mode can drive the user's real logged-in browser, so it stays
+    /// off until explicitly enabled.
+    #[serde(default)]
+    pub allow_attach: bool,
+    /// Which Kodex-owned profile `Persistent` mode uses. Logins are scoped to
+    /// this name, so switching it is how you get a clean slate without
+    /// deleting anything.
+    #[serde(default = "default_browser_profile_name")]
+    pub profile_name: String,
+    /// Provider package version pin, so a provider upgrade cannot change the
+    /// exposed tool surface under a running session.
+    #[serde(default = "default_browser_provider_version")]
+    pub provider_version: String,
+    #[serde(default = "default_browser_tool_timeout_ms")]
+    pub tool_call_timeout_ms: u64,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: BrowserMode::Launch,
+            headless: true,
+            executable_path: String::new(),
+            endpoint: String::new(),
+            allow_attach: false,
+            profile_name: default_browser_profile_name(),
+            provider_version: default_browser_provider_version(),
+            tool_call_timeout_ms: default_browser_tool_timeout_ms(),
+        }
+    }
+}
+
+impl BrowserSettings {
+    /// Validation shared by the settings command and session preflight.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.mode == BrowserMode::Persistent {
+            validate_browser_profile_name(&self.profile_name)?;
+        }
+        if self.mode == BrowserMode::Attach {
+            if self.endpoint.trim().is_empty() {
+                return Err("attach mode requires a browser endpoint".to_string());
+            }
+            if !self.allow_attach {
+                return Err(
+                    "attach mode can drive a real logged-in browser and must be enabled explicitly"
+                        .to_string(),
+                );
+            }
+        }
+        if self.tool_call_timeout_ms == 0 {
+            return Err("tool call timeout must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn default_browser_headless() -> bool {
+    true
+}
+
+/// Profile names appear in a filesystem path, so they are restricted to
+/// characters that cannot escape the profiles directory.
+fn default_browser_profile_name() -> String {
+    "default".to_string()
+}
+
+/// Validate a profile name before it is used as a path segment.
+pub fn validate_browser_profile_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("A profile name is required.".to_string());
+    }
+    if trimmed.len() > 64 {
+        return Err("A profile name may be at most 64 characters.".to_string());
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "A profile name may only contain letters, digits, hyphens, and underscores."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The pinned `@playwright/mcp` version.
+///
+/// A real published version, not the dsh package's own version: the two are
+/// independent, and assuming otherwise makes every install fail with
+/// `notarget`. The last stable line is pinned rather than "latest" so the
+/// provider Kodex runs is the one it verified.
+///
+/// Lives here because both the settings default and the installer need it, and
+/// `browser-service` already sits above this crate.
+pub const DEFAULT_BROWSER_PROVIDER_VERSION: &str = "0.0.82";
+
+fn default_browser_provider_version() -> String {
+    DEFAULT_BROWSER_PROVIDER_VERSION.to_string()
+}
+
+fn default_browser_tool_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Computer-use driver backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComputerUseDriver {
+    /// In-process Cua Driver native SDK, scoped per session activation.
+    #[default]
+    Native,
+}
+
+/// Computer-use configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUseSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub driver: ComputerUseDriver,
+    #[serde(default = "default_computer_tool_timeout_ms")]
+    pub tool_call_timeout_ms: u64,
+}
+
+impl Default for ComputerUseSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            driver: ComputerUseDriver::Native,
+            tool_call_timeout_ms: default_computer_tool_timeout_ms(),
+        }
+    }
+}
+
+impl ComputerUseSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.tool_call_timeout_ms == 0 {
+            return Err("tool call timeout must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn default_computer_tool_timeout_ms() -> u64 {
+    30_000
+}
+
+/// A persisted screenshot. Bytes live in attachment storage; this is the
+/// handle passed to the model, the tool card, and the browser panel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenshotHandle {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_size: u64,
+    pub media_type: String,
+}
+
+impl ScreenshotHandle {
+    /// Whether a model with this capability can consume the image directly,
+    /// as opposed to needing the `view_image` fallback.
+    pub fn inlineable(&self, model_supports_vision: bool) -> bool {
+        model_supports_vision && self.byte_size > 0
+    }
+}
+
+/// Lifecycle state of one live session's browser or desktop resource.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityResourceStatus {
+    /// Created, but no tool has run yet, so nothing is acquired.
+    #[default]
+    Idle,
+    /// The resource is acquired and serving tool calls.
+    Active,
+    /// Disposal is in progress; new calls are refused.
+    Closing,
+    /// Disposed, or never acquired.
+    Closed,
+    /// The resource failed; the tool result carries the reason.
+    Failed,
+}
+
+/// A preflight that has not been run, for a snapshot built without one.
+fn default_browser_preflight() -> BrowserPreflight {
+    BrowserPreflight {
+        state: PreflightState::Missing {
+            detail: "Browser preflight has not run yet.".to_string(),
+            remedy: "Reopen settings to check the browser prerequisites.".to_string(),
+            fix: PreflightFix::Configure,
+        },
+        node_executable: None,
+        provider_version: String::new(),
+    }
+}
+
+/// Target a session's browser from the panel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserSessionRequest {
+    pub session_id: String,
+}
+
+/// Navigate a session's browser to a URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserNavigateRequest {
+    pub session_id: String,
+    pub url: String,
+}
+
+/// Browser preflight result, surfaced in settings and in the panel's
+/// unavailable state.
+///
+/// Field names stay snake_case, matching [`BrowserSettings`] and every other
+/// settings DTO. A `rename_all` here would have made this the one struct the
+/// TypeScript type has to special-case, and the mismatch is invisible until a
+/// read comes back `undefined`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserPreflight {
+    pub state: PreflightState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_executable: Option<String>,
+    pub provider_version: String,
+}
+
+/// Install progress, read by the settings pane and pushed as it changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserInstallState {
+    pub phase: BrowserInstallPhase,
+    /// Human-readable label for the pane.
+    pub label: String,
+    /// Whether work is still in flight.
+    pub running: bool,
+    /// Whether the provider is now usable.
+    pub verified: bool,
+    /// Whether a usable provider was present when this state was produced.
+    pub installed: bool,
+}
+
+/// Phase of a provider install, mirroring `browser_service`'s own enum so the
+/// wire shape has one definition.
+///
+/// Nesting is spelled out through [`BrowserInstallPhaseTagged`] for the same
+/// reason as [`PreflightState`]: a bare `#[serde(tag)]` would flatten
+/// `verified`/`step`/`detail` out of `phase` and into the install state beside
+/// it. It is harmless only while no caller reads those fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserInstallPhase {
+    Resolving,
+    InstallingPackage,
+    InstallingChromium,
+    Verifying,
+    Complete { verified: bool },
+    Failed { step: String, detail: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+enum BrowserInstallPhaseTagged {
+    Resolving,
+    InstallingPackage,
+    InstallingChromium,
+    Verifying,
+    Complete { verified: bool },
+    Failed { step: String, detail: String },
+}
+
+impl From<&BrowserInstallPhase> for BrowserInstallPhaseTagged {
+    fn from(phase: &BrowserInstallPhase) -> Self {
+        match phase {
+            BrowserInstallPhase::Resolving => BrowserInstallPhaseTagged::Resolving,
+            BrowserInstallPhase::InstallingPackage => BrowserInstallPhaseTagged::InstallingPackage,
+            BrowserInstallPhase::InstallingChromium => {
+                BrowserInstallPhaseTagged::InstallingChromium
+            }
+            BrowserInstallPhase::Verifying => BrowserInstallPhaseTagged::Verifying,
+            BrowserInstallPhase::Complete { verified } => BrowserInstallPhaseTagged::Complete {
+                verified: *verified,
+            },
+            BrowserInstallPhase::Failed { step, detail } => BrowserInstallPhaseTagged::Failed {
+                step: step.clone(),
+                detail: detail.clone(),
+            },
+        }
+    }
+}
+
+impl From<BrowserInstallPhaseTagged> for BrowserInstallPhase {
+    fn from(tagged: BrowserInstallPhaseTagged) -> Self {
+        match tagged {
+            BrowserInstallPhaseTagged::Resolving => BrowserInstallPhase::Resolving,
+            BrowserInstallPhaseTagged::InstallingPackage => BrowserInstallPhase::InstallingPackage,
+            BrowserInstallPhaseTagged::InstallingChromium => {
+                BrowserInstallPhase::InstallingChromium
+            }
+            BrowserInstallPhaseTagged::Verifying => BrowserInstallPhase::Verifying,
+            BrowserInstallPhaseTagged::Complete { verified } => {
+                BrowserInstallPhase::Complete { verified }
+            }
+            BrowserInstallPhaseTagged::Failed { step, detail } => {
+                BrowserInstallPhase::Failed { step, detail }
+            }
+        }
+    }
+}
+
+impl Serialize for BrowserInstallPhase {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        BrowserInstallPhaseTagged::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BrowserInstallPhase {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(BrowserInstallPhaseTagged::deserialize(deserializer)?.into())
+    }
+}
+
+/// Why a capability cannot run. `Ready` is the only variant that permits
+/// injection; the others carry the reason so the UI can explain the absence
+/// instead of the tools silently not appearing.
+/// How a user resolves an unsatisfied prerequisite.
+///
+/// The distinction drives which control the settings pane offers: an install
+/// button, or a field to change. Conflating them sends someone to reinstall a
+/// package when their configuration is what is wrong.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PreflightFix {
+    /// Running the installer resolves it.
+    Install,
+    /// The configuration itself must change.
+    Configure,
+}
+
+impl Default for PreflightFix {
+    fn default() -> Self {
+        // Conservative: an unknown fix shows no install button rather than an
+        // install button that would not help.
+        PreflightFix::Configure
+    }
+}
+
+impl PreflightFix {
+    /// The Tauri command the settings pane invokes for this fix.
+    pub fn action(self) -> Option<&'static str> {
+        match self {
+            PreflightFix::Install => Some("browser_install"),
+            PreflightFix::Configure => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightState {
+    Ready,
+    Missing {
+        detail: String,
+        remedy: String,
+        fix: PreflightFix,
+    },
+    Invalid {
+        detail: String,
+        remedy: String,
+        fix: PreflightFix,
+    },
+}
+
+/// The tagged JSON layout of [`PreflightState`], kept as its own type.
+///
+/// Serde's `tag` attribute describes a *flattening* representation. As a field
+/// of `BrowserPreflight`, a `Missing` variant's `detail`, `remedy`, and `fix`
+/// would land **beside** `state` rather than inside it:
+///
+/// ```json
+/// { "state": "missing", "detail": "…", "fix": "install" }
+/// ```
+///
+/// The TypeScript type nests them under `state`, so every read of
+/// `preflight.state.fix` is `undefined` — the detail text renders empty and the
+/// install button never appears, with no error anywhere to explain it. Both
+/// sides were "correct" against themselves, and TypeScript could not catch it
+/// because the type was hand-written to match the intent, not the output.
+///
+/// Converting through this helper emits the same tagged layout as a standalone
+/// object instead, so the value nests the way the type says it does.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+enum PreflightStateTagged {
+    Ready,
+    Missing {
+        detail: String,
+        remedy: String,
+        /// Absent on a payload written before this field existed, which
+        /// deserializes as `Configure` — the conservative choice, since it
+        /// shows no install button rather than one that would not help.
+        #[serde(default)]
+        fix: PreflightFix,
+    },
+    Invalid {
+        detail: String,
+        remedy: String,
+        #[serde(default)]
+        fix: PreflightFix,
+    },
+}
+
+impl From<&PreflightState> for PreflightStateTagged {
+    fn from(state: &PreflightState) -> Self {
+        match state {
+            PreflightState::Ready => PreflightStateTagged::Ready,
+            PreflightState::Missing {
+                detail,
+                remedy,
+                fix,
+            } => PreflightStateTagged::Missing {
+                detail: detail.clone(),
+                remedy: remedy.clone(),
+                fix: *fix,
+            },
+            PreflightState::Invalid {
+                detail,
+                remedy,
+                fix,
+            } => PreflightStateTagged::Invalid {
+                detail: detail.clone(),
+                remedy: remedy.clone(),
+                fix: *fix,
+            },
+        }
+    }
+}
+
+impl From<PreflightStateTagged> for PreflightState {
+    fn from(tagged: PreflightStateTagged) -> Self {
+        match tagged {
+            PreflightStateTagged::Ready => PreflightState::Ready,
+            PreflightStateTagged::Missing {
+                detail,
+                remedy,
+                fix,
+            } => PreflightState::Missing {
+                detail,
+                remedy,
+                fix,
+            },
+            PreflightStateTagged::Invalid {
+                detail,
+                remedy,
+                fix,
+            } => PreflightState::Invalid {
+                detail,
+                remedy,
+                fix,
+            },
+        }
+    }
+}
+
+impl Serialize for PreflightState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        PreflightStateTagged::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PreflightState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(PreflightStateTagged::deserialize(deserializer)?.into())
+    }
+}
+
+impl PreflightState {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, PreflightState::Ready)
+    }
+
+    /// The fix for an unsatisfied prerequisite, or `None` when ready.
+    pub fn fix(&self) -> Option<PreflightFix> {
+        match self {
+            PreflightState::Ready => None,
+            PreflightState::Missing { fix, .. } | PreflightState::Invalid { fix, .. } => Some(*fix),
+        }
+    }
+
+    /// Whether the settings pane should offer an install action.
+    pub fn wants_install(&self) -> bool {
+        self.fix() == Some(PreflightFix::Install)
+    }
+}
+
+/// Per-session browser state surfaced to the sidebar panel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BrowserSessionState {
+    pub session_id: String,
+    pub status: CapabilityResourceStatus,
+    pub mode: BrowserMode,
+    pub current_url: String,
+    pub page_title: String,
+    /// Downscaled rendition for the panel. Full-resolution bytes stay in
+    /// attachment storage and never enter the polled snapshot.
+    pub panel_rendition: Option<String>,
+    pub latest_screenshot: Option<ScreenshotHandle>,
+    /// Incremented on every state change so the UI can skip redundant renders.
+    pub version: u64,
+}
+
+/// Per-session computer-use state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ComputerSessionState {
+    pub session_id: String,
+    pub status: CapabilityResourceStatus,
+    pub cursor_x: Option<i32>,
+    pub cursor_y: Option<i32>,
+    pub latest_screenshot: Option<ScreenshotHandle>,
+    /// Facilities the driver reports as unavailable, e.g. a cursor overlay.
+    pub unavailable_facilities: Vec<String>,
+    /// Sessions whose operations recently overlapped on the shared desktop.
+    pub overlapping_sessions: Vec<String>,
+    pub version: u64,
+}
+
+/// A state change pushed to the frontend for one capability.
+///
+/// The snapshot carries the current value, but a screenshot or a navigation
+/// should not wait for the next poll, so changes are also pushed. Every
+/// transition carries a monotonically increasing `version` so a consumer that
+/// receives both an event and a snapshot can drop the stale one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CapabilityStateEvent {
+    Browser {
+        state: Box<BrowserSessionState>,
+    },
+    Computer {
+        state: Box<ComputerSessionState>,
+    },
+    /// The capability's resource was disposed, so the panel should clear.
+    BrowserClosed {
+        session_id: String,
+    },
+    ComputerClosed {
+        session_id: String,
+    },
+    /// The capability is enabled but cannot run, with the reason to show.
+    Unavailable {
+        capability: String,
+        detail: String,
+        remedy: String,
+    },
+}
+
+impl CapabilityStateEvent {
+    /// The session this event belongs to, when it names one.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            CapabilityStateEvent::Browser { state } => Some(state.session_id.as_str()),
+            CapabilityStateEvent::Computer { state } => Some(state.session_id.as_str()),
+            CapabilityStateEvent::BrowserClosed { session_id }
+            | CapabilityStateEvent::ComputerClosed { session_id } => Some(session_id),
+            CapabilityStateEvent::Unavailable { .. } => None,
+        }
+    }
+}
+
 /// Image-understanding fallback configuration. `view` selects a multimodal
 /// model from the existing model catalog used by the `view_image` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2188,6 +2801,14 @@ pub struct AppSettings {
     pub claude: ClaudeProviderSettings,
     #[serde(default)]
     pub web_tools: WebToolsSettings,
+    /// Browser-use capability. Disabled by default; enabled sessions receive
+    /// a managed MCP server exposing the selected provider's tool catalog.
+    #[serde(default)]
+    pub browser: BrowserSettings,
+    /// Computer-use capability. Disabled by default; drives the host desktop
+    /// through a per-session Cua Driver instance.
+    #[serde(default)]
+    pub computer_use: ComputerUseSettings,
     #[serde(default)]
     pub image: ImageSettings,
     /// Commit-message assistant model selection (codex agent).
@@ -2286,6 +2907,10 @@ pub struct AgentSettingsSnapshot {
     pub codex_acp: CodexAcpSettingsStatus,
     pub claude: ClaudeProviderSettingsStatus,
     pub web_tools: WebToolsSettingsStatus,
+    /// Browser preflight, resolved with the rest of the settings so the pane
+    /// can explain a capability that is enabled but cannot run.
+    #[serde(default = "default_browser_preflight")]
+    pub browser: BrowserPreflight,
     #[serde(default)]
     pub image: ImageSettingsStatus,
     #[serde(default)]
@@ -2520,7 +3145,10 @@ mod model_attributes_tests {
             help_text: String::new(),
         };
         let json = serde_json::to_string(&profile).expect("serialize");
-        assert!(json.contains("\"managed_proxy_kind\":\"codebuddy\""), "managed_proxy_kind serialized: {json}");
+        assert!(
+            json.contains("\"managed_proxy_kind\":\"codebuddy\""),
+            "managed_proxy_kind serialized: {json}"
+        );
         assert!(json.contains("\"port\":17856"), "port serialized: {json}");
         let back: AgentProviderProfile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.managed_proxy_kind, ManagedProxyKind::Codebuddy);
@@ -2546,5 +3174,187 @@ mod model_attributes_tests {
         let back: AgentProviderProfile = serde_json::from_str(json).expect("deserialize");
         assert_eq!(back.managed_proxy_kind, ManagedProxyKind::None);
         assert_eq!(back.port, None);
+    }
+}
+
+#[cfg(test)]
+mod preflight_fix_tests {
+    use super::*;
+
+    #[test]
+    fn fix_survives_serialization() {
+        let state = PreflightState::Missing {
+            detail: "d".into(),
+            remedy: "r".into(),
+            fix: PreflightFix::Install,
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["fix"], "install");
+        assert!(state.wants_install());
+    }
+
+    /// The nesting the settings pane's TypeScript type promises.
+    ///
+    /// `fix_survives_serialization` covers the state on its own, where the
+    /// layout is identical either way. This is the case that actually shipped
+    /// broken: inside its parent, a tagged serde enum flattens, so
+    /// `preflight.state.fix` — the exact expression the install button is
+    /// guarded by — was `undefined` on a real payload while every unit test
+    /// stayed green.
+    #[test]
+    fn preflight_state_nests_inside_its_container() {
+        let preflight = BrowserPreflight {
+            state: PreflightState::Missing {
+                detail: "尚未安装固定版本的浏览器 provider（v0.0.82）。".into(),
+                remedy: "Kodex 可以为你一键安装。".into(),
+                fix: PreflightFix::Install,
+            },
+            node_executable: Some("/opt/homebrew/bin/node".into()),
+            provider_version: "0.0.82".into(),
+        };
+
+        let json = serde_json::to_value(&preflight).unwrap();
+        assert_eq!(
+            json["state"]["state"], "missing",
+            "the variant tag nests under state: {json}"
+        );
+        assert_eq!(
+            json["state"]["fix"], "install",
+            "the pane reads preflight.state.fix: {json}"
+        );
+        assert_eq!(
+            json["state"]["detail"],
+            "尚未安装固定版本的浏览器 provider（v0.0.82）。"
+        );
+        assert_eq!(json["node_executable"], "/opt/homebrew/bin/node");
+        assert_eq!(json["provider_version"], "0.0.82");
+
+        // The flattened layout would have put these at the top level. Asserting
+        // their absence keeps a future `#[serde(tag)]` re-add from passing the
+        // assertions above by accident.
+        assert!(
+            json.get("fix").is_none(),
+            "fix must not flatten beside state: {json}"
+        );
+        assert!(json.get("detail").is_none(), "detail flattened: {json}");
+
+        // The whole payload, exactly. The settings pane test renders this same
+        // object, so a change on either side that the other has not absorbed
+        // fails here rather than as a missing button on a user's machine.
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "state": {
+                    "state": "missing",
+                    "detail": "尚未安装固定版本的浏览器 provider（v0.0.82）。",
+                    "remedy": "Kodex 可以为你一键安装。",
+                    "fix": "install",
+                },
+                "node_executable": "/opt/homebrew/bin/node",
+                "provider_version": "0.0.82",
+            })
+        );
+
+        // And it round-trips, so a snapshot read back yields the same state.
+        let back: BrowserPreflight = serde_json::from_value(json).unwrap();
+        assert_eq!(back, preflight);
+    }
+
+    #[test]
+    fn a_ready_preflight_nests_as_a_bare_tag() {
+        let preflight = BrowserPreflight {
+            state: PreflightState::Ready,
+            node_executable: None,
+            provider_version: "0.0.82".into(),
+        };
+        let json = serde_json::to_value(&preflight).unwrap();
+        assert_eq!(json["state"], serde_json::json!({ "state": "ready" }));
+        assert!(json.get("node_executable").is_none());
+    }
+
+    /// The install phase nests for the same reason, and is read the same way.
+    #[test]
+    fn install_phase_nests_inside_the_install_state() {
+        let state = BrowserInstallState {
+            phase: BrowserInstallPhase::Complete { verified: true },
+            label: "安装完成。".into(),
+            running: false,
+            verified: true,
+            installed: true,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::json!({
+                "phase": { "phase": "complete", "verified": true },
+                "label": "安装完成。",
+                "running": false,
+                "verified": true,
+                "installed": true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_failed_install_phase_keeps_its_detail_nested() {
+        let state = BrowserInstallState {
+            phase: BrowserInstallPhase::Failed {
+                step: "Installing".into(),
+                detail: "npm error ETARGET".into(),
+            },
+            label: "安装失败。".into(),
+            running: false,
+            verified: false,
+            installed: false,
+        };
+
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["phase"]["step"], "Installing");
+        assert_eq!(json["phase"]["detail"], "npm error ETARGET");
+        assert_eq!(json["label"], "安装失败。");
+        // A flattened `step` would have shadowed nothing today, but it is the
+        // same defect the preflight one shipped as.
+        assert!(json.get("step").is_none(), "step flattened: {json}");
+    }
+
+    /// The whole payload, exactly.
+    ///
+    /// The settings pane renders this same file, so a change on either side
+    /// that the other has not absorbed fails here rather than as a missing
+    /// button on a user's machine. The frontend's own test used to pass a
+    /// hand-written object straight to a mocked command, which skipped the one
+    /// boundary that was broken and so stayed green throughout.
+    ///
+    /// The fixture lives under `apps/` because the pane test is its consumer;
+    /// nothing in this crate depends on it at build time, and `include_str!`
+    /// only pulls it into the test binary.
+    #[test]
+    fn the_pane_fixture_is_the_payload_this_crate_emits() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/desktop/ui/src/features/settings/fixtures/browser-preflight-missing.json"
+        ))
+        .expect("fixture is valid JSON");
+
+        let preflight: BrowserPreflight =
+            serde_json::from_value(fixture.clone()).expect("fixture deserializes");
+        assert_eq!(
+            serde_json::to_value(&preflight).unwrap(),
+            fixture,
+            "the serialized payload drifted from the fixture the pane renders"
+        );
+        assert!(preflight.state.wants_install());
+    }
+
+    #[test]
+    fn a_state_without_fix_deserializes_as_configure() {
+        // A snapshot written before the field existed must not offer an
+        // install button that may not work.
+        let json = serde_json::json!({
+            "state": "missing",
+            "detail": "d",
+            "remedy": "r"
+        });
+        let state: PreflightState = serde_json::from_value(json).unwrap();
+        assert!(!state.wants_install());
     }
 }

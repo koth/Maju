@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, AgentInstallResult, AgentProviderFamily, AgentSettingsSnapshot, AppTheme,
-    CustomProviderInput, ImageGenerateProtocol, LspProbeResult, LspServerConfigInput,
-    DshVersionInfo, LspServerSettingsEntry, LspSettingsSnapshot, ModelAttributesInput,
+    CustomProviderInput, DshVersionInfo, ImageGenerateProtocol, LspProbeResult,
+    LspServerConfigInput, LspServerSettingsEntry, LspSettingsSnapshot, ModelAttributesInput,
     RemoteMachineProfile, RemoteMachineProfileInput, RemoteMachineProfilesSnapshot,
     RemoteMachineValidationRequest,
 };
@@ -89,6 +89,23 @@ pub fn settings_save_web_tools_settings(
         .map_err(|e| e.to_string())
 }
 
+/// Persist browser-use settings. Validation happens here, so an unusable
+/// configuration is refused where the user made the change.
+#[tauri::command]
+pub fn settings_save_browser_settings(
+    settings: workspace_model::BrowserSettings,
+) -> Result<AgentSettingsSnapshot, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    app_core::settings::save_browser_settings(&paths, settings).map_err(|e| e.to_string())
+}
+
+/// Re-run browser preflight without saving, for the settings pane's status line.
+#[tauri::command]
+pub fn settings_browser_preflight() -> Result<workspace_model::BrowserPreflight, String> {
+    let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+    Ok(app_core::settings::browser_preflight(&paths).into())
+}
+
 #[tauri::command]
 pub fn settings_save_web_tools_provider_key(
     provider: String,
@@ -137,8 +154,7 @@ pub fn settings_save_image_generate_api_key(
     api_key: String,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    app_core::settings::save_image_generate_api_key(&paths, &api_key)
-        .map_err(|e| e.to_string())
+    app_core::settings::save_image_generate_api_key(&paths, &api_key).map_err(|e| e.to_string())
 }
 
 /// Persist the commit-assistant model selection (provider + model from the
@@ -247,7 +263,6 @@ pub fn settings_select_codex_acp_provider(
     }
     app_core::settings::select_codex_acp_provider(&paths, &provider).map_err(|e| e.to_string())
 }
-
 
 #[tauri::command]
 pub fn settings_select_agent_provider_profile(
@@ -370,9 +385,14 @@ pub async fn settings_sync_provider_models_from_url(
         let default_model = app_core::settings::codebuddy_default_model(&paths);
         let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
         let debug = app_core::settings::codebuddy_debug(&paths);
-        state
-            .codebuddy_proxy()
-            .ensure_running(&paths, port, &api_key, &default_model, &internet_env, debug)?;
+        state.codebuddy_proxy().ensure_running(
+            &paths,
+            port,
+            &api_key,
+            &default_model,
+            &internet_env,
+            debug,
+        )?;
     }
     let models =
         app_core::settings::fetch_provider_models_from_url(&paths, &provider, &model_list_url)
@@ -827,8 +847,7 @@ pub async fn codebuddy_proxy_status(
 pub async fn codebuddy_proxy_start(state: State<'_, AppState>) -> Result<(), String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
     let port = app_core::settings::codebuddy_port(&paths);
-    let api_key = app_core::settings::codebuddy_secret(&paths)
-        .unwrap_or_default();
+    let api_key = app_core::settings::codebuddy_secret(&paths).unwrap_or_default();
     let default_model = app_core::settings::codebuddy_default_model(&paths);
     let internet_env = app_core::settings::codebuddy_internet_environment(&paths);
     let debug = app_core::settings::codebuddy_debug(&paths);
@@ -871,16 +890,14 @@ pub fn settings_save_codebuddy_config(
     )
     .map_err(|e| e.to_string())?;
     // Restart if already running so it picks up the new port/key.
-    let _ = state
-        .codebuddy_proxy()
-        .restart_if_changed(
-            &paths,
-            app_core::settings::codebuddy_port(&paths),
-            &app_core::settings::codebuddy_secret(&paths).unwrap_or_default(),
-            &app_core::settings::codebuddy_default_model(&paths),
-            &app_core::settings::codebuddy_internet_environment(&paths),
-            app_core::settings::codebuddy_debug(&paths),
-        );
+    let _ = state.codebuddy_proxy().restart_if_changed(
+        &paths,
+        app_core::settings::codebuddy_port(&paths),
+        &app_core::settings::codebuddy_secret(&paths).unwrap_or_default(),
+        &app_core::settings::codebuddy_default_model(&paths),
+        &app_core::settings::codebuddy_internet_environment(&paths),
+        app_core::settings::codebuddy_debug(&paths),
+    );
     Ok(snapshot)
 }
 

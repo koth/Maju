@@ -1,8 +1,7 @@
 use super::diff_utils::{
     CanonicalTextDiff, ExactEditText, canonical_text_diff, edit_input_after_text,
     edit_input_before_text, edit_input_change_type_for_path, edit_input_content_for_path,
-    edit_input_unified_diff_for_path, is_file_write_tool_identity,
-    is_shell_command_tool_label,
+    edit_input_unified_diff_for_path, is_file_write_tool_identity, is_shell_command_tool_label,
     looks_like_fragment_to_full_file_text, looks_like_whole_file_addition_hunks,
     normalize_diff_text_for_session_change, reverse_apply_diff_hunks, reverse_apply_unified_diff,
     tool_command_write_hint_paths, tool_diff_hunks_for_detected_write, tool_event_change_paths,
@@ -408,19 +407,13 @@ impl Application {
             // create-shaped writes).
             if let Some(new_text) =
                 write_tool_payload_created_content(&tool, &normalized_path, &self.ui.workspace.root)
-                && self.completed_write_claims_creation(
-                    call_id,
-                    &tool,
-                    &normalized_path,
-                    &new_text,
-                )
+                && self.completed_write_claims_creation(call_id, &tool, &normalized_path, &new_text)
             {
-                let disk_matches = std::fs::read_to_string(
-                    self.ui.workspace.root.join(&normalized_path),
-                )
-                .ok()
-                .map(|text| normalize_diff_text_for_session_change(&text))
-                .is_some_and(|disk| disk == new_text);
+                let disk_matches =
+                    std::fs::read_to_string(self.ui.workspace.root.join(&normalized_path))
+                        .ok()
+                        .map(|text| normalize_diff_text_for_session_change(&text))
+                        .is_some_and(|disk| disk == new_text);
                 if disk_matches {
                     changes.push(crate::file_tracker::VerifiedFileChange {
                         path: normalized_path,
@@ -1208,12 +1201,9 @@ impl Application {
             return false;
         }
         let normalized = normalize_path_for_storage(path, &self.ui.workspace.root);
-        let payload_confirms = write_tool_payload_created_content(
-            &tool,
-            &normalized,
-            &self.ui.workspace.root,
-        )
-        .is_some_and(|content| content == normalize_diff_text_for_session_change(new_text));
+        let payload_confirms =
+            write_tool_payload_created_content(&tool, &normalized, &self.ui.workspace.root)
+                .is_some_and(|content| content == normalize_diff_text_for_session_change(new_text));
         if !payload_confirms {
             return false;
         }
@@ -1433,18 +1423,13 @@ impl Application {
             .file_tracker
             .get_baseline_text(call_id, normalized_path)
         {
-            Some(baseline) => {
-                normalize_diff_text_for_session_change(baseline) == payload_text
-            }
+            Some(baseline) => normalize_diff_text_for_session_change(baseline) == payload_text,
             None => self
                 .file_tracker
                 .was_missing_at_start(call_id, normalized_path)
                 .unwrap_or(false),
         };
-        tracker_cannot_verify
-            && self
-                .git_head_text_for_path(normalized_path)
-                .is_none()
+        tracker_cannot_verify && self.git_head_text_for_path(normalized_path).is_none()
     }
 }
 

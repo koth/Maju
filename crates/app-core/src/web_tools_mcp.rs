@@ -109,7 +109,10 @@ pub struct WebToolsLease {
 }
 
 impl WebToolsLease {
-    pub fn register(handle: Arc<WebToolsMcpHandle>, config: WebToolsConfig) -> anyhow::Result<Self> {
+    pub fn register(
+        handle: Arc<WebToolsMcpHandle>,
+        config: WebToolsConfig,
+    ) -> anyhow::Result<Self> {
         let token = handle.register_session(config)?;
         Ok(Self { handle, token })
     }
@@ -216,7 +219,8 @@ async fn handle_http_request(
         return Ok(response(StatusCode::NOT_FOUND, "Not found"));
     }
     // The token names the session, so it is also the MCP session id: each
-    // client gets its own and may never present another session's id.
+    // client gets its own and may never present another session's id. Taken
+    // before the body is consumed.
     let Some(token) = request_token(&request) else {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
@@ -252,7 +256,23 @@ async fn handle_http_request(
             ));
         }
     };
-    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str()) {
+
+    // The version probe is answered between authentication and the session
+    // check. It does carry the token — verified by capturing the probe's headers
+    // rather than assumed — so authentication was never the issue. What it cannot
+    // carry is a session id: sessions are issued by `initialize`, and this
+    // request runs before that. Refusing it there produces a 401 the SDK reads as
+    // a missing authProvider, which is terminal.
+    if let Some(reply) = crate::mcp_version::discover_response(&payload) {
+        let id = payload.get("id").cloned().unwrap_or(Value::Null);
+        return Ok(json_response(
+            StatusCode::OK,
+            json!({"jsonrpc": "2.0", "id": id, "result": reply}),
+        ));
+    }
+
+    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str())
+    {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
@@ -322,7 +342,7 @@ async fn handle_json_rpc_call(payload: Value, service: WebToolsService) -> Optio
     }
     let result = match method {
         "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": crate::mcp_version::negotiate(payload.get("params")),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "kodex-web-tools", "version": env!("CARGO_PKG_VERSION")}
         })),
@@ -569,9 +589,8 @@ mod tests {
     }
 
     fn start_test_server() -> TestServer {
-        let handle = Arc::new(
-            start_web_tools_mcp_server_with_service(WebToolsMcpService::new()).unwrap(),
-        );
+        let handle =
+            Arc::new(start_web_tools_mcp_server_with_service(WebToolsMcpService::new()).unwrap());
         let token = handle.register_session(mcp_config()).unwrap();
         TestServer { handle, token }
     }
@@ -607,6 +626,15 @@ mod tests {
         assert_eq!(
             payload["result"]["serverInfo"]["name"].as_str(),
             Some("kodex-web-tools")
+        );
+        // This assertion is the one that was missing, and its absence is why a
+        // hard-coded `2024-11-05` reply survived: the test sent a modern
+        // version and never checked what came back, so the harness disconnected
+        // and the suite stayed green.
+        assert_eq!(
+            payload["result"]["protocolVersion"].as_str(),
+            Some("2025-11-25"),
+            "a server that can speak the requested revision must reply with it"
         );
         session_id
     }

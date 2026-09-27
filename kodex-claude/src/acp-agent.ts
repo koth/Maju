@@ -283,7 +283,7 @@ type QueryWithTitleHelpers = Query & {
  *  detect when a loadSession/resumeSession call requires tearing down and
  *  recreating the underlying Query process.  MCP servers are sorted by name
  *  so that ordering differences don't trigger unnecessary recreations. */
-function computeSessionFingerprint(params: {
+export function computeSessionFingerprint(params: {
   cwd: string;
   mcpServers?: NewSessionRequest["mcpServers"];
 }): string {

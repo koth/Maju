@@ -214,15 +214,16 @@ impl Application {
                         // For dsh sessions the mode slot carries the agent
                         // preset (not the ACP Plan/Build permission mode), so
                         // restore the persisted preset over the generic mode.
-                        ui.session.mode = if crate::settings::is_deepseek_harness_command(&agent_command) {
-                            store
-                                .get_session_agent_preset(session_id)
-                                .ok()
-                                .flatten()
-                                .or(mode)
-                        } else {
-                            mode
-                        };
+                        ui.session.mode =
+                            if crate::settings::is_deepseek_harness_command(&agent_command) {
+                                store
+                                    .get_session_agent_preset(session_id)
+                                    .ok()
+                                    .flatten()
+                                    .or(mode)
+                            } else {
+                                mode
+                            };
                     }
                     ui.messages = messages;
                     ui.tools = tools;
@@ -387,7 +388,10 @@ impl Application {
             .unwrap_or(false)
         {
             ui.turn_changes = store
-                .load_recent_turn_file_changes(&ui.session.id.to_string(), RESTORE_TURN_CHANGE_LIMIT)
+                .load_recent_turn_file_changes(
+                    &ui.session.id.to_string(),
+                    RESTORE_TURN_CHANGE_LIMIT,
+                )
                 .unwrap_or_default();
         }
 
@@ -405,6 +409,7 @@ impl Application {
             remote_ssh: None,
             web_tools_mcp,
             image_mcp,
+            browser_mcp: None,
             in_flight_prompt: None,
             seq_counter,
             needs_title,
@@ -661,7 +666,10 @@ impl Application {
             .unwrap_or(false)
         {
             ui.turn_changes = store
-                .load_recent_turn_file_changes(&ui.session.id.to_string(), RESTORE_TURN_CHANGE_LIMIT)
+                .load_recent_turn_file_changes(
+                    &ui.session.id.to_string(),
+                    RESTORE_TURN_CHANGE_LIMIT,
+                )
                 .unwrap_or_default();
         }
 
@@ -679,6 +687,7 @@ impl Application {
             remote_ssh: Some(remote_ssh),
             web_tools_mcp: None,
             image_mcp: None,
+            browser_mcp: None,
             in_flight_prompt: None,
             seq_counter,
             needs_title,

@@ -56,6 +56,7 @@ import {
   type SettingsStartupNotice,
 } from "../settings/SettingsPage";
 import { AutomationPage } from "../automation/AutomationPage";
+import { SkillsPage } from "../skills/SkillsPage";
 import { TerminalDock } from "../terminal/TerminalDock";
 import { applyAppTheme, DEFAULT_APP_THEME } from "../../theme";
 import { checkForAppUpdate, type AppUpdateInfo } from "../../lib/updater";
@@ -407,6 +408,8 @@ export function Workbench() {
   } = useTerminalDockState(snapshot, snapshotRef);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [automationOpen, setAutomationOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillsTab, setSkillsTab] = useState<"installed" | "skillhub">("installed");
   const [automationToast, setAutomationToast] = useState<AutomationFiredEvent | null>(null);
   const [remoteOpenVisible, setRemoteOpenVisible] = useState(false);
   const [remoteWorkspaceHydration, setRemoteWorkspaceHydration] = useState<{
@@ -481,6 +484,14 @@ export function Workbench() {
 
   const handleCloseAutomation = useCallback(() => {
     setAutomationOpen(false);
+  }, []);
+
+  const handleOpenSkills = useCallback(() => {
+    setSkillsOpen(true);
+  }, []);
+
+  const handleCloseSkills = useCallback(() => {
+    setSkillsOpen(false);
   }, []);
 
   const resetReviewPanelTabs = useCallback(() => {
@@ -1222,6 +1233,15 @@ export function Workbench() {
     );
   }
 
+  if (skillsOpen) {
+    return (
+      <div className="workbench">
+        <SkillsPage key={skillsTab} onBack={handleCloseSkills} onTabChange={setSkillsTab} />
+        {updateNotice}
+      </div>
+    );
+  }
+
   // No workspace loaded — show welcome screen
   if (!workspaceReady) {
     return (
@@ -1363,6 +1383,7 @@ export function Workbench() {
               refreshToken={sessionListRefreshToken}
               onOpenSettings={handleOpenSettings}
               onOpenAutomation={handleOpenAutomation}
+              onOpenSkills={handleOpenSkills}
               onSessionChanged={handleSessionChanged}
               onWorkspaceChanged={handleWorkspaceChanged}
               onWorkspaceArchived={handleWorkspaceArchived}

@@ -364,8 +364,7 @@ fn usage_tokens_from_meta(meta: Option<&Value>) -> UsageTokenBreakdown {
 
     let latency_ms = usage_u64_field(meta, &["latency_ms", "latencyMs"]);
     let ttft_ms = usage_u64_field(meta, &["ttft_ms", "ttftMs"]);
-    let tokens_per_second =
-        usage_f64_field(meta, &["tokens_per_second", "tokensPerSecond"]);
+    let tokens_per_second = usage_f64_field(meta, &["tokens_per_second", "tokensPerSecond"]);
 
     UsageTokenBreakdown {
         input_tokens,

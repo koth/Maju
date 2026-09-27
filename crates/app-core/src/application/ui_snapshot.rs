@@ -380,7 +380,9 @@ pub fn project_remote_snapshot(
             workspace_model::TimelineItem::Thinking(_) => {}
         }
     }
-    snapshot.messages.retain(|m| referenced_messages.contains(&m.id));
+    snapshot
+        .messages
+        .retain(|m| referenced_messages.contains(&m.id));
     // Pending-permission tools must survive the trim: the phone derives the
     // approval sheet from `snapshot.tools`, not from the timeline.
     snapshot.tools.retain(|t| {
@@ -572,6 +574,7 @@ mod tests {
                 can_stop: false,
                 stop_kind: None,
                 stop_status: None,
+                screenshots: Vec::new(),
             });
             timeline.push(workspace_model::TimelineItem::Message(message_id));
             timeline.push(workspace_model::TimelineItem::Tool(tool_id));
@@ -586,6 +589,8 @@ mod tests {
                 kind: workspace_model::WorkspaceKind::Project,
             },
             workspace_connected: true,
+            browser: None,
+            computer_use: None,
             session: workspace_model::SessionSummary {
                 id: uuid::Uuid::nil(),
                 workspace_id: uuid::Uuid::nil(),
@@ -645,16 +650,14 @@ mod tests {
             .collect();
         assert_eq!(referenced.len(), projected.messages.len());
         for message in &projected.messages {
-            assert!(referenced.contains(&message.id), "message must be referenced");
+            assert!(
+                referenced.contains(&message.id),
+                "message must be referenced"
+            );
         }
         // Oldest message pair (ids 1000/2000) fell out of the window.
         let oldest_message = uuid::Uuid::from_u128(1000);
-        assert!(
-            projected
-                .messages
-                .iter()
-                .all(|m| m.id != oldest_message)
-        );
+        assert!(projected.messages.iter().all(|m| m.id != oldest_message));
     }
 
     #[test]
@@ -662,10 +665,12 @@ mod tests {
         let snapshot = remote_fixture(3);
         let projected = project_remote_snapshot(snapshot);
 
-        assert!(projected
-            .tools
-            .iter()
-            .all(|t| t.summary.len() <= REMOTE_TOOL_TEXT_CHARS + "\n...".len()));
+        assert!(
+            projected
+                .tools
+                .iter()
+                .all(|t| t.summary.len() <= REMOTE_TOOL_TEXT_CHARS + "\n...".len())
+        );
 
         assert!(projected.session_changes.is_empty());
         assert!(projected.review_changes.is_empty());
@@ -738,8 +743,7 @@ mod tests {
         // Oldest: budget spent, falls back to the head cap + marker.
         let oldest = body_of(ids[0]);
         assert!(
-            oldest.starts_with(&"x".repeat(REMOTE_MESSAGE_BODY_CHARS))
-                && oldest.ends_with("\n..."),
+            oldest.starts_with(&"x".repeat(REMOTE_MESSAGE_BODY_CHARS)) && oldest.ends_with("\n..."),
             "the oldest body must fall back to the head cap: {}",
             oldest.len()
         );
@@ -787,17 +791,27 @@ mod tests {
         // the image budget and travel whole, the oldest is dropped with a note —
         // never a half data URL, which the phone would render as base64 text.
         let png_base64 = "A".repeat(2_500_000);
-        let image = |label: &str| format!("{label}\n\n![生成的图片](data:image/png;base64,{png_base64})");
+        let image =
+            |label: &str| format!("{label}\n\n![生成的图片](data:image/png;base64,{png_base64})");
         let mut snapshot = remote_fixture(3);
         snapshot.messages[0].body = image("第一张");
         snapshot.messages[1].body = image("第二张");
         snapshot.messages[2].body = image("第三张");
 
         let projected = project_remote_snapshot(snapshot);
-        assert!(projected.messages[2].body.contains("data:image/"), "newest stays whole");
-        assert!(projected.messages[1].body.contains("data:image/"), "second stays whole");
+        assert!(
+            projected.messages[2].body.contains("data:image/"),
+            "newest stays whole"
+        );
+        assert!(
+            projected.messages[1].body.contains("data:image/"),
+            "second stays whole"
+        );
         let omitted = &projected.messages[0].body;
-        assert!(!omitted.contains("data:image/"), "no half data URL may ship");
+        assert!(
+            !omitted.contains("data:image/"),
+            "no half data URL may ship"
+        );
         assert!(omitted.contains(REMOTE_IMAGE_OMITTED_NOTE));
         assert!(omitted.starts_with("第一张"), "the prose survives");
     }
@@ -848,10 +862,9 @@ mod tests {
         let mut snapshot = remote_fixture(2);
         snapshot.timeline.truncate(1); // drop the tool entries from the timeline
         snapshot.messages.retain(|m| {
-            snapshot
-                .timeline
-                .iter()
-                .any(|item| matches!(item, workspace_model::TimelineItem::Message(id) if *id == m.id))
+            snapshot.timeline.iter().any(
+                |item| matches!(item, workspace_model::TimelineItem::Message(id) if *id == m.id),
+            )
         });
         let pending_id = uuid::Uuid::from_u128(9999);
         snapshot.tools.insert(
@@ -933,7 +946,10 @@ mod tests {
             pending_steers: Vec::new(),
         };
         let projected = project_remote_patch(patch, None);
-        assert!(projected.thinking_text.is_empty(), "thinking text is phone-dead weight");
+        assert!(
+            projected.thinking_text.is_empty(),
+            "thinking text is phone-dead weight"
+        );
         assert!(projected.repository.is_none());
         assert!(projected.session_changes.is_empty());
         assert!(projected.review_changes.is_empty());
@@ -990,6 +1006,8 @@ impl Application {
             revision: self.ui.revision,
             workspace: self.ui.workspace.clone(),
             workspace_connected: true,
+            browser: None,
+            computer_use: None,
             session: self.ui.session.clone(),
             session_config: self.ui.session_config.clone(),
             prompt_capabilities: self.ui.prompt_capabilities.clone(),

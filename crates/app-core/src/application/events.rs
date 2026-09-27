@@ -232,7 +232,11 @@ impl Application {
                 // the session's actual preset is known (create / select).
                 // Persist it so reconnect/resume restores the session's own
                 // preset instead of falling back to the global default.
-                if let ClientEvent::SessionConfigValueChanged { control_id, value_id, .. } = event
+                if let ClientEvent::SessionConfigValueChanged {
+                    control_id,
+                    value_id,
+                    ..
+                } = event
                     && control_id == "agent_preset"
                 {
                     let _ = self

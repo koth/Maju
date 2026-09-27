@@ -1,0 +1,21 @@
+[package]
+name = "browser-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+session-resource = { path = "../session-resource" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "fs"] }
+tracing = "0.1"
+workspace-model = { path = "../workspace-model" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "fs", "test-util"] }
+
+# SIGTERM/SIGKILL for the orphan reaper, which terminates provider processes
+# that are not our children after a crash.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

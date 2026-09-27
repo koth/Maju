@@ -535,6 +535,10 @@ pub struct SpawnDshWebConfig {
     /// the Kodex-generated `settings.yaml` and keeps all state under Kodex's
     /// data root rather than `~/.dsh`.
     pub dsh_home: String,
+    /// `CODEX_HOME` — the skill directory root (`~/.kodex`). Defaults to
+    /// `dsh_home` when empty. Set this to the Kodex data root so dsh loads
+    /// skills from `~/.kodex/skills` instead of `~/.codex/skills`.
+    pub codex_home: String,
     /// Provider API keys to inject, keyed by the env-var name written to
     /// `settings.yaml` as `apiKeyEnv` (e.g. `KODEX_DSH_DEEPSEEK_KEY` -> secret).
     /// dsh's `llm-pi-ai` resolves the credential named by `apiKeyEnv` from the
@@ -559,6 +563,7 @@ impl Default for SpawnDshWebConfig {
     fn default() -> Self {
         Self {
             dsh_home: String::new(),
+            codex_home: String::new(),
             provider_keys: Vec::new(),
             extra_env: Vec::new(),
             patch_overlay: None,
@@ -697,6 +702,9 @@ async fn spawn_with_args(
     }
     if !config.dsh_home.is_empty() {
         cmd.env("DSH_HOME", &config.dsh_home);
+    }
+    if !config.codex_home.is_empty() {
+        cmd.env("CODEX_HOME", &config.codex_home);
     }
     for (env_name, secret) in &config.provider_keys {
         cmd.env(env_name, secret);
@@ -1208,7 +1216,13 @@ fn find_volta_node() -> Option<std::path::PathBuf> {
     None
 }
 
-fn find_binary(binary: &str) -> Option<std::path::PathBuf> {
+/// Find an executable the way the rest of the app does.
+///
+/// Exported so preflight resolves `node` and `npm` identically to how the
+/// agent CLIs are found. A GUI-launched app inherits a minimal PATH that omits
+/// Homebrew and every version manager, so a plain PATH lookup reports tools
+/// the user plainly has as missing.
+pub fn find_binary(binary: &str) -> Option<std::path::PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
         vec![
             format!("{binary}.exe"),

@@ -1,7 +1,15 @@
 mod application;
-pub mod automation;
 mod attachment_cache;
+pub mod automation;
 mod bootstrap;
+pub mod browser_cleanup;
+pub mod browser_injection;
+pub mod browser_install;
+pub mod browser_mcp;
+pub mod browser_panel;
+pub mod browser_preflight;
+pub mod browser_server;
+pub mod capability_state;
 pub mod dsh_bringup;
 mod editor_files;
 mod file_tracker;
@@ -9,15 +17,19 @@ mod handoff;
 mod image_api;
 mod image_capability;
 mod image_mcp;
+pub mod mcp_version;
 mod paths;
 mod reducer;
-mod shared_mcp;
 pub mod remote_bootstrap;
 mod remote_control;
 pub mod remote_profiles;
 pub mod remote_ssh;
 mod remote_workspace;
+pub mod screenshot_pipeline;
 pub mod settings;
+pub mod shared_mcp;
+pub mod skillhub;
+pub mod skills;
 pub mod startup_perf;
 pub mod web_tools;
 pub mod web_tools_mcp;
@@ -193,7 +205,8 @@ mod tests {
         let mut snapshot = app.lightweight_ui_snapshot();
         snapshot.messages = vec![message];
         snapshot.timeline = vec![TimelineItem::Message(snapshot.messages[0].id)];
-        super::project_remote_snapshot(snapshot)            .messages
+        super::project_remote_snapshot(snapshot)
+            .messages
             .into_iter()
             .next()
             .expect("the projection keeps the referenced message")
@@ -1630,9 +1643,13 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             .unwrap();
         drop(store);
 
-        let app =
-            Application::bootstrap_with_app_paths(&workspace, "codebuddy --acp", app_paths.clone(), None)
-                .unwrap();
+        let app = Application::bootstrap_with_app_paths(
+            &workspace,
+            "codebuddy --acp",
+            app_paths.clone(),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(app.ui.session.id.to_string(), session_id);
         assert_eq!(app.ui.session.agent_cli.as_deref(), Some("CodeBuddy"));
@@ -1919,6 +1936,7 @@ async function clickCanvasNewMenuItem(page: Page, itemText: string) {
             can_stop: false,
             stop_kind: None,
             stop_status: None,
+            screenshots: Vec::new(),
         };
         store.insert_tool(&session_id, &tool, 1).unwrap();
         drop(store);

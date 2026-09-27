@@ -748,7 +748,10 @@ fn mime_from_str(mime: &str) -> &'static str {
 /// `images/edits` response. Supports `b64_json` (preferred, requested) and
 /// falls back to fetching a `url` when the provider does not honor
 /// `response_format`.
-async fn parse_image_results(response: &Value, timeout_secs: u64) -> Result<Vec<DecodedImage>, String> {
+async fn parse_image_results(
+    response: &Value,
+    timeout_secs: u64,
+) -> Result<Vec<DecodedImage>, String> {
     let data = response
         .get("data")
         .and_then(Value::as_array)

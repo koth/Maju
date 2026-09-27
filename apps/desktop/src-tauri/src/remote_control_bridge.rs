@@ -8,7 +8,9 @@
 
 use app_core::{AppUpdate, RemoteControl, UiPatchCursor, UiSnapshotUpdate};
 use relay_client::{ControlHandler, EventSource, PairingHandler, SessionKey};
-use relay_protocol::{ControlRequest, ControlResponse, Envelope, EventFrame, Message, PairingConfirm};
+use relay_protocol::{
+    ControlRequest, ControlResponse, Envelope, EventFrame, Message, PairingConfirm,
+};
 use tauri::{AppHandle, Manager};
 use tokio::sync::broadcast;
 
@@ -52,10 +54,8 @@ impl PairingHandler for DesktopPairingHandler {
     ) -> anyhow::Result<(SessionKey, String, bool)> {
         let manager = self.app.state::<AppState>().remote_control();
         let identity = manager.device_identity()?;
-        let key = identity.derive_pairing_session_key(
-            &confirm.session_key_material,
-            RELAY_E2E_SALT,
-        )?;
+        let key =
+            identity.derive_pairing_session_key(&confirm.session_key_material, RELAY_E2E_SALT)?;
         // Diagnostic: log the derived key prefix so it can be matched
         // against the phone's `resume sessionKey prefix` log line.
         let prefix: String = key
@@ -76,10 +76,7 @@ impl PairingHandler for DesktopPairingHandler {
         Ok((key, confirm.phone_device_id, emit_b64))
     }
 
-    async fn on_subscription_status(
-        &mut self,
-        _status: relay_protocol::SubscriptionStatus,
-    ) {
+    async fn on_subscription_status(&mut self, _status: relay_protocol::SubscriptionStatus) {
         // The relay acks `PairingRegister` with a `SubscriptionStatus` frame.
         // Flip the panel's「正在把配对码注册到 relay…」flag here — routed
         // through the driver's frame loop, so an interleaved request frame
@@ -129,14 +126,15 @@ impl ControlHandler for DesktopControlHandler {
             tracing::debug!(target: "remote_control", request_id = %request_id, "handling GetState");
         }
         let result = match request {
-            ControlRequest::ListSessions { .. } => self
-                .control
-                .list_sessions()
-                .await
-                .map(|sessions| ControlResponse::ListSessions {
-                    request_id,
-                    sessions,
-                }),
+            ControlRequest::ListSessions { .. } => {
+                self.control
+                    .list_sessions()
+                    .await
+                    .map(|sessions| ControlResponse::ListSessions {
+                        request_id,
+                        sessions,
+                    })
+            }
             ControlRequest::CreateSession {
                 workspace_root,
                 agent,
@@ -154,14 +152,12 @@ impl ControlHandler for DesktopControlHandler {
             // `Application`, so this one bypasses the `RemoteControl` trait
             // (same boundary reasoning as `list_sessions`, which the trait
             // injects from the shell).
-            ControlRequest::ListAgentOptions { .. } => {
-                crate::remote_control::list_agent_options()
-                    .await
-                    .map(|options| ControlResponse::AgentOptions {
-                        request_id,
-                        options,
-                    })
-            }
+            ControlRequest::ListAgentOptions { .. } => crate::remote_control::list_agent_options()
+                .await
+                .map(|options| ControlResponse::AgentOptions {
+                    request_id,
+                    options,
+                }),
             ControlRequest::SetConfigControl {
                 control_id,
                 value_id,
@@ -196,13 +192,11 @@ impl ControlHandler for DesktopControlHandler {
                     .get_state(known)
                     .await
                     .map(|result| match result {
-                        app_core::RemoteGetState::Snapshot(snapshot) => {
-                            ControlResponse::GetState {
-                                request_id,
-                                snapshot: Some(snapshot),
-                                up_to_date: false,
-                            }
-                        }
+                        app_core::RemoteGetState::Snapshot(snapshot) => ControlResponse::GetState {
+                            request_id,
+                            snapshot: Some(snapshot),
+                            up_to_date: false,
+                        },
                         // Short-circuit: the phone's held (session, revision)
                         // is still current, so no snapshot crosses the relay.
                         app_core::RemoteGetState::UpToDate => ControlResponse::GetState {
@@ -228,14 +222,14 @@ impl ControlHandler for DesktopControlHandler {
                 .cancel()
                 .await
                 .map(|_| ControlResponse::Cancel { request_id }),
-            ControlRequest::StopTool {
-                tool_call_id, ..
-            } => self
+            ControlRequest::StopTool { tool_call_id, .. } => self
                 .control
                 .stop_tool(tool_call_id)
                 .await
                 .map(|_| ControlResponse::StopTool { request_id }),
-            ControlRequest::GetFileDiff { message_id, path, .. } => self
+            ControlRequest::GetFileDiff {
+                message_id, path, ..
+            } => self
                 .control
                 .get_file_diff(message_id.to_string(), path)
                 .await
@@ -369,28 +363,28 @@ impl EventSource for AppUpdateEventSource {
             // not-yet-open workspace, or a workspace switch must never wedge
             // the phone's stream. A timeout here leaves any late signal in
             // the channel for the next iteration to consume.
-            let signal: Option<Result<AppUpdate, broadcast::error::RecvError>> =
-                match self.rx.as_mut() {
-                    Some(rx) => {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(EVENT_FALLBACK_WAKE_MS),
-                            rx.recv(),
-                        )
-                        .await
-                        {
-                            Ok(result) => Some(result),
-                            // Timed out without a signal.
-                            Err(_elapsed) => None,
-                        }
+            let signal: Option<Result<AppUpdate, broadcast::error::RecvError>> = match self
+                .rx
+                .as_mut()
+            {
+                Some(rx) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(EVENT_FALLBACK_WAKE_MS),
+                        rx.recv(),
+                    )
+                    .await
+                    {
+                        Ok(result) => Some(result),
+                        // Timed out without a signal.
+                        Err(_elapsed) => None,
                     }
-                    None => {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            EVENT_FALLBACK_WAKE_MS,
-                        ))
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(EVENT_FALLBACK_WAKE_MS))
                         .await;
-                        None
-                    }
-                };
+                    None
+                }
+            };
             match signal {
                 // Timed out without a signal: poll the cursor anyway so a
                 // missed wake still catches up.

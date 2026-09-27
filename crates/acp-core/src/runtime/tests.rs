@@ -777,7 +777,10 @@ fn active_send_prompt_uses_latest_accepted_prompt_completion() {
         .unwrap();
 
     if let Err(error) = session.send_steer_content(vec![UserPromptContent::text("second prompt")]) {
-        panic!("send_steer_content failed: {error:#}; runtime last_error: {:?}", session.last_error());
+        panic!(
+            "send_steer_content failed: {error:#}; runtime last_error: {:?}",
+            session.last_error()
+        );
     }
 
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
@@ -852,7 +855,10 @@ fn active_send_prompt_finishes_when_steer_response_never_returns() {
         .unwrap();
 
     if let Err(error) = session.send_steer_content(vec![UserPromptContent::text("second prompt")]) {
-        panic!("send_steer_content failed: {error:#}; runtime last_error: {:?}", session.last_error());
+        panic!(
+            "send_steer_content failed: {error:#}; runtime last_error: {:?}",
+            session.last_error()
+        );
     }
 
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
@@ -888,7 +894,10 @@ fn cancel_active_prompt_finishes_locally_when_agent_never_responds() {
         .unwrap();
 
     if let Err(error) = session.cancel_prompt() {
-        panic!("cancel_prompt failed: {error:#}; runtime last_error: {:?}", session.last_error());
+        panic!(
+            "cancel_prompt failed: {error:#}; runtime last_error: {:?}",
+            session.last_error()
+        );
     }
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     session.shutdown();
@@ -912,10 +921,7 @@ fn prompt_completion_error_finishes_turn_instead_of_hanging() {
     // `collect_prompt_events_until_finished` times out.
     let dir = tempfile::tempdir().unwrap();
     let mut config = mock_agent_session_config(dir.path(), false);
-    config.agent_command = format!(
-        "KODEX_MOCK_ACP_PROMPT_ERROR=1 {}",
-        config.agent_command
-    );
+    config.agent_command = format!("KODEX_MOCK_ACP_PROMPT_ERROR=1 {}", config.agent_command);
     let mut session = SessionHandle::start(config).unwrap();
     let mut task = session
         .send_prompt_content_async(vec![UserPromptContent::text("rate limited")])
@@ -947,7 +953,10 @@ fn late_prompt_response_after_cancel_does_not_disconnect_session() {
         .unwrap();
 
     if let Err(error) = session.cancel_prompt() {
-        panic!("cancel_prompt failed: {error:#}; runtime last_error: {:?}", session.last_error());
+        panic!(
+            "cancel_prompt failed: {error:#}; runtime last_error: {:?}",
+            session.last_error()
+        );
     }
     let events = collect_prompt_events_until_finished(&mut session, &mut task);
     assert!(
@@ -1037,10 +1046,7 @@ fn mock_agent_session_config_with_options(
             mock_agent_binary_command()
         )
     } else {
-        format!(
-            "{prompt_never_responds_env}{}",
-            mock_agent_binary_command()
-        )
+        format!("{prompt_never_responds_env}{}", mock_agent_binary_command())
     };
 
     SessionConfig {

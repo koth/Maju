@@ -985,3 +985,156 @@ fn plan_permission_asks_for_shell_file_mutations() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+// ---------------------------------------------------------------------------
+// Browser-use and computer-use permission classification.
+//
+// Origin: add-browser-computer-use-support, Section 1 (Permission Path Probe).
+// The probe found that MCP-namespaced tools arrive as `ToolKind::Other`, so a
+// screenshot and a click were indistinguishable: Plan mode prompted for both
+// and Build mode allowed both. Classification is now keyed on the leaf tool
+// name, with the write class as the safe default. See design.md
+// "Permission classification is broker-side, keyed on the MCP tool name".
+// ---------------------------------------------------------------------------
+
+/// An MCP-namespaced tool request as a managed agent would send it: the tool
+/// name lands in `title`, and the agent declares no meaningful `ToolKind`.
+fn mcp_tool_request(tool_name: &str) -> RequestPermissionRequest {
+    RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            format!("call-{tool_name}"),
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Other)
+                .title(tool_name.to_string()),
+        ),
+        vec![
+            PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+        ],
+    )
+}
+
+#[test]
+fn mcp_read_only_tools_execute_without_a_write_prompt() {
+    let root = temp_workspace("mcp-read");
+    let root = root.to_str().unwrap();
+
+    for tool_name in [
+        "mcp__playwright-mcp__browser_take_screenshot",
+        "mcp__playwright-mcp__browser_snapshot",
+        "cua_driver_native__computer_screenshot",
+    ] {
+        for mode in [
+            PermissionPolicyMode::ReadOnly,
+            PermissionPolicyMode::Build,
+            PermissionPolicyMode::FullAccess,
+        ] {
+            assert!(
+                matches!(
+                    decide_permission(mode, root, &mcp_tool_request(tool_name)),
+                    PermissionDecision::Select(_)
+                ),
+                "{tool_name} must be a read in {mode:?}",
+            );
+        }
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_write_tools_prompt_in_plan_mode_and_follow_policy_elsewhere() {
+    let root = temp_workspace("mcp-write");
+    let root = root.to_str().unwrap();
+
+    for tool_name in [
+        "mcp__playwright-mcp__browser_click",
+        "mcp__playwright-mcp__browser_navigate",
+        "mcp__playwright-mcp__browser_type",
+        "cua_driver_native__computer_click",
+        "cua_driver_native__computer_type",
+    ] {
+        assert_eq!(
+            decide_permission(
+                PermissionPolicyMode::ReadOnly,
+                root,
+                &mcp_tool_request(tool_name)
+            ),
+            PermissionDecision::Ask,
+            "{tool_name} must prompt in plan mode",
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_unrecognised_tools_default_to_the_write_class() {
+    let root = temp_workspace("mcp-unknown");
+    let root = root.to_str().unwrap();
+
+    // A name that merely contains a capture verb still writes, and a name this
+    // code has never seen defaults to write rather than read.
+    for tool_name in [
+        "mcp__playwright-mcp__screenshot_and_edit",
+        "mcp__some-future-mcp__do_thing",
+        "mcp__playwright-mcp__browser_fill_form",
+    ] {
+        assert_eq!(
+            decide_permission(
+                PermissionPolicyMode::ReadOnly,
+                root,
+                &mcp_tool_request(tool_name)
+            ),
+            PermissionDecision::Ask,
+            "{tool_name} must default to the write class",
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn non_mcp_tool_names_are_untouched_by_classification() {
+    let root = temp_workspace("non-mcp");
+    let root = root.to_str().unwrap();
+
+    // A bare tool name that looks like a capture must not be treated as an
+    // MCP read, and a normal execute request keeps its existing classification.
+    let bare = RequestPermissionRequest::new(
+        SessionId::new("session-1"),
+        ToolCallUpdate::new(
+            "call-bare",
+            ToolCallUpdateFields::new()
+                .kind(ToolKind::Execute)
+                .title("screenshot".to_string()),
+        ),
+        vec![
+            PermissionOption::new("allow", "Yes", PermissionOptionKind::AllowOnce),
+            PermissionOption::new("reject", "No", PermissionOptionKind::RejectOnce),
+        ],
+    );
+    assert_eq!(
+        decide_permission(PermissionPolicyMode::ReadOnly, root, &bare),
+        PermissionDecision::Ask,
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn mcp_leaf_tool_name_strips_namespace_and_server_segments() {
+    assert_eq!(
+        mcp_leaf_tool_name("mcp__playwright-mcp__browser_take_screenshot"),
+        Some("browser_take_screenshot")
+    );
+    assert_eq!(
+        mcp_leaf_tool_name("cua_driver_native__computer_screenshot"),
+        Some("computer_screenshot")
+    );
+    // No namespace, or an empty leaf, is not an MCP tool.
+    assert_eq!(mcp_leaf_tool_name("browser_click"), None);
+    assert_eq!(mcp_leaf_tool_name("mcp__"), None);
+    assert_eq!(mcp_leaf_tool_name("mcp__server__"), None);
+}

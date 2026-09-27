@@ -361,10 +361,18 @@ mod tests {
 
     #[test]
     fn compact_slash_prompt_matches_bare_command_only() {
-        assert!(is_compact_slash_prompt(&[UserPromptContent::text("/compact")]));
-        assert!(is_compact_slash_prompt(&[UserPromptContent::text("  /Compact  ")]));
-        assert!(!is_compact_slash_prompt(&[UserPromptContent::text("/compact 之后总结一下")]));
-        assert!(!is_compact_slash_prompt(&[UserPromptContent::text("/compactx")]));
+        assert!(is_compact_slash_prompt(&[UserPromptContent::text(
+            "/compact"
+        )]));
+        assert!(is_compact_slash_prompt(&[UserPromptContent::text(
+            "  /Compact  "
+        )]));
+        assert!(!is_compact_slash_prompt(&[UserPromptContent::text(
+            "/compact 之后总结一下"
+        )]));
+        assert!(!is_compact_slash_prompt(&[UserPromptContent::text(
+            "/compactx"
+        )]));
         assert!(!is_compact_slash_prompt(&[]));
         assert!(!is_compact_slash_prompt(&[
             UserPromptContent::text("/compact"),

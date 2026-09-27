@@ -147,7 +147,8 @@ fn streaming_chat_payload_requests_usage_in_stream() {
         "stream": true
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     assert_eq!(chat["stream"], true);
     assert_eq!(chat["stream_options"]["include_usage"], true);
 }
@@ -166,7 +167,8 @@ fn non_streaming_chat_payload_omits_stream_options() {
         "stream": false
     });
 
-    let chat = responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
+    let chat =
+        responses_payload_to_chat_payload(payload, "custom_ocgo_msg", "test-session").unwrap();
     assert_eq!(chat["stream"], false);
     assert!(chat.get("stream_options").is_none());
 }
@@ -1563,15 +1565,15 @@ fn anthropic_messages_base_request_includes_version_header() {
     // `anthropic-version` with 400 invalid_params. Every native-Anthropic
     // upstream call is built from this helper, so it must always set the
     // header (plus content-type and user-agent).
-    let request = anthropic_messages_base_request(
-        &reqwest::Client::new(),
-        "http://example.com/v1/messages",
-    )
-    .build()
-    .unwrap();
+    let request =
+        anthropic_messages_base_request(&reqwest::Client::new(), "http://example.com/v1/messages")
+            .build()
+            .unwrap();
     let headers = request.headers();
     assert_eq!(
-        headers.get("anthropic-version").and_then(|v| v.to_str().ok()),
+        headers
+            .get("anthropic-version")
+            .and_then(|v| v.to_str().ok()),
         Some(ANTHROPIC_VERSION_HEADER.1),
     );
     assert_eq!(
@@ -2733,7 +2735,10 @@ fn anthropic_response_folds_cache_into_input_tokens() {
     });
     let response = anthropic_response_to_responses_response(anthropic);
     assert_eq!(response["usage"]["input_tokens"], 23034);
-    assert_eq!(response["usage"]["input_tokens_details"]["cached_tokens"], 20939);
+    assert_eq!(
+        response["usage"]["input_tokens_details"]["cached_tokens"],
+        20939
+    );
     assert_eq!(response["usage"]["output_tokens"], 503);
     assert_eq!(response["usage"]["total_tokens"], 23537);
 }
@@ -3066,30 +3071,65 @@ fn synthetic_tool_call_id_from_responses_sse(text: &str) -> String {
 #[test]
 fn retryable_status_covers_transient_5xx_and_429() {
     // 429 + the full transient 5xx family are retried.
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::BAD_GATEWAY));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::SERVICE_UNAVAILABLE));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::GATEWAY_TIMEOUT));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::BAD_GATEWAY
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::GATEWAY_TIMEOUT
+    ));
     // Cloudflare origin/timeout codes (520-524) are retried so a flaky CDN
     // cannot terminate the request after a single logged attempt.
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(520).unwrap()));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(521).unwrap()));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(522).unwrap()));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(523).unwrap()));
-    assert!(is_retryable_upstream_status(reqwest::StatusCode::from_u16(524).unwrap()));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::from_u16(520).unwrap()
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::from_u16(521).unwrap()
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::from_u16(522).unwrap()
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::from_u16(523).unwrap()
+    ));
+    assert!(is_retryable_upstream_status(
+        reqwest::StatusCode::from_u16(524).unwrap()
+    ));
     // Permanent 5xx and success/4xx (except 429) are NOT retried.
-    assert!(!is_retryable_upstream_status(reqwest::StatusCode::NOT_IMPLEMENTED));
-    assert!(!is_retryable_upstream_status(reqwest::StatusCode::BAD_REQUEST));
-    assert!(!is_retryable_upstream_status(reqwest::StatusCode::UNAUTHORIZED));
+    assert!(!is_retryable_upstream_status(
+        reqwest::StatusCode::NOT_IMPLEMENTED
+    ));
+    assert!(!is_retryable_upstream_status(
+        reqwest::StatusCode::BAD_REQUEST
+    ));
+    assert!(!is_retryable_upstream_status(
+        reqwest::StatusCode::UNAUTHORIZED
+    ));
     assert!(!is_retryable_upstream_status(reqwest::StatusCode::OK));
 }
 
 #[test]
 fn retry_reason_maps_status_codes() {
-    assert_eq!(retry_reason_for_status(reqwest::StatusCode::TOO_MANY_REQUESTS), "rate_limited");
-    assert_eq!(retry_reason_for_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR), "internal_server_error");
-    assert_eq!(retry_reason_for_status(reqwest::StatusCode::BAD_GATEWAY), "bad_gateway");
+    assert_eq!(
+        retry_reason_for_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+        "rate_limited"
+    );
+    assert_eq!(
+        retry_reason_for_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+        "internal_server_error"
+    );
+    assert_eq!(
+        retry_reason_for_status(reqwest::StatusCode::BAD_GATEWAY),
+        "bad_gateway"
+    );
     assert_eq!(
         retry_reason_for_status(reqwest::StatusCode::SERVICE_UNAVAILABLE),
         "service_unavailable"
@@ -3126,8 +3166,14 @@ fn backoff_grows_exponentially_then_caps() {
     assert!(retry_backoff_duration(5, None) <= std::time::Duration::from_millis(8250));
     assert!(retry_backoff_duration(10, None) <= std::time::Duration::from_millis(8250));
     // Retry-After overrides the schedule, capped at 8s.
-    assert_eq!(retry_backoff_duration(2, Some(3)), std::time::Duration::from_millis(3000));
-    assert_eq!(retry_backoff_duration(2, Some(30)), std::time::Duration::from_millis(8000));
+    assert_eq!(
+        retry_backoff_duration(2, Some(3)),
+        std::time::Duration::from_millis(3000)
+    );
+    assert_eq!(
+        retry_backoff_duration(2, Some(30)),
+        std::time::Duration::from_millis(8000)
+    );
 }
 
 #[test]
@@ -3199,10 +3245,7 @@ fn any_active_proxy_retry_status_returns_most_recent_active() {
         },
     );
     // session_a is the only active one.
-    assert_eq!(
-        any_active_proxy_retry_status().map(|s| s.attempt),
-        Some(1)
-    );
+    assert_eq!(any_active_proxy_retry_status().map(|s| s.attempt), Some(1));
 
     let attempt_b = format!("attempt_b_{}", uuid::Uuid::new_v4());
     set_proxy_retry_status(
@@ -3218,10 +3261,7 @@ fn any_active_proxy_retry_status_returns_most_recent_active() {
         },
     );
     // session_b was updated last → it wins.
-    assert_eq!(
-        any_active_proxy_retry_status().map(|s| s.attempt),
-        Some(4)
-    );
+    assert_eq!(any_active_proxy_retry_status().map(|s| s.attempt), Some(4));
 
     clear_proxy_retry_status_by_key(&attempt_a);
     clear_proxy_retry_status_by_key(&attempt_b);
@@ -3237,7 +3277,11 @@ fn any_active_proxy_retry_status_returns_most_recent_active() {
 /// hiding the retry from the accept loop).
 fn mock_upstream_server(
     statuses: Vec<u16>,
-) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>, std::thread::JoinHandle<()>) {
+) -> (
+    u16,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    std::thread::JoinHandle<()>,
+) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3257,7 +3301,11 @@ fn mock_upstream_server(
                 // Serve any scripted error status verbatim (502, 429, 503,
                 // Cloudflare 524, ...) so retry behaviour across mixed
                 // transient 5xx can be exercised. Only 429 carries Retry-After.
-                let extra = if status == 429 { "Retry-After: 0\r\n" } else { "" };
+                let extra = if status == 429 {
+                    "Retry-After: 0\r\n"
+                } else {
+                    ""
+                };
                 format!(
                     "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n{extra}\r\n"
                 )
@@ -3478,7 +3526,11 @@ fn native_anthropic_messages_retry_keys_under_acp_session_id() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let status = observed.expect("acp-sid retry entry should appear during the 502 retries");
-    assert!(matches!(status.attempt, 1 | 2), "attempt in retry range, got {}", status.attempt);
+    assert!(
+        matches!(status.attempt, 1 | 2),
+        "attempt in retry range, got {}",
+        status.attempt
+    );
     assert_eq!(status.status_code, Some(502));
     assert_eq!(status.provider.as_deref(), Some("test_native"));
     assert!(current_proxy_retry_status("provider-scoped-sid").is_none());
@@ -3504,7 +3556,7 @@ fn send_upstream_with_retry_cancellation_clears_registry_entry() {
     // registry entry on drop. Previously the manual `clear` calls only ran on
     // explicit return paths, so a dropped retry left an `active:true`
     // `transport_error`/`bad_gateway` entry that the UI rendered forever.
-// The mock replies with a single persistent 502 and then exits its accept
+    // The mock replies with a single persistent 502 and then exits its accept
     // loop (1 scripted status → server thread joins). The call would retry on
     // that 502; we arm a short timeout that drops the future mid-backoff and
     // then assert the registry is empty for that session.
@@ -3526,11 +3578,7 @@ fn send_upstream_with_retry_cancellation_clears_registry_entry() {
         );
         // Drop the future after the first 502 has been received and the guard
         // has armed — well before the exponential backoff (>=500ms) elapses.
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            fut,
-        )
-        .await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(100), fut).await;
         // Timeout fired (Err), meaning the future was dropped mid-backoff.
         assert!(outcome.is_err(), "future should be dropped mid-backoff");
     });

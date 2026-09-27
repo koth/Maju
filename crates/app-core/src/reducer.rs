@@ -70,8 +70,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             // Keep only the tail of the reasoning buffer (see the consts
             // above). Draining at a UTF-8 char boundary keeps the String
             // valid; the slack amortizes the O(cap) memmove.
-            let cap_with_slack =
-                MAX_THINKING_TEXT_TAIL_BYTES + MAX_THINKING_TEXT_DRAIN_SLACK_BYTES;
+            let cap_with_slack = MAX_THINKING_TEXT_TAIL_BYTES + MAX_THINKING_TEXT_DRAIN_SLACK_BYTES;
             if ui.thinking_text.len() > cap_with_slack {
                 let mut cut = ui.thinking_text.len() - cap_with_slack;
                 while cut < ui.thinking_text.len() && !ui.thinking_text.is_char_boundary(cut) {
@@ -374,9 +373,7 @@ pub(crate) fn apply_event(ui: &mut UiSnapshot, event: ClientEvent) {
             // below.
             sync_session_summary_from_config(ui);
             if control_id == "mode" {
-                ui.session.mode = Some(
-                    value_label.unwrap_or_else(|| value_id.to_string()),
-                );
+                ui.session.mode = Some(value_label.unwrap_or_else(|| value_id.to_string()));
             }
         }
         ClientEvent::PlanUpdated { entries } => {
@@ -1200,6 +1197,7 @@ fn ensure_tool<'a>(
         can_stop: false,
         stop_kind: None,
         stop_status: None,
+        screenshots: Vec::new(),
     };
     let id = tool.id;
     ui.tools.push(tool);
@@ -1840,6 +1838,8 @@ mod tests {
                 kind: WorkspaceKind::Project,
             },
             workspace_connected: true,
+            browser: None,
+            computer_use: None,
             session: SessionSummary {
                 id: uuid::Uuid::new_v4(),
                 workspace_id,
@@ -2916,7 +2916,9 @@ mod tests {
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
         apply_event(
             &mut ui,
-            ClientEvent::ThinkingChunk { text: "第一段".into() },
+            ClientEvent::ThinkingChunk {
+                text: "第一段".into(),
+            },
         );
         // A repeated active:true within the same segment must NOT clear.
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
@@ -2928,7 +2930,9 @@ mod tests {
         assert_eq!(ui.thinking_text, "");
         apply_event(
             &mut ui,
-            ClientEvent::ThinkingChunk { text: "第二段".into() },
+            ClientEvent::ThinkingChunk {
+                text: "第二段".into(),
+            },
         );
         assert_eq!(ui.thinking_text, "第二段");
     }
@@ -2940,7 +2944,9 @@ mod tests {
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
         apply_event(
             &mut ui,
-            ClientEvent::ThinkingChunk { text: "第一段推理".into() },
+            ClientEvent::ThinkingChunk {
+                text: "第一段推理".into(),
+            },
         );
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: false });
 
@@ -2959,7 +2965,9 @@ mod tests {
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: true });
         apply_event(
             &mut ui,
-            ClientEvent::ThinkingChunk { text: "第二段推理".into() },
+            ClientEvent::ThinkingChunk {
+                text: "第二段推理".into(),
+            },
         );
         apply_event(&mut ui, ClientEvent::ThinkingActivity { active: false });
         assert_eq!(ui.timeline.len(), 2);

@@ -133,7 +133,10 @@ pub fn dsh_version_info() -> (Option<String>, Option<String>) {
     let definition = definition(AgentCliId::DeepSeekHarness).expect("dsh agent id");
     let detected_path = find_binary(definition.binary);
     let current = detected_path.as_deref().and_then(dsh_current_version);
-    let latest = detected_path.is_some().then(|| dsh_latest_version()).flatten();
+    let latest = detected_path
+        .is_some()
+        .then(|| dsh_latest_version())
+        .flatten();
     (current, latest)
 }
 

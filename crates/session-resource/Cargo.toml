@@ -1,0 +1,11 @@
+[package]
+name = "session-resource"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros", "test-util"] }

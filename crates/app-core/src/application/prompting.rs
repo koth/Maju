@@ -1,5 +1,5 @@
-use super::*;
 use super::diff_utils::tool_start_should_record_write_baseline;
+use super::*;
 use workspace_model::{ChangeSetStatus, UsageEventScope};
 
 pub(super) struct RuntimeEventApplyResult {
@@ -662,9 +662,8 @@ impl Application {
             // Terminal state for the automation run that dispatched this turn
             // (no-op for manually driven turns).
             match result.turn_stop_reason.as_deref() {
-                None | Some("end_turn") => {
-                    self.finalize_automation_run(workspace_model::AutomationRunStatus::Completed, None)
-                }
+                None | Some("end_turn") => self
+                    .finalize_automation_run(workspace_model::AutomationRunStatus::Completed, None),
                 Some("cancelled") => self.finalize_automation_run(
                     workspace_model::AutomationRunStatus::Interrupted,
                     result.turn_detail.clone(),
@@ -1019,17 +1018,14 @@ impl Application {
                 new_text,
             } = event
             {
-                let landed = self.apply_verified_fs_write_tool_diff(
-                    id,
-                    path,
-                    old_text.as_deref(),
-                    new_text,
-                ) || self.apply_landed_write_tool_diff(
-                    id,
-                    path,
-                    old_text.as_deref(),
-                    new_text,
-                );
+                let landed =
+                    self.apply_verified_fs_write_tool_diff(id, path, old_text.as_deref(), new_text)
+                        || self.apply_landed_write_tool_diff(
+                            id,
+                            path,
+                            old_text.as_deref(),
+                            new_text,
+                        );
                 if landed {
                     had_file_changes = true;
                 }

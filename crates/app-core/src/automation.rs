@@ -44,14 +44,12 @@ pub fn next_run_at_ms(schedule: &AutomationSchedule, after_ms: i64) -> Option<i6
         AutomationScheduleKind::Daily => {
             next_wall_clock_run_ms(after_ms, schedule.hour?, schedule.minute?, None)
         }
-        AutomationScheduleKind::Weekly => {
-            next_wall_clock_run_ms(
-                after_ms,
-                schedule.hour?,
-                schedule.minute?,
-                Some(schedule.weekday?),
-            )
-        }
+        AutomationScheduleKind::Weekly => next_wall_clock_run_ms(
+            after_ms,
+            schedule.hour?,
+            schedule.minute?,
+            Some(schedule.weekday?),
+        ),
     }
 }
 
@@ -68,7 +66,9 @@ fn next_wall_clock_run_ms(
     if hour > 23 || minute > 59 {
         return None;
     }
-    if let Some(weekday) = weekday && !(1..=7).contains(&weekday) {
+    if let Some(weekday) = weekday
+        && !(1..=7).contains(&weekday)
+    {
         return None;
     }
     let after = Local.timestamp_millis_opt(after_ms).single()?;
@@ -77,7 +77,10 @@ fn next_wall_clock_run_ms(
     // 370 days covers every weekly slot even across DST transitions and
     // short months; a valid slot is always found within a week.
     for day_offset in 0..370i64 {
-        let Some(date) = after_naive.date().checked_add_signed(Duration::days(day_offset)) else {
+        let Some(date) = after_naive
+            .date()
+            .checked_add_signed(Duration::days(day_offset))
+        else {
             break;
         };
         if let Some(weekday) = weekday
@@ -118,12 +121,7 @@ mod tests {
 
     fn local_parts(ms: i64) -> (u32, u32, u32, u32) {
         let dt = Local.timestamp_millis_opt(ms).single().unwrap();
-        (
-            dt.month(),
-            dt.day(),
-            dt.hour(),
-            dt.minute(),
-        )
+        (dt.month(), dt.day(), dt.hour(), dt.minute())
     }
 
     fn daily(hour: u32, minute: u32) -> AutomationSchedule {

@@ -2,10 +2,10 @@ use app_core::AppPaths;
 use serde::Serialize;
 use std::net::TcpStream;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::oneshot;
+use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
+use tokio::sync::oneshot;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RunningConfig {
     port: u16,
@@ -29,7 +29,12 @@ pub struct CodebuddyProxyStatus {
 }
 impl CodebuddyProxyManager {
     pub fn new() -> Self {
-        Self { task: Mutex::new(None), shutdown_tx: Mutex::new(None), running: Mutex::new(None), alive: AtomicBool::new(false) }
+        Self {
+            task: Mutex::new(None),
+            shutdown_tx: Mutex::new(None),
+            running: Mutex::new(None),
+            alive: AtomicBool::new(false),
+        }
     }
     pub fn status(&self, internet_environment: &str, debug: bool) -> CodebuddyProxyStatus {
         let running = self.running.lock().ok().and_then(|g| g.clone());
@@ -43,43 +48,99 @@ impl CodebuddyProxyManager {
     fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
-    pub fn ensure_running(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str, debug: bool) -> Result<(), String> {
-        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string(), debug };
+    pub fn ensure_running(
+        &self,
+        paths: &AppPaths,
+        port: u16,
+        api_key: &str,
+        default_model: &str,
+        internet_environment: &str,
+        debug: bool,
+    ) -> Result<(), String> {
+        let desired = RunningConfig {
+            port,
+            api_key: api_key.to_string(),
+            default_model: default_model.to_string(),
+            internet_environment: internet_environment.to_string(),
+            debug,
+        };
         if self.is_alive() {
             let current = self.running.lock().ok().and_then(|g| g.clone());
-            if current.as_ref() == Some(&desired) { return Ok(()); }
+            if current.as_ref() == Some(&desired) {
+                return Ok(());
+            }
             self.stop();
         }
         self.spawn_inline(paths, &desired)?;
-        self.wait_until_healthy(port, Duration::from_secs(15)).map_err(|e| format!("codebuddy proxy failed to become healthy: {e}"))?;
+        self.wait_until_healthy(port, Duration::from_secs(15))
+            .map_err(|e| format!("codebuddy proxy failed to become healthy: {e}"))?;
         Ok(())
     }
-    pub fn restart_if_changed(&self, paths: &AppPaths, port: u16, api_key: &str, default_model: &str, internet_environment: &str, debug: bool) -> Result<(), String> {
-        let desired = RunningConfig { port, api_key: api_key.to_string(), default_model: default_model.to_string(), internet_environment: internet_environment.to_string(), debug };
-        if !self.is_alive() { return Ok(()); }
+    pub fn restart_if_changed(
+        &self,
+        paths: &AppPaths,
+        port: u16,
+        api_key: &str,
+        default_model: &str,
+        internet_environment: &str,
+        debug: bool,
+    ) -> Result<(), String> {
+        let desired = RunningConfig {
+            port,
+            api_key: api_key.to_string(),
+            default_model: default_model.to_string(),
+            internet_environment: internet_environment.to_string(),
+            debug,
+        };
+        if !self.is_alive() {
+            return Ok(());
+        }
         let current = self.running.lock().ok().and_then(|g| g.clone());
-        if current.as_ref() == Some(&desired) { return Ok(()); }
+        if current.as_ref() == Some(&desired) {
+            return Ok(());
+        }
         self.stop();
         self.spawn_inline(paths, &desired)?;
-        self.wait_until_healthy(port, Duration::from_secs(15)).map_err(|e| format!("codebuddy proxy failed to become healthy: {e}"))?;
+        self.wait_until_healthy(port, Duration::from_secs(15))
+            .map_err(|e| format!("codebuddy proxy failed to become healthy: {e}"))?;
         Ok(())
     }
     pub fn stop(&self) {
         let tx = self.shutdown_tx.lock().ok().and_then(|mut g| g.take());
-        if let Some(tx) = tx { let _ = tx.send(()); }
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
         let handle = self.task.lock().ok().and_then(|mut g| g.take());
-        if let Some(handle) = handle { handle.abort(); }
-        if let Ok(mut r) = self.running.lock() { *r = None; }
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+        if let Ok(mut r) = self.running.lock() {
+            *r = None;
+        }
         self.alive.store(false, Ordering::SeqCst);
     }
     fn spawn_inline(&self, paths: &AppPaths, config: &RunningConfig) -> Result<(), String> {
         let port = config.port;
         let default_model = config.default_model.clone();
         let cwd = std::env::current_dir().ok();
-        let max_turns: Option<u32> = std::env::var("CODEBUDDY_MAX_TURNS").ok().and_then(|s| s.parse().ok());
-        let max_sessions: usize = std::env::var("CODEBUDDY_MAX_SESSIONS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
-        let idle_timeout = Duration::from_secs(std::env::var("CODEBUDDY_IDLE_TIMEOUT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(600));
-        let api_key = if config.api_key.is_empty() { None } else { Some(config.api_key.clone()) };
+        let max_turns: Option<u32> = std::env::var("CODEBUDDY_MAX_TURNS")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        let max_sessions: usize = std::env::var("CODEBUDDY_MAX_SESSIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        let idle_timeout = Duration::from_secs(
+            std::env::var("CODEBUDDY_IDLE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(600),
+        );
+        let api_key = if config.api_key.is_empty() {
+            None
+        } else {
+            Some(config.api_key.clone())
+        };
         // Resolve the CodeBuddy CLI binary the same way the ACP agent launcher
         // does: `detect_agent_with_paths(Codebuddy)` → `find_binary("codebuddy")`
         // scans PATH plus the npm-global / `%LOCALAPPDATA%\codebuddy\bin` roots
@@ -100,7 +161,8 @@ impl CodebuddyProxyManager {
         // in-process Rust proxy must do the same via SessionOptions::env, or
         // the headless CLI cannot authenticate and `initialize` hangs until
         // the 60s control timeout.
-        let mut cli_env: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let mut cli_env: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         // `CODEBUDDY_API_KEY` — backend auth. Without it the CLI has no
         // credentials in headless mode and blocks on `initialize`.
         if !config.api_key.is_empty() {
@@ -119,16 +181,33 @@ impl CodebuddyProxyManager {
         if let Ok(joined) = std::env::join_paths(app_core::settings::search_paths()) {
             cli_env.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
         }
-        let proxy_cfg = codebuddy_proxy::server::ProxyConfig { port, default_model, cwd, max_turns, max_sessions, idle_timeout, api_key, cli_path, cli_env, debug: config.debug };
+        let proxy_cfg = codebuddy_proxy::server::ProxyConfig {
+            port,
+            default_model,
+            cwd,
+            max_turns,
+            max_sessions,
+            idle_timeout,
+            api_key,
+            cli_path,
+            cli_env,
+            debug: config.debug,
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let handle = tauri::async_runtime::spawn(async move {
             if let Err(e) = codebuddy_proxy::server::run(proxy_cfg, shutdown_rx).await {
                 tracing::error!(target: "codebuddy_proxy", error = %e, "server error");
             }
         });
-        if let Ok(mut g) = self.task.lock() { *g = Some(handle); }
-        if let Ok(mut g) = self.shutdown_tx.lock() { *g = Some(shutdown_tx); }
-        if let Ok(mut r) = self.running.lock() { *r = Some(config.clone()); }
+        if let Ok(mut g) = self.task.lock() {
+            *g = Some(handle);
+        }
+        if let Ok(mut g) = self.shutdown_tx.lock() {
+            *g = Some(shutdown_tx);
+        }
+        if let Ok(mut r) = self.running.lock() {
+            *r = Some(config.clone());
+        }
         self.alive.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -137,10 +216,14 @@ impl CodebuddyProxyManager {
         let addr: std::net::SocketAddr = addr_str.parse().unwrap();
         let tcp_deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < tcp_deadline {
-            if !self.is_alive() { return Err("proxy task exited before becoming healthy".to_string()); }
+            if !self.is_alive() {
+                return Err("proxy task exited before becoming healthy".to_string());
+            }
             if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok() {
                 std::thread::sleep(Duration::from_millis(150));
-                if !self.is_alive() { return Err("proxy task exited after TCP probe".to_string()); }
+                if !self.is_alive() {
+                    return Err("proxy task exited after TCP probe".to_string());
+                }
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -149,7 +232,9 @@ impl CodebuddyProxyManager {
     }
 }
 impl Drop for CodebuddyProxyManager {
-    fn drop(&mut self) { self.stop(); }
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 #[cfg(test)]
 mod tests {

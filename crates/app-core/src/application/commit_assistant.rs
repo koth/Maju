@@ -8,8 +8,7 @@ use super::*;
 /// The generation prompt handed to the throwaway codex session. Kept as a
 /// plain constant so the orchestration in `generate_commit_message` stays
 /// readable.
-const COMMIT_MESSAGE_PROMPT: &str =
-    "你是 commit message 生成器。请直接在回复正文里给我一条 commit message，禁止调用任何写文件/编辑/创建文件的工具。\n\
+const COMMIT_MESSAGE_PROMPT: &str = "你是 commit message 生成器。请直接在回复正文里给我一条 commit message，禁止调用任何写文件/编辑/创建文件的工具。\n\
      \n\
      第一步：用尽量少的只读命令了解已暂存变更。推荐一次性执行：\n\
      - `git diff --staged` 看完整 staged diff（若太长才改用 `--stat` + `--name-status`）\n\
@@ -53,12 +52,14 @@ impl Application {
         // which agent the visible session uses. The model comes from the
         // settings "Commit 助手" pane when configured, falling back to the
         // visible session's current model.
-        let agent_command = crate::settings::command_for_agent_with_paths(
-            AgentCliId::CodexAcp,
-            &self.app_paths,
-        )
-        .ok_or_else(|| "codex agent 命令不可用，请在设置中检查 codex-acp 安装".to_string())?;
-        if !crate::settings::detect_agent_with_paths(&self.app_paths, AgentCliId::CodexAcp).installed {
+        let agent_command =
+            crate::settings::command_for_agent_with_paths(AgentCliId::CodexAcp, &self.app_paths)
+                .ok_or_else(|| {
+                    "codex agent 命令不可用，请在设置中检查 codex-acp 安装".to_string()
+                })?;
+        if !crate::settings::detect_agent_with_paths(&self.app_paths, AgentCliId::CodexAcp)
+            .installed
+        {
             return Err("codex agent 未安装，请先在设置的智能体页面安装 codex-acp".to_string());
         }
 
@@ -543,4 +544,3 @@ drafting…\n\
         assert_eq!(message, "fix: final draft\n\n- keep this one");
     }
 }
-

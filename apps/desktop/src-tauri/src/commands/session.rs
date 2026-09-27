@@ -167,7 +167,9 @@ pub fn session_create(
             .ok()
             .map(|paths| app_core::settings::default_agent_for_new_work(&paths))
     });
-    state.with_workspace_app(workspace_root, |app| app.session_create(default_agent, preset))?;
+    state.with_workspace_app(workspace_root, |app| {
+        app.session_create(default_agent, preset)
+    })?;
     save_open_workspace_state(&state)
 }
 

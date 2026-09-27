@@ -2,19 +2,18 @@ use crate::codebuddy_proxy::CodebuddyProxyManager;
 use crate::lsp::LspService;
 use crate::open_workspaces::{OpenWorkspaceRecord, OpenWorkspaceState};
 use crate::remote_control_manager::RemoteControlManager;
-use app_core::{
-    AppUpdate, Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path,
-};
+use app_core::{AppUpdate, Application, UiPatchCursor, UiSnapshotUpdate, normalize_tracked_path};
 use session_store::SessionStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use terminal_service::{TerminalEventSink, TerminalService};
 use workspace_model::{
-    AgentCliId, EditorFileSnapshot, FileEntry, OpenWorkspaceItem, RemoteLinuxWorkspace,
-    RepositorySnapshot, SessionListItem, TerminalOpenRequest, TerminalResizeRequest,
-    TerminalSession, TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceKind,
-    WorkspaceLocation, WorkspaceSessionList,
+    AgentCliId, BrowserNavigateRequest, BrowserPreflight, BrowserSessionRequest,
+    EditorFileSnapshot, FileEntry, OpenWorkspaceItem, RemoteLinuxWorkspace, RepositorySnapshot,
+    SessionListItem, TerminalOpenRequest, TerminalResizeRequest, TerminalSession,
+    TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceKind, WorkspaceLocation,
+    WorkspaceSessionList,
 };
 
 use std::sync::Arc;
@@ -185,9 +184,11 @@ impl AppState {
             app_core::startup_perf::measure("state/new_lsp_service", "", LspService::new);
         let terminal_service = TerminalService::new();
         let remote_control = Arc::new(RemoteControlManager::new(
-            app_core::AppPaths::resolve().unwrap_or_else(|_| app_core::AppPaths::from_root(
-                std::env::current_dir().unwrap_or_default().join(".kodex"),
-            )),
+            app_core::AppPaths::resolve().unwrap_or_else(|_| {
+                app_core::AppPaths::from_root(
+                    std::env::current_dir().unwrap_or_default().join(".kodex"),
+                )
+            }),
         ));
         Self {
             workspaces: Mutex::new(WorkspaceRegistry::default()),
@@ -537,6 +538,42 @@ impl AppState {
             .map_err(|e| e.to_string())
     }
 
+    /// The shared browser server, for panel-driven actions.
+    ///
+    /// Started on first use, so a user who never enables browser tools never
+    /// pays for a listening socket.
+    fn panel_browser(&self) -> Result<app_core::browser_panel::PanelBrowser, String> {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        let settings = app_core::settings::load_app_settings(&paths);
+        let shared = app_core::shared_mcp::shared_mcp()
+            .browser_server(&paths, &settings.browser)
+            .map_err(|e| e.to_string())?;
+        Ok(app_core::browser_panel::PanelBrowser::new(shared.service()))
+    }
+
+    pub fn browser_navigate(&self, request: BrowserNavigateRequest) -> Result<(), String> {
+        let panel = self.panel_browser()?;
+        app_core::shared_mcp::block_on_result(panel.navigate(&request.session_id, &request.url))?;
+        Ok(())
+    }
+
+    pub fn browser_refresh(&self, request: BrowserSessionRequest) -> Result<(), String> {
+        let panel = self.panel_browser()?;
+        app_core::shared_mcp::block_on_result(panel.refresh(&request.session_id))?;
+        Ok(())
+    }
+
+    pub fn browser_close(&self, request: BrowserSessionRequest) -> Result<(), String> {
+        let panel = self.panel_browser()?;
+        app_core::shared_mcp::block_on_result(panel.close(&request.session_id))?;
+        Ok(())
+    }
+
+    pub fn browser_preflight(&self) -> Result<BrowserPreflight, String> {
+        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
+        Ok(app_core::browser_injection::preflight_for(&paths).into())
+    }
+
     pub fn terminal_restart(
         &self,
         request: TerminalResizeRequest,
@@ -666,7 +703,8 @@ impl AppState {
 
             let local_path = local_path.ok_or("Workspace is not open")?;
             let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
-            let snapshot = connect_workspace_locked(&mut guard, key.clone(), local_path, None, None)?;
+            let snapshot =
+                connect_workspace_locked(&mut guard, key.clone(), local_path, None, None)?;
             guard.active_workspace = Some(key);
             app_core::startup_perf::mark("state/set_active_workspace/end", "");
             return Ok(snapshot);
@@ -730,14 +768,16 @@ impl AppState {
             Some(WorkspaceEntry::Connected(app)) => app,
             _ => return Err("No connected workspace open".into()),
         };
-        Ok(app.lightweight_ui_update(cursor).map(|update| match update {
-            UiSnapshotUpdate::Full(snapshot) => {
-                UiSnapshotUpdate::Full(app_core::project_remote_snapshot(snapshot))
-            }
-            UiSnapshotUpdate::Patch(patch) => UiSnapshotUpdate::Patch(
-                app_core::project_remote_patch(patch, app.live_turn_file_changes()),
-            ),
-        }))
+        Ok(app
+            .lightweight_ui_update(cursor)
+            .map(|update| match update {
+                UiSnapshotUpdate::Full(snapshot) => {
+                    UiSnapshotUpdate::Full(app_core::project_remote_snapshot(snapshot))
+                }
+                UiSnapshotUpdate::Patch(patch) => UiSnapshotUpdate::Patch(
+                    app_core::project_remote_patch(patch, app.live_turn_file_changes()),
+                ),
+            }))
     }
 
     /// Subscribe to update signals from the active workspace's `Application`.
@@ -864,7 +904,8 @@ impl AppState {
             let snapshot = app_core::refresh_remote_git_status(&config)?;
             let mut guard = self.workspaces.lock().map_err(|e| e.to_string())?;
             if guard.active_workspace.as_deref() == Some(workspace_key.as_str())
-                && let Some(WorkspaceEntry::Connected(app)) = guard.workspaces.get_mut(&workspace_key)
+                && let Some(WorkspaceEntry::Connected(app)) =
+                    guard.workspaces.get_mut(&workspace_key)
                 && app.is_remote_workspace()
             {
                 app.replace_repository_snapshot(snapshot.clone());
@@ -901,7 +942,9 @@ impl AppState {
     pub fn git_stage(&self, paths: Vec<String>) -> Result<(), String> {
         self.run_local_or_remote_git(
             "stage",
-            |root| git_service::GitService::stage_status_paths(root, &paths).map_err(|e| e.to_string()),
+            |root| {
+                git_service::GitService::stage_status_paths(root, &paths).map_err(|e| e.to_string())
+            },
             |app| app.stage_files(&paths),
         )
     }
@@ -1079,7 +1122,10 @@ impl AppState {
         if let Some(remote) = remote {
             connect_remote_workspace_locked(&mut guard, key.clone(), remote)?;
         } else if let Some(path) = path {
-            if !matches!(guard.workspaces.get(&key), Some(WorkspaceEntry::Connected(_))) {
+            if !matches!(
+                guard.workspaces.get(&key),
+                Some(WorkspaceEntry::Connected(_))
+            ) {
                 connect_workspace_locked(&mut guard, key.clone(), path, None, None)?;
             }
         }

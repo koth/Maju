@@ -102,7 +102,10 @@ pub enum RuntimeCommand {
 #[derive(Debug, Clone)]
 pub enum HarnessApprovalResult {
     /// Approval: `allowed-once` or `rejected`.
-    Approval { approval_id: String, outcome: HarnessApprovalOutcome },
+    Approval {
+        approval_id: String,
+        outcome: HarnessApprovalOutcome,
+    },
     /// Question answer batch (one answer per question id).
     Question { answers: Vec<HarnessQuestionAnswer> },
     /// The user dismissed the question batch without answering. dsh cancels an
@@ -142,7 +145,7 @@ pub trait HarnessBackend: Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-static HARNESS_BACKEND: std::sync::OnceLock< std::sync::Arc<dyn HarnessBackend>> =
+static HARNESS_BACKEND: std::sync::OnceLock<std::sync::Arc<dyn HarnessBackend>> =
     std::sync::OnceLock::new();
 
 /// Register the harness backend implementation. Called once at process startup

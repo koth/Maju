@@ -4,7 +4,13 @@ use super::*;
 /// resolution walks the FULL persisted history, not the UI window).
 fn persist_message(app: &mut Application, id: uuid::Uuid, role: &str, body: &str, seq: i64) {
     app.store
-        .insert_message(&app.ui.session.id.to_string(), &id.to_string(), role, body, seq)
+        .insert_message(
+            &app.ui.session.id.to_string(),
+            &id.to_string(),
+            role,
+            body,
+            seq,
+        )
         .unwrap();
 }
 
@@ -21,7 +27,12 @@ fn fork_turn_ordinal_counts_turn_opening_user_messages() {
     persist_message(&mut app, u1, "User", "第一个问题", 1);
     persist_message(&mut app, a1, "Assistant", "第一个回答", 2);
     app.store
-        .insert_steer_message(&app.ui.session.id.to_string(), &steer.to_string(), "补充一下", 3)
+        .insert_steer_message(
+            &app.ui.session.id.to_string(),
+            &steer.to_string(),
+            "补充一下",
+            3,
+        )
         .unwrap();
     persist_message(&mut app, a2, "Assistant", "补充后的回答", 4);
     persist_message(&mut app, u2, "User", "第二个问题", 5);
@@ -157,7 +168,12 @@ fn fork_candidates_list_every_turn_from_full_history() {
     persist_message(&mut app, u1, "User", "第一轮的问题", 1);
     persist_message(&mut app, a1, "Assistant", "第一轮的回复", 2);
     app.store
-        .insert_steer_message(&app.ui.session.id.to_string(), &steer.to_string(), "补充", 3)
+        .insert_steer_message(
+            &app.ui.session.id.to_string(),
+            &steer.to_string(),
+            "补充",
+            3,
+        )
         .unwrap();
     persist_message(&mut app, a2, "Assistant", "补充后的回复", 4);
     persist_message(&mut app, compact, "User", "/compact", 5);
@@ -200,7 +216,12 @@ fn fork_prompt_anchor_resolves_text_and_occurrence() {
     persist_message(&mut app, u1, "User", "同一个问题", 1);
     persist_message(&mut app, a1, "Assistant", "回答一", 2);
     app.store
-        .insert_steer_message(&app.ui.session.id.to_string(), &steer.to_string(), "补充说明", 3)
+        .insert_steer_message(
+            &app.ui.session.id.to_string(),
+            &steer.to_string(),
+            "补充说明",
+            3,
+        )
         .unwrap();
     persist_message(&mut app, a2, "Assistant", "回答二", 4);
     persist_message(&mut app, compact, "User", "/compact", 5);
