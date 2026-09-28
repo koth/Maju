@@ -187,3 +187,33 @@
   line-height: 1.5;
   color: var(--text-2, #9aa3af);
 }
+
+/* How to expose the CDP endpoint. The endpoint field cannot explain itself: a
+ * browser only listens on one when launched with `--remote-debugging-port`, so
+ * the commands are the difference between a field that can be filled in and one
+ * that cannot. */
+.browser-settings__attach-help {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.browser-settings__note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text-1, #e6e8eb);
+}
+
+.browser-settings__code {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-1, #e6e8eb);
+  background: var(--surface-2, #1b1e24);
+  border: 1px solid var(--border-1, #262a31);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

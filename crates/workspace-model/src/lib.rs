@@ -2085,8 +2085,27 @@ impl BrowserSettings {
             validate_browser_profile_name(&self.profile_name)?;
         }
         if self.mode == BrowserMode::Attach {
-            if self.endpoint.trim().is_empty() {
-                return Err("attach mode requires a browser endpoint".to_string());
+            let endpoint = self.endpoint.trim();
+            if endpoint.is_empty() {
+                return Err(
+                    "attach mode requires a browser endpoint — start the browser with \
+                     --remote-debugging-port and fill in the address it exposes, usually \
+                     http://127.0.0.1:9222"
+                        .to_string(),
+                );
+            }
+            // A bare `127.0.0.1:9222` is the natural thing to type and the one
+            // shape the CDP client cannot parse, so it is named here rather than
+            // surfacing much later as an opaque connection failure with nothing
+            // pointing back at this field.
+            let has_scheme = ["http://", "https://", "ws://", "wss://"]
+                .iter()
+                .any(|scheme| endpoint.starts_with(scheme));
+            if !has_scheme {
+                return Err(format!(
+                    "attach endpoint must be a full CDP URL, for example \
+                     http://127.0.0.1:9222 — got {endpoint}"
+                ));
             }
             if !self.allow_attach {
                 return Err(
@@ -3174,6 +3193,68 @@ mod model_attributes_tests {
         let back: AgentProviderProfile = serde_json::from_str(json).expect("deserialize");
         assert_eq!(back.managed_proxy_kind, ManagedProxyKind::None);
         assert_eq!(back.port, None);
+    }
+}
+
+#[cfg(test)]
+mod browser_settings_tests {
+    use super::*;
+
+    fn attach(endpoint: &str) -> BrowserSettings {
+        BrowserSettings {
+            mode: BrowserMode::Attach,
+            endpoint: endpoint.to_string(),
+            allow_attach: true,
+            ..BrowserSettings::default()
+        }
+    }
+
+    /// The endpoint field cannot create the endpoint, so a missing one has to
+    /// say how to bring one into existence rather than only that it is required.
+    #[test]
+    fn a_missing_attach_endpoint_says_how_to_expose_one() {
+        let error = attach("  ").validate().unwrap_err();
+
+        assert!(
+            error.contains("attach mode requires a browser endpoint"),
+            "{error}"
+        );
+        assert!(
+            error.contains("--remote-debugging-port"),
+            "the error must say how to expose the endpoint: {error}"
+        );
+    }
+
+    /// A bare `host:port` is what people type, and it is the one shape the CDP
+    /// client cannot parse — named here rather than surfacing as a connection
+    /// failure that never points back at this field.
+    #[test]
+    fn a_bare_host_and_port_is_rejected_with_an_example() {
+        let error = attach("127.0.0.1:9222").validate().unwrap_err();
+
+        assert!(error.contains("http://127.0.0.1:9222"), "{error}");
+    }
+
+    #[test]
+    fn a_full_cdp_url_is_accepted_in_any_supported_scheme() {
+        for endpoint in [
+            "http://127.0.0.1:9222",
+            "https://127.0.0.1:9222",
+            "ws://127.0.0.1:9222/devtools/browser/abc",
+            "wss://127.0.0.1:9222/devtools/browser/abc",
+        ] {
+            assert!(attach(endpoint).validate().is_ok(), "{endpoint}");
+        }
+    }
+
+    /// The opt-in gate is independent of the endpoint and must stay.
+    #[test]
+    fn attach_mode_still_requires_the_explicit_opt_in() {
+        let mut settings = attach("http://127.0.0.1:9222");
+        settings.allow_attach = false;
+
+        let error = settings.validate().unwrap_err();
+        assert!(error.contains("must be enabled explicitly"), "{error}");
     }
 }
 

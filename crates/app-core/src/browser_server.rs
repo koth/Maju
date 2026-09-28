@@ -352,25 +352,29 @@ async fn handle_http_request(
     };
 
     // The version probe is answered between authentication and the session
-    // check, and that is exactly where it belongs.
+    // check, and that is exactly where it belongs: it carries the token (the SDK
+    // sends it — verified by capturing the probe's headers, not assumed) but
+    // never a session id.
     //
-    // It does carry the token — the SDK sends it, which was verified by
-    // capturing the probe's headers rather than assumed — so authentication was
-    // never the issue. What the probe cannot carry is a *session id*: sessions
-    // are issued by `initialize`, and this request runs before that.
-    // `json_rpc_requires_session` exempted notifications only, so the probe was
-    // refused with a 401 the SDK reads as "this server needs an authProvider I do
-    // not have" — terminal, and reported as `server is disconnected`.
+    // For revision 2026-07-28 that is not a special case to exempt one request
+    // at a time: that revision has *no* sessions, so no request ever carries an
+    // id. Demanding one below refused every call and made the client report this
+    // server as `server is disconnected`.
     if let Some(reply) = crate::mcp_version::discover_response(&payload) {
         let id = payload.get("id").cloned().unwrap_or(Value::Null);
         return Ok(json_response(
             StatusCode::OK,
-            json!({"jsonrpc": "2.0", "id": id, "result": reply}),
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": crate::mcp_version::wire_result("server/discover", reply)
+            }),
         ));
     }
 
-    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str())
-    {
+    // Only a *foreign* session id is refused. Revision 2026-07-28 has no
+    // sessions to present, and the token already names this one.
+    if crate::mcp_version::session_id_is_foreign(request_session_id.as_deref(), token.as_str()) {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
@@ -401,13 +405,6 @@ fn request_token(request: &Request<Incoming>) -> Option<String> {
         .get(hyper::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())?;
     header.strip_prefix("Bearer ").map(str::to_string)
-}
-
-/// Whether this request must carry a matching MCP session id. A notification
-/// is fire-and-forget and has no id to correlate, so it is allowed through.
-fn json_rpc_requires_session(payload: &Value) -> bool {
-    let is_notification = payload.get("method").is_some() && payload.get("id").is_none();
-    !is_notification
 }
 
 enum JsonRpcHttpResult {
@@ -484,7 +481,11 @@ async fn handle_json_rpc_call(
     };
 
     Some(match result {
-        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Ok(result) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": crate::mcp_version::wire_result(method, result)
+        }),
         Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
     })
 }
@@ -854,16 +855,51 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 401"), "got {raw}");
     }
 
+    /// Revision 2026-07-28 sends no session id at all — it has no sessions — and
+    /// that must be accepted: the token already names and authenticates the
+    /// session. Refusing the absence was what disconnected this server.
     #[test]
-    fn a_request_without_a_matching_session_id_is_refused() {
+    fn tools_list_without_any_session_id_is_accepted() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        install_one_tool(&adapter, "browser_click");
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let (status, body) = rpc(&handle, &token, payload, false);
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 1);
+    }
+
+    /// What the rule is actually about: a request may present no session id, but
+    /// never another session's.
+    #[test]
+    fn another_sessions_id_is_refused() {
         let dir = TempDir::new().unwrap();
         let adapter = adapter(&dir);
         let handle = start_browser_mcp_server(adapter.clone()).unwrap();
         let token = handle.register_session("session-1").unwrap();
 
-        let payload = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-        let (status, _) = rpc(&handle, &token, payload, false);
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let address = handle
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches("/mcp")
+            .to_string();
+        let mut stream = connect_with_retry(&address);
+        let body = serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .unwrap();
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n{TOKEN_HEADER}: {token}\r\n{MCP_SESSION_ID_HEADER}: someone-elses-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+        stream.flush().unwrap();
+
+        let raw = read_all(&mut stream);
+        assert!(raw.starts_with("HTTP/1.1 401"), "got {raw}");
     }
 
     #[test]
@@ -988,6 +1024,37 @@ mod tests {
         );
     }
 
+    /// `initialize` is answered without a session id, because it is the request
+    /// that issues one.
+    ///
+    /// The exemption covered notifications and the version probe, but not the
+    /// handshake itself, so the server answered the one request that could never
+    /// carry a session id with a 401 — which the client reads as a terminal auth
+    /// problem and reports as `server is disconnected`. `web_tools_mcp` and
+    /// `image_mcp` have always exempted it; this is the test that says so.
+    #[test]
+    fn initialize_is_answered_before_a_session_id_exists() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2026-07-28", "capabilities": {}}
+        });
+        // `false` for the session header: the client cannot have one yet.
+        let (status, body) = rpc(&handle, &token, payload, false);
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a 401 on the handshake is terminal for the client: {body}"
+        );
+        assert_eq!(body["result"]["serverInfo"]["name"], "kodex-browser");
+        assert_eq!(body["result"]["protocolVersion"], "2026-07-28");
+    }
+
     /// And nothing else lost its authentication.
     #[test]
     fn everything_else_still_requires_a_token() {
@@ -1024,10 +1091,14 @@ mod tests {
             eprintln!("skipped: the dsh MCP SDK is not installed here");
             return;
         };
-        let Some(node) = std::env::var("PATH")
+        // `split_paths`, not `split(':')`: on Windows PATH is `;`-separated, and a
+        // hard-coded `:` made this test skip on the one platform whose client it
+        // exists to protect — so a regression here went unnoticed there.
+        let Some(node) = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
             .unwrap_or_default()
-            .split(':')
-            .map(|dir| std::path::Path::new(dir).join("node"))
+            .into_iter()
+            .map(|dir| dir.join("node"))
             .find(|candidate| candidate.is_file())
         else {
             eprintln!("skipped: no node on PATH");

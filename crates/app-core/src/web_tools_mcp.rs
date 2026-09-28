@@ -267,12 +267,17 @@ async fn handle_http_request(
         let id = payload.get("id").cloned().unwrap_or(Value::Null);
         return Ok(json_response(
             StatusCode::OK,
-            json!({"jsonrpc": "2.0", "id": id, "result": reply}),
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": crate::mcp_version::wire_result("server/discover", reply)
+            }),
         ));
     }
 
-    if json_rpc_requires_session(&payload) && request_session_id.as_deref() != Some(token.as_str())
-    {
+    // Only a *foreign* session id is refused. Revision 2026-07-28 has no
+    // sessions to present, and the token already names this one.
+    if crate::mcp_version::session_id_is_foreign(request_session_id.as_deref(), token.as_str()) {
         return Ok(json_response(
             StatusCode::UNAUTHORIZED,
             json!({"error": "unauthorized: valid MCP session id is required"}),
@@ -351,7 +356,7 @@ async fn handle_json_rpc_call(payload: Value, service: WebToolsService) -> Optio
             handle_tool_call(payload.get("params").cloned().unwrap_or_default(), service).await
         }
         "resources/list" => Ok(json!({"resources": [tool_manifest_resource()]})),
-        "resources/templates" => Ok(json!({"resourceTemplates": []})),
+        "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
         "resources/read" => {
             handle_resource_read(payload.get("params").cloned().unwrap_or_default())
         }
@@ -362,7 +367,11 @@ async fn handle_json_rpc_call(payload: Value, service: WebToolsService) -> Optio
     };
 
     Some(match result {
-        Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Ok(result) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": crate::mcp_version::wire_result(method, result)
+        }),
         Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
     })
 }
@@ -484,13 +493,6 @@ fn internal_error(error: anyhow::Error) -> Value {
 
 fn json_rpc_error(code: i64, message: impl Into<String>) -> Value {
     json!({"code": code, "message": message.into()})
-}
-
-fn json_rpc_requires_session(payload: &Value) -> bool {
-    if let Some(batch) = payload.as_array() {
-        return batch.iter().any(json_rpc_requires_session);
-    }
-    payload.get("method").and_then(Value::as_str) != Some("initialize")
 }
 
 fn json_response(status: StatusCode, payload: Value) -> Response<BoxBody> {

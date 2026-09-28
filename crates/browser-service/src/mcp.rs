@@ -641,6 +641,15 @@ mod tests {
         assert_eq!(catalog.tools[0].name, "browser_click");
         // A tool with no description still parses, with an empty one.
         assert_eq!(catalog.tools[1].description, "");
+        // The schema binds under the provider's camelCase spelling. This is the
+        // assertion this test never made while the field failed to bind at all:
+        // every tool decoded with `inputSchema: null` and the harness client
+        // refused the entire list.
+        assert_eq!(
+            catalog.tools[0].input_schema,
+            json!({"type": "object"}),
+            "inputSchema did not decode"
+        );
     }
 
     #[tokio::test]

@@ -1307,10 +1307,12 @@
   padding: 4px 8px 18px;
 }
 
+/* 项目之间的间距与会话行一致（2px）：折叠的项目列表用 10px 段间距时，行
+   距接近行高的三分之一，项目一多整个名单显得很松。 */
 .sl-workspace-section,
 .sl-workspace-section.is-active,
 .sl-workspace-section.is-dormant {
-  margin: 0 0 10px;
+  margin: 0 0 2px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1387,7 +1389,7 @@
   min-width: 0;
   overflow: hidden;
   color: currentColor;
-  /* 与会话名同字号（15px），只靠字重与明度分主次 —— 对齐 ChatGPT 侧栏。 */
+  /* 比会话名大一号（项目名 15px / 会话名 14px），字重再各差一档 —— 对齐 ChatGPT 侧栏。 */
   font-size: 15px;
   font-weight: 500;
   line-height: 1.2;
@@ -1596,10 +1598,6 @@
   box-shadow: none;
 }
 
-.sl-item.is-disabled:hover .sl-item-time {
-  display: inline;
-}
-
 .sl-item.is-disabled:hover .sl-item-agent {
   display: none;
 }
@@ -1690,13 +1688,15 @@
   }
 }
 
-/* Session titles sit one rung below their project on purpose: the project owns
-   the group, the sessions belong to it. Same 15px size as the project name —
-   only weight and brightness separate the two (ChatGPT sidebar style). Only
-   the open session is promoted back to full strength. */
+/* Session titles sit below their project on purpose: the project owns the
+   group, the sessions belong to it. They no longer share the project name's
+   15px — a list of 15px titles at the softest grey read as a wall of dim text,
+   which is the opposite of a sidebar you can scan. The title drops a size and
+   climbs a rung of the text scale, so it stays quieter than the project name
+   without turning muddy. Only the open session is promoted to full strength. */
 .sl-item-title {
-  color: var(--text-soft);
-  font-size: 15px;
+  color: var(--text-muted);
+  font-size: 14px;
   font-weight: 400;
   line-height: 1.25;
 }
@@ -1706,20 +1706,13 @@
   font-weight: 500;
 }
 
-.sl-item-time {
-  color: var(--text-soft);
-  font-size: var(--font-size-2xs);
-  line-height: 1;
-  white-space: nowrap;
-}
-
 .sl-item-side-label {
   display: grid;
   justify-items: end;
   min-width: 0;
 }
 
-/* Hover reveals the agent's brand mark in place of the timestamp. The name is
+/* Hover reveals the agent's brand mark in the side label slot. The name is
    not repeated as text — it stays in the mark's tooltip — so the row keeps its
    quiet resting state and only the identity is one glance away. */
 .sl-item-agent {
@@ -1750,11 +1743,7 @@
   pointer-events: none;
 }
 
-.sl-item:hover .sl-item-time {
-  display: none;
-}
-
-/* Hover swaps the timestamp for the agent's brand mark. */
+/* Hover reveals the agent's brand mark in the side label slot. */
 .sl-item:hover .sl-item-agent {
   display: grid;
 }
@@ -1786,4 +1775,75 @@
 
 .sl-session-empty .sl-empty-copy {
   display: none;
+}
+
+/* The hover card beside a session row — title, last active, owning project —
+   which is what a narrow row cannot show at once. It replaces the native
+   `title` tooltip that floated a pale box over the conversation.
+
+   `position: fixed` and portalled to <body> on purpose: the sidebar scrolls, so
+   an absolutely positioned child of it would be clipped exactly where this card
+   needs to spill out — over the conversation. `pointer-events: none` keeps it
+   informational, so it can never steal the hover from the row underneath. */
+.sl-peek {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-bg);
+  box-shadow: var(--shadow-elevated);
+  pointer-events: none;
+}
+
+.sl-peek-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sl-peek-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: var(--font-size-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sl-peek-time {
+  flex-shrink: 0;
+  color: var(--text-soft);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.sl-peek-workspace {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-soft);
+  font-size: var(--font-size-xs);
+}
+
+.sl-peek-workspace svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.sl-peek-workspace span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

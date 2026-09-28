@@ -16,7 +16,14 @@ pub struct ProviderTool {
     #[serde(default)]
     pub description: String,
     /// JSON Schema for the tool's input, forwarded to the model unchanged.
-    #[serde(default)]
+    ///
+    /// The provider spells this `inputSchema` — the MCP `Tool` schema — and this
+    /// field carried no rename, so the binding silently never happened and every
+    /// tool reached the model with `inputSchema: null`. The harness client
+    /// rejects a tool list shaped like that, which is why no browser tool was
+    /// ever usable. `alias` keeps the Rust spelling working for anything already
+    /// round-tripping a `ProviderTool` through serde.
+    #[serde(default, rename = "inputSchema", alias = "input_schema")]
     pub input_schema: serde_json::Value,
 }
 
@@ -175,11 +182,25 @@ pub fn expose(
             exposed_name: name,
             provider_name: tool.name.clone(),
             description: tool.description.clone(),
-            input_schema: tool.input_schema.clone(),
+            input_schema: model_input_schema(&tool.input_schema),
         });
     }
 
     Ok(exposed)
+}
+
+/// The schema a tool carries onto the model-visible surface.
+///
+/// MCP requires `Tool.inputSchema` to be an object. A parameterless command
+/// advertises no schema at all — which reaches [`expose`] as `null` or absent —
+/// and a `null` there is not "takes no arguments", it is a malformed tool list
+/// that the client refuses outright. An empty object schema is the honest
+/// encoding of "takes nothing".
+fn model_input_schema(schema: &serde_json::Value) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(_) => schema.clone(),
+        _ => serde_json::json!({"type": "object"}),
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +365,48 @@ mod tests {
 
         assert_eq!(exposed[0].description, source.description);
         assert_eq!(exposed[0].input_schema, source.input_schema);
+    }
+
+    /// The provider spells the field `inputSchema`; a deserialized catalog has
+    /// to carry it. Before the rename this decoded as `null` for every tool and
+    /// the harness client refused the whole list — so this asserts the binding,
+    /// which is the assertion the provider's own test never made.
+    #[test]
+    fn the_provider_camelcase_schema_field_binds() {
+        let catalog: ProviderCatalog = serde_json::from_value(serde_json::json!({
+            "tools": [{
+                "name": "browser_click",
+                "description": "Click an element",
+                "inputSchema": {"type": "object", "properties": {"selector": {"type": "string"}}}
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            catalog.tools[0].input_schema["properties"]["selector"]["type"],
+            "string",
+            "inputSchema did not bind: {:?}",
+            catalog.tools[0].input_schema
+        );
+    }
+
+    /// And a tool the provider advertises without one — a parameterless command
+    /// — must not reach the model as `null`.
+    #[test]
+    fn a_tool_without_a_schema_is_exposed_with_an_object_schema() {
+        let exposed = expose(
+            "playwright-mcp",
+            &ProviderCatalog {
+                tools: vec![ProviderTool {
+                    name: "browser_close".to_string(),
+                    description: "Close the page".to_string(),
+                    input_schema: serde_json::Value::Null,
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(exposed[0].input_schema, json!({"type": "object"}));
     }
 
     #[test]

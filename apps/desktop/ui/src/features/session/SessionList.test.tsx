@@ -1212,7 +1212,9 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
       />,
     );
 
-    await screen.findByTitle("Background run · Codex");
+    // Locate the row by its visible title: the native tooltip this used to
+    // assert on is gone, replaced by the hover peek card.
+    await screen.findByText("Background run");
     await waitFor(() => expect(callbackRegistered).toBe(true));
     statusCallback({
       id: "active-session",
@@ -1445,7 +1447,7 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
     expect(indicator).toHaveClass("is-complete");
     expect(indicator.closest(".sl-item")).toHaveClass("is-completed-unviewed");
 
-    const rowTitle = screen.getByTitle("Done in background · Codex");
+    const rowTitle = screen.getByText("Done in background");
     const rowButton = rowTitle.closest("button");
     expect(rowButton).not.toBeNull();
     fireEvent.click(rowButton!);
@@ -1493,6 +1495,49 @@ const workspaceButton = await screen.findByTitle(/^双击连接远程工作区/)
 
     await waitFor(() => expect(screen.getByText("Feature work")).toBeInTheDocument());
     expect(screen.getByText("Bugfix")).toBeInTheDocument();
+  });
+
+  it("replaces the native tooltip with a hover peek card beside the row", async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    vi.mocked(sessionList).mockResolvedValue(
+      workspaceWithSessions([
+        sessionItem({ id: "session-1", title: "Feature work", updated_at: twoHoursAgo }),
+      ]),
+    );
+
+    render(
+      <SessionList
+        activeSessionId="session-1"
+        activeSessionTitle="Feature work"
+        activeWorkspaceRoot="/Users/kothchen/code/Kodex"
+        currentSessionStatus="Idle"
+        onOpenSettings={vi.fn()}
+        onSessionChanged={vi.fn()}
+        onWorkspaceChanged={vi.fn()}
+      />,
+    );
+
+    const title = await screen.findByText("Feature work");
+    // The native `title` tooltip is gone — it floated a pale box over the
+    // conversation and repeated only what the row already showed.
+    expect(title).not.toHaveAttribute("title");
+
+    const row = title.closest(".sl-item");
+    expect(row).not.toBeNull();
+    expect(document.querySelector(".sl-peek")).toBeNull();
+
+    fireEvent.mouseEnter(row!);
+
+    // The card answers the two things a narrow row cannot show at once: when
+    // the session last moved, and which project it belongs to.
+    const peek = document.querySelector(".sl-peek");
+    expect(peek).not.toBeNull();
+    expect(peek).toHaveTextContent("Feature work");
+    expect(peek).toHaveTextContent("2 小时前");
+    expect(peek).toHaveTextContent("Kodex");
+
+    fireEvent.mouseLeave(row!);
+    await waitFor(() => expect(document.querySelector(".sl-peek")).toBeNull());
   });
 
   it("clicking the project name toggles collapse without activating the workspace", async () => {

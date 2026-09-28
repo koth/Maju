@@ -1135,6 +1135,7 @@ function WorkspaceSection({
                   key={session.id}
                   session={displaySession}
                   active={isActiveSession}
+                  workspaceName={item.workspace.name}
                   activeConversationVisible={isActiveSession ? activeConversationVisible : true}
                   connected={session.id === activeSessionId && item.is_active && item.connected}
                   disabled={isDormantRemoteWorkspace}
@@ -1178,11 +1179,55 @@ function remoteAgentForWorkspace(remote: RemoteLinuxWorkspace | null): AgentCliI
   return null;
 }
 
+/**
+ * The card that appears beside a hovered session row: its title, when it was
+ * last active, and the project it belongs to.
+ *
+ * It replaces the native `title` tooltip, which floated a pale box over the
+ * conversation and repeated the title plus an agent name — nothing the row had
+ * not already shown. What a narrow row genuinely cannot show is *when* and
+ * *where*, so those are what the card adds.
+ *
+ * Rendered through a portal: the sidebar is a scroll container, and an
+ * absolutely positioned child of one is clipped to it. The card is informational
+ * only (`pointer-events: none`), so it never steals the hover from the row.
+ */
+function SessionPeekCard({
+  title,
+  timeLabel,
+  workspaceName,
+  position,
+}: {
+  title: string;
+  timeLabel: string | null;
+  workspaceName?: string;
+  position: { top: number; left: number };
+}) {
+  return (
+    <div
+      className="sl-peek"
+      style={{ top: `${position.top}px`, left: `${position.left}px` }}
+    >
+      <div className="sl-peek-head">
+        <span className="sl-peek-title">{title}</span>
+        {timeLabel ? <span className="sl-peek-time">{timeLabel}</span> : null}
+      </div>
+      {workspaceName ? (
+        <div className="sl-peek-workspace">
+          <FolderIcon open={false} />
+          <span>{workspaceName}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ThreadRow({
   session,
   active,
   connected,
   disabled = false,
+  workspaceName,
   onSwitch,
   onArchive,
 }: {
@@ -1192,19 +1237,37 @@ function ThreadRow({
   /// row's own running dot no longer depends on it (a running session must show
   /// it either way), so it is accepted and ignored here.
   activeConversationVisible?: boolean;
+  /// Project the session belongs to, shown in the hover peek card. A session
+  /// item only knows its own id and title — the grouping belongs to the section,
+  /// so the name is handed down rather than read off the item.
+  workspaceName?: string;
   connected: boolean;
   disabled?: boolean;
   onSwitch: (id: string) => void;
   onArchive: (id: string) => void;
 }) {
-  const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
+  // The last-active timestamp used to sit at the right edge of every row; it
+  // was dropped because it crowded the title out of the narrow sidebar. It
+  // lives in the hover peek card now, alongside the title and the project the
+  // session belongs to — the things a narrow row cannot show at once.
+  //
+  // That card is also what replaced the native `title` tooltip, which rendered
+  // as a pale box over the conversation and repeated the title plus an agent
+  // name — nothing the row had not already shown.
   const agentLabel = formatAgentLabel(session.agent_cli);
   const disabledHint = "先连接远程项目后再打开会话";
-  const sessionTooltip = disabled
-    ? `${session.title} · ${disabledHint}`
-    : agentLabel
-      ? `${session.title} · ${agentLabel}`
-      : session.title;
+  const timeLabel = formatRelativeTime(session.updated_at || session.created_at);
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const [peek, setPeek] = useState<{ top: number; left: number } | null>(null);
+
+  const showPeek = () => {
+    const rect = rowRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // Beside the row and flush with its top edge, as the ChatGPT sidebar does.
+    // `getBoundingClientRect` is already viewport-relative, which is what a
+    // `position: fixed` portal wants — there is no scroll offset to subtract.
+    setPeek({ top: rect.top, left: rect.right + 8 });
+  };
   const runtimeStatus = session.runtime_status ?? "none";
   const attentionState = session.attention_state ?? "none";
   const turnStillRunning = session.status === "Streaming" || session.status === "WaitingForTool";
@@ -1241,6 +1304,9 @@ function ThreadRow({
 
   return (
     <div
+      ref={rowRef}
+      onMouseEnter={showPeek}
+      onMouseLeave={() => setPeek(null)}
       className={[
         "sl-item",
         active ? "sl-active" : "",
@@ -1270,14 +1336,13 @@ function ThreadRow({
           aria-label={indicatorLabel}
         />
         <span className="sl-item-main">
-          <span className="sl-item-title" title={sessionTooltip}>{session.title}</span>
+          <span className="sl-item-title">{session.title}</span>
         </span>
-        {(timeLabel || agentLabel) && (
+        {agentLabel && (
           <span className="sl-item-side-label">
-            {timeLabel && <span className="sl-item-time">{timeLabel}</span>}
-            {/* Hover swaps the timestamp for the agent's brand mark — the name
-                itself stays in the tooltip so it never crowds the row. */}
-            {agentLabel && resolveAgentKind(session.agent_cli) !== "unknown" && (
+            {/* The agent's brand mark shows on hover; the name stays in the
+                tooltip so it never crowds the row. */}
+            {resolveAgentKind(session.agent_cli) !== "unknown" && (
               <span className="sl-item-agent" title={agentLabel}>
                 <AgentIcon agentCli={session.agent_cli} />
               </span>
@@ -1305,6 +1370,16 @@ function ThreadRow({
       >
         <ArchiveIcon />
       </button>
+      {peek &&
+        createPortal(
+          <SessionPeekCard
+            title={session.title}
+            timeLabel={timeLabel}
+            workspaceName={workspaceName}
+            position={peek}
+          />,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1315,6 +1390,22 @@ function sortSessions(sessions: SessionListItem[]): SessionListItem[] {
   });
 }
 
+function getTimestamp(value: string) {
+  if (!value) return 0;
+
+  const numericValue = Number(value);
+  if (Number.isFinite(numericValue) && numericValue > 0) {
+    return numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue;
+  }
+
+  const normalizedValue = value.includes("T") || /[zZ]|[+-]\d{2}:?\d{2}$/.test(value)
+    ? value
+    : value.replace(" ", "T");
+  const timestamp = new Date(normalizedValue).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+/// When a session was last active, in the short form the peek card shows.
 function formatRelativeTime(value: string): string | null {
   const timestamp = getTimestamp(value);
   if (!timestamp) return null;
@@ -1332,21 +1423,6 @@ function formatRelativeTime(value: string): string | null {
   if (days < 7) return `${days} 天前`;
 
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function getTimestamp(value: string) {
-  if (!value) return 0;
-
-  const numericValue = Number(value);
-  if (Number.isFinite(numericValue) && numericValue > 0) {
-    return numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue;
-  }
-
-  const normalizedValue = value.includes("T") || /[zZ]|[+-]\d{2}:?\d{2}$/.test(value)
-    ? value
-    : value.replace(" ", "T");
-  const timestamp = new Date(normalizedValue).getTime();
-  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function FolderIcon({ open }: { open: boolean }) {

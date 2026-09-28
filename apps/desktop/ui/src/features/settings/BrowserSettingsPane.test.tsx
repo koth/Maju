@@ -241,6 +241,39 @@ describe("BrowserSettingsPane", () => {
     expect(screen.getByPlaceholderText("http://127.0.0.1:9222")).toBeTruthy();
   });
 
+  it("explains how to expose the debug endpoint in attach mode", () => {
+    // The endpoint field cannot create the endpoint: a browser only listens on
+    // one when launched with `--remote-debugging-port`, and nothing else in the
+    // pane says so. Without this the field asks for an address the user has no
+    // way to know they have to bring into existence first.
+    render(
+      <BrowserSettingsPane
+        onSaved={vi.fn()}
+        preflight={ready}
+        settings={settings({ mode: "attach" })}
+      />,
+    );
+    expect(
+      screen.getByText(/google-chrome --remote-debugging-port/),
+    ).toBeTruthy();
+    // The trap worth spelling out: a flag on an already-running browser is
+    // silently ignored, so attaching to a logged-in session needs a restart.
+    expect(screen.getByText(/完全退出/)).toBeTruthy();
+  });
+
+  it("does not show the endpoint guide outside attach mode", () => {
+    render(
+      <BrowserSettingsPane
+        onSaved={vi.fn()}
+        preflight={ready}
+        settings={settings()}
+      />,
+    );
+    expect(
+      screen.queryByText(/google-chrome --remote-debugging-port/),
+    ).toBeNull();
+  });
+
   it("offers the headless toggle only in launch mode", () => {
     const { rerender } = render(
       <BrowserSettingsPane

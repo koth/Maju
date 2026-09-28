@@ -24,11 +24,11 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   version,
   orientation: "portrait",
   icon: "./assets/icon.png",
-  scheme: "kodex",
+  scheme: "maju",
   userInterfaceStyle: "automatic",
   newArchEnabled: true,
   android: {
-    package: "com.kodex.mobile",
+    package: "com.maju.mobile",
     versionCode,
     // expo-notifications' config plugin also injects POST_NOTIFICATIONS; the
     // explicit entry keeps the permission visible at the config level.
@@ -47,7 +47,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     barStyle: "light-content",
   },
   ios: {
-    bundleIdentifier: "com.kodex.mobile",
+    bundleIdentifier: "com.maju.mobile",
     buildNumber: String(versionCode),
     supportsTablet: true,
   },

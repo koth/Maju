@@ -379,13 +379,30 @@ fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>> {
 ///
 /// Checks both the PATH and the default install location (`~/.local/bin`),
 /// because a GUI-launched process does not inherit the user's shell PATH.
+/// Build a `skillhub` command that opens no console window on Windows.
+///
+/// The CLI is a console-subsystem program — an npm/volta shim at that — run from
+/// a GUI app, so without this every SkillHub page opens a black window for as
+/// long as the command runs. Its output is captured by the caller, never
+/// watched, so there is nothing for a window to show.
+fn skillhub_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
 pub fn is_cli_available() -> bool {
     cli_path().is_some()
 }
 
 /// Resolve the CLI binary, falling back to `~/.local/bin/skillhub`.
 pub fn cli_path() -> Option<PathBuf> {
-    if Command::new("skillhub")
+    if skillhub_command("skillhub")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -402,7 +419,7 @@ pub fn cli_path() -> Option<PathBuf> {
 pub async fn get_rankings(ranking_type: &str) -> Result<Vec<SkillHubSkill>> {
     let cli = cli_path().ok_or_else(|| anyhow::anyhow!("skillhub CLI 未安装，请先安装"))?;
 
-    let output = Command::new(&cli)
+    let output = skillhub_command(&cli)
         // Deterministic output: without this the CLI may self-upgrade mid-run
         // and interleave upgrade chatter with the JSON payload.
         .arg("--skip-self-upgrade")

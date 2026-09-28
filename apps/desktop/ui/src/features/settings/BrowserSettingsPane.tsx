@@ -33,6 +33,23 @@ type SaveState =
   | { kind: "error"; message: string };
 
 /**
+ * How to expose the CDP endpoint the attach field asks for.
+ *
+ * The endpoint cannot be typed into existence: a browser only listens on one
+ * when it is launched with `--remote-debugging-port`, which is not something a
+ * text field can say about itself. Without these lines the pane demands an
+ * address the user has no way to know they have to create first.
+ */
+const CDP_LAUNCH_COMMANDS = `Windows
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222
+
+macOS
+  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
+
+Linux
+  google-chrome --remote-debugging-port=9222`;
+
+/**
  * Whether the preflight result permits enabling the capability.
  *
  * A configuration that cannot run is shown with its remedy rather than being
@@ -239,6 +256,23 @@ export function BrowserSettingsPane({
               value={draft.endpoint}
             />
           </label>
+          <div className="browser-settings__attach-help">
+            <p className="browser-settings__note">
+              端点是浏览器的 CDP 调试端点。正常打开的浏览器不开这个端口，必须带{" "}
+              <code>--remote-debugging-port</code> 启动才有；没开的话所有浏览器
+              工具调用都会连接失败。端口自选，下面以 9222 为例。
+            </p>
+            <pre className="browser-settings__code">{CDP_LAUNCH_COMMANDS}</pre>
+            <p className="browser-settings__note">
+              要接管你已登录的浏览器，请先把浏览器<strong>完全退出</strong>
+              ，再用上面的命令启动，然后把 <code>http://127.0.0.1:9222</code> 填到
+              上面。浏览器还在运行时另开一个带参数的实例是没用的，参数会被忽略。
+              不想影响当前浏览器的话，加{" "}
+              <code>--user-data-dir=&lt;目录&gt;</code> 另开一个实例，但那是全新的
+              配置档，没有你的登录。只支持 Chrome / Edge 等 Chromium 内核
+              （Firefox、WebKit 不走 CDP）；调试端点只监听本机，不要暴露到公网。
+            </p>
+          </div>
         </div>
       ) : (
         <label className="browser-settings__row">

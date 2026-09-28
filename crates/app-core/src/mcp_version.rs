@@ -85,6 +85,81 @@ pub fn discover_response(payload: &Value) -> Option<Value> {
     }))
 }
 
+/// `resultType` for a result that ran to completion.
+///
+/// Protocol revision 2026-07-28 turns this into a required discriminator on
+/// every result: an absent one is a hard `InvalidResult`, not a default. The
+/// shipped harness client negotiates `2026-07-28` whenever a server advertises
+/// it, so a server that advertises the revision must produce the field.
+pub const RESULT_TYPE_COMPLETE: &str = "complete";
+
+/// `ttlMs` for the cache hints a `CacheableResult` (SEP-2549) must carry.
+///
+/// `0` is the specification's "immediately stale", and it is the honest value
+/// here rather than a placeholder: a tool list grows when the provider finishes
+/// installing, and a resource read reflects that same live catalog, so nothing
+/// these servers return is safe to serve from a cache. `0` is a value the schema
+/// accepts — the requirement is that the field be present, not that it be large.
+const CACHE_TTL_MS: u64 = 0;
+
+/// `cacheScope` for those same hints. `private`, because a result is built for
+/// one authenticated session and its browser, never for the host's other users.
+const CACHE_SCOPE: &str = "private";
+
+/// Methods whose result is a `CacheableResult` and therefore must carry both
+/// `ttlMs` and `cacheScope`.
+fn is_cacheable_result(method: &str) -> bool {
+    matches!(
+        method,
+        "tools/list"
+            | "prompts/list"
+            | "resources/list"
+            | "resources/templates/list"
+            | "resources/read"
+    )
+}
+
+/// Build the `result` member of a JSON-RPC reply, carrying the fields protocol
+/// revision 2026-07-28 requires.
+///
+/// This is one function rather than three inline `json!` literals because the
+/// requirement is invisible at the call site: a reply that looks perfectly
+/// reasonable is rejected for a field the method's own schema does not mention.
+/// Earlier revisions are not hurt by any of it — their decode step strips
+/// `resultType`, and the client's cache engine reads `ttlMs`/`cacheScope` only
+/// when they are there.
+pub fn wire_result(method: &str, mut result: Value) -> Value {
+    if let Some(result) = result.as_object_mut() {
+        result.insert(
+            "resultType".to_string(),
+            Value::String(RESULT_TYPE_COMPLETE.to_string()),
+        );
+        if is_cacheable_result(method) {
+            result.insert("ttlMs".to_string(), json!(CACHE_TTL_MS));
+            result.insert("cacheScope".to_string(), json!(CACHE_SCOPE));
+        }
+    }
+    result
+}
+
+/// Whether a request presents a session id belonging to some other session.
+///
+/// Protocol revision 2026-07-28 has no sessions at all: `server/discover` is
+/// its handshake, so there is no `initialize` to mint a `Mcp-Session-Id` and no
+/// request can ever carry one. Earlier revisions do mint one and echo it on
+/// every request.
+///
+/// Requiring an id therefore refused every 2026-07-28 request at the one moment
+/// it could never have one, and the client read that 401 as terminal — which is
+/// what reported all three Kodex servers as `server is disconnected`.
+///
+/// The rule that actually matters is narrower: a request may never present
+/// *another* session's id. The token already names and authenticates the
+/// session, so an absent id is safe and only a foreign one is refused.
+pub fn session_id_is_foreign(presented: Option<&str>, token: &str) -> bool {
+    matches!(presented, Some(presented) if presented != token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +250,59 @@ mod tests {
                 "answered {answered:?} for a client asking {requested:?}, which the SDK does not support"
             );
         }
+    }
+
+    #[test]
+    fn a_cacheable_result_carries_both_cache_hints() {
+        let result = wire_result("tools/list", json!({"tools": []}));
+        assert_eq!(result["resultType"], RESULT_TYPE_COMPLETE);
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "private");
+    }
+
+    #[test]
+    fn an_uncacheable_result_carries_only_the_discriminator() {
+        // `tools/call` is not a CacheableResult, so inventing a cache hint for it
+        // would be noise the schema does not ask for.
+        let result = wire_result("tools/call", json!({"content": []}));
+        assert_eq!(result["resultType"], RESULT_TYPE_COMPLETE);
+        assert!(result.get("ttlMs").is_none(), "{result}");
+        assert!(result.get("cacheScope").is_none(), "{result}");
+    }
+
+    /// Every method Kodex serves finishes its results, which is the requirement
+    /// that is invisible at the call site: a reply can look complete and still
+    /// be rejected for the field it never stamps.
+    #[test]
+    fn every_method_kodex_serves_finishes_its_results() {
+        for method in [
+            "initialize",
+            "tools/list",
+            "tools/call",
+            "resources/list",
+            "resources/templates/list",
+            "resources/read",
+            "server/discover",
+        ] {
+            assert_eq!(
+                wire_result(method, json!({}))["resultType"],
+                RESULT_TYPE_COMPLETE,
+                "{method} results are not finished"
+            );
+        }
+    }
+
+    /// The whole outage in one assertion: a revision 2026-07-28 request has no
+    /// session id to present, and treating that absence as a mismatch is what
+    /// reported all three servers as `server is disconnected`.
+    #[test]
+    fn an_absent_session_id_is_not_a_foreign_one() {
+        assert!(!session_id_is_foreign(None, "token-a"));
+    }
+
+    #[test]
+    fn another_sessions_id_is_still_refused() {
+        assert!(session_id_is_foreign(Some("token-b"), "token-a"));
+        assert!(!session_id_is_foreign(Some("token-a"), "token-a"));
     }
 }

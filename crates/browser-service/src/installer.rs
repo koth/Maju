@@ -287,7 +287,6 @@ fn step_failure(outcome: &CommandOutcome) -> Option<String> {
 }
 
 /// A runner backed by the real host, used in production.
-#[cfg(unix)]
 pub struct HostCommandRunner;
 
 #[async_trait]
@@ -309,6 +308,11 @@ impl CommandRunner for HostCommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        // No console window: `npm`/`npx`/`node` are console-subsystem programs
+        // run from a GUI app, and their output is captured below rather than
+        // watched. See `crate::win`.
+        crate::win::hide_console(&mut command);
 
         let child = match command.spawn() {
             Ok(child) => child,

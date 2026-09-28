@@ -14,6 +14,7 @@ pub mod orphan;
 pub mod provider;
 pub mod provision;
 pub mod proxy;
+pub mod win;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -235,6 +236,13 @@ impl ResourceFactory for BrowserFactory {
         {
             let _ = std::fs::create_dir_all(parent);
         }
+
+        // No console window. The provider is a console-subsystem `node` launched
+        // from a GUI app, and without this Windows opens a black window at the
+        // moment the browser tools connect and keeps it up until the provider
+        // exits. It has no use for one: the MCP conversation runs over the pipes
+        // configured above. See `crate::win`.
+        win::hide_console(&mut command);
 
         let mut child = command.spawn().map_err(|error| {
             BrowserError::Launch(format!(
