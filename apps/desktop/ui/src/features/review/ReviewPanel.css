@@ -263,6 +263,25 @@
   background: transparent;
 }
 
+/* Browser tab: the live view of the session's built-in browser. */
+.review-tab-panel-web {
+  position: relative;
+  isolation: isolate;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.review-tab-panel-web .browser-live {
+  background: transparent;
+}
+
+.review-web-tab-icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-strong);
+}
+
 .review-tab-panel-diff-editor .dt-header {
   z-index: 4;
 }

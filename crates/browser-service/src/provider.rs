@@ -107,11 +107,19 @@ fn push_headless(args: &mut Vec<String>, headless: bool) {
 /// `resolve_package_root` locates the installed provider; returning `None`
 /// means preflight should have failed, and the caller surfaces that rather than
 /// launching a process that cannot work.
+///
+/// `cdp_endpoint` is the browser to attach to. It is always given now: a
+/// managed browser Kodex started itself in launch/persistent mode, or the
+/// user's own browser in attach mode. The provider then gets `--cdp-endpoint`
+/// and nothing else — the browser-side choices (`--isolated`, `--headless`,
+/// `--executable-path`, `--user-data-dir`, `--browser`) are ours to make, and
+/// none of them belong to a process that no longer starts a browser.
 pub fn build_launch(
     settings: &BrowserSettings,
     node_executable: PathBuf,
     package_root: std::path::PathBuf,
     profile_dir: PathBuf,
+    cdp_endpoint: Option<&str>,
 ) -> ProviderLaunch {
     let mut args = vec![
         provider_cli_from_package_root(&package_root)
@@ -119,36 +127,46 @@ pub fn build_launch(
             .into_owned(),
     ];
 
-    match settings.mode {
-        BrowserMode::Launch => {
-            // `--isolated` keeps the session's browser free of any user
-            // profile, so two sessions cannot share cookies or cache.
-            args.push("--isolated".to_string());
-            args.push("--browser".to_string());
-            args.push("chromium".to_string());
-            push_headless(&mut args, settings.headless);
-            let executable = settings.executable_path.trim();
-            if !executable.is_empty() {
-                args.push("--executable-path".to_string());
-                args.push(executable.to_string());
-            }
-        }
-        BrowserMode::Attach => {
-            // Attaching means the browser is the user's own process, so no
-            // `--isolated` and no headless flag: the user can see it.
+    match cdp_endpoint {
+        Some(endpoint) => {
             args.push("--cdp-endpoint".to_string());
-            args.push(settings.endpoint.trim().to_string());
+            args.push(endpoint.trim().to_string());
         }
-        BrowserMode::Persistent => {
-            // A Kodex-owned profile directory. No `--isolated`, because the
-            // point is to keep cookies between sessions, but never the user's
-            // own profile: the path is built under Kodex's data root.
-            args.push("--browser".to_string());
-            args.push("chromium".to_string());
-            push_headless(&mut args, settings.headless);
-            args.push("--user-data-dir".to_string());
-            args.push(profile_dir.to_string_lossy().into_owned());
-        }
+        // No endpoint: the shape of a provider that starts a browser of its
+        // own. Production does not produce it any more — every mode has an
+        // endpoint — but a caller resolving a description without starting
+        // anything still needs one that makes sense.
+        None => match settings.mode {
+            BrowserMode::Launch => {
+                // `--isolated` keeps the session's browser free of any user
+                // profile, so two sessions cannot share cookies or cache.
+                args.push("--isolated".to_string());
+                args.push("--browser".to_string());
+                args.push("chromium".to_string());
+                push_headless(&mut args, settings.headless);
+                let executable = settings.executable_path.trim();
+                if !executable.is_empty() {
+                    args.push("--executable-path".to_string());
+                    args.push(executable.to_string());
+                }
+            }
+            BrowserMode::Attach => {
+                // Attaching means the browser is the user's own process, so no
+                // `--isolated` and no headless flag: the user can see it.
+                args.push("--cdp-endpoint".to_string());
+                args.push(settings.endpoint.trim().to_string());
+            }
+            BrowserMode::Persistent => {
+                // A Kodex-owned profile directory. No `--isolated`, because the
+                // point is to keep cookies between sessions, but never the user's
+                // own profile: the path is built under Kodex's data root.
+                args.push("--browser".to_string());
+                args.push("chromium".to_string());
+                push_headless(&mut args, settings.headless);
+                args.push("--user-data-dir".to_string());
+                args.push(profile_dir.to_string_lossy().into_owned());
+            }
+        },
     }
 
     ProviderLaunch {
@@ -171,12 +189,25 @@ mod tests {
         }
     }
 
+    /// The unmanaged shape: a provider that starts a browser of its own.
     fn launch(settings: &BrowserSettings) -> ProviderLaunch {
         build_launch(
             settings,
             PathBuf::from("/usr/bin/node"),
             PathBuf::from("/pkg/node_modules/@playwright/mcp"),
             PathBuf::from("/data/browser/profiles/default"),
+            None,
+        )
+    }
+
+    /// The managed shape: a provider attaching to a browser that already runs.
+    fn attached(settings: &BrowserSettings, endpoint: &str) -> ProviderLaunch {
+        build_launch(
+            settings,
+            PathBuf::from("/usr/bin/node"),
+            PathBuf::from("/pkg/node_modules/@playwright/mcp"),
+            PathBuf::from("/data/browser/profiles/default"),
+            Some(endpoint),
         )
     }
 
@@ -312,6 +343,7 @@ mod tests {
             PathBuf::from("/usr/bin/node"),
             PathBuf::from("/pkg/@playwright/mcp"),
             PathBuf::from("/data/browser/profiles/staging"),
+            None,
         );
         assert_eq!(
             arg_after(&launch.args, "--user-data-dir"),
@@ -330,6 +362,102 @@ mod tests {
         assert_eq!(
             arg_after(&launch(&settings).args, "--cdp-endpoint"),
             Some("ws://127.0.0.1:9222/devtools"),
+        );
+    }
+
+    #[test]
+    fn an_endpoint_replaces_the_provider_side_browser_configuration() {
+        // Every mode attaches now — to a browser Kodex started, or to the
+        // user's own — so the provider is told only where to attach. The
+        // flags that would make it choose or start a browser must not appear.
+        let modes = [
+            launch_settings(),
+            BrowserSettings {
+                mode: BrowserMode::Persistent,
+                profile_name: "default".to_string(),
+                ..launch_settings()
+            },
+            BrowserSettings {
+                mode: BrowserMode::Attach,
+                endpoint: "http://127.0.0.1:9222".to_string(),
+                allow_attach: true,
+                ..launch_settings()
+            },
+        ];
+
+        for settings in &modes {
+            let args = attached(settings, "ws://127.0.0.1:9222/devtools/browser/x").args;
+            assert_eq!(args.len(), 3, "got {args:?}");
+            assert!(args[0].ends_with("cli.js"), "got {}", args[0]);
+            assert_eq!(
+                arg_after(&args, "--cdp-endpoint"),
+                Some("ws://127.0.0.1:9222/devtools/browser/x")
+            );
+            for flag in [
+                "--isolated",
+                "--headless",
+                "--executable-path",
+                "--user-data-dir",
+                "--browser",
+            ] {
+                assert!(
+                    !args.iter().any(|arg| arg == flag),
+                    "{flag} belongs to a browser the provider no longer starts: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_managed_endpoint_is_trimmed() {
+        assert_eq!(
+            arg_after(
+                &attached(&launch_settings(), "  ws://127.0.0.1:9222/devtools  ").args,
+                "--cdp-endpoint"
+            ),
+            Some("ws://127.0.0.1:9222/devtools"),
+        );
+    }
+
+    #[test]
+    fn an_endpoint_wins_over_an_explicit_executable() {
+        // `--executable-path` tells the provider which browser to start; with
+        // a browser attached there is nothing for it to choose.
+        let settings = BrowserSettings {
+            executable_path: "/opt/chrome".to_string(),
+            ..launch_settings()
+        };
+        let args = attached(&settings, "ws://x").args;
+        assert!(!args.iter().any(|arg| arg == "--executable-path"));
+    }
+
+    #[test]
+    fn persistent_mode_with_an_endpoint_does_not_hand_the_provider_a_profile() {
+        // The profile is the managed browser's, passed at its launch; the
+        // provider must not open one of its own on top of it.
+        let settings = BrowserSettings {
+            mode: BrowserMode::Persistent,
+            profile_name: "default".to_string(),
+            ..launch_settings()
+        };
+        let args = attached(&settings, "ws://x").args;
+        assert!(!args.iter().any(|arg| arg == "--user-data-dir"));
+        assert!(!args.contains(&"--isolated".to_string()));
+    }
+
+    #[test]
+    fn attach_mode_passes_the_settings_endpoint_through() {
+        // Attach is the shape every mode has now; it only differs in which
+        // endpoint it names.
+        let settings = BrowserSettings {
+            mode: BrowserMode::Attach,
+            endpoint: "http://127.0.0.1:9222".to_string(),
+            allow_attach: true,
+            ..launch_settings()
+        };
+        assert_eq!(
+            attached(&settings, settings.endpoint.trim()).args,
+            launch(&settings).args,
         );
     }
 

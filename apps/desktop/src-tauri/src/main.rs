@@ -74,6 +74,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
+        .manage(commands::browser_view::BrowserViewHost::default())
         .setup({
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
@@ -295,6 +296,13 @@ fn main() {
             commands::terminal::terminal_terminate,
             commands::terminal::terminal_restart,
             commands::terminal::terminal_list,
+            commands::browser_view::browser_view_attach,
+            commands::browser_view::browser_view_detach,
+            commands::browser_view::browser_view_focus,
+            commands::browser_view::browser_view_open_page,
+            commands::browser_view::browser_view_close_page,
+            commands::browser_view::browser_view_set_size,
+            commands::browser_view::browser_view_input,
             commands::remote_control::remote_control_set_enabled,
             commands::remote_control::remote_control_pairing_qr,
             commands::remote_control::remote_control_status,

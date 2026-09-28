@@ -8,21 +8,25 @@
 //! how a tool result is projected.
 
 pub mod catalog;
+pub mod cdp;
 pub mod installer;
+pub mod managed;
 pub mod mcp;
 pub mod orphan;
 pub mod provider;
 pub mod provision;
 pub mod proxy;
+pub mod view;
 pub mod win;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use catalog::{ExposedTool, ProviderCatalog, ProviderTool};
+use managed::ManagedBrowser;
 use provider::ProviderLaunch;
 use session_resource::{CancelToken, RegistryError, ResourceFactory, SessionResourceRegistry};
-use workspace_model::BrowserSettings;
+use workspace_model::{BrowserMode, BrowserSettings};
 
 /// A tool call result, projected from whatever shape the provider returned.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -95,6 +99,15 @@ pub struct BrowserResource {
     /// Populated after the first successful handshake, so a session that never
     /// calls a tool never pays for a catalog fetch.
     pub catalog: Option<ProviderCatalog>,
+    /// The CDP endpoint of the browser behind this resource: the managed
+    /// browser's websocket URL in launch/persistent mode, the user's endpoint
+    /// in attach mode. This is what the browser view connects to — the same
+    /// browser the tools drive.
+    pub cdp_endpoint: Option<String>,
+    /// The browser this session owns, when one was started. Attach mode has
+    /// none: the browser is the user's process, and killing it on release is
+    /// not ours to do.
+    pub managed: Option<ManagedBrowser>,
     /// The live provider process, when one was actually started. `None` for a
     /// session that only resolved its launch description.
     process: Option<tokio::process::Child>,
@@ -107,9 +120,31 @@ impl BrowserResource {
             launch,
             server_name: server_name.into(),
             catalog: None,
+            cdp_endpoint: None,
+            managed: None,
             process: None,
             client: None,
         }
+    }
+
+    /// Record the managed browser this resource owns. Its websocket endpoint
+    /// is the CDP endpoint both clients use.
+    pub fn with_managed(mut self, managed: ManagedBrowser) -> Self {
+        self.cdp_endpoint = Some(managed.ws_endpoint().to_string());
+        self.managed = Some(managed);
+        self
+    }
+
+    /// Record the CDP endpoint when the browser is not ours to hold — attach
+    /// mode, where it is the user's own.
+    pub fn with_cdp_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.cdp_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// The CDP endpoint of the browser behind this resource, if any.
+    pub fn cdp_endpoint(&self) -> Option<&str> {
+        self.cdp_endpoint.as_deref()
     }
 
     /// Attach a started process and its client.
@@ -185,6 +220,34 @@ impl ResourceFactory for BrowserFactory {
     }
 
     async fn acquire(&self, _session_id: &str) -> Result<BrowserResource, BrowserError> {
+        // The browser is resolved and started first, so the provider attaches
+        // to a browser we already own instead of launching one of its own:
+        // the tools and the browser view must be driving the same process.
+        let (managed, endpoint) = match self.settings.mode {
+            // Attach mode: the browser is the user's own process, and both
+            // clients connect to the endpoint they configured.
+            BrowserMode::Attach => (None, Some(self.settings.endpoint.trim().to_string())),
+            // Launch/persistent mode: find the Chromium to start, start it,
+            // and hand its websocket endpoint to the provider below.
+            BrowserMode::Launch | BrowserMode::Persistent if self.spawn_process => {
+                let executable = managed::resolve_browser_executable(
+                    &self.node_executable,
+                    &self.package_root,
+                    &self.settings,
+                )
+                .await
+                .map_err(BrowserError::Launch)?;
+                let browser = ManagedBrowser::launch(&self.data_root, &executable, &self.settings)
+                    .await
+                    .map_err(BrowserError::Launch)?;
+                let endpoint = browser.ws_endpoint().to_string();
+                (Some(browser), Some(endpoint))
+            }
+            // Nothing is started (tests): there is no browser, so there is no
+            // endpoint to record.
+            BrowserMode::Launch | BrowserMode::Persistent => (None, None),
+        };
+
         // The launch description is resolved here rather than in the caller so
         // that a settings change between session start and first use cannot
         // produce a process that does not match the advertised configuration.
@@ -193,11 +256,21 @@ impl ResourceFactory for BrowserFactory {
             self.node_executable.clone(),
             self.package_root.clone(),
             crate::provision::profile_dir(&self.data_root, &self.settings.profile_name),
+            endpoint.as_deref(),
         );
+
+        // The resource keeps its own copy of the description; the spawn below
+        // reads this one to name the command in a failure.
+        let mut resource = BrowserResource::new(launch.clone(), self.server_name.clone());
+        if let Some(browser) = managed {
+            resource = resource.with_managed(browser);
+        } else if let Some(endpoint) = endpoint {
+            resource = resource.with_cdp_endpoint(endpoint);
+        }
 
         // The process is started here, once, on the session's first tool call.
         if !self.spawn_process {
-            return Ok(BrowserResource::new(launch, self.server_name.clone()));
+            return Ok(resource);
         }
 
         let mut command = tokio::process::Command::new(&launch.executable);
@@ -266,7 +339,7 @@ impl ResourceFactory for BrowserFactory {
             .await
             .map_err(|error| BrowserError::Launch(error.to_string()))?;
 
-        Ok(BrowserResource::new(launch, self.server_name.clone()).with_process(child, client))
+        Ok(resource.with_process(child, client))
     }
 
     async fn release(
@@ -278,6 +351,12 @@ impl ResourceFactory for BrowserFactory {
         // explicit and covers a provider that outlived its client.
         if let Some(child) = resource.process_mut() {
             let _ = child.start_kill();
+        }
+        // A managed browser is ours to dispose of: the provider is gone, so
+        // nothing will attach to it again. A persistent profile survives by
+        // design; a temporary one is removed with the browser.
+        if let Some(managed) = resource.managed.take() {
+            managed.shutdown().await;
         }
         Ok(())
     }
@@ -332,6 +411,19 @@ impl BrowserService {
 
     pub fn registry(&self) -> &Arc<SessionResourceRegistry<BrowserFactory>> {
         &self.registry
+    }
+
+    /// The CDP endpoint of the session's live browser, without acquiring one.
+    ///
+    /// Reads what the registry already holds, so a session that has not run a
+    /// tool yet reports `None` instead of starting a browser nobody asked
+    /// for. This is how the browser view finds the endpoint to attach to.
+    pub fn cdp_endpoint(&self, session_id: &str) -> Option<String> {
+        self.registry.with_resource(session_id, |resource| {
+            resource
+                .and_then(|resource| resource.cdp_endpoint())
+                .map(str::to_string)
+        })
     }
 
     /// Expose the provider's catalog to the model.
@@ -652,5 +744,76 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "handshake should time out promptly, took {elapsed:?}",
         );
+    }
+
+    #[test]
+    fn the_endpoint_accessor_reads_the_resource_directly() {
+        let launch = ProviderLaunch {
+            executable: std::path::PathBuf::from("/usr/bin/node"),
+            args: Vec::new(),
+            env: Default::default(),
+        };
+
+        let resource = BrowserResource::new(launch, "test").with_cdp_endpoint("ws://127.0.0.1:1/devtools");
+
+        assert_eq!(
+            resource.cdp_endpoint(),
+            Some("ws://127.0.0.1:1/devtools"),
+            "the view attaches to exactly this endpoint",
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_mode_records_the_endpoint_for_the_view() {
+        // In attach mode the browser is the user's own, and the endpoint is
+        // the one the settings named — trimmed, as the provider gets it.
+        let service = BrowserService::from_factory(
+            BrowserFactory::new(
+                BrowserSettings {
+                    enabled: true,
+                    mode: workspace_model::BrowserMode::Attach,
+                    endpoint: "  http://127.0.0.1:9222  ".to_string(),
+                    allow_attach: true,
+                    ..BrowserSettings::default()
+                },
+                std::path::PathBuf::from("/usr/bin/node"),
+                std::path::PathBuf::from("/pkg/@playwright/mcp"),
+                std::path::PathBuf::from("/data"),
+            )
+            .without_spawn(),
+        );
+        let cancel = CancelToken::new();
+
+        assert_eq!(
+            service.cdp_endpoint("session-1"),
+            None,
+            "no browser is live before the first tool call"
+        );
+
+        service
+            .call("session-1", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.cdp_endpoint("session-1").as_deref(),
+            Some("http://127.0.0.1:9222"),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_started_browser_reports_no_endpoint() {
+        // Reporting an endpoint that does not exist would send the view into
+        // a connection failure; no browser, no endpoint.
+        let service = service();
+        let cancel = CancelToken::new();
+
+        service
+            .call("session-1", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+
+        assert_eq!(service.cdp_endpoint("session-1"), None);
+        assert_eq!(service.cdp_endpoint("never-existed"), None);
     }
 }

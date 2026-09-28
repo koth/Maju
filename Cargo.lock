@@ -367,11 +367,13 @@ name = "browser-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "libc",
  "serde",
  "serde_json",
  "session-resource",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "workspace-model",
 ]

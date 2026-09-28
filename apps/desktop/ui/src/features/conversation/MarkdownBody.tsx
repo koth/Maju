@@ -74,6 +74,7 @@ const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
 });
 import { useCurrentAppTheme } from "../../lib/use-app-theme";
 import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
+import { openLinkInPanelOrExternal } from "../browser/browserTabs";
 import { maskMarkdownMath } from "./markdown-math";
 
 interface Props {
@@ -438,7 +439,19 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
             }
           }
           return (
-            <a className="md-link" href={href} target="_blank" rel="noopener noreferrer">
+            <a
+              className="md-link"
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => {
+                // Web links open in the right panel's built-in browser (with
+                // a system-browser fallback) instead of leaving the app.
+                if (!href || href.startsWith("#")) return;
+                event.preventDefault();
+                void openLinkInPanelOrExternal(href);
+              }}
+            >
               {children}
             </a>
           );

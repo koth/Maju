@@ -5,9 +5,14 @@ edition = "2024"
 
 [dependencies]
 async-trait.workspace = true
+# WebSocketStream only speaks futures' Stream/Sink, so the CDP wire tasks and
+# their tests need the extension traits in scope alongside tokio-tungstenite
+# (same pairing as dsh-bridge).
+futures.workspace = true
 session-resource = { path = "../session-resource" }
 serde.workspace = true
 serde_json.workspace = true
+tokio-tungstenite = "0.27"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "fs"] }
 tracing = "0.1"
 workspace-model = { path = "../workspace-model" }

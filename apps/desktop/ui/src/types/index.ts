@@ -479,6 +479,74 @@ export interface TerminalExitEvent {
   exit_code: number | null;
 }
 
+/** One page in the session's built-in browser (a CDP page target). The right
+ *  panel's browser tabs mirror these 1:1. */
+export interface BrowserViewTarget {
+  target_id: string;
+  url: string;
+  title: string;
+  type: string;
+}
+
+export interface BrowserViewTargetsEvent {
+  session_id: string;
+  targets: BrowserViewTarget[];
+}
+
+/** Incremental navigation state for one page. */
+export interface BrowserViewMetaEvent {
+  session_id: string;
+  target_id: string;
+  url: string | null;
+  title: string | null;
+}
+
+/** A screencast frame (base64 JPEG) of one page. */
+export interface BrowserViewFrameEvent {
+  session_id: string;
+  target_id: string;
+  frame: string;
+  seq: number;
+}
+
+export interface BrowserViewStatusEvent {
+  session_id: string;
+  status: "connecting" | "live" | "closed" | "failed";
+  detail: string | null;
+}
+
+export interface BrowserViewStatusReport {
+  session_id: string;
+  status: string;
+}
+
+export interface BrowserViewPageReport {
+  target_id: string;
+}
+
+/** User input forwarded to the page. Mirrors the Rust `ViewInputEvent`. */
+export type BrowserViewInputEvent =
+  | {
+      kind: "mouse";
+      type: string;
+      x: number;
+      y: number;
+      button: string;
+      click_count: number;
+      delta_x: number;
+      delta_y: number;
+      modifiers: number;
+    }
+  | {
+      kind: "key";
+      type: string;
+      key: string;
+      code: string;
+      text: string;
+      modifiers: number;
+    }
+  | { kind: "text"; text: string };
+
 export interface PermissionOption {
   id: string;
   label: string;

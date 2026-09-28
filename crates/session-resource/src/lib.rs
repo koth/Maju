@@ -286,6 +286,27 @@ impl<F: ResourceFactory> SessionResourceRegistry<F> {
         names.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// Read the session's live resource, without acquiring one.
+    ///
+    /// The closure sees `None` when the session has no resource — before the
+    /// first operation, after disposal, or while an acquisition is still in
+    /// flight — so a reader observes the world instead of changing it: no
+    /// browser is started and no operation lock is taken to answer a question
+    /// about what already exists. A slot momentarily held by another task to
+    /// clone the handle is also reported as `None`; that window is a single
+    /// `Arc` clone, and holding the lock across `f` would make a read wait on
+    /// unrelated work.
+    pub fn with_resource<R>(&self, session_id: &str, f: impl FnOnce(Option<&F::Resource>) -> R) -> R {
+        let Some(entry) = self.entry_for(session_id) else {
+            return f(None);
+        };
+        let slot = entry.resource.try_lock().ok();
+        f(slot
+            .as_ref()
+            .and_then(|guard| guard.as_ref())
+            .map(|resource| &**resource))
+    }
+
     /// Acquire the session's resource if needed, run `operation` under the
     /// session's operation lock, and release the lock afterwards.
     ///
@@ -868,6 +889,36 @@ mod tests {
                 .await,
             Err(RegistryError::Disposing)
         ));
+    }
+
+    #[tokio::test]
+    async fn with_resource_reads_without_acquiring() {
+        let (factory, counters) = factory();
+        let registry = SessionResourceRegistry::new(factory);
+        let cancel = CancelToken::new();
+
+        // Before the first operation there is nothing to read, and reading
+        // must not acquire anything.
+        assert_eq!(
+            registry.with_resource("session-1", |resource| resource.map(|r| r.id.clone())),
+            None
+        );
+        assert_eq!(acquired(&counters), 0);
+
+        registry
+            .run("session-1", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+        assert_eq!(
+            registry.with_resource("session-1", |resource| resource.map(|r| r.id.clone())),
+            Some("session-1".to_string())
+        );
+
+        registry.close("session-1").await.unwrap();
+        assert_eq!(
+            registry.with_resource("session-1", |resource| resource.map(|r| r.id.clone())),
+            None
+        );
     }
 
     #[tokio::test]

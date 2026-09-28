@@ -61,6 +61,9 @@ import type {
   BrowserInstallState,
   BrowserPreflight,
   BrowserSettings,
+  BrowserViewInputEvent,
+  BrowserViewPageReport,
+  BrowserViewStatusReport,
 } from "../types";
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -1181,4 +1184,56 @@ export async function browserInstallState(): Promise<BrowserInstallState> {
  *  without reopening settings. */
 export async function browserRefreshPreflight(): Promise<BrowserPreflight> {
   return invoke<BrowserPreflight>("browser_refresh_preflight");
+}
+
+/* Right-panel browser view (docs/browser-view-subsystem.md): live pages of the
+ * session's built-in browser — the same one the browser-use tools drive. */
+
+export async function browserViewAttach(
+  sessionId: string,
+): Promise<BrowserViewStatusReport> {
+  return invoke<BrowserViewStatusReport>("browser_view_attach", { sessionId });
+}
+
+export async function browserViewDetach(sessionId: string): Promise<void> {
+  return invoke<void>("browser_view_detach", { sessionId });
+}
+
+export async function browserViewFocus(
+  sessionId: string,
+  targetId: string,
+): Promise<void> {
+  return invoke<void>("browser_view_focus", { sessionId, targetId });
+}
+
+/** Open a link as a new page in the built-in browser. */
+export async function browserViewOpenPage(
+  sessionId: string,
+  url: string,
+): Promise<BrowserViewPageReport> {
+  return invoke<BrowserViewPageReport>("browser_view_open_page", { sessionId, url });
+}
+
+export async function browserViewClosePage(
+  sessionId: string,
+  targetId: string,
+): Promise<void> {
+  return invoke<void>("browser_view_close_page", { sessionId, targetId });
+}
+
+export async function browserViewSetSize(
+  sessionId: string,
+  targetId: string,
+  width: number,
+  height: number,
+): Promise<void> {
+  return invoke<void>("browser_view_set_size", { sessionId, targetId, width, height });
+}
+
+export async function browserViewInput(
+  sessionId: string,
+  targetId: string,
+  event: BrowserViewInputEvent,
+): Promise<void> {
+  return invoke<void>("browser_view_input", { sessionId, targetId, event });
 }

@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent, BrowserInstallState, CapabilityStateEvent } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent, BrowserInstallState, CapabilityStateEvent, BrowserViewTargetsEvent, BrowserViewMetaEvent, BrowserViewFrameEvent, BrowserViewStatusEvent } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -58,6 +58,40 @@ export function onBrowserInstallProgress(
   callback: (state: BrowserInstallState) => void,
 ): Promise<UnlistenFn> {
   return listen<BrowserInstallState>("browser:install_progress", (event) =>
+    callback(event.payload),
+  );
+}
+
+/** Right-panel browser view (see docs/browser-view-subsystem.md): the live
+ *  pages of the session's built-in browser. */
+export function onBrowserViewTargets(
+  callback: (event: BrowserViewTargetsEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserViewTargetsEvent>("browser_view:targets", (event) =>
+    callback(event.payload),
+  );
+}
+
+export function onBrowserViewMeta(
+  callback: (event: BrowserViewMetaEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserViewMetaEvent>("browser_view:meta", (event) =>
+    callback(event.payload),
+  );
+}
+
+export function onBrowserViewFrame(
+  callback: (event: BrowserViewFrameEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserViewFrameEvent>("browser_view:frame", (event) =>
+    callback(event.payload),
+  );
+}
+
+export function onBrowserViewStatus(
+  callback: (event: BrowserViewStatusEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserViewStatusEvent>("browser_view:status", (event) =>
     callback(event.payload),
   );
 }

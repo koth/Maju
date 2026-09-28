@@ -9,7 +9,7 @@ import {
   type RefObject,
 } from "react";
 import type { SearchResult } from "../../types";
-import { openExternalUrl } from "../../lib/tauri";
+import { openLinkInPanelOrExternal } from "../browser/browserTabs";
 import { getFileIcon } from "../filetree/file-icons";
 import "./SearchResults.css";
 
@@ -451,7 +451,9 @@ function ExternalLink({ href, children }: { href: string; children: string }) {
       href={href}
       onClick={(event) => {
         event.preventDefault();
-        void openExternalUrl(href);
+        // Right panel's built-in browser first; falls back to the system
+        // browser when the capability is not available.
+        void openLinkInPanelOrExternal(href);
       }}
       rel="noreferrer"
       target="_blank"

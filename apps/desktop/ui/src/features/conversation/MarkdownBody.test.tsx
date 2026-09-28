@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { registerPanelOpener } from "../browser/browserTabs";
 import MarkdownBody, {
   pathMatchesFragment,
   resolveClickableFilePath,
@@ -188,6 +189,24 @@ describe("MarkdownBody", () => {
     const link = screen.getByRole("link", { name: "官网" });
     expect(link).toHaveAttribute("href", "https://example.com/docs");
     expect(link).not.toHaveClass("md-file-path");
+  });
+
+  it("routes external link clicks into the right-panel browser", async () => {
+    const opener = vi.fn(async () => true);
+    registerPanelOpener(opener);
+    try {
+      render(
+        <MarkdownBody
+          content={"见 [官网](https://example.com/docs) 了解详情。"}
+          workspaceRoot="/test"
+          onFilePathClick={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole("link", { name: "官网" }));
+      expect(opener).toHaveBeenCalledWith("https://example.com/docs");
+    } finally {
+      registerPanelOpener(null);
+    }
   });
 
   it("renders non-existent file references as fixed links too", () => {

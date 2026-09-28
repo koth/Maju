@@ -69,6 +69,7 @@ import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
 import { useAgentPlanOverlap, resolveAgentPlanDockLayout, type AgentPlanOverlapTier } from "./useAgentPlanOverlap";
 import { useSessionAgentPlan } from "./useSessionAgentPlan";
+import { useBrowserViewTabs } from "../browser/useBrowserViewTabs";
 import {
   latestReviewableTurnChangeSet,
   reviewableTurnChangeSetSignature,
@@ -88,7 +89,9 @@ const EMPTY_HIDDEN_PERMISSION_REQUEST_IDS = new Set<string>();
 type CenterTabType = "conversation" | "changes" | "diff" | "editor";
 
 function reviewOpenTabKey(tab: ReviewPanelOpenTab) {
-  return tab.kind === "diff" ? `diff:${tab.changeSetId}:${tab.path}` : `file:${tab.path}`;
+  if (tab.kind === "diff") return `diff:${tab.changeSetId}:${tab.path}`;
+  if (tab.kind === "web") return `web:${tab.id}`;
+  return `file:${tab.path}`;
 }
 
 let startupUpdateCheckPromise: Promise<AppUpdateInfo | null> | null = null;
@@ -396,6 +399,14 @@ export function Workbench() {
     INITIAL_REVIEW_PANEL_ACTIVE_TAB,
   );
   const [reviewPanelOpenTabs, setReviewPanelOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
+  // Right-panel browser tabs: pages of the session's built-in browser (the one
+  // the browser-use tools drive), mirrored into the review tab strip. Link
+  // clicks anywhere route here through `registerPanelOpener`.
+  const { closePage: closeBrowserPage } = useBrowserViewTabs({
+    sessionId: snapshot?.session.id ?? "",
+    setOpenTabs: setReviewPanelOpenTabs,
+    setActiveTab: setReviewPanelActiveTab,
+  });
   const [reviewPreferredChangeSet, setReviewPreferredChangeSet] =
     useState<ReviewPreferredChangeSet | null>(null);
   const {
@@ -1352,6 +1363,7 @@ export function Workbench() {
       openTabs={reviewPanelOpenTabs}
       onActiveTabChange={setReviewPanelActiveTab}
       onOpenTabsChange={setReviewPanelOpenTabs}
+      onWebTabClose={closeBrowserPage}
       focusRequest={reviewFocusRequest}
       preferredChangeSet={reviewPreferredChangeSet}
       onPreferredChangeSetChange={setReviewPreferredChangeSet}

@@ -1,7 +1,7 @@
 import { memo, useState, useMemo, useCallback, useEffect, useRef } from "react";
 import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { MultiFileDiff } from "@pierre/diffs/react";
-import { GitCommitHorizontal } from "lucide-react";
+import { GitCommitHorizontal, Globe } from "lucide-react";
 import type { UiSnapshot, ChangedFile, ChangeSection, DiffStats, FileEntry, ChangeSetSummary, FileChangeSummary, FileChangeRecord, AppTheme } from "../../types";
 import { fsListDir, fsReveal, gitStage, gitUnstage, reviewRejectPatch, sessionListChangeSets, sessionListChangeSetFiles, sessionGetChangeSetFileDiff } from "../../lib/tauri";
 import { CommitDialog } from "../changes/CommitDialog";
@@ -13,6 +13,7 @@ import {
   resolvePierreDiffHorizontalScrollTarget,
 } from "../editor/pierre-diff";
 import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
+import { BrowserLiveView } from "../browser/BrowserLiveView";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import { appConfirm, rejectPatchConfirmRequest, trackConfirmRequest } from "../../lib/confirm";
@@ -21,13 +22,16 @@ import { useNearViewportOnce } from "../conversation/useNearViewportOnce";
 import "./ReviewPanel.css";
 
 export type ReviewPanelTab = "Review" | "Diff" | "Files";
+export type ReviewPanelWebTab = { kind: "web"; id: string; url: string; title?: string };
 export type ReviewPanelActiveTab =
   | { kind: "base"; tab: ReviewPanelTab }
   | { kind: "file"; path: string; lineNumber?: number; searchQuery?: string; navToken?: number }
-  | { kind: "diff"; path: string; changeSetId: string };
+  | { kind: "diff"; path: string; changeSetId: string }
+  | ReviewPanelWebTab;
 export type ReviewPanelOpenTab =
   | { kind: "file"; path: string; lineNumber?: number; searchQuery?: string; navToken?: number }
-  | { kind: "diff"; path: string; changeSetId: string };
+  | { kind: "diff"; path: string; changeSetId: string }
+  | ReviewPanelWebTab;
 export interface ReviewPreferredChangeSet {
   id: string;
   token: number;
@@ -207,6 +211,9 @@ interface Props {
   openTabs?: ReviewPanelOpenTab[];
   onActiveTabChange?: Dispatch<SetStateAction<ReviewPanelActiveTab>>;
   onOpenTabsChange?: Dispatch<SetStateAction<ReviewPanelOpenTab[]>>;
+  /** Close one browser page (web tab close). The tab list is reconciled from
+   *  the backend's page targets, so the caller owns the removal. */
+  onWebTabClose?: (targetId: string) => void;
   focusRequest?: { changeSetId: string; token: number; path?: string } | null;
   preferredChangeSet?: ReviewPreferredChangeSet | null;
   onPreferredChangeSetChange?: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
@@ -229,6 +236,7 @@ export function ReviewPanel({
   openTabs: controlledOpenTabs,
   onActiveTabChange,
   onOpenTabsChange,
+  onWebTabClose,
   focusRequest,
   preferredChangeSet: controlledPreferredChangeSet,
   onPreferredChangeSetChange,
@@ -277,6 +285,7 @@ export function ReviewPanel({
   const activeFileTab = activeTab.kind === "file" ? activeTab : null;
   const activeFilePath = activeFileTab?.path ?? null;
   const activeDiffTab = activeTab.kind === "diff" ? activeTab : null;
+  const activeWebTab = activeTab.kind === "web" ? activeTab : null;
   const activeSideTreeKeyRef = useRef<string | null>(null);
   const workspaceConnected = snapshot.workspace_connected !== false;
   const hasOpenFileTab = openTabs.some((tab) => tab.kind === "file");
@@ -353,19 +362,29 @@ export function ReviewPanel({
   }, [handleOpenReviewTab]);
 
   const handleOpenTabClose = useCallback((tab: ReviewPanelOpenTab) => {
-    const closingTabId = reviewOpenTabId(tab);
-    if (tab.kind === "file" && !isModelDirty(tab.path)) {
-      disposeModel(tab.path);
+    if (tab.kind === "web") {
+      // Browser pages are owned by the backend's target list: the close
+      // request reconciles the tab away through the targets event.
+      if (onWebTabClose) {
+        onWebTabClose(tab.id);
+        return;
+      }
     }
-    pinnedFilePathsRef.current.delete(tab.path);
+    const closingTabId = reviewOpenTabId(tab);
+    if (tab.kind === "file") {
+      if (!isModelDirty(tab.path)) {
+        disposeModel(tab.path);
+      }
+      pinnedFilePathsRef.current.delete(tab.path);
+    }
     const remainingTabs = openTabs.filter((openTab) => reviewOpenTabId(openTab) !== closingTabId);
     setOpenTabs(remainingTabs);
     setActiveTab((current) =>
       reviewActiveTabMatchesOpenTab(current, tab)
-        ? remainingTabs[remainingTabs.length - 1] ?? { kind: "base", tab: tab.kind === "diff" ? "Diff" : "Files" }
+        ? remainingTabs[remainingTabs.length - 1] ?? { kind: "base", tab: tab.kind === "diff" ? "Diff" : tab.kind === "web" ? "Review" : "Files" }
         : current,
     );
-  }, [openTabs, setActiveTab, setOpenTabs]);
+  }, [openTabs, onWebTabClose, setActiveTab, setOpenTabs]);
 
   const filteredFiles = useMemo(() => {
     const lowerFilter = filter.toLowerCase();
@@ -669,8 +688,38 @@ export function ReviewPanel({
         )}
         {openTabs.map((tab) => {
           const tabId = reviewOpenTabId(tab);
-          const fileName = fileNameFromPath(tab.path);
           const isActive = reviewActiveTabMatchesOpenTab(activeTab, tab);
+          if (tab.kind === "web") {
+            const label = tab.title?.trim() || hostOfWebUrl(tab.url);
+            return (
+              <div
+                key={tabId}
+                className={`review-open-file-tab review-web-tab ${isActive ? "review-tab-active" : ""}`}
+                title={tab.url}
+              >
+                <button
+                  type="button"
+                  className="review-file-tab-close"
+                  onClick={() => handleOpenTabClose(tab)}
+                  aria-label={`关闭 ${label}`}
+                  title={`关闭 ${label}`}
+                >
+                  <Globe className="review-file-tab-icon review-web-tab-icon" size={13} strokeWidth={2} aria-hidden="true" />
+                  <span className="review-file-tab-x" aria-hidden="true">×</span>
+                </button>
+                <button
+                  type="button"
+                  className="review-file-tab-label-btn"
+                  onClick={() => setActiveTab(tab)}
+                  aria-label={`打开网页 ${label}`}
+                  title={tab.url}
+                >
+                  {label}
+                </button>
+              </div>
+            );
+          }
+          const fileName = fileNameFromPath(tab.path);
           return (
             <div
               key={tabId}
@@ -846,19 +895,43 @@ export function ReviewPanel({
           )}
         </div>
       )}
+      {activeWebTab && (
+        <div className="review-tab-panel review-tab-panel-web">
+          <BrowserLiveView
+            sessionId={snapshot.session.id}
+            targetId={activeWebTab.id}
+            url={activeWebTab.url}
+            title={activeWebTab.title}
+          />
+        </div>
+      )}
     </div>
   );
 }
 
-function reviewOpenTabId(tab: ReviewPanelOpenTab | Extract<ReviewPanelActiveTab, { kind: "file" | "diff" }>) {
-  return tab.kind === "diff" ? `diff:${tab.changeSetId}:${tab.path}` : `file:${tab.path}`;
+function reviewOpenTabId(tab: ReviewPanelOpenTab | Extract<ReviewPanelActiveTab, { kind: "file" | "diff" | "web" }>) {
+  if (tab.kind === "diff") return `diff:${tab.changeSetId}:${tab.path}`;
+  if (tab.kind === "web") return `web:${tab.id}`;
+  return `file:${tab.path}`;
 }
 
 function reviewActiveTabMatchesOpenTab(activeTab: ReviewPanelActiveTab, openTab: ReviewPanelOpenTab) {
   if (activeTab.kind !== openTab.kind) return false;
+  if (activeTab.kind === "web" || openTab.kind === "web") {
+    return activeTab.kind === "web" && openTab.kind === "web" && activeTab.id === openTab.id;
+  }
   if (activeTab.path !== openTab.path) return false;
   if (activeTab.kind !== "diff") return true;
   return openTab.kind === "diff" && activeTab.changeSetId === openTab.changeSetId;
+}
+
+/** Tab-chip label for a page: its host when it has no usable title yet. */
+function hostOfWebUrl(url: string) {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
 }
 
 function fileNameFromPath(path: string) {

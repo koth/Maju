@@ -9,6 +9,7 @@ pub mod browser_mcp;
 pub mod browser_panel;
 pub mod browser_preflight;
 pub mod browser_server;
+pub mod browser_view;
 pub mod capability_state;
 pub mod dsh_bringup;
 mod editor_files;
