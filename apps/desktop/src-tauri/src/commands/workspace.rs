@@ -2,7 +2,7 @@ use crate::events;
 use crate::open_workspaces::OpenWorkspaces;
 use crate::recent_workspaces::{RecentEntry, RecentWorkspaces};
 use crate::state::AppState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 use workspace_model::{
     AgentCliId, OpenWorkspaceItem, RemoteLinuxWorkspace, RemoteOpenPhaseKind,
@@ -33,6 +33,7 @@ pub fn save_open_workspace_state(state: &AppState) -> Result<(), String> {
 
 #[tauri::command]
 pub fn workspace_open(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     agent: Option<AgentCliId>,
@@ -43,10 +44,30 @@ pub fn workspace_open(
         return Err(format!("Not a directory: {path}"));
     }
     let snapshot = state.open_workspace(dir, agent, preset)?;
+    allow_workspace_asset_scope(&app, Path::new(&path));
     recent_store()?.add(&path);
     save_open_workspace_state(&state)?;
     Ok(snapshot)
 }
+
+/// Let the webview read files out of an opened workspace.
+///
+/// The asset protocol serves only the directories `tauri.conf.json` names, and
+/// a workspace is never one of them — it is wherever the user's project lives.
+/// Conversation markdown routinely points inside it (a README's screenshots, a
+/// capture the browser tools wrote next to a page snapshot), so opening a
+/// workspace opens its files to the webview as well.
+fn allow_workspace_asset_scope(app: &AppHandle, root: &Path) {
+    if let Err(error) = app.asset_protocol_scope().allow_directory(root, true) {
+        tracing::warn!(
+            target: "workspace",
+            path = %root.display(),
+            error = %error,
+            "could not widen the asset scope to the workspace"
+        );
+    }
+}
+
 
 #[tauri::command]
 pub async fn workspace_open_remote_linux(
@@ -114,7 +135,10 @@ pub fn workspace_chats_root() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSnapshot>, String> {
+pub fn workspace_restore_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<UiSnapshot>, String> {
     app_core::startup_perf::mark("workspace_restore_open/start", "");
     let saved = app_core::startup_perf::measure("workspace_restore_open/load_saved", "", || {
         open_store().map(|store| store.load())
@@ -215,6 +239,9 @@ pub fn workspace_restore_open(state: State<'_, AppState>) -> Result<Option<UiSna
     app_core::startup_perf::measure("workspace_restore_open/save_state", "", || {
         save_open_workspace_state(&state)
     })?;
+    if let Some(restored) = snapshot.as_ref() {
+        allow_workspace_asset_scope(&app, &restored.workspace.root);
+    }
     app_core::startup_perf::mark(
         "workspace_restore_open/end",
         format!(
@@ -241,10 +268,12 @@ fn open_workspace_record_matches(
 
 #[tauri::command]
 pub fn workspace_set_active(
+    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<UiSnapshot, String> {
-    let snapshot = state.set_active_workspace(path)?;
+    let snapshot = state.set_active_workspace(path.clone())?;
+    allow_workspace_asset_scope(&app, Path::new(&path));
     save_open_workspace_state(&state)?;
     Ok(snapshot)
 }

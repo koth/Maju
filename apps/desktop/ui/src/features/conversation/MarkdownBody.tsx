@@ -1,3 +1,4 @@
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -445,9 +446,17 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
               target="_blank"
               rel="noopener noreferrer"
               onClick={(event) => {
-                // Web links open in the right panel's built-in browser (with
-                // a system-browser fallback) instead of leaving the app.
+                // Web links open in the right panel's built-in browser instead
+                // of leaving the app (or opening a second browser window).
                 if (!href || href.startsWith("#")) return;
+                event.preventDefault();
+                void openLinkInPanelOrExternal(href);
+              }}
+              onAuxClick={(event) => {
+                // A middle click is a link click too. Left to the browser it
+                // becomes a new-window request the shell suppresses into a dead
+                // click, so it takes the same route as the left button.
+                if (!href || href.startsWith("#") || event.button !== 1) return;
                 event.preventDefault();
                 void openLinkInPanelOrExternal(href);
               }}
@@ -458,18 +467,22 @@ function MarkdownBody({ content, workspaceRoot, onFilePathClick, changedFiles, c
         },
         img({ src, alt }) {
           const label = alt || "附加的图片";
-          if (!onImagePreview || typeof src !== "string" || !src) {
-            return <img className="md-image" src={src} alt={label} />;
+          const shown = markdownImageSrc(
+            typeof src === "string" ? src : "",
+            workspaceRoot,
+          );
+          if (!onImagePreview || !shown) {
+            return <img className="md-image" src={shown} alt={label} />;
           }
           return (
             <button
               type="button"
               className="md-image-button"
-              onClick={() => onImagePreview(src, label)}
+              onClick={() => onImagePreview(shown, label)}
               aria-label={`预览 ${label}`}
               title="预览图片"
             >
-              <img className="md-image" src={src} alt={label} />
+              <img className="md-image" src={shown} alt={label} />
             </button>
           );
         },
@@ -682,6 +695,47 @@ function normalizeFilePathSeparators(value: string) {
   const backslashes = (value.match(/\\/g) ?? []).length;
   const slashes = (value.match(/\//g) ?? []).length;
   return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
+}
+
+/**
+ * A markdown image source the webview can actually fetch.
+ *
+ * Agents (and their tools) point at pictures by path: an absolute Windows path,
+ * a `file://` URL, or one relative to the workspace — a README screenshot, the
+ * capture the browser tools wrote next to a page snapshot. None of those load
+ * as an `img` source, because the webview has no filesystem of its own; each has
+ * to become the asset URL the asset protocol serves (the host widens that scope
+ * to the open workspace). Anything already loadable — `data:`, `http(s):`,
+ * `asset:`, `blob:` — is passed through untouched.
+ */
+export function markdownImageSrc(src: string, workspaceRoot?: string): string {
+  const raw = (src ?? "").trim();
+  if (!raw) return raw;
+  if (/^(?:data:|https?:|asset:|blob:)/i.test(raw)) return raw;
+  if (!isTauri()) return raw;
+
+  let path = raw;
+  if (/^file:\/\//i.test(path)) {
+    const stripped = path.replace(/^file:\/\//i, "");
+    // file:///C:/x → C:/x, while a POSIX path keeps its leading slash.
+    path = /^\/[A-Za-z]:/.test(stripped) ? stripped.slice(1) : stripped;
+  }
+  path = normalizeFilePathSeparators(path);
+  const isAbsolute = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
+  if (!isAbsolute) {
+    if (!workspaceRoot) return raw;
+    const root = normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "");
+    path = `${root}\\${path.replace(/^[\\/]+/, "")}`;
+  } else if (/^[A-Za-z]:[\\/]/.test(path)) {
+    // Windows paths reach `convertFileSrc` in their native form: an asset URL
+    // built from the forward-slash spelling does not resolve in this webview.
+    path = path.replace(/\//g, "\\");
+  }
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return raw;
+  }
 }
 
 /** Normalize any absolute-in-workspace or mixed-separator path down to the

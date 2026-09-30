@@ -91,12 +91,30 @@ pub fn settings_save_web_tools_settings(
 
 /// Persist browser-use settings. Validation happens here, so an unusable
 /// configuration is refused where the user made the change.
+///
+/// Turning browser-use on also brings the panel's browser up: it is the browser
+/// the tools drive, and a user who has just enabled them is about to ask for
+/// one. Nothing is started when browser-use is off, so a user who never wanted
+/// a browser never pays for one.
 #[tauri::command]
-pub fn settings_save_browser_settings(
+pub async fn settings_save_browser_settings(
+    app: tauri::AppHandle,
     settings: workspace_model::BrowserSettings,
 ) -> Result<AgentSettingsSnapshot, String> {
     let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-    app_core::settings::save_browser_settings(&paths, settings).map_err(|e| e.to_string())
+    let enabled = settings.enabled;
+    let snapshot =
+        app_core::settings::save_browser_settings(&paths, settings).map_err(|e| e.to_string())?;
+    if enabled {
+        let host = app.state::<crate::browser_panel::BrowserPanelHost>();
+        if let Err(error) = crate::browser_panel::warm(&app, &host).await {
+            // The settings are saved either way; the panel starts its browser
+            // on the first tab, and the agent gets a browser of its own until
+            // then. Losing that optimisation is not a failed save.
+            tracing::warn!(target: "browser_panel", "could not warm the panel browser: {error}");
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Re-run browser preflight without saving, for the settings pane's status line.

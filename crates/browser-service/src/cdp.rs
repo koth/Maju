@@ -66,7 +66,7 @@ impl std::error::Error for CdpError {}
 /// One unsolicited message from the browser.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CdpEvent {
-    /// The CDP event method, e.g. `Page.screencastFrame`.
+    /// The CDP event method, e.g. `Page.loadEventFired`.
     pub method: String,
     /// The event's `params` object (or `Null` when the browser sent none).
     pub params: Value,

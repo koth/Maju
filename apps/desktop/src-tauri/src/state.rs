@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use terminal_service::{TerminalEventSink, TerminalService};
 use workspace_model::{
-    AgentCliId, BrowserNavigateRequest, BrowserPreflight, BrowserSessionRequest,
+    AgentCliId, BrowserPreflight,
     EditorFileSnapshot, FileEntry, OpenWorkspaceItem, RemoteLinuxWorkspace, RepositorySnapshot,
     SessionListItem, TerminalOpenRequest, TerminalResizeRequest, TerminalSession,
     TerminalWriteRequest, UiSnapshot, WorkspaceDescriptor, WorkspaceKind, WorkspaceLocation,
@@ -536,37 +536,6 @@ impl AppState {
         self.terminal_service
             .terminate(terminal_id)
             .map_err(|e| e.to_string())
-    }
-
-    /// The shared browser server, for panel-driven actions.
-    ///
-    /// Started on first use, so a user who never enables browser tools never
-    /// pays for a listening socket.
-    fn panel_browser(&self) -> Result<app_core::browser_panel::PanelBrowser, String> {
-        let paths = app_core::AppPaths::resolve().map_err(|e| e.to_string())?;
-        let settings = app_core::settings::load_app_settings(&paths);
-        let shared = app_core::shared_mcp::shared_mcp()
-            .browser_server(&paths, &settings.browser)
-            .map_err(|e| e.to_string())?;
-        Ok(app_core::browser_panel::PanelBrowser::new(shared.service()))
-    }
-
-    pub fn browser_navigate(&self, request: BrowserNavigateRequest) -> Result<(), String> {
-        let panel = self.panel_browser()?;
-        app_core::shared_mcp::block_on_result(panel.navigate(&request.session_id, &request.url))?;
-        Ok(())
-    }
-
-    pub fn browser_refresh(&self, request: BrowserSessionRequest) -> Result<(), String> {
-        let panel = self.panel_browser()?;
-        app_core::shared_mcp::block_on_result(panel.refresh(&request.session_id))?;
-        Ok(())
-    }
-
-    pub fn browser_close(&self, request: BrowserSessionRequest) -> Result<(), String> {
-        let panel = self.panel_browser()?;
-        app_core::shared_mcp::block_on_result(panel.close(&request.session_id))?;
-        Ok(())
     }
 
     pub fn browser_preflight(&self) -> Result<BrowserPreflight, String> {
@@ -1408,6 +1377,12 @@ fn activate_workspace_locked(
     };
 
     guard.active_workspace = Some(key.clone());
+    // The browser provider writes its artifacts relative to its working
+    // directory; the conversation resolves the same paths against the workspace
+    // root, so the two have to name the same place.
+    if let Some(root) = path.as_ref() {
+        app_core::shared_mcp::shared_mcp().set_browser_work_dir(root.clone());
+    }
     if let Some(remote) = remote {
         return app_core::build_dormant_remote_workspace_ui(remote);
     }

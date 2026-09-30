@@ -1,5 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent, BrowserInstallState, CapabilityStateEvent, BrowserViewTargetsEvent, BrowserViewMetaEvent, BrowserViewFrameEvent, BrowserViewStatusEvent } from "../types";
+import type { UiSnapshot, UiSnapshotPatch, SessionSummary, ChatMessage, ToolInvocation, RepositorySnapshot, TerminalOutputEvent, TerminalStatusEvent, TerminalExitEvent, RemoteOpenProgressEvent, ProxyRetryStatus, AutomationFiredEvent, BrowserInstallState, CapabilityStateEvent, BrowserPanelTabsEvent, BrowserPanelPageEvent, BrowserPanelUrlEvent, BrowserPanelNewWindowEvent } from "../types";
 
 export function onUiSnapshot(callback: (snapshot: UiSnapshot) => void): Promise<UnlistenFn> {
   return listen<UiSnapshot>("ui:snapshot", (event) => callback(event.payload));
@@ -62,36 +62,40 @@ export function onBrowserInstallProgress(
   );
 }
 
-/** Right-panel browser view (see docs/browser-view-subsystem.md): the live
- *  pages of the session's built-in browser. */
-export function onBrowserViewTargets(
-  callback: (event: BrowserViewTargetsEvent) => void,
+/** The right panel's own browser: its tab set changed (opened, closed, or the
+ *  active tab moved). */
+export function onBrowserPanelTabs(
+  callback: (event: BrowserPanelTabsEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<BrowserViewTargetsEvent>("browser_view:targets", (event) =>
+  return listen<BrowserPanelTabsEvent>("browser_panel:tabs", (event) =>
     callback(event.payload),
   );
 }
 
-export function onBrowserViewMeta(
-  callback: (event: BrowserViewMetaEvent) => void,
+/** A load started or finished in a panel tab. */
+export function onBrowserPanelPage(
+  callback: (event: BrowserPanelPageEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<BrowserViewMetaEvent>("browser_view:meta", (event) =>
+  return listen<BrowserPanelPageEvent>("browser_panel:page", (event) =>
     callback(event.payload),
   );
 }
 
-export function onBrowserViewFrame(
-  callback: (event: BrowserViewFrameEvent) => void,
+/** A panel tab arrived at a new URL — a redirect, or a click inside the page. */
+export function onBrowserPanelUrl(
+  callback: (event: BrowserPanelUrlEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<BrowserViewFrameEvent>("browser_view:frame", (event) =>
+  return listen<BrowserPanelUrlEvent>("browser_panel:url", (event) =>
     callback(event.payload),
   );
 }
 
-export function onBrowserViewStatus(
-  callback: (event: BrowserViewStatusEvent) => void,
+/** A page asked for a new window (`target="_blank"`, `window.open`). The panel
+ *  is the browser, so the request arrives here to be opened as a tab. */
+export function onBrowserPanelNewWindow(
+  callback: (event: BrowserPanelNewWindowEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<BrowserViewStatusEvent>("browser_view:status", (event) =>
+  return listen<BrowserPanelNewWindowEvent>("browser_panel:new_window", (event) =>
     callback(event.payload),
   );
 }

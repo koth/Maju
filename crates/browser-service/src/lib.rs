@@ -13,10 +13,10 @@ pub mod installer;
 pub mod managed;
 pub mod mcp;
 pub mod orphan;
+pub mod panel;
 pub mod provider;
 pub mod provision;
 pub mod proxy;
-pub mod view;
 pub mod win;
 
 use std::sync::Arc;
@@ -175,11 +175,28 @@ pub struct BrowserFactory {
     /// Kodex data root, used to resolve a persistent profile directory. Never
     /// the user's browser profile: persistent mode writes only under here.
     data_root: std::path::PathBuf,
+    /// Working directory the provider runs in, once the app knows which
+    /// workspace is visible.
+    ///
+    /// The provider writes its artifacts relative to its working directory: the
+    /// `.playwright-mcp/` page snapshots, and every screenshot the agent asks
+    /// for by bare filename. Inheriting Kodex's own directory means those land
+    /// next to the app — for an installed build, inside the installation
+    /// folder — while the conversation resolves the very same relative paths
+    /// against the workspace root. The result is a file that is both in the
+    /// wrong place and unreadable by the webview (the asset protocol is scoped
+    /// to Kodex-owned directories), which shows up as a broken image.
+    work_dir: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
     server_name: String,
     /// When false, acquisition resolves the launch description without
     /// starting a process. Used to exercise lifecycle behaviour without a
     /// browser on the machine.
     spawn_process: bool,
+    /// Where the app publishes the panel browser's endpoint. Read at
+    /// acquisition time rather than at construction: the panel comes up when
+    /// the app starts its browser, which can be either side of the first
+    /// session, and the decision has to follow the live state.
+    panel_endpoint: panel::PanelEndpoint,
 }
 
 impl BrowserFactory {
@@ -194,9 +211,36 @@ impl BrowserFactory {
             node_executable,
             package_root,
             data_root,
+            work_dir: Arc::new(std::sync::RwLock::new(None)),
             server_name: "playwright-mcp".to_string(),
             spawn_process: true,
+            panel_endpoint: panel::slot(),
         }
+    }
+
+    /// Read the panel browser's endpoint from a slot of the caller's choosing.
+    /// Tests use this so the decision can be exercised without touching the
+    /// process-wide state the running app publishes into.
+    pub fn with_panel_endpoint(mut self, endpoint: panel::PanelEndpoint) -> Self {
+        self.panel_endpoint = endpoint;
+        self
+    }
+
+    /// The panel browser's endpoint, when one is running.
+    pub fn panel_endpoint(&self) -> Option<String> {
+        panel::read(&self.panel_endpoint)
+    }
+
+    /// Point the provider at `dir` (the visible workspace root).
+    pub fn set_work_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        if let Ok(mut slot) = self.work_dir.write() {
+            *slot = Some(dir.into());
+        }
+    }
+
+    /// The directory the provider is started in, if the app has named one.
+    fn work_dir(&self) -> Option<std::path::PathBuf> {
+        self.work_dir.read().ok().and_then(|slot| slot.clone())
     }
 
     pub fn with_server_name(mut self, server_name: impl Into<String>) -> Self {
@@ -223,29 +267,38 @@ impl ResourceFactory for BrowserFactory {
         // The browser is resolved and started first, so the provider attaches
         // to a browser we already own instead of launching one of its own:
         // the tools and the browser view must be driving the same process.
-        let (managed, endpoint) = match self.settings.mode {
-            // Attach mode: the browser is the user's own process, and both
-            // clients connect to the endpoint they configured.
-            BrowserMode::Attach => (None, Some(self.settings.endpoint.trim().to_string())),
-            // Launch/persistent mode: find the Chromium to start, start it,
-            // and hand its websocket endpoint to the provider below.
-            BrowserMode::Launch | BrowserMode::Persistent if self.spawn_process => {
-                let executable = managed::resolve_browser_executable(
-                    &self.node_executable,
-                    &self.package_root,
-                    &self.settings,
-                )
-                .await
-                .map_err(BrowserError::Launch)?;
-                let browser = ManagedBrowser::launch(&self.data_root, &executable, &self.settings)
+        //
+        // The panel's browser, when one is running, is that browser whatever
+        // the settings say: it is the page the user is looking at, so nothing
+        // is started for it and nothing is taken from the user's own browser.
+        let panel = self.panel_endpoint();
+        let (managed, endpoint) = match panel {
+            Some(endpoint) => (None, Some(endpoint)),
+            None => match self.settings.mode {
+                // Attach mode: the browser is the user's own process, and both
+                // clients connect to the endpoint they configured.
+                BrowserMode::Attach => (None, Some(self.settings.endpoint.trim().to_string())),
+                // Launch/persistent mode: find the Chromium to start, start it,
+                // and hand its websocket endpoint to the provider below.
+                BrowserMode::Launch | BrowserMode::Persistent if self.spawn_process => {
+                    let executable = managed::resolve_browser_executable(
+                        &self.node_executable,
+                        &self.package_root,
+                        &self.settings,
+                    )
                     .await
                     .map_err(BrowserError::Launch)?;
-                let endpoint = browser.ws_endpoint().to_string();
-                (Some(browser), Some(endpoint))
-            }
-            // Nothing is started (tests): there is no browser, so there is no
-            // endpoint to record.
-            BrowserMode::Launch | BrowserMode::Persistent => (None, None),
+                    let browser =
+                        ManagedBrowser::launch(&self.data_root, &executable, &self.settings)
+                            .await
+                            .map_err(BrowserError::Launch)?;
+                    let endpoint = browser.ws_endpoint().to_string();
+                    (Some(browser), Some(endpoint))
+                }
+                // Nothing is started (tests): there is no browser, so there is
+                // no endpoint to record.
+                BrowserMode::Launch | BrowserMode::Persistent => (None, None),
+            },
         };
 
         // The launch description is resolved here rather than in the caller so
@@ -289,6 +342,12 @@ impl ResourceFactory for BrowserFactory {
             .kill_on_drop(true);
         let parent: std::collections::HashMap<String, String> = std::env::vars().collect();
         command.env_clear();
+        // Artifacts the provider writes by relative name belong to the visible
+        // workspace, not to whatever directory Kodex happens to run in.
+        if let Some(work_dir) = self.work_dir() {
+            let _ = std::fs::create_dir_all(&work_dir);
+            command.current_dir(&work_dir);
+        }
         // The owner marker makes this process identifiable to the orphan reaper
         // if Kodex is killed before the child is reaped normally.
         let mut env = orphan::provider_env(&parent);
@@ -366,6 +425,9 @@ impl ResourceFactory for BrowserFactory {
 pub struct BrowserService {
     registry: Arc<SessionResourceRegistry<BrowserFactory>>,
     settings: BrowserSettings,
+    /// Shared with the factory inside the registry, so the visible workspace can
+    /// be named after the service was built.
+    work_dir: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
 }
 
 impl BrowserService {
@@ -386,14 +448,17 @@ impl BrowserService {
     /// Build a service around a caller-supplied factory.
     pub fn from_factory(factory: BrowserFactory) -> Self {
         let settings = factory.settings.clone();
-        // Two modes cannot be shared between sessions. Attach holds the user's
-        // own browser, and a persistent profile is a single Chromium profile
-        // directory that only one process may open. Launch gives each session
-        // its own browser and needs no such limit.
-        let exclusive = matches!(
-            settings.mode,
-            workspace_model::BrowserMode::Attach | workspace_model::BrowserMode::Persistent
-        );
+        let work_dir = Arc::clone(&factory.work_dir);
+        // Three modes cannot be shared between sessions. Attach holds the
+        // user's own browser, a persistent profile is a single Chromium profile
+        // directory that only one process may open, and the panel browser is
+        // one browser with one visible set of tabs and one set of cookies.
+        // Launch gives each session its own browser and needs no such limit.
+        let exclusive = factory.panel_endpoint().is_some()
+            || matches!(
+                settings.mode,
+                workspace_model::BrowserMode::Attach | workspace_model::BrowserMode::Persistent
+            );
         let registry = if exclusive {
             SessionResourceRegistry::new(factory).exclusive()
         } else {
@@ -402,6 +467,14 @@ impl BrowserService {
         Self {
             registry: Arc::new(registry),
             settings,
+            work_dir,
+        }
+    }
+
+    /// Name the directory the provider runs in (the visible workspace root).
+    pub fn set_work_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        if let Ok(mut slot) = self.work_dir.write() {
+            *slot = Some(dir.into());
         }
     }
 
@@ -815,5 +888,121 @@ mod tests {
 
         assert_eq!(service.cdp_endpoint("session-1"), None);
         assert_eq!(service.cdp_endpoint("never-existed"), None);
+    }
+
+    /// A factory whose "browser" is the panel's, at `endpoint`, with a private
+    /// slot so no other test can see it.
+    fn panel_factory(
+        endpoint: Option<&str>,
+        settings_mode: workspace_model::BrowserMode,
+    ) -> BrowserFactory {
+        let slot: panel::PanelEndpoint = Arc::new(std::sync::RwLock::new(None));
+        if let Some(endpoint) = endpoint {
+            panel::write(&slot, endpoint);
+        }
+        BrowserFactory::new(
+            BrowserSettings {
+                enabled: true,
+                mode: settings_mode,
+                endpoint: "http://127.0.0.1:9222".to_string(),
+                allow_attach: true,
+                ..BrowserSettings::default()
+            },
+            std::path::PathBuf::from("/usr/bin/node"),
+            std::path::PathBuf::from("/pkg/@playwright/mcp"),
+            std::path::PathBuf::from("/data"),
+        )
+        .without_spawn()
+        .with_panel_endpoint(slot)
+    }
+
+    #[tokio::test]
+    async fn the_panel_browser_is_the_browser_the_tools_drive() {
+        // The user's settings name a persistent profile, and the panel is
+        // running anyway: the tools must drive the panel, because that is the
+        // page the user is looking at.
+        let service = BrowserService::from_factory(panel_factory(
+            Some("http://127.0.0.1:9333"),
+            workspace_model::BrowserMode::Persistent,
+        ));
+        let cancel = CancelToken::new();
+
+        let (endpoint, args) = service
+            .call("session-1", &cancel, |resource| async move {
+                Ok((
+                    resource.cdp_endpoint().map(str::to_string),
+                    resource.launch.args.clone(),
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:9333"));
+        assert_eq!(
+            service.cdp_endpoint("session-1").as_deref(),
+            Some("http://127.0.0.1:9333"),
+        );
+        let after = args.iter().position(|arg| arg == "--cdp-endpoint");
+        assert_eq!(
+            after
+                .and_then(|index| args.get(index + 1))
+                .map(String::as_str),
+            Some("http://127.0.0.1:9333"),
+            "the provider is pointed at the panel, got {args:?}",
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "--user-data-dir"),
+            "a browser we do not start is not given a profile, got {args:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panel_browser_is_held_by_one_session_at_a_time() {
+        // One browser, one visible set of tabs: a second session driving it
+        // would be two agents in one page.
+        let service = BrowserService::from_factory(panel_factory(
+            Some("http://127.0.0.1:9333"),
+            workspace_model::BrowserMode::Launch,
+        ));
+        let cancel = CancelToken::new();
+
+        service
+            .call("session-1", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(
+            service
+                .call("session-2", &cancel, |_| async { Ok(()) })
+                .await
+                .is_err(),
+        );
+
+        // Once the first session lets go, the panel browser is available again.
+        service.close_session("session-1").await.unwrap();
+        service
+            .call("session-2", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unpublished_panel_leaves_the_settings_in_charge() {
+        // Launch mode without a panel browser: the settings decide, and there
+        // is no endpoint to attach to.
+        let service =
+            BrowserService::from_factory(panel_factory(None, workspace_model::BrowserMode::Launch));
+        let cancel = CancelToken::new();
+
+        service
+            .call("session-1", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
+
+        assert_eq!(service.cdp_endpoint("session-1"), None);
+        // Two sessions, because launch mode is not exclusive.
+        service
+            .call("session-2", &cancel, |_| async { Ok(()) })
+            .await
+            .unwrap();
     }
 }

@@ -445,15 +445,21 @@ function highlightText(text: string, query: string): ReactNode {
 }
 
 function ExternalLink({ href, children }: { href: string; children: string }) {
+  const open = (event: { preventDefault: () => void }) => {
+    event.preventDefault();
+    // Right panel's built-in browser; a web link is never handed to the system
+    // browser.
+    void openLinkInPanelOrExternal(href);
+  };
   return (
     <a
       className="search-results-link"
       href={href}
-      onClick={(event) => {
-        event.preventDefault();
-        // Right panel's built-in browser first; falls back to the system
-        // browser when the capability is not available.
-        void openLinkInPanelOrExternal(href);
+      onClick={open}
+      onAuxClick={(event) => {
+        // A middle click takes the same route as the left button; left to the
+        // browser it is a new-window request the shell suppresses.
+        if (event.button === 1) open(event);
       }}
       rel="noreferrer"
       target="_blank"

@@ -173,6 +173,35 @@
   min-width: 0;
 }
 
+/* New browser tab: the way into the panel's browser for a URL the user types,
+   without waiting for a link to click. */
+.review-new-web-tab-btn {
+  display: grid;
+  flex: 0 0 20px;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-size-ui);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.review-new-web-tab-btn:hover {
+  background: var(--interactive-selected);
+  color: var(--text-strong);
+}
+
+.review-new-web-tab-btn:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--text-strong));
+  outline-offset: 1px;
+}
+
 .review-refresh-btn,
 .review-panel-toggle-btn {
   display: grid;
@@ -263,7 +292,7 @@
   background: transparent;
 }
 
-/* Browser tab: the live view of the session's built-in browser. */
+/* Browser tab: the panel's own browser, a native webview per tab. */
 .review-tab-panel-web {
   position: relative;
   isolation: isolate;
@@ -272,7 +301,7 @@
   background: var(--app-bg);
 }
 
-.review-tab-panel-web .browser-live {
+.review-tab-panel-web .embedded-browser {
   background: transparent;
 }
 

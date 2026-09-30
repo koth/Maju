@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import type {
   UiSnapshot,
   UiSnapshotPatch,
@@ -61,13 +60,20 @@ import type {
   BrowserInstallState,
   BrowserPreflight,
   BrowserSettings,
-  BrowserViewInputEvent,
-  BrowserViewPageReport,
-  BrowserViewStatusReport,
+  BrowserPanelDirection,
+  BrowserPanelState,
+  BrowserPanelTab,
 } from "../types";
 
-export async function openExternalUrl(url: string): Promise<void> {
-  await shellOpen(url);
+/**
+ * Hand a URL to the operating system (the user's browser or mail handler).
+ *
+ * `source` names the caller so the backend log pins the exact click: web links
+ * belong in the right-panel browser, so an external window is a decision that
+ * should always be traceable.
+ */
+export async function openExternalUrl(url: string, source: string): Promise<void> {
+  await invoke("open_external_url", { url, source });
 }
 
 export async function startupPerfMark(
@@ -1133,25 +1139,6 @@ export async function sessionListBackgroundJobs(): Promise<SessionJobRecord[]> {
   return invoke<SessionJobRecord[]>("session_list_background_jobs");
 }
 
-/** Navigate a session's browser to a URL. The agent is not involved; this is
- *  the user driving the same browser the agent sees. */
-export async function browserNavigate(
-  sessionId: string,
-  url: string,
-): Promise<void> {
-  return invoke<void>("browser_navigate", { request: { session_id: sessionId, url } });
-}
-
-/** Re-capture the current page for the panel. */
-export async function browserRefresh(sessionId: string): Promise<void> {
-  return invoke<void>("browser_refresh", { request: { session_id: sessionId } });
-}
-
-/** Dispose a session's browser. A later tool call starts a fresh one. */
-export async function browserClose(sessionId: string): Promise<void> {
-  return invoke<void>("browser_close", { request: { session_id: sessionId } });
-}
-
 /** Run browser preflight and return the result for the settings pane. */
 export async function browserPreflight(): Promise<BrowserPreflight> {
   return invoke<BrowserPreflight>("browser_preflight");
@@ -1186,54 +1173,61 @@ export async function browserRefreshPreflight(): Promise<BrowserPreflight> {
   return invoke<BrowserPreflight>("browser_refresh_preflight");
 }
 
-/* Right-panel browser view (docs/browser-view-subsystem.md): live pages of the
- * session's built-in browser — the same one the browser-use tools drive. */
+/* The right panel's own browser (docs/browser-view-subsystem.md): a native
+ * WebView2 webview per tab, in the app window, in its own profile. Rendering,
+ * scrolling and the input method are the platform's own, and the agent drives
+ * the very same browser through the DevTools endpoint reported here. */
 
-export async function browserViewAttach(
-  sessionId: string,
-): Promise<BrowserViewStatusReport> {
-  return invoke<BrowserViewStatusReport>("browser_view_attach", { sessionId });
+/** The panel's tabs, the active one, and the agent's endpoint for this run. */
+export async function browserPanelState(): Promise<BrowserPanelState> {
+  return invoke<BrowserPanelState>("browser_panel_state");
 }
 
-export async function browserViewDetach(sessionId: string): Promise<void> {
-  return invoke<void>("browser_view_detach", { sessionId });
+/** Open a URL as a new panel tab. */
+export async function browserPanelOpen(url: string): Promise<BrowserPanelTab> {
+  return invoke<BrowserPanelTab>("browser_panel_open", { url });
 }
 
-export async function browserViewFocus(
-  sessionId: string,
-  targetId: string,
-): Promise<void> {
-  return invoke<void>("browser_view_focus", { sessionId, targetId });
+export async function browserPanelClose(tabId: string): Promise<void> {
+  return invoke<void>("browser_panel_close", { tabId });
 }
 
-/** Open a link as a new page in the built-in browser. */
-export async function browserViewOpenPage(
-  sessionId: string,
+/** Show one tab (and the browser with it), hiding the others. */
+export async function browserPanelActivate(tabId: string): Promise<void> {
+  return invoke<void>("browser_panel_activate", { tabId });
+}
+
+/** Hide the browser without closing anything: the panel is on another tab, and
+ *  a native webview paints above the app's own UI. */
+export async function browserPanelHide(): Promise<void> {
+  return invoke<void>("browser_panel_hide");
+}
+
+export async function browserPanelNavigate(
+  tabId: string,
   url: string,
-): Promise<BrowserViewPageReport> {
-  return invoke<BrowserViewPageReport>("browser_view_open_page", { sessionId, url });
-}
-
-export async function browserViewClosePage(
-  sessionId: string,
-  targetId: string,
 ): Promise<void> {
-  return invoke<void>("browser_view_close_page", { sessionId, targetId });
+  return invoke<void>("browser_panel_navigate", { tabId, url });
 }
 
-export async function browserViewSetSize(
-  sessionId: string,
-  targetId: string,
+export async function browserPanelReload(tabId: string): Promise<void> {
+  return invoke<void>("browser_panel_reload", { tabId });
+}
+
+export async function browserPanelHistory(
+  tabId: string,
+  direction: BrowserPanelDirection,
+): Promise<void> {
+  return invoke<void>("browser_panel_history", { tabId, direction });
+}
+
+/** Where the panel's slot is on screen, in logical pixels — the hole in the
+ *  app's UI the native webview is moved onto. */
+export async function browserPanelBounds(
+  x: number,
+  y: number,
   width: number,
   height: number,
 ): Promise<void> {
-  return invoke<void>("browser_view_set_size", { sessionId, targetId, width, height });
-}
-
-export async function browserViewInput(
-  sessionId: string,
-  targetId: string,
-  event: BrowserViewInputEvent,
-): Promise<void> {
-  return invoke<void>("browser_view_input", { sessionId, targetId, event });
+  return invoke<void>("browser_panel_bounds", { x, y, width, height });
 }

@@ -13,7 +13,7 @@ import {
   resolvePierreDiffHorizontalScrollTarget,
 } from "../editor/pierre-diff";
 import { disposeModel, isModelDirty } from "../editor/monaco-model-registry";
-import { BrowserLiveView } from "../browser/BrowserLiveView";
+import { EmbeddedBrowser } from "../browser/EmbeddedBrowser";
 import { FileTree } from "../filetree/FileTree";
 import { getFileIcon } from "../filetree/file-icons";
 import { appConfirm, rejectPatchConfirmRequest, trackConfirmRequest } from "../../lib/confirm";
@@ -190,6 +190,10 @@ interface Props {
   hydrated: boolean;
   appTheme?: AppTheme;
   panelExpanded?: boolean;
+  /** Anything that can move or collapse the panel, in one value. The browser
+   *  page is a native webview placed by the backend, so it is re-measured
+   *  whenever this changes — see `EmbeddedBrowser`. */
+  layoutSignal?: string;
   onRefresh: () => void | Promise<void>;
   onFileSelect: (path: string, changeSetId: string) => void;
   onFileOpen: (path: string) => void;
@@ -214,6 +218,8 @@ interface Props {
   /** Close one browser page (web tab close). The tab list is reconciled from
    *  the backend's page targets, so the caller owns the removal. */
   onWebTabClose?: (targetId: string) => void;
+  /** Open the panel's browser on an empty page, for a URL the user types. */
+  onWebTabOpen?: () => void;
   focusRequest?: { changeSetId: string; token: number; path?: string } | null;
   preferredChangeSet?: ReviewPreferredChangeSet | null;
   onPreferredChangeSetChange?: Dispatch<SetStateAction<ReviewPreferredChangeSet | null>>;
@@ -226,6 +232,7 @@ export function ReviewPanel({
   hydrated,
   appTheme = "graphite",
   panelExpanded = false,
+  layoutSignal,
   onRefresh,
   onFileOpen,
   onAddComposerReference,
@@ -237,6 +244,7 @@ export function ReviewPanel({
   onActiveTabChange,
   onOpenTabsChange,
   onWebTabClose,
+  onWebTabOpen,
   focusRequest,
   preferredChangeSet: controlledPreferredChangeSet,
   onPreferredChangeSetChange,
@@ -748,8 +756,18 @@ export function ReviewPanel({
             </div>
           );
         })}
-        <div className="review-tabs-spacer" />
-        {activeBaseTab !== null && activeBaseTab !== "Review" && (
+        {onWebTabOpen && (
+          <button
+            type="button"
+            className="review-new-web-tab-btn"
+            onClick={onWebTabOpen}
+            title="新建浏览器标签页"
+            aria-label="新建浏览器标签页"
+          >
+            +
+          </button>
+        )}
+        <div className="review-tabs-spacer" />        {activeBaseTab !== null && activeBaseTab !== "Review" && (
           <button
             type="button"
             className="review-refresh-btn"
@@ -897,11 +915,11 @@ export function ReviewPanel({
       )}
       {activeWebTab && (
         <div className="review-tab-panel review-tab-panel-web">
-          <BrowserLiveView
-            sessionId={snapshot.session.id}
-            targetId={activeWebTab.id}
+          <EmbeddedBrowser
+            tabId={activeWebTab.id}
             url={activeWebTab.url}
             title={activeWebTab.title}
+            layoutSignal={layoutSignal}
           />
         </div>
       )}

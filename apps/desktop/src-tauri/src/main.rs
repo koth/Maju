@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod automation_scheduler;
+mod browser_panel;
 mod codebuddy_proxy;
 mod commands;
 mod events;
@@ -74,7 +75,7 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
-        .manage(commands::browser_view::BrowserViewHost::default())
+        .manage(browser_panel::BrowserPanelHost::default())
         .setup({
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
@@ -119,6 +120,12 @@ fn main() {
                 // fires due automations as background session runs and emits
                 // the `automation:fired` reminder events.
                 automation_scheduler::start(app.handle().clone());
+                // Start the panel's browser before anyone needs it, when the
+                // agent may use browser tools: the tools attach to that browser,
+                // and the user's first link click should not wait for WebView2
+                // to start. Not on this thread — creating a webview runs on the
+                // main thread, which only starts turning after setup returns.
+                warm_panel_browser(app.handle().clone());
                 // If the CodeBuddy provider is configured and selected, eagerly
                 // start the managed proxy at app launch.
                 // Spawn the codebuddy proxy boot in the background so the
@@ -282,9 +289,6 @@ fn main() {
             commands::workspace::workspace_set_active,
             commands::workspace::workspace_get_recent,
             commands::workspace::workspace_remove_recent,
-            commands::browser::browser_navigate,
-            commands::browser::browser_refresh,
-            commands::browser::browser_close,
             commands::browser::browser_preflight,
             commands::browser_install::browser_install,
             commands::browser_install::browser_install_state,
@@ -296,13 +300,16 @@ fn main() {
             commands::terminal::terminal_terminate,
             commands::terminal::terminal_restart,
             commands::terminal::terminal_list,
-            commands::browser_view::browser_view_attach,
-            commands::browser_view::browser_view_detach,
-            commands::browser_view::browser_view_focus,
-            commands::browser_view::browser_view_open_page,
-            commands::browser_view::browser_view_close_page,
-            commands::browser_view::browser_view_set_size,
-            commands::browser_view::browser_view_input,
+            commands::browser::open_external_url,
+            browser_panel::browser_panel_state,
+            browser_panel::browser_panel_open,
+            browser_panel::browser_panel_close,
+            browser_panel::browser_panel_activate,
+            browser_panel::browser_panel_hide,
+            browser_panel::browser_panel_navigate,
+            browser_panel::browser_panel_reload,
+            browser_panel::browser_panel_history,
+            browser_panel::browser_panel_bounds,
             commands::remote_control::remote_control_set_enabled,
             commands::remote_control::remote_control_pairing_qr,
             commands::remote_control::remote_control_status,
@@ -325,6 +332,40 @@ fn main() {
                 }
             }
         });
+}
+
+/// Bring the panel's browser up at launch, when the agent may use browser tools.
+///
+/// The agent's browser tools drive the panel's own browser, so it has to exist
+/// before the first tool call — and a user's first link click should find it
+/// already running rather than wait for WebView2 to start. The work happens on
+/// its own thread because creating a webview is dispatched to the main thread,
+/// which is busy running this setup closure.
+fn warm_panel_browser(app: tauri::AppHandle) {
+    let paths = match app_core::AppPaths::resolve() {
+        Ok(paths) => paths,
+        Err(error) => {
+            app_core::startup_perf::mark("desktop/panel_warm_skipped", &error.to_string());
+            return;
+        }
+    };
+    let settings = app_core::settings::load_app_settings(&paths);
+    if !app_core::panel_browser::warm_required(&settings.browser) {
+        app_core::startup_perf::mark("desktop/panel_warm_disabled", "");
+        return;
+    }
+    std::thread::spawn(move || {
+        let host = app.state::<browser_panel::BrowserPanelHost>();
+        match tauri::async_runtime::block_on(browser_panel::warm(&app, &host)) {
+            Ok(endpoint) => app_core::startup_perf::mark(
+                "desktop/panel_warm_ready",
+                format!("endpoint={}", endpoint.unwrap_or_default()),
+            ),
+            // Not fatal: the panel starts its browser on the first tab and the
+            // agent gets a browser of its own until then.
+            Err(error) => app_core::startup_perf::mark("desktop/panel_warm_failed", &error),
+        }
+    });
 }
 
 /// If the CodeBuddy provider is configured and selected (for Codex or Claude),

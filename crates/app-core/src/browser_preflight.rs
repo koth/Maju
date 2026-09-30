@@ -238,6 +238,25 @@ pub fn check_browser(
     settings: &BrowserSettings,
     env: &dyn PreflightEnvironment,
 ) -> BrowserPreflight {
+    check_browser_with(settings, env, crate::panel_browser::endpoint().as_deref())
+}
+
+/// [`check_browser`], with the panel browser named rather than looked up.
+///
+/// `panel_endpoint` is the DevTools endpoint of the browser the right panel is
+/// showing, when one is running. It decides one thing and one thing only: which
+/// browser the tools drive. Playwright attaches to that browser over CDP instead
+/// of launching one, so no Chromium has to be on the machine at all — while Node
+/// and the pinned provider package are still required, because the tools still
+/// run as a provider process.
+///
+/// Split from [`check_browser`] so the decision can be tested against a named
+/// endpoint instead of whatever the running app has published.
+pub fn check_browser_with(
+    settings: &BrowserSettings,
+    env: &dyn PreflightEnvironment,
+    panel_endpoint: Option<&str>,
+) -> BrowserPreflight {
     let provider_version = settings.provider_version.clone();
 
     if let Err(detail) = settings.validate() {
@@ -287,6 +306,19 @@ pub fn check_browser(
                 ),
                 "Kodex 可以为你一键安装，也可以自行运行 `npm install`。".to_string(),
             ),
+            node_executable: Some(node),
+            provider_version,
+        };
+    }
+
+    // The panel's browser is the one these tools drive, so there is nothing to
+    // launch and nothing to install — not even the executable these settings
+    // name, which is inert while the panel is the browser. This is the only
+    // requirement a running panel removes; Node and the provider package above
+    // are still what runs the tools.
+    if panel_endpoint.is_some() {
+        return BrowserPreflight {
+            state: PreflightState::Ready,
             node_executable: Some(node),
             provider_version,
         };
@@ -829,6 +861,77 @@ mod tests {
 
         let preflight = check_browser(&settings, &FakeEnv::new().with_node());
         assert!(matches!(preflight.state, PreflightState::Invalid { .. }));
+    }
+
+    #[test]
+    fn a_running_panel_browser_needs_no_chromium_of_its_own() {
+        let settings = BrowserSettings {
+            enabled: true,
+            ..BrowserSettings::default()
+        };
+        // Node and the provider package, and nothing else: no executable path,
+        // no Chromium in the provider's cache.
+        let env = FakeEnv::new().with_node();
+
+        let without = check_browser_with(&settings, &env, None);
+        assert!(!without.state.is_ready(), "got {:?}", without.state);
+
+        let with = check_browser_with(&settings, &env, Some("http://127.0.0.1:9333"));
+        assert!(with.state.is_ready(), "got {:?}", with.state);
+        // The provider still runs as a process, so it still needs its runtime:
+        // answering Ready without one would hand the session tools that cannot
+        // start.
+        assert!(with.node_executable.is_some());
+    }
+
+    #[test]
+    fn a_panel_browser_does_not_excuse_a_missing_provider() {
+        let settings = BrowserSettings {
+            enabled: true,
+            ..BrowserSettings::default()
+        };
+
+        let preflight = check_browser_with(
+            &settings,
+            &FakeEnv::new().with_node().without_provider(),
+            Some("http://127.0.0.1:9333"),
+        );
+
+        assert!(!preflight.state.is_ready(), "got {:?}", preflight.state);
+    }
+
+    #[test]
+    fn a_panel_browser_does_not_excuse_a_missing_node() {
+        // Without a Node runtime the provider cannot start at all, whatever
+        // browser the tools would have driven.
+        let settings = BrowserSettings {
+            enabled: true,
+            ..BrowserSettings::default()
+        };
+
+        let preflight =
+            check_browser_with(&settings, &FakeEnv::new(), Some("http://127.0.0.1:9333"));
+
+        assert!(!preflight.state.is_ready(), "got {:?}", preflight.state);
+    }
+
+    #[test]
+    fn a_panel_browser_makes_a_stale_executable_path_irrelevant() {
+        // Nothing is launched while the panel is the browser, so a path that
+        // points nowhere must not withhold the tools.
+        let settings = BrowserSettings {
+            enabled: true,
+            executable_path: "/nope/chromium".to_string(),
+            ..BrowserSettings::default()
+        };
+
+        let preflight = check_browser_with(
+            &settings,
+            &FakeEnv::new().with_node(),
+            Some("http://127.0.0.1:9333"),
+        );
+
+        assert!(preflight.state.is_ready(), "got {:?}", preflight.state);
     }
 
     #[test]

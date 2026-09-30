@@ -479,73 +479,59 @@ export interface TerminalExitEvent {
   exit_code: number | null;
 }
 
-/** One page in the session's built-in browser (a CDP page target). The right
- *  panel's browser tabs mirror these 1:1. */
-export interface BrowserViewTarget {
-  target_id: string;
+/**
+ * One tab of the right panel's own browser — a native WebView2 webview in the
+ * app window, not a page of the session's headless Chromium.
+ *
+ * `tab_id` is the webview's label: the UI names a tab, the backend finds the
+ * page. The browser itself is shared by the whole app (one profile, one
+ * DevTools port), so tabs outlive a session switch. See
+ * `docs/browser-view-subsystem.md`.
+ */
+export interface BrowserPanelTab {
+  tab_id: string;
   url: string;
   title: string;
-  type: string;
 }
 
-export interface BrowserViewTargetsEvent {
-  session_id: string;
-  targets: BrowserViewTarget[];
+/** The panel's tabs, which one is showing, and the DevTools endpoint the
+ *  agent's browser tools are pointed at (`null` while the panel browser has not
+ *  answered DevTools, in which case the tools are still on their own browser). */
+export interface BrowserPanelState {
+  tabs: BrowserPanelTab[];
+  active: string | null;
+  endpoint: string | null;
 }
 
-/** Incremental navigation state for one page. */
-export interface BrowserViewMetaEvent {
-  session_id: string;
-  target_id: string;
-  url: string | null;
-  title: string | null;
+export interface BrowserPanelTabsEvent {
+  tabs: BrowserPanelTab[];
+  active: string | null;
 }
 
-/** A screencast frame (base64 JPEG) of one page. */
-export interface BrowserViewFrameEvent {
-  session_id: string;
-  target_id: string;
-  frame: string;
-  seq: number;
+/** A load starting or finishing in one panel tab. */
+export interface BrowserPanelPageEvent {
+  tab_id: string;
+  url: string;
+  event: "started" | "finished";
 }
 
-export interface BrowserViewStatusEvent {
-  session_id: string;
-  status: "connecting" | "live" | "closed" | "failed";
-  detail: string | null;
+/** Where a panel tab ended up — a redirect, or a click inside the page. */
+export interface BrowserPanelUrlEvent {
+  tab_id: string;
+  url: string;
 }
 
-export interface BrowserViewStatusReport {
-  session_id: string;
-  status: string;
+/** A page in the panel asked for a new window. The panel is the browser, so the
+ *  request becomes a new tab instead of a second window. */
+export interface BrowserPanelNewWindowEvent {
+  /** The tab the request came from, or the panel's spare page when it has no tab
+   *  yet — the agent's first navigation arrives that way. */
+  tab_id: string;
+  url: string;
 }
 
-export interface BrowserViewPageReport {
-  target_id: string;
-}
-
-/** User input forwarded to the page. Mirrors the Rust `ViewInputEvent`. */
-export type BrowserViewInputEvent =
-  | {
-      kind: "mouse";
-      type: string;
-      x: number;
-      y: number;
-      button: string;
-      click_count: number;
-      delta_x: number;
-      delta_y: number;
-      modifiers: number;
-    }
-  | {
-      kind: "key";
-      type: string;
-      key: string;
-      code: string;
-      text: string;
-      modifiers: number;
-    }
-  | { kind: "text"; text: string };
+/** Which way through a page's history the panel's back/forward buttons go. */
+export type BrowserPanelDirection = "back" | "forward";
 
 export interface PermissionOption {
   id: string;

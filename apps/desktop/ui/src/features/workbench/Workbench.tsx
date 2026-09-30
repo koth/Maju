@@ -69,7 +69,7 @@ import { useRightPanelState } from "./useRightPanelState";
 import { useTerminalDockState } from "./useTerminalDockState";
 import { useAgentPlanOverlap, resolveAgentPlanDockLayout, type AgentPlanOverlapTier } from "./useAgentPlanOverlap";
 import { useSessionAgentPlan } from "./useSessionAgentPlan";
-import { useBrowserViewTabs } from "../browser/useBrowserViewTabs";
+import { usePanelBrowserTabs } from "../browser/usePanelBrowserTabs";
 import {
   latestReviewableTurnChangeSet,
   reviewableTurnChangeSetSignature,
@@ -399,14 +399,25 @@ export function Workbench() {
     INITIAL_REVIEW_PANEL_ACTIVE_TAB,
   );
   const [reviewPanelOpenTabs, setReviewPanelOpenTabs] = useState<ReviewPanelOpenTab[]>([]);
-  // Right-panel browser tabs: pages of the session's built-in browser (the one
-  // the browser-use tools drive), mirrored into the review tab strip. Link
-  // clicks anywhere route here through `registerPanelOpener`.
-  const { closePage: closeBrowserPage } = useBrowserViewTabs({
-    sessionId: snapshot?.session.id ?? "",
+  // Right-panel browser tabs: the panel's own browser (a native webview per
+  // tab, the same browser the agent's tools drive), mirrored into the review
+  // tab strip. Link clicks anywhere route here through `registerPanelOpener`.
+  const { openPage: openBrowserPage, closePage: closeBrowserPage } = usePanelBrowserTabs({
     setOpenTabs: setReviewPanelOpenTabs,
     setActiveTab: setReviewPanelActiveTab,
   });
+  // A web tab is the one tab the panel can gain without the user touching the
+  // panel: a link click in chat, or the agent's browser starting to browse. The
+  // panel therefore has to show itself, or the new tab appears nowhere. Only a
+  // new page pulls it open — collapsing the panel while a page is up stays
+  // collapsed, because this effect does not re-run for the same target.
+  const activeBrowserTargetId =
+    reviewPanelActiveTab.kind === "web" ? reviewPanelActiveTab.id : null;
+  useEffect(() => {
+    if (!activeBrowserTargetId) return;
+    setRightPanelCollapsed(false);
+    setReviewPanelExpanded(false);
+  }, [activeBrowserTargetId, setRightPanelCollapsed]);
   const [reviewPreferredChangeSet, setReviewPreferredChangeSet] =
     useState<ReviewPreferredChangeSet | null>(null);
   const {
@@ -1341,6 +1352,10 @@ export function Workbench() {
     reviewPanelExpanded ? "is-review-expanded" : "",
     reviewPanelExpanded && expandedReviewSideTreeVisible ? "has-expanded-review-side-tree" : "",
   ].filter(Boolean).join(" ");
+  // Everything that can move or collapse the right panel, in one value. The
+  // native webviews the panel hosts are positioned by the backend, which cannot
+  // see any of this: they are re-measured whenever it changes.
+  const rightPanelLayoutSignal = `${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`;
   const reviewPanel = remoteHydrating ? (
     <RemoteWorkspaceHydrationPanel />
   ) : (
@@ -1350,6 +1365,7 @@ export function Workbench() {
       hydrated={gitHydrated}
       appTheme={appTheme}
       panelExpanded={reviewPanelExpanded}
+      layoutSignal={rightPanelLayoutSignal}
       onRefresh={handleRefreshGit}
       onFileSelect={(path, changeSetId) =>
         handleOpenDiffTab(path, "git", undefined, changeSetId)
@@ -1364,6 +1380,9 @@ export function Workbench() {
       onActiveTabChange={setReviewPanelActiveTab}
       onOpenTabsChange={setReviewPanelOpenTabs}
       onWebTabClose={closeBrowserPage}
+      // A browser tab the user can type a URL into: a link is not the only way
+      // into the panel's browser.
+      onWebTabOpen={() => void openBrowserPage("about:blank")}
       focusRequest={reviewFocusRequest}
       preferredChangeSet={reviewPreferredChangeSet}
       onPreferredChangeSetChange={setReviewPreferredChangeSet}
@@ -1651,7 +1670,7 @@ export function Workbench() {
               appTheme={appTheme}
               visible={terminalDockActive}
               height={terminalDockHeight}
-              layoutSignal={`${leftSidebarWidth}:${sidebarCollapsed}:${rightPanelWidth}:${rightPanelCollapsed}:${reviewPanelExpanded}`}
+              layoutSignal={rightPanelLayoutSignal}
               onHeightChange={handleTerminalDockHeightChange}
               onHide={handleHideTerminalDock}
             />

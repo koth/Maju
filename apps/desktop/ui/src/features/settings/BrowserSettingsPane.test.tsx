@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import {
   BrowserSettingsPane,
+  browserModeFromValue,
   preflightBlocksEnable,
   wantsInstallAction,
 } from "./BrowserSettingsPane";
@@ -80,6 +81,19 @@ describe("preflightBlocksEnable", () => {
   });
 });
 
+describe("browserModeFromValue", () => {
+  it("keeps every mode the picker offers", () => {
+    expect(browserModeFromValue("launch")).toBe("launch");
+    expect(browserModeFromValue("attach")).toBe("attach");
+    expect(browserModeFromValue("persistent")).toBe("persistent");
+  });
+
+  it("falls back to launch for an unknown value", () => {
+    expect(browserModeFromValue("")).toBe("launch");
+    expect(browserModeFromValue("nonsense")).toBe("launch");
+  });
+});
+
 describe("BrowserSettingsPane", () => {
   beforeEach(() => {
     vi.mocked(browserPreflight).mockResolvedValue(ready);
@@ -133,6 +147,45 @@ describe("BrowserSettingsPane", () => {
     await waitFor(() => {
       expect(screen.queryByText(/npx playwright install/)).toBeNull();
     });
+  });
+
+  it("keeps 跨会话保留登录状态 selected and offers the profile field", () => {
+    // The picker used to map every value that was not "attach" back to
+    // "launch", so this option could be clicked but never stayed selected.
+    render(
+      <BrowserSettingsPane
+        onSaved={vi.fn()}
+        preflight={ready}
+        settings={settings()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "persistent" },
+    });
+
+    expect(screen.getByRole("combobox")).toHaveProperty("value", "persistent");
+    expect(screen.getByText(/配置档名/)).toBeTruthy();
+    expect(screen.queryByLabelText(/我理解这会让 agent 操作我已登录的浏览器/)).toBeNull();
+  });
+
+  it("switches to 接管我已经在运行的浏览器 and asks for consent", () => {
+    render(
+      <BrowserSettingsPane
+        onSaved={vi.fn()}
+        preflight={ready}
+        settings={settings()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "attach" },
+    });
+
+    expect(screen.getByRole("combobox")).toHaveProperty("value", "attach");
+    expect(
+      screen.getByLabelText(/我理解这会让 agent 操作我已登录的浏览器/),
+    ).toBeTruthy();
   });
 
   it("saves the edited settings and reports the snapshot back", async () => {

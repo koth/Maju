@@ -101,9 +101,42 @@ pub struct SharedMcpServers {
     web_tools: Mutex<Option<Arc<WebToolsMcpHandle>>>,
     image: Mutex<Option<Arc<ImageMcpHandle>>>,
     browser: Mutex<Option<SharedBrowserServer>>,
+    /// The visible workspace root the browser provider should run in.
+    ///
+    /// Remembered even while the browser server does not exist yet, so the order
+    /// of "the workspace connects" and "the first browser use" cannot decide
+    /// whether it is applied.
+    browser_work_dir: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl SharedMcpServers {
+    /// Point the browser provider's artifacts at the visible workspace root.
+    ///
+    /// The provider writes `.playwright-mcp/` snapshots and any screenshot the
+    /// agent asks for by bare filename relative to its working directory, and
+    /// the conversation resolves those same relative paths against the
+    /// workspace root. Without this the artifacts land next to the app instead
+    /// — for an installed build, inside the installation folder — where the
+    /// webview cannot read them.
+    pub fn set_browser_work_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        let dir = dir.into();
+        if let Ok(mut slot) = self.browser_work_dir.lock() {
+            *slot = Some(dir.clone());
+        }
+        if let Ok(slot) = self.browser.lock()
+            && let Some(existing) = slot.as_ref()
+        {
+            existing.service.set_work_dir(dir);
+        }
+    }
+
+    /// The directory remembered for the provider, if any.
+    fn browser_work_dir(&self) -> Option<std::path::PathBuf> {
+        self.browser_work_dir
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
     /// The shared web-tools server, started on first use.
     pub fn web_tools(&self) -> anyhow::Result<Arc<WebToolsMcpHandle>> {
         let mut slot = self
@@ -222,6 +255,11 @@ impl SharedMcpServers {
         let service = Arc::new(crate::browser_server::BrowserServerService::with_adapter(
             adapter.clone(),
         ));
+        // A workspace named before this server existed still decides where the
+        // provider writes its artifacts.
+        if let Some(dir) = self.browser_work_dir() {
+            service.set_work_dir(dir);
+        }
         *slot = Some(SharedBrowserServer {
             handle: handle.clone(),
             adapter: adapter.clone(),

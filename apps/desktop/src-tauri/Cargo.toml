@@ -1,6 +1,6 @@
 [package]
 name = "maju-desktop"
-version = "0.1.9"
+version = "0.1.13"
 edition = "2024"
 
 [dependencies]
@@ -15,7 +15,7 @@ git-service = { path = "../../../crates/git-service" }
 serde.workspace = true
 serde_json.workspace = true
 session-store = { path = "../../../crates/session-store" }
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 git2.workspace = true
 libc.workspace = true
 terminal-service = { path = "../../../crates/terminal-service" }

@@ -1,7 +1,6 @@
 pub mod automation;
 pub mod browser;
 pub mod browser_install;
-pub mod browser_view;
 pub mod editor;
 pub mod fs;
 pub mod git;

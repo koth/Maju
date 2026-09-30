@@ -9,10 +9,31 @@ import {
 import type {
   AgentSettingsSnapshot,
   BrowserInstallState,
+  BrowserMode,
   BrowserPreflight,
   BrowserSettings,
 } from "../../types";
 import "./BrowserSettingsPane.css";
+
+/**
+ * The browser modes the picker offers, and how each reads.
+ *
+ * One list for the markup *and* the change handler, because keeping them apart
+ * is how "persistent" became unselectable: the select offered three options
+ * while the handler mapped everything that was not "attach" back to "launch",
+ * so picking 跨会话保留登录状态 silently snapped back to the first row.
+ */
+const BROWSER_MODE_LABEL: Record<BrowserMode, string> = {
+  launch: "每个会话开一个全新的浏览器",
+  attach: "接管我已经在运行的浏览器",
+  persistent: "跨会话保留登录状态",
+};
+
+/** The mode a select value means; an unknown value falls back to `launch`. */
+export function browserModeFromValue(value: string): BrowserMode {
+  const known = Object.keys(BROWSER_MODE_LABEL) as BrowserMode[];
+  return known.find((mode) => mode === value) ?? "launch";
+}
 
 export interface BrowserSettingsPaneProps {
   settings: BrowserSettings;
@@ -207,14 +228,14 @@ export function BrowserSettingsPane({
       <label className="browser-settings__row">
         <span>浏览器</span>
         <select
-          onChange={(event) =>
-            update({ mode: event.target.value === "attach" ? "attach" : "launch" })
-          }
+          onChange={(event) => update({ mode: browserModeFromValue(event.target.value) })}
           value={draft.mode}
         >
-          <option value="launch">每个会话开一个全新的浏览器</option>
-          <option value="attach">接管我已经在运行的浏览器</option>
-          <option value="persistent">跨会话保留登录状态</option>
+          {(Object.keys(BROWSER_MODE_LABEL) as BrowserMode[]).map((mode) => (
+            <option key={mode} value={mode}>
+              {BROWSER_MODE_LABEL[mode]}
+            </option>
+          ))}
         </select>
       </label>
 

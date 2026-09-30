@@ -2263,19 +2263,6 @@ fn default_browser_preflight() -> BrowserPreflight {
     }
 }
 
-/// Target a session's browser from the panel.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BrowserSessionRequest {
-    pub session_id: String,
-}
-
-/// Navigate a session's browser to a URL.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BrowserNavigateRequest {
-    pub session_id: String,
-    pub url: String,
-}
-
 /// Browser preflight result, surfaced in settings and in the panel's
 /// unavailable state.
 ///

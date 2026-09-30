@@ -49,6 +49,13 @@ pub const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 /// that carry the full package rather than its core.
 ///
 /// Kept as a pure function so the request is testable without Node.
+///
+/// The script travels as a single `node -e` argument, so it is deliberately
+/// **one line**: `node` on PATH is often a shim (Volta's `node.exe` re-launches
+/// the real binary), and a shim that rebuilds the command line truncates an
+/// argument at its first newline. A multi-line script then runs only its first
+/// statement — `const root = …;` — and exits 0 with empty output, which reads as
+/// "Node printed no path" and takes the whole browser provider down with it.
 pub fn resolve_script(package_root: &Path) -> String {
     let node_modules = package_root.join("node_modules");
     // npm hoists a dependency of `<prefix>/node_modules/<pkg>` to
@@ -70,26 +77,23 @@ pub fn resolve_script(package_root: &Path) -> String {
     ];
 
     let root = package_root.to_string_lossy().into_owned();
-    format!(
-        "const root = {root};\n\
-         const dirs = {dirs};\n\
-         for (const dir of dirs) {{ try {{ module.paths.unshift(dir); }} catch (e) {{}} }}\n\
-         const candidates = {candidates};\n\
-         let found = \"\";\n\
-         for (const name of candidates) {{\n\
-         \x20 try {{\n\
-         \x20\x20 const mod = require(name);\n\
-         \x20\x20 const chromium = mod && (mod.chromium || (mod.default && mod.default.chromium));\n\
-         \x20\x20 const exe = chromium && chromium.executablePath();\n\
-         \x20\x20 if (exe) {{ found = String(exe); break; }}\n\
-         \x20 }} catch (e) {{}}\n\
-         }}\n\
-         if (found) {{ process.stdout.write(found); }}\n\
-         else {{ process.stderr.write(\"playwright-core not found under \" + root); process.exitCode = 1; }}",
-        root = json_string(&root),
-        dirs = json_string_list(&search_dirs),
-        candidates = json_string_list(&candidates),
-    )
+    [
+        format!("const root = {};", json_string(&root)),
+        format!("const dirs = {};", json_string_list(&search_dirs)),
+        "for (const dir of dirs) { try { module.paths.unshift(dir); } catch (e) {} }".to_string(),
+        format!("const candidates = {};", json_string_list(&candidates)),
+        "let found = \"\";".to_string(),
+        "for (const name of candidates) { try { const mod = require(name); \
+         const chromium = mod && (mod.chromium || (mod.default && mod.default.chromium)); \
+         const exe = chromium && chromium.executablePath(); \
+         if (exe) { found = String(exe); break; } } catch (e) {} }"
+            .to_string(),
+        "if (found) { process.stdout.write(found); } \
+         else { process.stderr.write(\"playwright-core not found under \" + root); \
+         process.exitCode = 1; }"
+            .to_string(),
+    ]
+    .join(" ")
 }
 
 /// A JS string literal for `value`.
@@ -205,11 +209,13 @@ pub trait BrowserHost: Send + Sync {
     async fn probe_ws_endpoint(&self, port: u16) -> Option<String>;
 }
 
-/// A Chromium that Kodex started, with the debugging port both the provider
-/// and the browser view attach to.
+/// A Chromium that Kodex started, with the debugging port the provider
+/// attaches to.
 ///
-/// This is the browser behind `--cdp-endpoint`: the provider drives it and the
-/// view screencasts it, and they are the same process because this exists.
+/// This is the browser behind `--cdp-endpoint` when the panel's own browser is
+/// not the one being driven — the fallback the settings ask for. When the panel
+/// browser is up, `BrowserFactory::acquire` returns its endpoint instead and no
+/// managed Chromium is launched at all.
 pub struct ManagedBrowser {
     child: Option<Box<dyn BrowserChild>>,
     port: u16,
@@ -418,22 +424,54 @@ impl HostBrowser {
         )
         .ok()?;
 
-        let mut response = String::new();
-        stream.read_to_string(&mut response).ok()?;
-        if !response.starts_with("HTTP/1.1 200") {
-            return None;
+        // Read until the answer carries the websocket URL, then stop.
+        //
+        // Waiting for the stream to end instead would never succeed: Chromium's
+        // DevTools server answers and then *keeps the connection open*, `Connection:
+        // close` notwithstanding, so the read that follows a complete answer only
+        // returns on its timeout — and a probe that treats that as a failure throws
+        // away a browser that is up and listening on the very port it asked about.
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&chunk[..read]);
+                    if let Some(endpoint) = websocket_url(&String::from_utf8_lossy(&response)) {
+                        return Some(endpoint);
+                    }
+                }
+                // A timeout means "nothing more for now"; what already arrived
+                // is still worth parsing.
+                Err(_) => break,
+            }
         }
-        // The body is parsed from its first `{` onwards rather than trusted
-        // to be exactly one JSON document: chunked framing and a trailing
-        // newline would otherwise turn a correct answer into a failed probe.
-        let body = &response[response.find('{')?..];
-        let value = serde_json::Deserializer::from_str(body)
-            .into_iter::<serde_json::Value>()
-            .next()?
-            .ok()?;
-        let ws_endpoint = value.get("webSocketDebuggerUrl")?.as_str()?;
-        Some(ws_endpoint.to_string())
+        websocket_url(&String::from_utf8_lossy(&response))
     }
+}
+
+/// The `webSocketDebuggerUrl` in a `/json/version` answer, once enough of the
+/// answer has arrived to carry it.
+///
+/// `None` while the answer is still incomplete, which is what lets the probe
+/// stop reading as soon as the field shows up rather than waiting for a close.
+fn websocket_url(response: &str) -> Option<String> {
+    if !response.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    // The body is parsed from its first `{` onwards rather than trusted
+    // to be exactly one JSON document: chunked framing and a trailing
+    // newline would otherwise turn a correct answer into a failed probe.
+    let body = &response[response.find('{')?..];
+    let value = serde_json::Deserializer::from_str(body)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    value
+        .get("webSocketDebuggerUrl")?
+        .as_str()
+        .map(str::to_string)
 }
 
 #[async_trait::async_trait]
@@ -684,14 +722,42 @@ mod tests {
         // node_modules and the hoisted tree are both named, because either
         // can hold playwright-core, and `playwright` is the documented last
         // resort.
-        let script = resolve_script(Path::new("/pkg/node_modules/@playwright/mcp"));
+        let package_root = Path::new("/pkg/node_modules/@playwright/mcp");
+        let script = resolve_script(package_root);
+        // The paths inside the script are JSON string literals, so a Windows
+        // tree carries escaped separators (`\\`); normalize both sides so the
+        // assertions describe the layout rather than the host's separator.
+        let script = script.replace("\\\\", "/");
+        let package = package_root.to_string_lossy().replace('\\', "/");
+        let node_modules = format!("{package}/node_modules");
 
-        assert!(script.contains("/pkg/node_modules/@playwright/mcp/node_modules/playwright-core"));
-        assert!(script.contains("/pkg/node_modules/@playwright/mcp/../../playwright-core"));
-        assert!(script.contains("/pkg/node_modules/@playwright/mcp/node_modules"));
+        assert!(script.contains(&format!("{node_modules}/playwright-core")));
+        assert!(script.contains(&format!("{package}/../../playwright-core")));
+        assert!(script.contains(&node_modules));
         assert!(script.contains("\"playwright-core\""));
         assert!(script.contains("\"playwright\""));
         assert!(script.contains("chromium.executablePath()"));
+    }
+
+    #[test]
+    fn the_resolution_script_is_a_single_line() {
+        // `node` is reached through whatever is on PATH, which on Windows is
+        // often a shim that re-launches the real binary and truncates a
+        // multi-line argument at its first newline. A multi-line script then
+        // executes only its first statement and exits 0 with no output, so the
+        // one property this script must never lose is being one line.
+        let script = resolve_script(Path::new("/pkg/node_modules/@playwright/mcp"));
+
+        assert!(!script.contains('\n'), "script must not contain a newline");
+        assert!(!script.contains('\r'), "script must not contain a carriage return");
+        assert!(
+            script.contains("const root = \"/pkg/node_modules/@playwright/mcp\"; const dirs"),
+            "statements must stay separated: {script}"
+        );
+        assert!(
+            script.ends_with("process.exitCode = 1; }"),
+            "the fallback branch must still close the script: {script}"
+        );
     }
 
     #[tokio::test]
@@ -876,6 +942,64 @@ mod tests {
         assert!(message.contains("attach mode"), "got {message}");
         assert!(host.spawned_is_empty(), "nothing may be spawned");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_probe_reads_an_answer_whose_connection_never_closes() {
+        use std::io::Write as _;
+
+        // Chromium's DevTools server answers `/json/version` and then keeps the
+        // connection open. A probe that waits for the close never sees the
+        // answer, declares a listening browser dead, and kills it.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let holding = Arc::new(AtomicBool::new(true));
+        let server_holding = Arc::clone(&holding);
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let body = "{\"Browser\":\"Chrome/154\",\
+                        \"webSocketDebuggerUrl\":\"ws://127.0.0.1:9222/devtools/browser/abc\"}";
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.flush();
+            // Held open on purpose: no close, exactly like Chromium.
+            while server_holding.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let endpoint = HostBrowser::probe_once(port);
+        let elapsed = started.elapsed();
+        holding.store(false, Ordering::Relaxed);
+        server.join().unwrap();
+
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("ws://127.0.0.1:9222/devtools/browser/abc")
+        );
+        assert!(
+            elapsed < READY_TIMEOUT,
+            "the probe waited for a close instead of reading the answer: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_probe_ignores_an_answer_that_is_not_a_version_document() {
+        assert_eq!(websocket_url("HTTP/1.1 404 Not Found\r\n\r\n{}"), None);
+        assert_eq!(websocket_url("HTTP/1.1 200 OK\r\n\r\n{\"Browser\":"), None);
+        assert_eq!(websocket_url("HTTP/1.1 200 OK\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn the_probe_reads_through_chunked_framing_and_a_trailing_newline() {
+        let answer = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                      1a\r\n{\"webSocketDebuggerUrl\":\"ws://x\"}\r\n0\r\n\r\n";
+
+        assert_eq!(websocket_url(answer).as_deref(), Some("ws://x"));
     }
 
     #[tokio::test(start_paused = true)]

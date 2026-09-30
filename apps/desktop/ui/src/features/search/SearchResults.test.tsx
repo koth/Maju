@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openExternalUrl } from "../../lib/tauri";
+import { registerPanelOpener } from "../browser/browserTabs";
 import type { SearchResult } from "../../types";
 import { SearchResults } from "./SearchResults";
 
@@ -34,6 +35,7 @@ function renderResults(result: SearchResult, onFileOpen = vi.fn()) {
 describe("SearchResults", () => {
   afterEach(() => {
     cleanup();
+    registerPanelOpener(null);
     vi.clearAllMocks();
   });
 
@@ -85,7 +87,10 @@ describe("SearchResults", () => {
     expect(marks.every((node) => node.tagName === "MARK")).toBe(true);
   });
 
-  it("opens notice urls externally", () => {
+  it("routes notice urls to the right-panel browser", () => {
+    const opener = vi.fn(async () => true);
+    registerPanelOpener(opener);
+
     renderResults({
       query: "search",
       file_suggestions: [],
@@ -101,8 +106,9 @@ describe("SearchResults", () => {
 
     fireEvent.click(screen.getByRole("link", { name: /ripgrep#installation/ }));
 
-    expect(openExternalUrl).toHaveBeenCalledWith(
-      "https://github.com/BurntSushi/ripgrep#installation",
-    );
+    // Web links go to the right panel's browser; the system browser is never a
+    // destination for them.
+    expect(opener).toHaveBeenCalledWith("https://github.com/BurntSushi/ripgrep#installation");
+    expect(openExternalUrl).not.toHaveBeenCalled();
   });
 });

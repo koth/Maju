@@ -145,6 +145,15 @@ impl BrowserServerService {
     pub fn adapter_handle(&self) -> Option<Arc<BrowserMcpService>> {
         self.adapter.clone()
     }
+
+    /// Name the directory the provider's artifacts belong in (the visible
+    /// workspace root), so a capture it writes by relative name lands where the
+    /// conversation resolves it — and inside the webview's asset scope.
+    pub fn set_work_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        if let Some(adapter) = self.adapter_handle() {
+            adapter.service().set_work_dir(dir);
+        }
+    }
 }
 
 /// The running server. Dropping it shuts the listener down and joins the thread.
