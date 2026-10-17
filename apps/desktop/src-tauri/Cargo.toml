@@ -5,12 +5,14 @@ edition = "2024"
 
 [dependencies]
 acp-core = { path = "../../../crates/acp-core" }
+app-core = { path = "../../../crates/app-core" }
+browser-service = { path = "../../../crates/browser-service" }
 codebuddy-proxy = { path = "../../../crates/codebuddy-proxy" }
 dsh-bridge = { path = "../../../crates/dsh-bridge" }
 relay-client = { path = "../../../crates/relay-client" }
 relay-protocol = { path = "../../../crates/relay-protocol" }
 anyhow.workspace = true
-app-core = { path = "../../../crates/app-core" }
+async-trait.workspace = true
 git-service = { path = "../../../crates/git-service" }
 serde.workspace = true
 serde_json.workspace = true
@@ -23,7 +25,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid.workspace = true

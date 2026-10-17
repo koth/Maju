@@ -1,16 +1,16 @@
 /**
  * Right-panel browser tabs ↔ the panel's own browser.
  *
- * The panel hosts a native WebView2 webview per tab (`browser_panel_*`), one
- * profile shared by the whole app rather than one browser per session. The
+ * The panel hosts a native child webview per tab (`browser_panel_*`), one
+ * browser shared by the whole app rather than one browser per session. The
  * backend owns the truth (the webviews it created); this hook mirrors that into
  * the review panel's open-tab list, routes link clicks into new tabs, and keeps
  * url / title fresh.
  *
- * It mirrors rather than decides, because the panel's browser is the browser the
- * agent's tools drive: a page the agent opens becomes a tab here without the UI
- * having asked for one, and a tab closed by the user is a page the agent loses.
- * See `docs/browser-view-subsystem.md`.
+ * It mirrors rather than decides, because the backend also learns about pages
+ * the UI never asked for: on Windows the agent's tools drive that very browser,
+ * so a page the agent opens turns up here as a tab without anyone clicking a
+ * link. See `docs/browser-view-subsystem.md`.
  */
 
 import { useCallback, useEffect } from "react";

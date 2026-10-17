@@ -1,13 +1,17 @@
 //! The panel browser, as the app publishes it to the agent's browser tools.
 //!
-//! Maju's right panel is a real browser (`apps/desktop/src-tauri/src/
-//! browser_panel.rs`), not a picture of one, and it is the browser the tools
-//! drive: the page the user reads and the page the agent acts on are then the
-//! same page. The panel publishes its DevTools endpoint here as soon as its
-//! browser process exists, which is what makes that true — see
-//! [`browser_service::panel`] for the slot and
-//! [`browser_service::BrowserFactory`] for the decision, where a running panel
-//! browser wins over every choice in settings.
+//! On Windows the right panel is a real browser (`apps/desktop/src-tauri/src/
+//! browser_panel/`), not a picture of one: it is a WebView2 child webview
+//! started with a DevTools port, and it is the browser the tools drive, so the
+//! page the user reads and the page the agent acts on are the same page. The
+//! panel publishes its DevTools endpoint here as soon as that browser answers,
+//! which is what makes it true — see [`browser_service::panel`] for the slot
+//! and [`browser_service::BrowserFactory`] for the decision, where a running
+//! panel browser wins over every choice in settings.
+//!
+//! Nothing is ever published from a platform whose webview has no CDP endpoint
+//! (macOS), so there `endpoint()` is always `None` and the tools keep the
+//! browser their settings name.
 //!
 //! The desktop shell is the only publisher: it owns the webviews, so it is the
 //! only layer that knows whether the panel's browser is up.
@@ -19,12 +23,12 @@ use workspace_model::BrowserSettings;
 
 /// Whether the panel's browser is worth starting before anyone needs it.
 ///
-/// The browser tools are what attach to it, so a user who never turned
-/// browser-use on never needs the process: starting one anyway would spend a
-/// browser's worth of memory and startup time on every launch for nothing.
-/// When it is on, the browser is started warm so the agent's first tool call
-/// has somewhere to attach and the user's first link click has nothing to wait
-/// for.
+/// Only Windows has a panel browser the tools attach to, so this is only asked
+/// there; the caller treats "no" and "nothing to warm" the same way. The tools
+/// are what attach to it, so a user who never turned browser-use on never needs
+/// the process: starting one anyway would spend a browser's worth of memory and
+/// startup time on every launch for nothing. When it is on, the browser is
+/// started warm so the agent's first tool call has somewhere to attach.
 pub fn warm_required(settings: &BrowserSettings) -> bool {
     settings.enabled
 }

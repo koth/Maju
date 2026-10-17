@@ -120,12 +120,23 @@ fn main() {
                 // fires due automations as background session runs and emits
                 // the `automation:fired` reminder events.
                 automation_scheduler::start(app.handle().clone());
-                // Start the panel's browser before anyone needs it, when the
-                // agent may use browser tools: the tools attach to that browser,
-                // and the user's first link click should not wait for WebView2
-                // to start. Not on this thread — creating a webview runs on the
-                // main thread, which only starts turning after setup returns.
+                // Windows only: start the panel's browser before anyone needs
+                // it, when the agent may use browser tools. There the tools
+                // attach to that browser, so it has to exist before the first
+                // tool call. On macOS the panel is the app's own WKWebView and
+                // the tools drive the browser their settings name — there is
+                // nothing to warm, and nothing to put on screen at launch.
+                #[cfg(windows)]
                 warm_panel_browser(app.handle().clone());
+                // macOS: publish the panel driver. The WKWebView has no CDP
+                // endpoint, so this is how the agent's browser tools reach the
+                // panel at all — the MCP server serves native tools that drive
+                // the very tab the user is looking at, and no provider process
+                // or background Chromium is started for them.
+                #[cfg(target_os = "macos")]
+                browser_service::panel_driver::publish(std::sync::Arc::new(
+                    browser_panel::TauriPanelDriver::new(app.handle().clone()),
+                ));
                 // If the CodeBuddy provider is configured and selected, eagerly
                 // start the managed proxy at app launch.
                 // Spawn the codebuddy proxy boot in the background so the
@@ -145,6 +156,8 @@ fn main() {
         .on_window_event({
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |window, event| {
+                // The panel's pages need nothing here: they are child webviews
+                // of this window, so they move and resize with it.
                 if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                     snapshot_bridge_running.store(false, Ordering::Release);
                     window.state::<AppState>().shutdown_all();
@@ -310,6 +323,7 @@ fn main() {
             browser_panel::browser_panel_reload,
             browser_panel::browser_panel_history,
             browser_panel::browser_panel_bounds,
+            browser_panel::browser_panel_eval_result,
             commands::remote_control::remote_control_set_enabled,
             commands::remote_control::remote_control_pairing_qr,
             commands::remote_control::remote_control_status,
@@ -336,11 +350,12 @@ fn main() {
 
 /// Bring the panel's browser up at launch, when the agent may use browser tools.
 ///
-/// The agent's browser tools drive the panel's own browser, so it has to exist
-/// before the first tool call — and a user's first link click should find it
-/// already running rather than wait for WebView2 to start. The work happens on
-/// its own thread because creating a webview is dispatched to the main thread,
-/// which is busy running this setup closure.
+/// Windows only: there the panel's webview is the browser the agent's tools
+/// drive, so it has to exist before the first tool call — and a user's first
+/// link click should find it already running rather than wait for WebView2 to
+/// start. The work happens on its own thread because creating a webview is
+/// dispatched to the main thread, which is busy running this setup closure.
+#[cfg(windows)]
 fn warm_panel_browser(app: tauri::AppHandle) {
     let paths = match app_core::AppPaths::resolve() {
         Ok(paths) => paths,

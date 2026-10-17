@@ -2,19 +2,23 @@
  * The right panel's browser, live.
  *
  * This component draws nothing but the toolbar. The page itself is a native
- * WebView2 webview the backend created as a child of the app window
- * (`browser_panel_*`), sitting in the hole this component's slot div measures:
- * rendering, scrolling, the caret and the input method are all the platform's
- * own, so a text field in the page behaves like a text field anywhere else.
+ * surface the backend moves onto the hole this component's slot div measures:
+ * a child webview of the app window — WebView2 on Windows, WKWebView on macOS
+ * (`browser_panel_*`). Either way rendering, scrolling, the caret and the input
+ * method are the platform's own, so a text field in the page behaves like a
+ * text field anywhere else.
  *
  * The slot is therefore a hole, not a frame — anything drawn inside it is
- * covered by the webview. Toolbar state comes from the URL the backend reports.
+ * covered by the page. Toolbar state comes from the URL the backend reports,
+ * and the loading state from the loads it announces, so a page that takes a
+ * moment to arrive says so rather than leaving an empty hole.
  *
  * See `docs/browser-view-subsystem.md`.
  */
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import "./EmbeddedBrowser.css";
 import {
   browserPanelActivate,
@@ -24,6 +28,7 @@ import {
   browserPanelNavigate,
   browserPanelReload,
 } from "../../lib/tauri";
+import { onBrowserPanelPage } from "../../lib/events";
 import { isBlankUrl } from "./browserTabs";
 
 interface EmbeddedBrowserProps {
@@ -45,6 +50,8 @@ export const EmbeddedBrowser = memo(function EmbeddedBrowser({
   const [address, setAddress] = useState(url);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Whether the page in the hole is still loading. */
+  const [loading, setLoading] = useState(false);
 
   /** Tell the backend where the hole is. A zero-sized rect is how the panel
    *  says "I am not showing a page": the webview then hides itself. */
@@ -91,11 +98,34 @@ export const EmbeddedBrowser = memo(function EmbeddedBrowser({
     measure();
   }, [measure, layoutSignal]);
 
-  // Which tab the browser shows is the panel's state, not this component's: a
-  // remount (the review panel collapsing and coming back) must show the page
-  // again. The backend keeps the page itself alive across all of this.
+  // Whether the page is on screen for the first time. Which tab the browser
+  // shows is the panel's state, not this component's: a remount (the review
+  // panel collapsing and coming back) must show the page again. The backend
+  // keeps the page itself alive across all of this.
   useEffect(() => {
     void browserPanelActivate(tabId).catch(() => {});
+  }, [tabId]);
+
+  // The page says it is loading, and says so again when it is done. Without
+  // this the hole is just empty while a slow page arrives, which reads as a
+  // broken panel rather than as a page on its way. Only this tab's own loads
+  // count: every panel tab is loading at all times.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void onBrowserPanelPage((event) => {
+      if (cancelled || event.tab_id !== tabId) return;
+      setLoading(event.event === "started");
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    });
+    // A tab that is not this one any more is not loading on our behalf.
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      setLoading(false);
+    };
   }, [tabId]);
 
   // A redirect, or a link clicked inside the page, moves the address bar. What
@@ -191,6 +221,11 @@ export const EmbeddedBrowser = memo(function EmbeddedBrowser({
             }}
           />
         </form>
+        {loading && (
+          <span className="embedded-browser-loading" role="status">
+            加载中…
+          </span>
+        )}
       </div>
       {error && (
         <div className="embedded-browser-error" role="alert">

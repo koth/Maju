@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmbeddedBrowser } from "./EmbeddedBrowser";
+import { onBrowserPanelPage } from "../../lib/events";
 import {
   browserPanelActivate,
   browserPanelBounds,
@@ -23,12 +24,17 @@ vi.mock("../../lib/tauri", async () => {
   };
 });
 
+vi.mock("../../lib/events", () => ({
+  onBrowserPanelPage: vi.fn(() => Promise.resolve(() => {})),
+}));
+
 const mockedActivate = vi.mocked(browserPanelActivate);
 const mockedBounds = vi.mocked(browserPanelBounds);
 const mockedHide = vi.mocked(browserPanelHide);
 const mockedNavigate = vi.mocked(browserPanelNavigate);
 const mockedHistory = vi.mocked(browserPanelHistory);
 const mockedReload = vi.mocked(browserPanelReload);
+const mockedPage = vi.mocked(onBrowserPanelPage);
 
 /** Run the frame the component schedules its measurement on. */
 function paint() {
@@ -176,5 +182,37 @@ describe("EmbeddedBrowser", () => {
       expect(mockedHistory).toHaveBeenCalledWith("tab-1", "forward");
       expect(mockedReload).toHaveBeenCalledWith("tab-1");
     });
+  });
+
+  it("says the page is loading instead of leaving an empty hole", async () => {
+    let announce: ((event: { tab_id: string; url: string; event: string }) => void) | undefined;
+    mockedPage.mockImplementationOnce(async (callback) => {
+      announce = callback as typeof announce;
+      return () => {};
+    });
+    render(<EmbeddedBrowser tabId="tab-1" url="https://a.dev/" />);
+    await waitFor(() => expect(announce).toBeDefined());
+
+    // The page under the hole is on its way.
+    act(() => announce?.({ tab_id: "tab-1", url: "https://a.dev/", event: "started" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("加载中");
+
+    // …and has arrived.
+    act(() => announce?.({ tab_id: "tab-1", url: "https://a.dev/", event: "finished" }));
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  });
+
+  it("ignores another tab's loads", async () => {
+    let announce: ((event: { tab_id: string; url: string; event: string }) => void) | undefined;
+    mockedPage.mockImplementationOnce(async (callback) => {
+      announce = callback as typeof announce;
+      return () => {};
+    });
+    render(<EmbeddedBrowser tabId="tab-1" url="https://a.dev/" />);
+    await waitFor(() => expect(announce).toBeDefined());
+
+    act(() => announce?.({ tab_id: "tab-9", url: "https://other.dev/", event: "started" }));
+
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });
