@@ -505,7 +505,7 @@ async fn handle_json_rpc_call(
             // description: a client that surfaces it has already read it
             // before the first call, and one that drops it still has
             // `browser_documentation`.
-            "instructions": crate::browser_docs::instructions(),
+            "instructions": crate::browser_docs::instructions(cdp_available()),
         })),
         // Priming happens here rather than at start-up: this is the first
         // moment a client can express interest, and the catalog only exists
@@ -513,13 +513,13 @@ async fn handle_json_rpc_call(
         // the client the capability has no tools, and a client that lists once
         // at mount time would never ask again.
         "tools/list" => match prime(&adapter, token).await {
-            Ok(()) => Ok(json!({"tools": tool_schemas(&adapter)})),
+            Ok(()) => Ok(json!({"tools": tool_schemas(&adapter, cdp_available())})),
             // A provider that will not start must not cost the agent the
             // ability to read the page. The observation tool is still true,
             // and seeing the page is what lets the agent explain the failure.
-            Err(error) if error.get("code").and_then(Value::as_i64) == Some(-32002) => Ok(json!({
-                "tools": [observe_schema(), act_schema(), viewport_schema(), docs_schema()]
-            })),
+            Err(error) if error.get("code").and_then(Value::as_i64) == Some(-32002) => {
+                Ok(json!({"tools": ours(cdp_available())}))
+            }
             Err(error) => Err(error),
         },
         "tools/call" => {
@@ -575,7 +575,7 @@ async fn prime(adapter: &Arc<BrowserMcpService>, token: &str) -> Result<(), Valu
 /// The catalog is the source of truth, so this is a projection rather than a
 /// constant. An empty list here means [`prime`] has not run, which only
 /// happens if a caller reads this without going through `tools/list`.
-fn tool_schemas(adapter: &BrowserMcpService) -> Vec<Value> {
+fn tool_schemas(adapter: &BrowserMcpService, cdp: bool) -> Vec<Value> {
     let mut tools: Vec<Value> = adapter
         .exposed_tools()
         .into_iter()
@@ -587,12 +587,34 @@ fn tool_schemas(adapter: &BrowserMcpService) -> Vec<Value> {
             })
         })
         .collect();
-    // Observation is ours, so it is appended rather than discovered. It is
-    // listed after the provider's tools on purpose: reading the page is the
-    // step that follows an action, and the list reads in that order.
-    tools.push(observe_schema());
-    tools.push(act_schema());
-    tools.push(viewport_schema());
+    // Our own tools come last: reading the page is the step that follows an
+    // action, and the list reads in that order.
+    tools.extend(ours(cdp));
+    tools
+}
+
+/// Whether this platform's panel browser can be spoken to over CDP.
+///
+/// Not a probe of a running browser — it is the answer to "could it ever work
+/// here". The native driver is published only where the panel's webview has no
+/// DevTools endpoint (macOS WKWebView); when it is present, the observation
+/// tools have nothing to connect to and must not be offered, or the model will
+/// keep calling a tool whose answer is always "no endpoint".
+fn cdp_available() -> bool {
+    browser_service::panel_driver::get().is_none()
+}
+
+/// The tools this server adds itself, in the order they are listed.
+///
+/// Guidance is offered everywhere: it is shipped with the binary and is just as
+/// true on a platform whose page tools come from somewhere else.
+fn ours(cdp: bool) -> Vec<Value> {
+    let mut tools = Vec::new();
+    if cdp {
+        tools.push(observe_schema());
+        tools.push(act_schema());
+        tools.push(viewport_schema());
+    }
     tools.push(docs_schema());
     tools
 }
@@ -694,13 +716,46 @@ and `troubleshooting` after two failed attempts at the same thing.",
     })
 }
 
+/// The answer for a DevTools-backed tool called where there is no DevTools.
+///
+/// Naming the tools that *do* exist is the whole point: "no endpoint" is a
+/// dead end, "use browser_snapshot" is a next step.
+fn no_cdp_result(name: &str) -> Value {
+    let leaf = name.rsplit_once("__").map_or(name, |(_, leaf)| leaf);
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "{leaf} needs a DevTools endpoint, and this platform's panel browser has none. \
+Read the page with browser_snapshot and act with browser_click, browser_type or browser_press_key, \
+using the refs that snapshot reports."
+            )
+        }],
+        "isError": true,
+    })
+}
+
 /// Answer a documentation request.
-fn docs_result(arguments: &Value) -> Value {
+fn docs_result(arguments: &Value, cdp: bool) -> Value {
     let text = match arguments.get("name").and_then(Value::as_str) {
         Some(name) => match crate::browser_docs::by_name(name) {
-            Some(doc) => doc.body.trim().to_string(),
+            Some(doc) if crate::browser_docs::applies(doc, cdp) => doc.body.trim().to_string(),
+            // The document exists but describes tools this platform does not
+            // have; saying so is more useful than handing over instructions the
+            // model cannot follow.
+            Some(doc) => {
+                return tool_error(BrowserCallError::Act(format!(
+                    "\"{}\" describes the DevTools-backed tools, which this platform's panel browser \
+does not provide; call browser_documentation with no name to see what applies here",
+                    doc.name
+                )));
+            }
             None => {
-                let available: Vec<&str> = crate::browser_docs::DOCS.iter().map(|doc| doc.name).collect();
+                let available: Vec<&str> = crate::browser_docs::DOCS
+                    .iter()
+                    .filter(|doc| crate::browser_docs::applies(doc, cdp))
+                    .map(|doc| doc.name)
+                    .collect();
                 return tool_error(BrowserCallError::Act(format!(
                     "there is no document called \"{name}\"; available: {}",
                     available.join(", ")
@@ -709,7 +764,7 @@ fn docs_result(arguments: &Value) -> Value {
         },
         None => {
             let mut index = String::from("Available documents:\n");
-            for (name, title, summary) in crate::browser_docs::index() {
+            for (name, title, summary) in crate::browser_docs::index(cdp) {
                 index.push_str(&format!("- {name} — {title}: {summary}\n"));
             }
             index
@@ -929,23 +984,26 @@ async fn handle_tool_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Observation and actioning do not need the provider: they open their own
-    // CDP connection to the same browser. Handled before priming so a provider
-    // that cannot start still leaves the agent able to read and drive the page.
-    if name == observe_tool_name() {
-        return Ok(observe_result(&adapter, token, &arguments).await);
-    }
-    if name == act_tool_name() {
-        return Ok(act_result(&adapter, token, &arguments).await);
-    }
-    if name == viewport_tool_name() {
+    // Our own tools. Where the panel browser has no DevTools endpoint they are
+    // not listed, and a call that arrives anyway (a stale tool list) gets an
+    // answer that names the tools that do exist here.
+    if name == observe_tool_name() || name == act_tool_name() || name == viewport_tool_name() {
+        if !cdp_available() {
+            return Ok(no_cdp_result(&name));
+        }
+        if name == observe_tool_name() {
+            return Ok(observe_result(&adapter, token, &arguments).await);
+        }
+        if name == act_tool_name() {
+            return Ok(act_result(&adapter, token, &arguments).await);
+        }
         return Ok(viewport_result(&adapter, token, &arguments).await);
     }
     if name == docs_tool_name() {
         // Guidance needs neither a session nor a provider: it is shipped with
         // the binary, and a model that has lost its place should always be able
         // to re-read it.
-        return Ok(docs_result(&arguments));
+        return Ok(docs_result(&arguments, cdp_available()));
     }
 
     // A tool name is validated against the catalog before it is forwarded, and
@@ -1546,7 +1604,7 @@ mod tests {
         assert!(!adapter.has_tools());
 
         // Ours are listed regardless, because they do not depend on the provider.
-        let schemas = tool_schemas(&adapter);
+        let schemas = tool_schemas(&adapter, true);
         assert_eq!(schemas.len(), 4, "observe, act, viewport and the guidance");
         assert_eq!(schemas[0]["name"], observe_tool_name());
         assert_eq!(schemas[1]["name"], act_tool_name());
@@ -1554,7 +1612,40 @@ mod tests {
         assert_eq!(schemas[3]["name"], docs_tool_name());
 
         install_one_tool(&adapter, "browser_click");
-        assert_eq!(tool_schemas(&adapter).len(), 5);
+        assert_eq!(tool_schemas(&adapter, true).len(), 5);
+    }
+
+    /// Where the panel browser has no DevTools endpoint, the observation tools
+    /// are not offered at all: a model that cannot use a tool should not be
+    /// told it exists.
+    #[test]
+    fn the_cdp_tools_are_not_listed_without_a_devtools_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        install_one_tool(&adapter, "browser_click");
+
+        let schemas = tool_schemas(&adapter, false);
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+
+        assert!(names.contains(&"mcp__playwright-mcp__browser_click"));
+        assert!(names.contains(&docs_tool_name().as_str()));
+        assert!(!names.contains(&observe_tool_name().as_str()));
+        assert!(!names.contains(&act_tool_name().as_str()));
+        assert!(!names.contains(&viewport_tool_name().as_str()));
+    }
+
+    /// A stale tool list can still call one of them, and the answer has to be a
+    /// next step rather than a dead end.
+    #[test]
+    fn calling_a_cdp_tool_without_cdp_names_the_native_ones() {
+        let result = no_cdp_result(&observe_tool_name());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(text.contains("browser_snapshot"), "got {text}");
+        assert!(text.contains("browser_click"), "got {text}");
     }
 
     #[test]

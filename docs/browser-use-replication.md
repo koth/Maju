@@ -364,6 +364,12 @@ crates/app-core/src/browser_server.rs（本地 HTTP MCP，按会话 token）
 - **未做**：`visibility` 能力。面板的显示/隐藏是 Tauri 侧命令，跨 crate 回调，收益
   （把页面摆到用户面前）不如它带来的耦合大；等有真实需求再补。
 
+**与原生驱动那条路的关系**：合并 `2d54682`（macOS 子 webview + 原生工具驱动）之后，
+两套工具面并存但按平台分流——原生驱动只在其 webview 没有 CDP 的平台发布，所以
+`panel_driver::get().is_some()` 就是「观察工具在这里永远拿不到端点」的判据。工具列表、
+`initialize` 引导文本、以及误调用时的报错，三处都按它切换，详见
+`browser-view-subsystem.md` 的「平台差异」一节。
+
 ### P4：行为文档与动作级审批
 
 **已落地（文档部分）**

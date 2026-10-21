@@ -90,6 +90,22 @@ impl std::fmt::Display for BrowserCallError {
 
 impl std::error::Error for BrowserCallError {}
 
+/// What to say when a CDP call finds no endpoint.
+///
+/// Two very different situations look alike here. On Windows the endpoint
+/// appears a moment after the panel warms up, so "not yet" is the honest
+/// answer. Where the native driver is in charge there is no DevTools endpoint at
+/// all, and "not yet" would have the model retry forever.
+fn no_endpoint_message() -> String {
+    if browser_service::panel_driver::get().is_some() {
+        "this platform's panel browser has no DevTools endpoint (it is driven natively); \
+read the page with browser_snapshot instead"
+            .to_string()
+    } else {
+        "this session's browser has not published a DevTools endpoint yet".to_string()
+    }
+}
+
 /// What a browser action is aimed at, before the element number is resolved.
 ///
 /// The point variant exists because some things a person clicks are not in the
@@ -482,9 +498,7 @@ impl BrowserMcpService {
             .session_for(token)
             .ok_or(BrowserCallError::UnknownSession)?;
         let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
-            return Err(BrowserCallError::Observe(
-                "this session's browser has not published a DevTools endpoint yet".to_string(),
-            ));
+            return Err(BrowserCallError::Observe(no_endpoint_message()));
         };
 
         let client = CdpClient::connect(&endpoint)
@@ -542,9 +556,7 @@ impl BrowserMcpService {
             .filter(|target| !target.is_empty());
 
         let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
-            return Err(BrowserCallError::Viewport(
-                "this session's browser has not published a DevTools endpoint yet".to_string(),
-            ));
+            return Err(BrowserCallError::Viewport(no_endpoint_message()));
         };
         let client = CdpClient::connect(&endpoint)
             .await
@@ -607,9 +619,7 @@ impl BrowserMcpService {
         }
 
         let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
-            return Err(BrowserCallError::Act(
-                "this session's browser has not published a DevTools endpoint yet".to_string(),
-            ));
+            return Err(BrowserCallError::Act(no_endpoint_message()));
         };
 
         let client = CdpClient::connect(&endpoint)

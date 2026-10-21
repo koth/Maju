@@ -318,6 +318,24 @@ Edge 上事件发出去了、页面纹丝不动（`scrollY` 不变）。改用
 是 MCP 标准字段，客户端可以用也可以扔——扔了也不致命，因为 `browser_documentation`
 这个工具本身就把「什么时候读哪篇」写在描述里。
 
+### 平台差异：工具列表跟着能力走，不跟着代码走
+
+两台机器能做的事不一样，所以工具面也不一样：
+
+| | Windows（WebView2，有 CDP） | macOS（WKWebView，无 CDP） |
+|---|---|---|
+| 谁发布 | `panel::slot()` 的 DevTools 端点 | `panel_driver::slot()` 的原生驱动 |
+| agent 看到的页面工具 | `browser_observe` / `browser_act` / `browser_viewport` + provider 工具 | provider 名字的原生工具（`browser_snapshot` / `browser_click` / …），由 `engine.js` 在页面里跑 |
+| 我们的观测工具 | 列出 | **不列出** |
+
+判据是 `panel_driver::get().is_none()`：驱动只在「面板 webview 没有 CDP」的平台发布
+（见 `browser-service/src/panel_driver.rs` 的模块注释），所以它为 `Some` 时，
+`browser_observe` 永远拿不到端点——列出来只会让模型反复调用一个恒假的工具。
+
+不列之外还有两道兜底：会话拿着旧列表打过来时，返回的是「这里没有 DevTools 端点，
+改用 browser_snapshot」而不是「还没准备好」（后者会让模型重试）；`initialize` 的引导
+文本也按平台换一份——macOS 上不塞 observe/act 那套讲编号和 diff 的文字，改成讲
+`browser_snapshot` → `ref` 的循环，安全与确认两篇照旧。
 
 ## 架构
 
