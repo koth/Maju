@@ -376,10 +376,11 @@ fn mcp_leaf_tool_name(title: &str) -> Option<&str> {
 /// provider that renames or extends them (`browser_take_screenshot`,
 /// `browser_snapshot`, `computer_screenshot`) still classifies correctly,
 /// while anything that merely contains a capture verb (`screenshot_and_edit`)
-/// stays in the write class.
+/// stays in the write class. `observe` is Kodex's own accessibility capture: it
+/// reads the page, so it stays in the read class too.
 fn mcp_leaf_tool_name_is_read_only(leaf: &str) -> bool {
     let leaf = leaf.to_ascii_lowercase();
-    leaf.ends_with("screenshot") || leaf.ends_with("snapshot")
+    leaf.ends_with("screenshot") || leaf.ends_with("snapshot") || leaf.ends_with("observe")
 }
 
 fn decide_read_only_permission(

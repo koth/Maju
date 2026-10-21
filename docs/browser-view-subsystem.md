@@ -135,6 +135,101 @@ agent 的 browser-use 工具（@playwright/mcp --cdp-endpoint http://127.0.0.1:<
 - 端点由面板的浏览器进程提供，进程随窗口关闭而消失；面板保证「至少有一个 page」，
   所以只要应用在跑，工具就有页面可操作。
 
+### 观测：`browser_observe`（我们自己的，不是 provider 的）
+
+provider 的 `browser_snapshot` 返回的是 Playwright 的 aria snapshot：有结构、没有
+地址、也没有「和上次比变了什么」。模型因此每步都要重读整页，而且没法用序号精确
+指代元素。`browser_observe` 补的就是这一层：
+
+```
+0 AXWebArea Example Domain, URL: example.com/path
+	1 heading Example Domain
+	2 text field Description: Email, Value: a@b.c
+	3 button Sign In
+```
+
+- **行 = `("\t" × depth) + 序号 + " " + role + " " + name`**，可选 `Help:` /
+  `Value:` / `URL:` 后缀。role 走一张映射表（`RootWebArea → AXWebArea`、
+  `textbox → text field`、`StaticText → text`）；`nameSource: attribute` 的 name 与
+  所有 link 的 name 降级成 `Description:`；只渲染 `checked`/`selected`，
+  `disabled`/`focused`/`level` 一律不渲染；`InlineTextBox`、空文本、以及重复父级
+  名字的文本子节点都不占行。
+- **序号是元素的，不是行位置的**：元素第一次出现时拿到一个号，活着就一直用它
+  （根固定是 0）。所以插入一个元素不会让它下面所有行重新编号——这正是 diff 能小
+  的前提。原实现每次重排；我们量过代价：位置编号版「填三个字段再提交」要走
+  7259 字符，稳定编号版 1796。
+- **默认只回变化**：`~` 改、`+` 增、`Removed element IDs: 2-4, 9` 汇总删除；没有变化
+  时是一句固定的 "There has been no change in the accessibility tree."。`mode: "full"`
+  要全量。diff 省不到阈值（<50% 且 <512B）时自动退回全量——比让模型猜便宜。
+- **元素身份用 `backendDOMNodeId`**：结构化路径（role/name/兄弟序号）在一次提交后
+  会把 30 多行误判成「删除 + 新增」，因为一个祖先的序号变了就重排整棵子树。没有
+  DOM 对应物的合成节点才退回路径。
+- **收敛靠静默，不靠 sleep**：`waitForAXQuiet` 的等价物是 100ms 静默窗（25ms 轮询、
+  750ms 上限）+ `readyState`/元素数/文本长度探针，见 `browser-service/src/ax/settle.rs`。
+- **它不经过 provider**：自己开一条 CDP 连接到同一个面板端点（CDP 支持多客户端），
+  所以 provider 起不来时 `tools/list` 仍只列这一个工具，agent 至少还能看见页面。
+
+实现分布在 `crates/browser-service/src/ax/`（wire / identity / render / diff /
+settle / session / action）与 `crates/app-core/src/browser_mcp.rs::observe/act`；
+工具名是 `mcp__browser-use__browser_observe` 与 `mcp__browser-use__browser_act`，
+`app-core/src/browser_server.rs` 在 prime 之前拦截。设计取舍与它对照的那套实现见
+[`browser-use-replication.md`](./browser-use-replication.md)。
+
+### 动作：`browser_act`（按序号点，不是按坐标猜）
+
+序号要能变成节点，才有意义。链路是：**行号 → capture 时记下的 `backendDOMNodeId`
+→ `DOM.resolveNode` → 真实输入事件**。
+
+- `click` / `double_click`：先在元素上 `scrollIntoView()`，再读
+  `getBoundingClientRect()` 取中心，然后 `Input.dispatchMouseEvent` 按压力/释放成对
+  发送。**不用 `DOM.getBoxModel`**：它是文档坐标系，而输入事件是视口坐标系，换算要读
+  `Page.getLayoutMetrics` 还要处理滚动偏移；问元素自己要 rect 一次往返且已经在正确
+  坐标系里。
+- `fill`：focus + `select()`（contenteditable 用 Range 全选），再 `Input.insertText`
+  覆盖；`type` 只 focus 后在光标处插入。两者都走 `Input.insertText`——`value =` 赋值
+  不触发框架监听的事件，页面不会更新。
+- `press`：只支持会推进表单的那几个键（Enter/Tab/Escape/Backspace/Delete/Space/方向/
+  Home/End/PageUp/PageDown），键表外的名字直接拒绝并列出可用项，不让模型猜第二次。
+  有文本的键用 `keyDown`，纯控制键用 `rawKeyDown`（后者才是浏览器当真实按键处理的那种）。
+- **动作默认连观测一起返回**（`observe: true`，可关）。一次动作几乎总会改变页面，所以
+  「做了它，并告诉我变了什么」是最省的调用——一次往返而不是两次。只有连续做多个动作、
+  中间状态没用时才该关掉。动作成功、随后的观测失败时，结果仍是成功，附一句说明，
+  免得模型把已经发生的点击重试一遍。
+- **动作绑定在「那次 capture 的那个 tab」上**：`Observer` 记着 `target_id`，所以序号
+  不可能落到模型没读过的页面上。
+
+已知约束：元素必须有 `backendDOMNodeId` 才能按序号动作；纯 ARIA 合成节点（没有 DOM 对应）
+会被拒绝并提示改按坐标。零尺寸元素（隐藏）也会被拒绝，否则点击会落在页面角落。
+
+### 两种瞄准方式，以及为什么需要第二种
+
+- **按序号**：无障碍树里的一切。默认，也是唯一「可核对」的方式。
+- **按坐标**（`x` / `y`，从截图取）：只用于树里根本没有的东西——canvas、自绘控件、
+  跨域框。有可用的序号时不要用坐标：坐标是一发猜中的子弹。
+
+坐标路径与序号路径走同一套动作实现（`Target::Element` / `Target::Point`），
+所以「点到了没」的判定标准一致。
+
+**滚动不用 `Input.dispatchMouseEvent { type: "mouseWheel" }`**：实测在 headless
+Edge 上事件发出去了、页面纹丝不动（`scrollY` 不变）。改用
+`Input.synthesizeScrollGesture`——它的距离参数与滚轮增量符号相反（正数向上/向左），
+所以在入口翻转一次。实测 `dy: -200` 让 `scrollY` 从 398 变 198，正好 200px。
+
+### 视口：`browser_viewport`
+
+`Emulation.setDeviceMetricsOverride` / `clearDeviceMetricsOverride`，用于响应式自测。
+只有在用户点名了尺寸、断点或设备宽度时才该用；覆盖会一直生效到下一个人清掉它，
+所以工具描述里强调了收尾要 `reset`——否则之后每一次观测和截图都在那个尺寸下。
+
+### 引导：工具会说话，但话要省着说
+
+`docs/browser/` 下四篇模型面文档，三篇随 MCP `initialize` 的 `instructions` 一次性
+送达（usage / safety / confirmations，约 6.6k 字符 ≈ 1.7k token），一篇
+（troubleshooting）只在 `browser_documentation` 里按名索取。这条 `instructions` 通道
+是 MCP 标准字段，客户端可以用也可以扔——扔了也不致命，因为 `browser_documentation`
+这个工具本身就把「什么时候读哪篇」写在描述里。
+
+
 ## 架构
 
 ```

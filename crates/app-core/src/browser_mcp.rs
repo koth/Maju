@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use browser_service::BrowserService;
+use browser_service::ax::{self, DiffOptions, ObserveMode, Observed, RenderOptions, SettleOptions};
 use browser_service::catalog::{ExposedTool, ProviderCatalog};
+use browser_service::cdp::CdpClient;
 use browser_service::mcp::ToolCallResult;
 use session_resource::CancelToken;
 use workspace_model::ScreenshotHandle;
@@ -41,6 +43,12 @@ pub enum BrowserCallError {
     Closed { tool: String },
     /// A screenshot could not be persisted.
     Capture(String),
+    /// The accessibility capture failed before it produced a document.
+    Observe(String),
+    /// An action on a captured element failed.
+    Act(String),
+    /// A viewport override failed.
+    Viewport(String),
 }
 
 impl std::fmt::Display for BrowserCallError {
@@ -67,11 +75,33 @@ impl std::fmt::Display for BrowserCallError {
             BrowserCallError::Capture(detail) => {
                 write!(formatter, "screenshot could not be stored: {detail}")
             }
+            BrowserCallError::Observe(detail) => {
+                write!(formatter, "the page could not be observed: {detail}")
+            }
+            BrowserCallError::Act(detail) => {
+                write!(formatter, "the action could not be performed: {detail}")
+            }
+            BrowserCallError::Viewport(detail) => {
+                write!(formatter, "the viewport could not be changed: {detail}")
+            }
         }
     }
 }
 
 impl std::error::Error for BrowserCallError {}
+
+/// What a browser action is aimed at, before the element number is resolved.
+///
+/// The point variant exists because some things a person clicks are not in the
+/// accessibility tree at all — a canvas, a custom-drawn widget, a cross-origin
+/// frame. Without it those are simply unreachable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ActTarget {
+    /// An element number from an observation.
+    Element { index: usize },
+    /// A viewport coordinate in CSS pixels.
+    Point { x: f64, y: f64 },
+}
 
 /// A tool result, already projected for the model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -128,6 +158,13 @@ pub struct BrowserMcpService {
     /// session registers, since it is a property of the route.
     model_vision: Mutex<HashMap<String, bool>>,
     catalog: Mutex<Option<Vec<ExposedTool>>>,
+    /// Observation state per token: the element-identity table and the last
+    /// capture each tab's diff is measured against.
+    ///
+    /// Keyed by token rather than by session id so a token that has been
+    /// unregistered cannot inherit the diff baseline of the session that held
+    /// it before.
+    observers: Mutex<HashMap<String, ax::Observer>>,
     /// Serializes catalog priming. Two agents listing tools at the same moment
     /// must not both spawn a provider; the loser of the race re-checks after
     /// acquiring this and finds the catalog already installed.
@@ -143,6 +180,7 @@ impl BrowserMcpService {
             next_token: AtomicU64::new(1),
             model_vision: Mutex::new(HashMap::new()),
             catalog: Mutex::new(None),
+            observers: Mutex::new(HashMap::new()),
             prime: tokio::sync::Mutex::new(()),
         }
     }
@@ -193,6 +231,11 @@ impl BrowserMcpService {
             if let Ok(mut vision) = self.model_vision.lock() {
                 vision.remove(&lease.session_id);
             }
+        }
+        // The diff baseline dies with the token: a later session must not be
+        // shown a diff against a page it never read.
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.remove(token);
         }
     }
 
@@ -391,6 +434,162 @@ impl BrowserMcpService {
         if let Some(session_id) = self.session_for(token) {
             self.pipeline.end_turn(&session_id);
         }
+    }
+
+    /// Capture the session's page as a numbered accessibility tree.
+    ///
+    /// This is Kodex's own observation path: it opens its own CDP connection to
+    /// the same browser the provider drives, so the two never fight over a
+    /// session or a target. The state it keeps is per token — one identity
+    /// table and one diff baseline — because two tabs must not be compared
+    /// against each other.
+    pub async fn observe(
+        &self,
+        token: &str,
+        mode: ObserveMode,
+    ) -> Result<Observed, BrowserCallError> {
+        let session_id = self
+            .session_for(token)
+            .ok_or(BrowserCallError::UnknownSession)?;
+        let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
+            return Err(BrowserCallError::Observe(
+                "this session's browser has not published a DevTools endpoint yet".to_string(),
+            ));
+        };
+
+        let client = CdpClient::connect(&endpoint)
+            .await
+            .map_err(|error| BrowserCallError::Observe(error.to_string()))?;
+        let capture = match ax::capture(&client, None, SettleOptions::default()).await {
+            Ok(capture) => capture,
+            Err(error) => {
+                client.close().await;
+                return Err(BrowserCallError::Observe(error.to_string()));
+            }
+        };
+        client.close().await;
+
+        // The lock is taken only for the synchronous decision, never across an
+        // await: a slow page must not serialize every other session's tools.
+        let mut observers = self
+            .observers
+            .lock()
+            .map_err(|_| BrowserCallError::UnknownSession)?;
+        let observer = observers.entry(token.to_string()).or_default();
+        observer.begin_capture(&capture.target_id);
+        Ok(observer.observe(
+            &capture.doc,
+            mode,
+            RenderOptions::default(),
+            DiffOptions::default(),
+        ))
+    }
+
+    /// Override the page's viewport, or clear it with `None`.
+    ///
+    /// This is a review tool, not part of the loop: it exists so a responsive
+    /// layout can be checked at a stated size. An override outlives the call, so
+    /// the caller is expected to clear it.
+    pub async fn viewport(
+        &self,
+        token: &str,
+        size: Option<(u32, u32)>,
+    ) -> Result<(), BrowserCallError> {
+        let session_id = self
+            .session_for(token)
+            .ok_or(BrowserCallError::UnknownSession)?;
+        // Prefer the page the session has been reading; fall back to the first
+        // real page when nothing has been observed yet.
+        let target = self
+            .observers
+            .lock()
+            .ok()
+            .and_then(|observers| {
+                observers
+                    .get(token)
+                    .map(|observer| observer.target_id().to_string())
+            })
+            .filter(|target| !target.is_empty());
+
+        let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
+            return Err(BrowserCallError::Viewport(
+                "this session's browser has not published a DevTools endpoint yet".to_string(),
+            ));
+        };
+        let client = CdpClient::connect(&endpoint)
+            .await
+            .map_err(|error| BrowserCallError::Viewport(error.to_string()))?;
+        let result = ax::viewport(&client, target.as_deref(), size)
+            .await
+            .map_err(|error| BrowserCallError::Viewport(error.to_string()));
+        client.close().await;
+        result
+    }
+
+    ///
+    /// The number is resolved against *that* capture, in *that* tab: the
+    /// observer remembers both, so an action can never reach a page the model
+    /// has not read. A point needs the same capture only to know which tab it
+    /// belongs to; the coordinates are the model's own.
+    pub async fn act(
+        &self,
+        token: &str,
+        target: ActTarget,
+        action: &str,
+        value: Option<&str>,
+        scroll: Option<(f64, f64)>,
+    ) -> Result<(), BrowserCallError> {
+        let session_id = self
+            .session_for(token)
+            .ok_or(BrowserCallError::UnknownSession)?;
+
+        // Parse first: a misspelled action should not need a browser to fail.
+        let action = ax::parse_action(action, value, scroll)
+            .map_err(|error| BrowserCallError::Act(error.to_string()))?;
+
+        let (target_id, resolved) = {
+            let observers = self
+                .observers
+                .lock()
+                .map_err(|_| BrowserCallError::UnknownSession)?;
+            let observer = observers.get(token).ok_or_else(|| {
+                BrowserCallError::Act(
+                    "no page has been observed yet; call browser_observe first".to_string(),
+                )
+            })?;
+            let target_id = observer.target_id().to_string();
+            let resolved = match target {
+                ActTarget::Element { index } => ax::Target::Element {
+                    index,
+                    backend_id: observer
+                        .element(index)
+                        .map_err(|error| BrowserCallError::Act(error.to_string()))?,
+                },
+                ActTarget::Point { x, y } => ax::Target::Point { x, y },
+            };
+            (target_id, resolved)
+        };
+
+        if target_id.is_empty() {
+            return Err(BrowserCallError::Act(
+                "no page has been observed yet; call browser_observe first".to_string(),
+            ));
+        }
+
+        let Some(endpoint) = self.service.cdp_endpoint(&session_id) else {
+            return Err(BrowserCallError::Act(
+                "this session's browser has not published a DevTools endpoint yet".to_string(),
+            ));
+        };
+
+        let client = CdpClient::connect(&endpoint)
+            .await
+            .map_err(|error| BrowserCallError::Act(error.to_string()))?;
+        let result = ax::act(&client, &target_id, resolved, &action)
+            .await
+            .map_err(|error| BrowserCallError::Act(error.to_string()));
+        client.close().await;
+        result
     }
 
     fn session_for(&self, token: &str) -> Option<String> {

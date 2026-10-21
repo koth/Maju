@@ -3,6 +3,7 @@ mod attachment_cache;
 pub mod automation;
 mod bootstrap;
 pub mod browser_cleanup;
+pub mod browser_docs;
 pub mod browser_injection;
 pub mod browser_install;
 pub mod browser_mcp;

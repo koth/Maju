@@ -132,9 +132,11 @@ pub fn leaf_name(exposed: &str) -> Option<&str> {
 /// exact name keeps this correct across provider renames
 /// (`browser_take_screenshot`, `browser_snapshot`) and keeps a tool that merely
 /// mentions a capture verb (`screenshot_and_edit`) in the write class.
+/// `observe` is the same kind of verb for Kodex's own accessibility capture:
+/// it reads the page, so it must not prompt in Plan mode.
 pub fn classify(leaf: &str) -> ToolEffect {
     let leaf = leaf.to_ascii_lowercase();
-    if leaf.ends_with("screenshot") || leaf.ends_with("snapshot") {
+    if leaf.ends_with("screenshot") || leaf.ends_with("snapshot") || leaf.ends_with("observe") {
         ToolEffect::Read
     } else {
         ToolEffect::Write

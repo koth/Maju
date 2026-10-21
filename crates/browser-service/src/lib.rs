@@ -7,6 +7,7 @@
 //! is launched, how its catalog is discovered and exposed to the model, and
 //! how a tool result is projected.
 
+pub mod ax;
 pub mod catalog;
 pub mod cdp;
 pub mod installer;

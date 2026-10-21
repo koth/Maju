@@ -11,7 +11,8 @@
 //! version pin change the surface without a Kodex release, and it is why this
 //! server refuses to start with an empty catalog rather than serving nothing.
 
-use crate::browser_mcp::{BrowserCallError, BrowserMcpService};
+use crate::browser_mcp::{ActTarget, BrowserCallError, BrowserMcpService};
+use browser_service::ax::ObserveMode;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -33,6 +34,41 @@ use tokio::sync::oneshot;
 type BoxBody = Full<Bytes>;
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 const TOKEN_HEADER: &str = "x-kodex-browser-token";
+
+/// The server segment for Kodex's own browser tools.
+///
+/// The provider's tools arrive under its own name; observation is ours, and it
+/// keeps a separate segment so a tool card says where it came from and so the
+/// provider can be swapped without taking observation with it.
+const OBSERVE_SERVER: &str = "browser-use";
+/// The observation tool's leaf name.
+const OBSERVE_TOOL: &str = "browser_observe";
+/// The acting tool's leaf name.
+const ACT_TOOL: &str = "browser_act";
+/// The guidance tool's leaf name.
+const DOCS_TOOL: &str = "browser_documentation";
+/// The viewport tool's leaf name.
+const VIEWPORT_TOOL: &str = "browser_viewport";
+
+/// The exposed name of the observation tool.
+fn observe_tool_name() -> String {
+    browser_service::catalog::exposed_name(OBSERVE_SERVER, OBSERVE_TOOL)
+}
+
+/// The exposed name of the acting tool.
+fn act_tool_name() -> String {
+    browser_service::catalog::exposed_name(OBSERVE_SERVER, ACT_TOOL)
+}
+
+/// The exposed name of the guidance tool.
+fn docs_tool_name() -> String {
+    browser_service::catalog::exposed_name(OBSERVE_SERVER, DOCS_TOOL)
+}
+
+/// The exposed name of the viewport tool.
+fn viewport_tool_name() -> String {
+    browser_service::catalog::exposed_name(OBSERVE_SERVER, VIEWPORT_TOOL)
+}
 
 /// Per-token view of the browser adapter.
 #[derive(Clone, Default)]
@@ -464,7 +500,12 @@ async fn handle_json_rpc_call(
         "initialize" => Ok(json!({
             "protocolVersion": crate::mcp_version::negotiate(payload.get("params")),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "kodex-browser", "version": env!("CARGO_PKG_VERSION")}
+            "serverInfo": {"name": "kodex-browser", "version": env!("CARGO_PKG_VERSION")},
+            // Guidance rides on the handshake rather than on every tool
+            // description: a client that surfaces it has already read it
+            // before the first call, and one that drops it still has
+            // `browser_documentation`.
+            "instructions": crate::browser_docs::instructions(),
         })),
         // Priming happens here rather than at start-up: this is the first
         // moment a client can express interest, and the catalog only exists
@@ -473,6 +514,12 @@ async fn handle_json_rpc_call(
         // at mount time would never ask again.
         "tools/list" => match prime(&adapter, token).await {
             Ok(()) => Ok(json!({"tools": tool_schemas(&adapter)})),
+            // A provider that will not start must not cost the agent the
+            // ability to read the page. The observation tool is still true,
+            // and seeing the page is what lets the agent explain the failure.
+            Err(error) if error.get("code").and_then(Value::as_i64) == Some(-32002) => Ok(json!({
+                "tools": [observe_schema(), act_schema(), viewport_schema(), docs_schema()]
+            })),
             Err(error) => Err(error),
         },
         "tools/call" => {
@@ -529,7 +576,7 @@ async fn prime(adapter: &Arc<BrowserMcpService>, token: &str) -> Result<(), Valu
 /// constant. An empty list here means [`prime`] has not run, which only
 /// happens if a caller reads this without going through `tools/list`.
 fn tool_schemas(adapter: &BrowserMcpService) -> Vec<Value> {
-    adapter
+    let mut tools: Vec<Value> = adapter
         .exposed_tools()
         .into_iter()
         .map(|tool| {
@@ -539,7 +586,332 @@ fn tool_schemas(adapter: &BrowserMcpService) -> Vec<Value> {
                 "inputSchema": tool.input_schema,
             })
         })
-        .collect()
+        .collect();
+    // Observation is ours, so it is appended rather than discovered. It is
+    // listed after the provider's tools on purpose: reading the page is the
+    // step that follows an action, and the list reads in that order.
+    tools.push(observe_schema());
+    tools.push(act_schema());
+    tools.push(viewport_schema());
+    tools.push(docs_schema());
+    tools
+}
+
+/// The model-facing contract for [`VIEWPORT_TOOL`].
+///
+/// The description spends most of its words on *when not to use it*: resizing a
+/// browser to make a screenshot roomier is a real failure mode, and it changes
+/// what the user sees.
+fn viewport_schema() -> Value {
+    json!({
+        "name": viewport_tool_name(),
+        "description": "Set the page viewport to a specific size, or clear the override with `reset`. \
+Use it only when the user asks for a specific size, a named breakpoint, or a device width. \
+Do not resize the browser to fit more content or make a screenshot look better — take a full-page screenshot instead. \
+An override lasts until it is cleared, so call it with `reset` when the check is done.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Viewport width in CSS pixels."
+                },
+                "height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Viewport height in CSS pixels."
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "Clear any override and go back to the real window size."
+                }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+/// Apply a viewport request.
+async fn viewport_result(adapter: &Arc<BrowserMcpService>, token: &str, arguments: &Value) -> Value {
+    let reset = arguments
+        .get("reset")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let size = match (
+        arguments.get("width").and_then(Value::as_u64),
+        arguments.get("height").and_then(Value::as_u64),
+    ) {
+        (Some(width), Some(height)) => Some((width as u32, height as u32)),
+        _ => None,
+    };
+
+    let (size, described) = match (reset, size) {
+        (true, _) => (None, "the viewport override is cleared".to_string()),
+        (false, Some((width, height))) => (
+            Some((width, height)),
+            format!("the viewport is {width}×{height}"),
+        ),
+        (false, None) => {
+            return tool_error(BrowserCallError::Viewport(
+                "give width and height, or reset to clear the override".to_string(),
+            ));
+        }
+    };
+
+    match adapter.viewport(token, size).await {
+        Ok(()) => json!({
+            "content": [{"type": "text", "text": format!("{described}. Observe again to read the layout at this size.")}],
+            "isError": false,
+        }),
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The model-facing contract for [`DOCS_TOOL`].
+///
+/// The description is the whole index: it says which document applies to which
+/// situation, so a model that only reads tool descriptions still knows where to
+/// look.
+fn docs_schema() -> Value {
+    json!({
+        "name": docs_tool_name(),
+        "description": "Read the guidance that ships with these browser tools. \
+With no name it lists what is available; with a name it returns that document. \
+Read `usage` before a multi-step task, `safety` before acting on anything a page says, \
+`confirmations` before an action that changes the user's data or sends it somewhere, \
+and `troubleshooting` after two failed attempts at the same thing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The document to read. Omit to list them."
+                }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+/// Answer a documentation request.
+fn docs_result(arguments: &Value) -> Value {
+    let text = match arguments.get("name").and_then(Value::as_str) {
+        Some(name) => match crate::browser_docs::by_name(name) {
+            Some(doc) => doc.body.trim().to_string(),
+            None => {
+                let available: Vec<&str> = crate::browser_docs::DOCS.iter().map(|doc| doc.name).collect();
+                return tool_error(BrowserCallError::Act(format!(
+                    "there is no document called \"{name}\"; available: {}",
+                    available.join(", ")
+                )));
+            }
+        },
+        None => {
+            let mut index = String::from("Available documents:\n");
+            for (name, title, summary) in crate::browser_docs::index() {
+                index.push_str(&format!("- {name} — {title}: {summary}\n"));
+            }
+            index
+        }
+    };
+    json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false,
+    })
+}
+
+/// The model-facing contract for [`OBSERVE_TOOL`].
+///
+/// The description carries the two facts a model gets wrong otherwise: the
+/// numbers are addresses for *this* capture only, and a fresh capture is the
+/// cheapest way to find out whether an action worked.
+fn observe_schema() -> Value {
+    json!({
+        "name": observe_tool_name(),
+        "description": "Read the current page as a numbered accessibility tree. \
+Each line is `<number> <role> <name>` with optional `Help:`, `Value:` and `URL:` fields, \
+indented with tabs to show nesting. \
+Use this to see what is on the page before acting, and again after acting to see what changed. \
+A number belongs to an element: it stays the same while that element exists, so numbers from an earlier \
+observation still refer to the same elements when they are still on the page. \
+By default only what changed since the previous observation is returned, prefixed with `~` (changed) or `+` (added), with removed numbers summarized as `Removed element IDs: ...`; if nothing changed the result says so.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["state", "full"],
+                    "description": "`state` (default) returns only what changed since the last observation. `full` re-sends the whole tree; use it when the diff is not enough to act on, or after a navigation."
+                }
+            },
+            "additionalProperties": false
+        }
+    })
+}
+
+/// Run an observation and project it into an MCP tool result.
+async fn observe_result(adapter: &Arc<BrowserMcpService>, token: &str, arguments: &Value) -> Value {
+    let mode = match arguments.get("mode").and_then(Value::as_str) {
+        Some("full") => ObserveMode::Full,
+        _ => ObserveMode::State,
+    };
+    match adapter.observe(token, mode).await {
+        Ok(observed) => json!({
+            "content": [{"type": "text", "text": observed.text().unwrap_or_default()}],
+            "isError": false,
+        }),
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The model-facing contract for [`ACT_TOOL`].
+///
+/// `observe` defaults to on. An action almost always changes the page, so the
+/// cheapest useful call is "do it and tell me what changed" — one round trip
+/// instead of two. Turning it off is for batching several actions before
+/// looking, which is the only case where the intermediate states are waste.
+fn act_schema() -> Value {
+    json!({
+        "name": act_tool_name(),
+        "description": "Act on an element by the number it had in an observation, or on a point in the viewport. \
+`click` and `double_click` press in the middle of the target; `fill` replaces a field's text, `type` inserts at the caret; \
+`press` sends one key (`Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `Space`, arrows, `Home`, `End`, `PageUp`, `PageDown`); \
+`scroll` moves the page by `delta_y` (and `delta_x`). \
+Use a number whenever the element is in the observation. Use x and y only for something the tree does not expose — a canvas, a custom-drawn widget, a cross-origin frame — taking the coordinates from a screenshot. \
+The result includes the same diff `browser_observe` would return, so a single action needs no follow-up call. \
+Set `observe` to false when you are making several actions in a row and only want to look at the end. \
+Numbers stay valid while the element exists, but the page may have changed since you read it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The element number from an observation of the current page."
+                },
+                "x": {
+                    "type": "number",
+                    "description": "Viewport x in CSS pixels. Use with y instead of index."
+                },
+                "y": {
+                    "type": "number",
+                    "description": "Viewport y in CSS pixels. Use with x instead of index."
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["click", "double_click", "fill", "type", "press", "scroll"],
+                    "description": "What to do to the target."
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Text for `fill`/`type`, or the key name for `press`. Ignored by the other actions."
+                },
+                "delta_x": {
+                    "type": "number",
+                    "description": "Horizontal scroll distance in pixels, for `scroll`."
+                },
+                "delta_y": {
+                    "type": "number",
+                    "description": "Vertical scroll distance in pixels, for `scroll` (positive scrolls down)."
+                },
+                "observe": {
+                    "type": "boolean",
+                    "description": "Whether to include what changed on the page. Defaults to true."
+                }
+            },
+            "required": ["action"],
+            "additionalProperties": false
+        }
+    })
+}
+
+/// The text of an action result: what happened, then optionally what changed.
+///
+/// Kept pure so the wording — which is the only thing the model sees — is
+/// testable without a browser.
+fn act_text(action: &str, target: &str, observed: Option<&browser_service::ax::Observed>) -> String {
+    let mut text = format!("{action} on {target}.");
+    match observed {
+        Some(observed) => {
+            text.push('\n');
+            text.push_str(observed.text().unwrap_or_default());
+        }
+        None => text.push_str(" Observe the page to see the result."),
+    }
+    text
+}
+
+/// Run an action and project it into an MCP tool result.
+async fn act_result(adapter: &Arc<BrowserMcpService>, token: &str, arguments: &Value) -> Value {
+    let index = arguments.get("index").and_then(Value::as_u64);
+    let x = arguments.get("x").and_then(Value::as_f64);
+    let y = arguments.get("y").and_then(Value::as_f64);
+
+    // A number addresses an element; a point addresses whatever is drawn there.
+    // Everything else is a malformed call rather than something to guess at.
+    let (target, described) = match (index, x, y) {
+        (Some(index), _, _) => (
+            ActTarget::Element {
+                index: index as usize,
+            },
+            format!("element {index}"),
+        ),
+        (None, Some(x), Some(y)) => (ActTarget::Point { x, y }, format!("point ({x}, {y})")),
+        _ => {
+            return tool_error(BrowserCallError::Act(
+                "give an element index, or x and y for a point".to_string(),
+            ));
+        }
+    };
+
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("click");
+    let value = arguments.get("value").and_then(Value::as_str);
+    let scroll = {
+        let dx = arguments.get("delta_x").and_then(Value::as_f64);
+        let dy = arguments.get("delta_y").and_then(Value::as_f64);
+        (dx.is_some() || dy.is_some()).then(|| (dx.unwrap_or(0.0), dy.unwrap_or(0.0)))
+    };
+    // Observing is the default because a single action almost always wants its
+    // result; batching is the special case, and says so.
+    let observe = arguments
+        .get("observe")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    if let Err(error) = adapter.act(token, target, action, value, scroll).await {
+        return tool_error(error);
+    }
+
+    if !observe {
+        return json!({
+            "content": [{"type": "text", "text": act_text(action, &described, None)}],
+            "isError": false,
+        });
+    }
+
+    // The action already happened. A failed follow-up observation is worth
+    // reporting, but it must not turn a successful click into an error the
+    // model will retry.
+    match adapter.observe(token, ObserveMode::State).await {
+        Ok(observed) => json!({
+            "content": [{"type": "text", "text": act_text(action, &described, Some(&observed))}],
+            "isError": false,
+        }),
+        Err(error) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "{}\n(the page could not be observed afterwards: {error})",
+                    act_text(action, &described, None)
+                )
+            }],
+            "isError": false,
+        }),
+    }
 }
 
 async fn handle_tool_call(
@@ -556,6 +928,25 @@ async fn handle_tool_call(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // Observation and actioning do not need the provider: they open their own
+    // CDP connection to the same browser. Handled before priming so a provider
+    // that cannot start still leaves the agent able to read and drive the page.
+    if name == observe_tool_name() {
+        return Ok(observe_result(&adapter, token, &arguments).await);
+    }
+    if name == act_tool_name() {
+        return Ok(act_result(&adapter, token, &arguments).await);
+    }
+    if name == viewport_tool_name() {
+        return Ok(viewport_result(&adapter, token, &arguments).await);
+    }
+    if name == docs_tool_name() {
+        // Guidance needs neither a session nor a provider: it is shipped with
+        // the binary, and a model that has lost its place should always be able
+        // to re-read it.
+        return Ok(docs_result(&arguments));
+    }
 
     // A tool name is validated against the catalog before it is forwarded, and
     // the catalog only exists after a prime. A client that skips `tools/list`
@@ -879,7 +1270,7 @@ mod tests {
         let (status, body) = rpc(&handle, &token, payload, false);
 
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["result"]["tools"].as_array().unwrap().len(), 5);
     }
 
     /// What the rule is actually about: a request may present no session id, but
@@ -1140,21 +1531,30 @@ mod tests {
         assert!(stdout.contains("OK"), "{stdout}");
     }
 
-    /// The projection is empty until a prime has run.
+    /// The provider projection is empty until a prime has run.
     ///
     /// This used to be asserted over the wire, as `tools/list` returning an
     /// empty array — which is what the bug looked like from outside. The
     /// projection itself is still empty when nothing has primed it; what changed
-    /// is that `tools/list` no longer reports that as the answer.
+    /// is that `tools/list` no longer reports that as the answer. Observation is
+    /// not part of that projection: it is ours and is always listed.
     #[test]
     fn the_projection_is_empty_until_something_primes_it() {
         let dir = TempDir::new().unwrap();
         let adapter = adapter(&dir);
-        assert!(tool_schemas(&adapter).is_empty());
+        assert!(adapter.exposed_tools().is_empty());
         assert!(!adapter.has_tools());
 
+        // Ours are listed regardless, because they do not depend on the provider.
+        let schemas = tool_schemas(&adapter);
+        assert_eq!(schemas.len(), 4, "observe, act, viewport and the guidance");
+        assert_eq!(schemas[0]["name"], observe_tool_name());
+        assert_eq!(schemas[1]["name"], act_tool_name());
+        assert_eq!(schemas[2]["name"], viewport_tool_name());
+        assert_eq!(schemas[3]["name"], docs_tool_name());
+
         install_one_tool(&adapter, "browser_click");
-        assert_eq!(tool_schemas(&adapter).len(), 1);
+        assert_eq!(tool_schemas(&adapter).len(), 5);
     }
 
     #[test]
@@ -1170,10 +1570,288 @@ mod tests {
         let (_, body) = rpc(&handle, &token, payload, true);
 
         let tools = body["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 5, "the provider's tool and our four");
         assert_eq!(tools[0]["name"], "mcp__playwright-mcp__browser_click");
         assert_eq!(tools[0]["description"], "browser_click description");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        assert_eq!(tools[1]["name"], observe_tool_name());
+        assert_eq!(tools[1]["inputSchema"]["type"], "object");
+        assert_eq!(tools[2]["name"], act_tool_name());
+        assert_eq!(tools[2]["inputSchema"]["required"][0], "action");
+        assert_eq!(tools[3]["name"], viewport_tool_name());
+        assert_eq!(tools[4]["name"], docs_tool_name());
+    }
+
+    /// Observation is answered here, not forwarded to the provider.
+    ///
+    /// The catalog is empty in this test, so a forwarded call would come back
+    /// as an unknown tool. Getting "no endpoint yet" instead is the proof that
+    /// the tool belongs to this server.
+    #[test]
+    fn observe_is_served_without_a_provider() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": observe_tool_name(), "arguments": {}}
+        });
+        let (status, body) = rpc(&handle, &token, payload, true);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["isError"], true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("DevTools endpoint"),
+            "expected the observation path to run and find no browser: {text}"
+        );
+    }
+
+    /// The action result is what the model reads, so its wording is tested
+    /// rather than assumed.
+    #[test]
+    fn an_action_result_says_what_happened_and_optionally_what_changed() {
+        use browser_service::ax::Observed;
+
+        let alone = act_text("click", "element 24", None);
+        assert!(alone.starts_with("click on element 24."), "{alone}");
+        assert!(alone.contains("Observe the page"), "{alone}");
+
+        let unchanged = act_text("click", "point (300, 200)", Some(&Observed::Unchanged));
+        assert!(
+            unchanged.starts_with("click on point (300, 200)."),
+            "{unchanged}"
+        );
+        assert!(
+            unchanged.contains("no change in the accessibility tree"),
+            "{unchanged}"
+        );
+
+        let changed = act_text(
+            "fill",
+            "element 12",
+            Some(&Observed::Diff(
+                "Diff (~ changed, + added, removed by ID range):\n~\t12 text field Customer, Value: A\n"
+                    .to_string(),
+            )),
+        );
+        assert!(changed.starts_with("fill on element 12."), "{changed}");
+        assert!(changed.contains("~\t12 text field Customer"), "{changed}");
+    }
+
+    /// The flag exists, defaults to on, and is not required — a model that never
+    /// reads the schema still gets the useful behaviour.
+    #[test]
+    fn the_act_schema_offers_observation_by_default() {
+        let schema = act_schema();
+        let observe = &schema["inputSchema"]["properties"]["observe"];
+        assert_eq!(observe["type"], "boolean", "{observe}");
+        let required = schema["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            !required.iter().any(|field| field == "observe"),
+            "observation is a default, not an obligation"
+        );
+    }
+
+    /// A call with neither a number nor a point cannot be aimed at anything.
+    #[test]
+    fn act_needs_a_target() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": act_tool_name(), "arguments": {"action": "click"}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("element index, or x and y"), "got {text}");
+    }
+
+    /// A scroll with no distance is a typo, and the parser says so before any
+    /// browser is involved.
+    #[test]
+    fn act_rejects_a_scroll_without_a_distance() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": {"name": act_tool_name(), "arguments": {"action": "scroll", "x": 10, "y": 10}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("delta_y"), "got {text}");
+    }
+
+    /// The handshake carries the guidance, so a client that surfaces
+    /// `instructions` has it before the first tool call.
+    #[test]
+    fn initialize_carries_the_browser_guidance() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 20, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25"}
+        });
+        let (_, body) = rpc(&handle, &token, payload, false);
+
+        let instructions = body["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("Working with the browser"), "{instructions}");
+        assert!(
+            instructions.contains("browser_documentation"),
+            "the index of what can be read is missing"
+        );
+    }
+
+    /// The guidance tool answers without a session, a provider, or a page.
+    #[test]
+    fn documentation_is_always_readable() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let listing = json!({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": docs_tool_name(), "arguments": {}}
+        });
+        let (_, body) = rpc(&handle, &token, listing, true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("usage"), "{text}");
+        assert!(text.contains("troubleshooting"), "{text}");
+
+        let one = json!({
+            "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+            "params": {"name": docs_tool_name(), "arguments": {"name": "usage"}}
+        });
+        let (_, body) = rpc(&handle, &token, one, true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("browser_observe"), "{text}");
+    }
+
+    /// An unknown document names the ones that exist instead of failing blankly.
+    #[test]
+    fn an_unknown_document_lists_the_real_ones() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+            "params": {"name": docs_tool_name(), "arguments": {"name": "cookbook"}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        assert_eq!(body["result"]["isError"], true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("there is no document called"), "{text}");
+        assert!(text.contains("safety"), "{text}");
+    }
+
+    /// A viewport call with neither a size nor a reset is a typo.
+    #[test]
+    fn viewport_needs_a_size_or_a_reset() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 24, "method": "tools/call",
+            "params": {"name": viewport_tool_name(), "arguments": {}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        assert_eq!(body["result"]["isError"], true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("reset"), "got {text}");
+    }
+
+    /// Acting before observing has no numbers to act on, and says so.    #[test]
+    fn act_without_an_observation_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {"name": act_tool_name(), "arguments": {"index": 2, "action": "click"}}
+        });
+        let (status, body) = rpc(&handle, &token, payload, true);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["isError"], true);
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("browser_observe first"), "got {text}");
+    }
+
+    /// A missing index is a malformed call, not an element that cannot be found.
+    #[test]
+    fn act_requires_an_index() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": act_tool_name(), "arguments": {"action": "click"}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("element index"), "got {text}");
+    }
+
+    /// An unknown action fails before a browser is ever needed.
+    #[test]
+    fn act_rejects_an_unknown_action_without_touching_the_page() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+        let token = handle.register_session("session-1").unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": act_tool_name(), "arguments": {"index": 1, "action": "hover"}}
+        });
+        let (_, body) = rpc(&handle, &token, payload, true);
+
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("click, double_click, fill"), "got {text}");
+    }
+
+    /// An unregistered token cannot observe anything.    ///
+    /// The refusal happens at the transport, before any tool name is read:
+    /// the token *is* the session, so an unknown one is an authentication
+    /// failure rather than a tool error.
+    #[test]
+    fn observe_refuses_an_unregistered_token() {
+        let dir = TempDir::new().unwrap();
+        let adapter = adapter(&dir);
+        let handle = start_browser_mcp_server(adapter.clone()).unwrap();
+
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": observe_tool_name(), "arguments": {"mode": "full"}}
+        });
+        let (status, _body) = rpc(&handle, "browser-999", payload, true);
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -1207,9 +1885,11 @@ mod tests {
     ///
     /// An empty list is a cacheable answer: a client that lists once at mount
     /// time would remember it and never ask again, so a transient launch failure
-    /// would outlive the fault. An error is not cacheable that way.
+    /// would outlive the fault. The list is therefore never empty while
+    /// observation is available — the agent keeps the ability to read the page,
+    /// which is what lets it explain the failure instead of guessing at it.
     #[test]
-    fn a_provider_that_cannot_start_is_an_error_not_an_empty_list() {
+    fn a_provider_that_cannot_start_still_leaves_observation_available() {
         let dir = TempDir::new().unwrap();
         let adapter = adapter(&dir);
         // No catalog and no runnable provider: the prime cannot succeed.
@@ -1220,14 +1900,16 @@ mod tests {
         let (status, body) = rpc(&handle, &token, payload, true);
 
         assert_eq!(status, StatusCode::OK, "a JSON-RPC error, not an HTTP one");
-        assert!(
-            body.get("error").is_some(),
-            "an empty tools list would be cached by the client: {body}"
+        let tools = body["result"]["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            4,
+            "only our tools survive a broken provider: {body}"
         );
-        assert!(
-            !body["result"]["tools"].is_array(),
-            "the failure must not look like a capability with no tools: {body}"
-        );
+        assert_eq!(tools[0]["name"], observe_tool_name());
+        assert_eq!(tools[1]["name"], act_tool_name());
+        assert_eq!(tools[2]["name"], viewport_tool_name());
+        assert_eq!(tools[3]["name"], docs_tool_name());
     }
 
     #[test]
