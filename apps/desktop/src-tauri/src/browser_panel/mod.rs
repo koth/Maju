@@ -744,7 +744,7 @@ pub async fn warm(app: &AppHandle, host: &BrowserPanelHost) -> Result<Option<Str
         let endpoint = {
             let mut inner = host.inner.lock().map_err(|_| poisoned())?;
             inner.warming = false;
-            inner.warm = Some(created?);
+            inner.warm = Some(Surface::Webview(created?));
             inner.port.map(endpoint_for)
         };
         tracing::info!(

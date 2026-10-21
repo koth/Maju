@@ -903,6 +903,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Chromium's profile lock is a `hostname-pid` symlink on unix and something
+    // else entirely on Windows, so this test only says anything where the
+    // format it builds is the one Chromium writes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_profile_another_browser_still_holds_is_refused_by_name() {
         // The failure this exists for: an orphaned browser keeps the profile,
@@ -940,6 +944,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Companion to the test above, on the same unix-only lock format.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_lock_left_behind_by_a_dead_browser_is_not_a_holder() {
         // Chromium removes its lock on exit; one that outlived its process is
@@ -963,7 +969,8 @@ mod tests {
     }
 
     /// This machine's short hostname, which is what Chromium writes into its
-    /// `SingletonLock` target.
+    /// `SingletonLock` target. Only the unix tests above read it.
+    #[cfg(unix)]
     fn hostname() -> String {
         std::fs::read_to_string("/etc/hostname")
             .map(|name| name.trim().to_string())

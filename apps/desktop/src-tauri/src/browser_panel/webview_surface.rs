@@ -20,8 +20,10 @@ use tauri::{
 };
 
 use super::{BrowserPanelHost, OFFSCREEN, PageReport, Slot, main_window, report_tabs, tab_id_of};
+// `profile_dir` lives in this file (below), not in the parent: importing it from
+// `super` is a Windows-only compile error, which is why it is not here.
 #[cfg(windows)]
-use super::{promote, profile_dir};
+use super::promote;
 
 /// Create one of the panel's webviews, whichever tab it is going to be.
 ///
