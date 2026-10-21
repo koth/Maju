@@ -284,6 +284,18 @@ impl BrowserMcpService {
             .and_then(|leases| leases.get(token).map(|lease| lease.session_id.clone()))
     }
 
+    /// Install the provider-independent catalog: the native tools that drive
+    /// the panel's own browser.
+    ///
+    /// Separate from [`Self::install_catalog`] because the native list is
+    /// static — there is no provider catalog to validate it against, and no
+    /// transient failure that should leave a running session without tools.
+    pub fn install_native_catalog(&self, tools: Vec<ExposedTool>) {
+        if let Ok(mut slot) = self.catalog.lock() {
+            *slot = Some(tools);
+        }
+    }
+
     /// Make sure the provider has advertised its tools, starting it if needed.
     ///
     /// This is the step that turns an installed provider into a usable tool
@@ -304,10 +316,20 @@ impl BrowserMcpService {
         if self.has_tools() {
             return Ok(self.exposed_tools().len());
         }
+        // The panel's own browser, driven natively: when the desktop shell has
+        // published its panel driver, the tools are a static local list and no
+        // provider process is ever started. Checked on every call rather than
+        // once, so the moment the driver appears is the moment it takes over.
+        if browser_service::panel_driver::get().is_some() {
+            return crate::panel_browser_tools::ensure_catalog(self).await;
+        }
         let _guard = self.prime.lock().await;
         // Whoever held the lock may have primed while we waited.
         if self.has_tools() {
             return Ok(self.exposed_tools().len());
+        }
+        if browser_service::panel_driver::get().is_some() {
+            return crate::panel_browser_tools::ensure_catalog(self).await;
         }
 
         let service = self.service.clone();
@@ -352,6 +374,14 @@ impl BrowserMcpService {
             let lease = leases.get(token).ok_or(BrowserCallError::UnknownSession)?;
             (lease.session_id.clone(), lease.cancel.clone())
         };
+
+        // The panel's own browser, driven natively: the token above still
+        // decides *whether* this session may call, but the page every call
+        // reaches is the panel's — the one the user is looking at.
+        if let Some(driver) = browser_service::panel_driver::get() {
+            return crate::panel_browser_tools::call(self, &driver, token, exposed_name, arguments)
+                .await;
+        }
 
         let catalog = self.exposed_tools();
         let tool = catalog

@@ -1,8 +1,9 @@
 /* The right panel's browser (see docs/browser-view-subsystem.md).
-   The page is a native WebView2 webview the backend puts in the slot's place,
-   so the slot itself draws nothing: this file styles the toolbar around the
-   hole and keeps the hole exactly where the webview expects it. Colours come
-   from the app theme, because unlike the page the toolbar is app UI. */
+   The page is a native child webview of the app window — WebView2 on Windows,
+   WKWebView on macOS — so the slot itself draws nothing: this file styles the
+   toolbar around the hole and keeps the hole exactly where the page expects it.
+   Colours come from the app theme, because unlike the page the toolbar is app
+   UI. */
 
 .embedded-browser {
   display: flex;
@@ -88,4 +89,13 @@
   flex: 1 1 auto;
   min-height: 0;
   background: var(--app-bg);
+}
+
+/* A page on its way. The hole is empty until the page paints, and an empty
+   hole reads as a broken panel; this says what is actually happening. */
+.embedded-browser-loading {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-size-2xs);
+  white-space: nowrap;
 }

@@ -19,6 +19,7 @@ mod image_capability;
 mod image_mcp;
 pub mod mcp_version;
 pub mod panel_browser;
+pub mod panel_browser_tools;
 mod paths;
 mod reducer;
 pub mod remote_bootstrap;

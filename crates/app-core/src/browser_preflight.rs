@@ -238,17 +238,24 @@ pub fn check_browser(
     settings: &BrowserSettings,
     env: &dyn PreflightEnvironment,
 ) -> BrowserPreflight {
-    check_browser_with(settings, env, crate::panel_browser::endpoint().as_deref())
+    check_browser_with(
+        settings,
+        env,
+        crate::panel_browser::endpoint().as_deref(),
+        browser_service::panel_driver::get().is_some(),
+    )
 }
 
 /// [`check_browser`], with the panel browser named rather than looked up.
 ///
 /// `panel_endpoint` is the DevTools endpoint of the browser the right panel is
-/// showing, when one is running. It decides one thing and one thing only: which
-/// browser the tools drive. Playwright attaches to that browser over CDP instead
-/// of launching one, so no Chromium has to be on the machine at all — while Node
-/// and the pinned provider package are still required, because the tools still
-/// run as a provider process.
+/// showing, when one is running (Windows). `panel_native` is whether the
+/// desktop shell has published a native panel driver (macOS): then the tools
+/// run in-process against the panel's webview, and there is no provider, no
+/// Node and no Chromium to check at all. `panel_endpoint` decides which
+/// browser the provider attaches to over CDP instead of launching one — while
+/// Node and the pinned provider package are still required, because the tools
+/// still run as a provider process.
 ///
 /// Split from [`check_browser`] so the decision can be tested against a named
 /// endpoint instead of whatever the running app has published.
@@ -256,12 +263,23 @@ pub fn check_browser_with(
     settings: &BrowserSettings,
     env: &dyn PreflightEnvironment,
     panel_endpoint: Option<&str>,
+    panel_native: bool,
 ) -> BrowserPreflight {
     let provider_version = settings.provider_version.clone();
 
     if let Err(detail) = settings.validate() {
         return BrowserPreflight {
             state: misconfigured("Fix the browser settings, then re-run preflight.", detail),
+            node_executable: None,
+            provider_version,
+        };
+    }
+
+    // The tools are native calls into the panel's own webview: nothing is
+    // installed, spawned or attached, so there is nothing to check.
+    if panel_native {
+        return BrowserPreflight {
+            state: PreflightState::Ready,
             node_executable: None,
             provider_version,
         };
@@ -873,10 +891,10 @@ mod tests {
         // no Chromium in the provider's cache.
         let env = FakeEnv::new().with_node();
 
-        let without = check_browser_with(&settings, &env, None);
+        let without = check_browser_with(&settings, &env, None, false);
         assert!(!without.state.is_ready(), "got {:?}", without.state);
 
-        let with = check_browser_with(&settings, &env, Some("http://127.0.0.1:9333"));
+        let with = check_browser_with(&settings, &env, Some("http://127.0.0.1:9333"), false);
         assert!(with.state.is_ready(), "got {:?}", with.state);
         // The provider still runs as a process, so it still needs its runtime:
         // answering Ready without one would hand the session tools that cannot
@@ -895,6 +913,7 @@ mod tests {
             &settings,
             &FakeEnv::new().with_node().without_provider(),
             Some("http://127.0.0.1:9333"),
+            false,
         );
 
         assert!(!preflight.state.is_ready(), "got {:?}", preflight.state);
@@ -910,7 +929,7 @@ mod tests {
         };
 
         let preflight =
-            check_browser_with(&settings, &FakeEnv::new(), Some("http://127.0.0.1:9333"));
+            check_browser_with(&settings, &FakeEnv::new(), Some("http://127.0.0.1:9333"), false);
 
         assert!(!preflight.state.is_ready(), "got {:?}", preflight.state);
     }
@@ -929,9 +948,26 @@ mod tests {
             &settings,
             &FakeEnv::new().with_node(),
             Some("http://127.0.0.1:9333"),
+            false,
         );
 
         assert!(preflight.state.is_ready(), "got {:?}", preflight.state);
+    }
+
+    #[test]
+    fn a_native_panel_driver_needs_no_install_at_all() {
+        // The tools run in-process against the panel's webview: no Node, no
+        // provider package, no Chromium — the checks that would otherwise
+        // withhold the tools simply do not apply.
+        let settings = BrowserSettings {
+            enabled: true,
+            ..BrowserSettings::default()
+        };
+
+        let preflight = check_browser_with(&settings, &FakeEnv::new(), None, true);
+
+        assert!(preflight.state.is_ready(), "got {:?}", preflight.state);
+        assert!(preflight.node_executable.is_none());
     }
 
     #[test]

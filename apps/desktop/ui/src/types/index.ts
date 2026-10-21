@@ -479,14 +479,13 @@ export interface TerminalExitEvent {
   exit_code: number | null;
 }
 
-/**
- * One tab of the right panel's own browser — a native WebView2 webview in the
- * app window, not a page of the session's headless Chromium.
+/** One tab of the right panel's own browser — a native child webview of the app
+ * window (WebView2 on Windows, WKWebView on macOS), not a page of the session's
+ * headless Chromium.
  *
  * `tab_id` is the webview's label: the UI names a tab, the backend finds the
- * page. The browser itself is shared by the whole app (one profile, one
- * DevTools port), so tabs outlive a session switch. See
- * `docs/browser-view-subsystem.md`.
+ * page. The browser itself is shared by the whole app, so tabs outlive a
+ * session switch. See `docs/browser-view-subsystem.md`.
  */
 export interface BrowserPanelTab {
   tab_id: string;
@@ -495,8 +494,10 @@ export interface BrowserPanelTab {
 }
 
 /** The panel's tabs, which one is showing, and the DevTools endpoint the
- *  agent's browser tools are pointed at (`null` while the panel browser has not
- *  answered DevTools, in which case the tools are still on their own browser). */
+ *  agent's browser tools are pointed at (`null` whenever there is none to
+ *  point them at — while the panel browser has not answered DevTools, and on
+ *  macOS, where a WKWebView speaks no CDP at all and the tools keep the
+ *  browser their settings name). */
 export interface BrowserPanelState {
   tabs: BrowserPanelTab[];
   active: string | null;

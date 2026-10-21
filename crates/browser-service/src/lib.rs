@@ -15,6 +15,7 @@ pub mod managed;
 pub mod mcp;
 pub mod orphan;
 pub mod panel;
+pub mod panel_driver;
 pub mod provider;
 pub mod provision;
 pub mod proxy;

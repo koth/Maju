@@ -254,6 +254,19 @@ impl ManagedBrowser {
         std::fs::create_dir_all(&profile)
             .map_err(|error| format!("could not create {}: {error}", profile.display()))?;
 
+        // A profile another live browser still holds is not a profile this one
+        // can have: Chromium answers a second `--user-data-dir` of the same
+        // name by handing its arguments to the running instance and exiting,
+        // and the launch then fails fifteen seconds later with no debugging
+        // port and no cause. Said plainly here instead.
+        if let Some(holder) = profile_lock_holder(&profile) {
+            return Err(format!(
+                "the browser profile {} is in use by another browser (pid {holder}); \
+                 close it, or give this session its own profile",
+                profile.display()
+            ));
+        }
+
         let port = free_port()?;
         let args = browser_argv(port, &profile, settings.headless);
         let mut child = host.spawn(executable, &args).await?;
@@ -271,8 +284,9 @@ impl ManagedBrowser {
                     let _ = std::fs::remove_dir_all(&profile);
                 }
                 return Err(format!(
-                    "the browser did not expose a CDP endpoint on 127.0.0.1:{port} \
-                     within {READY_TIMEOUT:?}"
+                    "the browser started but exposed no CDP endpoint on 127.0.0.1:{port} \
+                     within {READY_TIMEOUT:?} (profile {})",
+                    profile.display()
                 ));
             }
             tokio::time::sleep(PROBE_INTERVAL).await;
@@ -377,6 +391,48 @@ fn unique_profile_name() -> String {
         .map(|since| since.as_nanos())
         .unwrap_or(0);
     format!("{}-{nanos}-{sequence}", std::process::id())
+}
+
+/// The live process holding a Chromium profile, when there is one.
+///
+/// Chromium records the holder in `<profile>/SingletonLock` as a link named
+/// `<hostname>-<pid>`, and cleans it up on exit — so a lock whose pid is gone
+/// is a leftover, not a holder, and is reported as none. Anything unreadable
+/// is also reported as none: a guess that blocks a launch costs the user their
+/// browser tools, which is worse than starting a browser that fails loudly.
+#[cfg(unix)]
+fn profile_lock_holder(profile: &Path) -> Option<u32> {
+    let target = std::fs::read_link(profile.join("SingletonLock")).ok()?;
+    let pid: u32 = target
+        .to_string_lossy()
+        .rsplit('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()?;
+    process_is_alive(pid).then_some(pid)
+}
+
+#[cfg(not(unix))]
+fn profile_lock_holder(_profile: &Path) -> Option<u32> {
+    None
+}
+
+/// Whether a pid still names a process this user could signal.
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // Signal 0 asks the kernel whether the pid exists, without delivering
+    // anything. EPERM means it exists and belongs to someone else, which for
+    // a browser profile still means it is not ours to take.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 /// An unused TCP port on the loopback interface.
@@ -492,7 +548,12 @@ impl BrowserHost for HostBrowser {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             // Reap it even if shutdown is never reached, e.g. on panic.
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // …and be reapable when the reaper never is: the marker is what
+            // makes an orphaned browser findable, and an orphaned browser is
+            // not a wasted process — it holds the profile the next launch
+            // needs, and a launch that cannot have it fails with no cause.
+            .envs(crate::orphan::owner_marker());
 
         // No console window: Chromium is a console-subsystem program started
         // from a GUI app. See `crate::win`.
@@ -843,6 +904,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_profile_another_browser_still_holds_is_refused_by_name() {
+        // The failure this exists for: an orphaned browser keeps the profile,
+        // Chromium hands the next launch's arguments to it and exits, and the
+        // launch then dies 15 seconds later with no debugging port and no
+        // cause. The refusal names the holder instead.
+        let root = test_root();
+        let profile = crate::provision::profile_dir(&root, "default");
+        std::fs::create_dir_all(&profile).unwrap();
+        let holder = std::process::id();
+        let link = profile.join("SingletonLock");
+        let hostname = hostname();
+        std::os::unix::fs::symlink(format!("{hostname}-{holder}"), &link).unwrap();
+        let host = ScriptedHost::ready("ws://x");
+
+        let failed = match ManagedBrowser::launch_with(
+            &host,
+            &root,
+            Path::new("/opt/chrome/chrome"),
+            &BrowserSettings {
+                mode: BrowserMode::Persistent,
+                ..launch_settings()
+            },
+        )
+        .await
+        {
+            // A profile in use is not a profile this launch can have.
+            Err(failed) => failed,
+            Ok(_) => panic!("a profile in use must not produce a browser"),
+        };
+
+        assert!(failed.contains(&holder.to_string()), "got {failed}");
+        assert!(failed.contains("in use"), "got {failed}");
+        assert!(host.spawned_is_empty(), "nothing may be started");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_lock_left_behind_by_a_dead_browser_is_not_a_holder() {
+        // Chromium removes its lock on exit; one that outlived its process is
+        // litter, and refusing on it would take the tools away for a profile
+        // that is in fact free.
+        let root = test_root();
+        let profile = crate::provision::profile_dir(&root, "default");
+        std::fs::create_dir_all(&profile).unwrap();
+        // A pid that is not running: the window above this process' own, which
+        // cannot be a pid that has already exited.
+        let dead = (1..=0x7fff_ffff)
+            .rev()
+            .find(|pid| !super::process_is_alive(*pid))
+            .expect("some pid is not running");
+        let hostname = hostname();
+        std::os::unix::fs::symlink(format!("{hostname}-{dead}"), profile.join("SingletonLock"))
+            .unwrap();
+
+        assert_eq!(profile_lock_holder(&profile), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// This machine's short hostname, which is what Chromium writes into its
+    /// `SingletonLock` target.
+    fn hostname() -> String {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|name| name.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
     async fn a_headed_browser_gets_no_headless_flag() {
         let root = test_root();
         let host = ScriptedHost::ready("ws://x");
@@ -1040,7 +1168,10 @@ mod tests {
         let Err(message) = failed else {
             panic!("a browser that never came up must fail the launch");
         };
-        assert!(message.contains("did not expose a CDP endpoint"), "got {message}");
+        assert!(message.contains("exposed no CDP endpoint"), "got {message}");
+        // The profile is named, because "no endpoint in 15s" on its own is
+        // exactly the symptom an orphaned browser holding the profile causes.
+        assert!(message.contains("profile"), "got {message}");
         assert!(host.killed(), "the half-started browser must be killed");
         let (_, args) = host.spawned();
         assert!(

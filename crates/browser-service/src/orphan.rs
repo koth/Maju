@@ -44,6 +44,18 @@ pub fn provider_env(
     env
 }
 
+/// The owner marker alone, for a child that otherwise inherits the parent's
+/// environment.
+///
+/// A managed Chromium is that child: it needs the real `PATH` and `HOME` to
+/// start at all, so it cannot take the filtered environment the provider does.
+/// Without the marker it is invisible to [`reap_orphaned_browser_providers`],
+/// and an orphaned one keeps holding its profile — so every later launch hands
+/// itself to that zombie and dies without a debugging port.
+pub fn owner_marker() -> [(&'static str, String); 1] {
+    [(OWNER_ENV, owner_pid().to_string())]
+}
+
 /// One row of a process listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PsRow {

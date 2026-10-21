@@ -178,6 +178,7 @@
 .review-new-web-tab-btn {
   display: grid;
   flex: 0 0 20px;
+  align-self: center;
   place-items: center;
   width: 20px;
   height: 20px;
