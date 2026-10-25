@@ -33,6 +33,8 @@
         "enable": true,
         "scope": [
           "$HOME/.kodex/attachments/**",
+          "$HOME/.kodex/dsh/attachments/**",
+          "$HOME/.kodex/generated-images/**",
           "$HOME/.kodex/companion/**",
           "$HOME/.vrm/**",
           "**/*.vrm",

@@ -68,6 +68,17 @@ fn allow_workspace_asset_scope(app: &AppHandle, root: &Path) {
     }
 }
 
+/// Read legacy screenshots referenced from an existing conversation.
+///
+/// New provider results are rewritten to ScreenshotPipeline's durable files.
+/// This narrowly scoped compatibility root is only for messages that already
+/// recorded Playwright's temporary output path; it does not expose the whole
+/// system temporary directory.
+pub fn allow_legacy_playwright_asset_scope(app: &AppHandle) {
+    let root = std::env::temp_dir().join(".playwright-mcp");
+    allow_workspace_asset_scope(app, &root);
+}
+
 
 #[tauri::command]
 pub async fn workspace_open_remote_linux(

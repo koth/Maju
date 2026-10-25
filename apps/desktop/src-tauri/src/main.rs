@@ -80,6 +80,10 @@ fn main() {
             let snapshot_bridge_running = snapshot_bridge_running.clone();
             move |app| {
                 app_core::startup_perf::mark("desktop/setup_start", "");
+                // Existing conversations may still reference Playwright's old
+                // temporary screenshot paths. New results use durable captures;
+                // this bounded scope keeps the old references renderable.
+                commands::workspace::allow_legacy_playwright_asset_scope(app.handle());
                 // Register the DeepSeek Harness backend: one shared host
                 // registry serves both the ACP harness dispatch and the
                 // Kodex-managed `dsh web` bring-up, so multiple sessions and
@@ -120,14 +124,20 @@ fn main() {
                 // fires due automations as background session runs and emits
                 // the `automation:fired` reminder events.
                 automation_scheduler::start(app.handle().clone());
-                // Windows only: start the panel's browser before anyone needs
-                // it, when the agent may use browser tools. There the tools
+                // Windows only: publish the short-lived paint lease used by
+                // provider calls, then start the panel's browser before anyone
+                // needs it when the agent may use browser tools. The tools
                 // attach to that browser, so it has to exist before the first
                 // tool call. On macOS the panel is the app's own WKWebView and
-                // the tools drive the browser their settings name — there is
-                // nothing to warm, and nothing to put on screen at launch.
+                // the tools drive it natively — there is nothing to warm.
                 #[cfg(windows)]
-                warm_panel_browser(app.handle().clone());
+                {
+                    let paint_app = app.handle().clone();
+                    browser_service::panel_paint::publish(std::sync::Arc::new(move || {
+                        browser_panel::acquire_paint(&paint_app)
+                    }));
+                    warm_panel_browser(app.handle().clone());
+                }
                 // macOS: publish the panel driver. The WKWebView has no CDP
                 // endpoint, so this is how the agent's browser tools reach the
                 // panel at all — the MCP server serves native tools that drive
@@ -158,7 +168,15 @@ fn main() {
             move |window, event| {
                 // The panel's pages need nothing here: they are child webviews
                 // of this window, so they move and resize with it.
-                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                //
+                // Only the main window owns the application lifetime. OAuth
+                // popups are top-level windows too; treating their close as a
+                // main-window close stopped the snapshot bridge and called
+                // `shutdown_all`, clearing the project/session state while the
+                // app was still open.
+                if is_main_window(window.label())
+                    && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+                {
                     snapshot_bridge_running.store(false, Ordering::Release);
                     window.state::<AppState>().shutdown_all();
                 }
@@ -706,6 +724,12 @@ fn start_snapshot_bridge(app: tauri::AppHandle, running: Arc<AtomicBool>) {
     });
 }
 
+/// Only the application window owns the app lifetime. OAuth popups are
+/// top-level windows as well; closing one must not shut down the app state.
+fn is_main_window(label: &str) -> bool {
+    label == "main"
+}
+
 fn install_panic_logger() {
     std::panic::set_hook(Box::new(|info| {
         let Ok(paths) = app_core::AppPaths::resolve() else {
@@ -728,4 +752,15 @@ fn install_panic_logger() {
                 file.write_all(payload.as_bytes())
             });
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_main_window;
+
+    #[test]
+    fn closing_a_popup_does_not_own_the_application_lifetime() {
+        assert!(is_main_window("main"));
+        assert!(!is_main_window("browser-popup-1"));
+    }
 }

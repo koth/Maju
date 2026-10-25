@@ -288,4 +288,38 @@ describe("usePanelBrowserTabs", () => {
       title: "A Dev — Home",
     });
   });
+
+  it("reveals an agent-created tab once without stealing focus again", async () => {
+    let handler: ((event: BrowserPanelTabsEvent) => void) | undefined;
+    vi.mocked(onBrowserPanelTabs).mockImplementationOnce((callback) => {
+      handler = callback;
+      return Promise.resolve(() => {});
+    });
+    const { setActiveTab } = mount();
+    await waitFor(() => expect(handler).toBeDefined());
+
+    handler?.({
+      tabs: [panelTab("tab-1", "https://a.dev/", "a.dev")],
+      active: "tab-1",
+    });
+    const reveal = setActiveTab.mock.calls[0][0] as (tab: unknown) => unknown;
+    expect(reveal({ kind: "base", tab: "Review" })).toEqual({
+      kind: "web",
+      id: "tab-1",
+      url: "https://a.dev/",
+      title: "a.dev",
+    });
+
+    // A later title event for the same native tab is not a new navigation. In
+    // particular it must not pull the user back after they returned to Review.
+    handler?.({
+      tabs: [panelTab("tab-1", "https://a.dev/", "A Dev — Home")],
+      active: "tab-1",
+    });
+    const titleUpdate = setActiveTab.mock.calls[1][0] as (tab: unknown) => unknown;
+    expect(titleUpdate({ kind: "base", tab: "Review" })).toEqual({
+      kind: "base",
+      tab: "Review",
+    });
+  });
 });

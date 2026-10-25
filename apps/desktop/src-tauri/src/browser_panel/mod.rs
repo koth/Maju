@@ -138,14 +138,14 @@ pub(super) enum Surface {
 }
 
 impl Surface {
-    /// Put the page at the slot (`Some`) or take it off screen (`None`).
-    pub(super) fn place(&self, slot: Option<Slot>) {
+    /// Put the page at the slot (`Some`), or hide / paint-park it (`None`).
+    pub(super) fn place(&self, slot: Option<Slot>, paint_held: bool) {
         match self {
             #[cfg(any(windows, target_os = "macos"))]
-            Surface::Webview(webview) => webview_surface::place(webview, slot),
+            Surface::Webview(webview) => webview_surface::place(webview, slot, paint_held),
             #[cfg(not(any(windows, target_os = "macos")))]
             Surface::Inert => {
-                let _ = slot;
+                let _ = (slot, paint_held);
             }
         }
     }
@@ -235,6 +235,11 @@ pub(super) struct Inner {
     /// a tab — it becomes one the first time a real page lands in it.
     #[cfg(windows)]
     pub(super) warm: Option<Surface>,
+    /// In-flight agent calls that need compositor frames. While non-zero,
+    /// hidden surfaces are parked visible off screen rather than made
+    /// `IsVisible = false`, which would leave CDP screenshots waiting forever.
+    #[cfg(windows)]
+    pub(super) paint_holds: usize,
     /// Whether a spare page is being created right now. Creating the surface
     /// runs outside this lock, so two callers racing for the first one need a
     /// flag rather than the lock to tell them apart.
@@ -253,6 +258,13 @@ pub struct BrowserPanelHost {
     /// Shared with the webview callbacks: they run on the main thread while the
     /// commands run on the async runtime, and both must see the same state.
     pub(super) inner: Arc<Mutex<Inner>>,
+    /// Serializes native show/hide/placement calls. The state snapshot is taken
+    /// only after this lock is held: a caller with an older plan therefore
+    /// either applies before the newer state or re-reads and applies the newer
+    /// state, but can never hide a page after a new paint lease showed it.
+    /// Unlike `inner`, this is never held by page callbacks, so native IO here
+    /// cannot re-enter it through a page event.
+    pub(super) placement: Mutex<()>,
     /// Page-load halves, broadcast for the panel driver's settle waits.
     pub(super) page_events: tokio::sync::broadcast::Sender<PageEvent>,
     /// In-flight page evaluations: call id → the caller waiting for the
@@ -265,6 +277,7 @@ impl Default for BrowserPanelHost {
         let (page_events, _) = tokio::sync::broadcast::channel(64);
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
+            placement: Mutex::new(()),
             page_events,
             eval_results: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -283,6 +296,8 @@ impl Default for Inner {
             port: None,
             #[cfg(windows)]
             warm: None,
+            #[cfg(windows)]
+            paint_holds: 0,
             #[cfg(windows)]
             warming: false,
             loading: HashMap::new(),
@@ -304,6 +319,25 @@ impl Inner {
         self.warm.as_ref().is_some_and(|warm| {
             matches!(warm, Surface::Webview(webview) if webview.label() == label)
         })
+    }
+
+    /// Add a paint hold and report whether this is the first one. Only that
+    /// transition needs to move native windows; overlapping calls ride along.
+    #[cfg(windows)]
+    fn hold_paint(&mut self) -> bool {
+        let first = self.paint_holds == 0;
+        self.paint_holds = self.paint_holds.saturating_add(1);
+        first
+    }
+
+    /// Release a paint hold and report whether the last one just went away.
+    #[cfg(windows)]
+    fn release_paint(&mut self) -> bool {
+        if self.paint_holds == 0 {
+            return false;
+        }
+        self.paint_holds -= 1;
+        self.paint_holds == 0
     }
 }
 
@@ -466,8 +500,20 @@ impl BrowserPanelHost {
     /// web tab. Positions are applied to the whole set: the tabs share one
     /// slot, so they stay in step whichever one is shown next.
     pub(super) fn place(&self) -> Result<(), String> {
-        let (tabs, active, slot, shown) = {
+        // Serialize the whole native transition, not just the state read. Every
+        // state mutation is followed by `place`, so the last caller always
+        // applies the newest state instead of overwriting it with a stale plan.
+        let _placement = self.placement.lock().map_err(|_| poisoned())?;
+        let (tabs, active, slot, shown, paint_held, warm) = {
             let inner = self.inner.lock().map_err(|_| poisoned())?;
+            #[cfg(windows)]
+            let paint_held = inner.paint_holds > 0;
+            #[cfg(not(windows))]
+            let paint_held = false;
+            #[cfg(windows)]
+            let warm = inner.warm.as_ref().map(clone_surface);
+            #[cfg(not(windows))]
+            let warm: Option<Surface> = None;
             (
                 inner
                     .tabs
@@ -477,11 +523,18 @@ impl BrowserPanelHost {
                 inner.active.clone(),
                 inner.slot,
                 inner.shown,
+                paint_held,
+                warm,
             )
         };
         for (tab_id, surface) in &tabs {
             let visible = shown && slot.has_area() && active.as_deref() == Some(tab_id.as_str());
-            surface.place(visible.then_some(slot));
+            surface.place(visible.then_some(slot), paint_held);
+        }
+        // The spare is never a visible tab, but it is often the exact page the
+        // provider first attaches to. It needs the same paint lease as tabs.
+        if let Some(warm) = warm {
+            warm.place(None, paint_held);
         }
         Ok(())
     }
@@ -491,6 +544,41 @@ impl BrowserPanelHost {
             report_tabs(app, &inner);
         }
     }
+}
+
+/// Hold the panel's pages paintable for one in-flight agent call.
+///
+/// The first lease moves hidden WebView2 controllers off screen but leaves
+/// them visible to the compositor. The last release hides them again. A page
+/// already on screen never moves, and neither transition touches page size.
+#[cfg(windows)]
+pub fn acquire_paint(app: &AppHandle) -> browser_service::panel_paint::PanelPaintLease {
+    let host = app.state::<BrowserPanelHost>();
+    let first = host
+        .inner
+        .lock()
+        .map(|mut inner| inner.hold_paint())
+        .unwrap_or(false);
+    if first {
+        if let Err(error) = host.place() {
+            tracing::warn!(target: "browser_panel", %error, "could not park panel pages for agent paint");
+        }
+    }
+
+    let released_app = app.clone();
+    browser_service::panel_paint::PanelPaintLease::new(move || {
+        let host = released_app.state::<BrowserPanelHost>();
+        let last = host
+            .inner
+            .lock()
+            .map(|mut inner| inner.release_paint())
+            .unwrap_or(false);
+        if last {
+            if let Err(error) = host.place() {
+                tracing::warn!(target: "browser_panel", %error, "could not restore hidden panel pages");
+            }
+        }
+    })
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -752,6 +840,10 @@ pub async fn warm(app: &AppHandle, host: &BrowserPanelHost) -> Result<Option<Str
             endpoint = %endpoint.clone().unwrap_or_default(),
             "panel browser is warm",
         );
+        // Creation always starts hidden. Re-apply placement before publishing
+        // so a first tool call that acquired a paint lease while this webview
+        // was being created cannot attach to a frame-less warm page.
+        host.place()?;
         publish_drivable(Arc::clone(&host.inner)).await;
         return Ok(endpoint);
     }
@@ -841,17 +933,21 @@ pub async fn browser_panel_open(
                 inner.active = Some(tab_id);
             }
         }
-        finish_open(&app, &host);
+        finish_open(&app, &host)?;
         Ok(info)
     }
 }
 
-/// What every open path does once the tab exists: publishing is about the
-/// agent's tools and must not hold the page up, and the strip needs the new
-/// state.
-fn finish_open(app: &AppHandle, host: &BrowserPanelHost) {
+/// What every open path does once the tab exists: apply the current visibility
+/// or paint lease before the provider can select the target, publish for the
+/// agent's tools without holding up the page, and update the strip.
+fn finish_open(app: &AppHandle, host: &BrowserPanelHost) -> Result<(), String> {
+    // `create_webview` always starts hidden. A tab created during an agent call
+    // must inherit that call's paint lease before its endpoint becomes usable.
+    host.place()?;
     tauri::async_runtime::spawn(publish_drivable(Arc::clone(&host.inner)));
     host.emit_tabs(app);
+    Ok(())
 }
 
 /// Close a panel tab. The page and its session go with it; the profile and
@@ -981,7 +1077,8 @@ pub async fn browser_panel_history(
 /// A zero-sized rect is taken as "the panel is not showing a page" — the panel
 /// is collapsed or the layout is mid-flight — and hides the pages for as long
 /// as it lasts: the page is painted above the app's own UI, so one left in
-/// place would cover whatever the panel now shows.
+/// place would cover whatever the panel now shows. During an agent paint lease
+/// the page is instead parked visible at `OFFSCREEN`, never over that UI.
 #[tauri::command]
 pub async fn browser_panel_bounds(
     host: tauri::State<'_, BrowserPanelHost>,
@@ -1084,7 +1181,7 @@ mod tests {
 
     #[cfg(windows)]
     mod windows_only {
-        use super::super::{endpoint_for, has_a_page_to_drive, is_blank, should_promote};
+        use super::super::{Inner, endpoint_for, has_a_page_to_drive, is_blank, should_promote};
 
         #[test]
         fn the_browser_is_started_with_the_port_the_agent_uses() {
@@ -1136,6 +1233,21 @@ mod tests {
             assert!(!should_promote(false, false, "https://example.com/"));
             // Still blank: nothing to show, so it stays the spare page.
             assert!(!should_promote(false, true, "about:blank"));
+        }
+
+        #[test]
+        fn paint_holds_change_native_visibility_only_at_the_edges() {
+            let mut inner = Inner::default();
+            assert!(inner.hold_paint());
+            assert!(!inner.hold_paint());
+            assert_eq!(inner.paint_holds, 2);
+
+            // One overlapping call finishing must not hide the page under the
+            // other. Only the final release restores the hidden state.
+            assert!(!inner.release_paint());
+            assert!(inner.release_paint());
+            assert_eq!(inner.paint_holds, 0);
+            assert!(!inner.release_paint());
         }
     }
 }

@@ -1,7 +1,7 @@
 import { Fragment, useRef, useEffect, useLayoutEffect, useMemo, useState, useCallback, memo } from "react";
 import type { FormEvent } from "react";
 import { createPortal } from "react-dom";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { webviewImageSrc } from "../../lib/image-src";
 import { GitFork, Handshake } from "lucide-react";
 import { resolveAgentKind } from "../session/AgentIcon";
 import type { FileChangeSummary, MessageRole } from "../../types";
@@ -921,27 +921,7 @@ function parseImageOnlyBlock(block: string): UserMessageImage | null {
 }
 
 function imageSrcForWebview(src: string): string {
-  if (!src.startsWith("file://") || !isTauri()) {
-    return src;
-  }
-  const path = fileUrlToPath(src);
-  return path ? convertFileSrc(path) : src;
-}
-
-function fileUrlToPath(src: string): string | null {
-  try {
-    const url = new URL(src);
-    if (url.protocol !== "file:") {
-      return null;
-    }
-    const path = decodeURIComponent(url.pathname);
-    if (/^\/[A-Za-z]:\//.test(path)) {
-      return path.slice(1);
-    }
-    return path;
-  } catch {
-    return null;
-  }
+  return webviewImageSrc(src);
 }
 
 function visibleTurnChangeSetsByMessageId(

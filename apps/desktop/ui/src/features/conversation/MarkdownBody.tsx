@@ -1,4 +1,4 @@
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { webviewImageSrc } from "../../lib/image-src";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -77,6 +77,7 @@ import { useCurrentAppTheme } from "../../lib/use-app-theme";
 import { stripWorkspaceRootPrefix } from "../filetree/FileTree";
 import { openLinkInPanelOrExternal } from "../browser/browserTabs";
 import { maskMarkdownMath } from "./markdown-math";
+import { remarkLocalImagePaths } from "./markdown-local-images";
 
 interface Props {
   content: string;
@@ -192,7 +193,12 @@ export function splitMarkdownBlocks(content: string): string[] {
  *  otherwise have already shredded a multi-line formula into `break` nodes.
  *  Once math is its own node it carries no children, so line-break handling
  *  leaves it untouched. */
-const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkPreserveLineBreaks];
+const REMARK_PLUGINS = [
+  remarkGfm,
+  remarkLocalImagePaths,
+  remarkMath,
+  remarkPreserveLineBreaks,
+];
 
 /** KaTeX is strict by default: it warns on unicode-in-math and refuses a few
  *  constructs LLMs emit casually (bare CJK inside `$…$`, `\text` without a
@@ -556,6 +562,14 @@ function markdownFileHrefToSpan(href: string): string {
   return lineMatch ? `${lineMatch[1]}:${lineMatch[2]}` : href;
 }
 
+/** Collapse mixed `\` / `/` separators to the platform-dominant one so file
+ *  links compare cleanly against the canonical workspace root. */
+function normalizeFilePathSeparators(value: string) {
+  const backslashes = (value.match(/\\/g) ?? []).length;
+  const slashes = (value.match(/\//g) ?? []).length;
+  return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
+}
+
 /** Resolve a clicked file span to the path handed to `onFilePathClick`. Pure
  *  and synchronous — no probes, no caches. Bare names and partial paths
  *  (`Composer.tsx:548`, `commands/fs.rs`) are matched against the changeset +
@@ -688,54 +702,11 @@ export function resolveClickableFilePath(
   return { path: relative, lineNumber, matchTail };
 }
 
-/** Collapse mixed `\` / `/` separators to the platform-dominant one so the
- *  resolved path compares cleanly against the canonical workspace root in
- *  the backend's traversal check. */
-function normalizeFilePathSeparators(value: string) {
-  const backslashes = (value.match(/\\/g) ?? []).length;
-  const slashes = (value.match(/\//g) ?? []).length;
-  return backslashes > slashes ? value.replace(/\//g, "\\") : value.replace(/\\/g, "/");
-}
-
-/**
- * A markdown image source the webview can actually fetch.
- *
- * Agents (and their tools) point at pictures by path: an absolute Windows path,
- * a `file://` URL, or one relative to the workspace — a README screenshot, the
- * capture the browser tools wrote next to a page snapshot. None of those load
- * as an `img` source, because the webview has no filesystem of its own; each has
- * to become the asset URL the asset protocol serves (the host widens that scope
- * to the open workspace). Anything already loadable — `data:`, `http(s):`,
- * `asset:`, `blob:` — is passed through untouched.
- */
+/** A markdown image source the webview can actually fetch. Kept as a small
+ *  exported wrapper for the renderer's existing callers and tests; the path
+ *  rules themselves are shared by every image surface in `lib/image-src`. */
 export function markdownImageSrc(src: string, workspaceRoot?: string): string {
-  const raw = (src ?? "").trim();
-  if (!raw) return raw;
-  if (/^(?:data:|https?:|asset:|blob:)/i.test(raw)) return raw;
-  if (!isTauri()) return raw;
-
-  let path = raw;
-  if (/^file:\/\//i.test(path)) {
-    const stripped = path.replace(/^file:\/\//i, "");
-    // file:///C:/x → C:/x, while a POSIX path keeps its leading slash.
-    path = /^\/[A-Za-z]:/.test(stripped) ? stripped.slice(1) : stripped;
-  }
-  path = normalizeFilePathSeparators(path);
-  const isAbsolute = /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
-  if (!isAbsolute) {
-    if (!workspaceRoot) return raw;
-    const root = normalizeFilePathSeparators(workspaceRoot).replace(/[\\/]+$/, "");
-    path = `${root}\\${path.replace(/^[\\/]+/, "")}`;
-  } else if (/^[A-Za-z]:[\\/]/.test(path)) {
-    // Windows paths reach `convertFileSrc` in their native form: an asset URL
-    // built from the forward-slash spelling does not resolve in this webview.
-    path = path.replace(/\//g, "\\");
-  }
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return raw;
-  }
+  return webviewImageSrc(src, workspaceRoot);
 }
 
 /** Normalize any absolute-in-workspace or mixed-separator path down to the
@@ -886,10 +857,13 @@ function fallbackCopyText(text: string) {
 }
 
 function safeMarkdownUrl(url: string) {
-  if (/^data:image\/(png|jpeg|jpg|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) {
+  if (/^data:image\/(apng|avif|bmp|png|jpeg|jpg|gif|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(url)) {
     return url;
   }
-  if (/^(https?:|mailto:)/i.test(url) || url.startsWith("/") || url.startsWith("#")) {
+  // A Windows drive is a local path, not an untrusted URL scheme. These must
+  // reach the shared asset conversion rather than being replaced by "".
+  if (/^[A-Za-z]:[\\/]/.test(url) || /^[A-Za-z]:%[0-9a-f]{2}/i.test(url)) return url;
+  if (/^(https?:|mailto:|file:|asset:|blob:)/i.test(url) || url.startsWith("/") || url.startsWith("#")) {
     return url;
   }
   // Relative/workspace paths (file references such as `crates/foo.rs`) pass

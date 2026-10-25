@@ -88,21 +88,26 @@ CDP，macOS 上「agent 驱动面板页面」做不到 —— 这条能力此前
 | `browser_panel:tabs` | `{ tabs, active }`：增删、切换、标题变化后的全量列表。 |
 | `browser_panel:page` | `{ tab_id, url, event: "started" \| "finished" }`：工具栏的「加载中…」。 |
 | `browser_panel:url` | `{ tab_id, url }`：跳转、重定向、页内点击。 |
-| `browser_panel:new_window` | `{ tab_id, url }`：页面要求新窗口（`target="_blank"` / `window.open`）。 |
+| `browser_panel:new_window` | `{ tab_id, url }`：普通新窗口请求回退为右侧 tab；认证弹窗不经过这里。 |
 
 原生页面画在应用自己的 DOM **之上**（它是窗口的子视图 / 子窗口），于是：
 
 - 「洞」必须保持空：任何画在洞里的东西都会被页面盖住，加载状态只能放工具栏。
 - 矩形为 0（面板收起 / `display: none`）时后端隐藏页面（webview hide），否则它会
-  浮在别的内容上。
+  浮在别的内容上。唯一的短时例外是 agent 调用持有 paint lease：页面移到屏外但
+  保持 compositor 可绘制，调用结束立即恢复隐藏，见下方 Windows CDP 说明。
 - 面板重新出现时尺寸可能与消失前完全相同（没有任何元素尺寸变化），所以
   `EmbeddedBrowser` 还按 `layoutSignal` 重测一次；`ResizeObserver` 与 window resize
   覆盖其余情况。
 - 面板切到非 web tab、或整体展开/收起（ReviewPanel 卸载）时，组件卸载 →
   `browser_panel_hide`。
 - 应用窗口移动/缩放**不需要**后端介入：页面是窗口的子视图，跟着窗口走。
-- `target="_blank"` 的链接没有第二个窗口可去，`on_new_window` 把请求发成
-  `browser_panel:new_window`，前端照常开 tab。
+- 普通 `target="_blank"` 链接没有第二个窗口可去，`on_new_window` 把请求发成
+  `browser_panel:new_window`，前端照常开 tab。带尺寸的 `window.open` 和 Google /
+  Apple / Microsoft 认证域名则创建真正的独立 WebView 弹窗：OAuth 依赖
+  `window.opener` 回传结果并自行关闭，降级成普通 tab 会让 X 等站点的登录一直等待。
+  应用生命周期只归标签为 `main` 的主窗口：关闭认证弹窗不能触发 `shutdown_all`，
+  否则项目与会话状态会在主窗口仍打开时被清空。
 - 页面标题来自 `on_document_title_changed`（两个平台都有）。
 
 ### agent 控制接口：面板浏览器 = 工具驱动的浏览器
@@ -125,6 +130,28 @@ CDP，macOS 上「agent 驱动面板页面」做不到 —— 这条能力此前
    target 收成 tab，所以工具操作的就是面板里那个页面。
 5. 由此，**Windows 上预检不再要求本机装 Chromium**：`check_browser_with` 在有面板
    浏览器时直接 Ready。
+6. **每次 provider 调用持有短时 paint lease。** WebView2 的 `IsVisible = false`
+   不只是肉眼不可见，它会停止 compositor 产出帧；此时 DOM / AX 仍能应答，但
+   `Page.captureScreenshot` 会一直等下一帧，最终撞上 Playwright 默认 5s action
+   timeout。`BrowserMcpService` 在调用期间通过 `browser-service::panel_paint`
+   持有 lease，面板把后台页移到屏外并保持可绘制（不覆盖 UI、不改变 viewport），最后
+   一个 lease 释放后立即恢复 `webview.hide()`。引用计数覆盖 warm 页、隐藏面板和
+   非活动 tab，也保证重叠调用不会提前把对方的页面隐藏；新建 tab 在发布前重新应用
+   当前 lease。原生 placement 由独立互斥锁串行化，并在取锁后读取最新状态，旧的
+   show/hide 计划不会覆盖新 lease。
+7. **超时不会污染下一次调用。** provider 的迟到响应可能在下一次请求发送后才到；
+   stdio MCP 客户端丢弃 id 小于当前请求的过期响应，而不是把它当成当前响应并报
+   `response id does not match`。只有大于当前 id 的响应仍是协议错误。读取使用持久
+   的 `Lines::next_line`（Tokio cancellation-safe）：deadline 前只收到半帧时，已读
+   字节保留在 transport 内，下一次调用先拼完并丢弃旧帧，不会从半帧中间解析 JSON。
+8. **截图引用使用持久路径。** provider 可能把截图写进系统临时目录
+   `.playwright-mcp` 并把该路径打印给模型；`ScreenshotPipeline` 已保存字节后，
+   `BrowserMcpService` 会把这段文本改成持久 `ScreenshotHandle.path`，避免临时文件
+   被清理后消息里的图片失效。已经存在于历史消息中的临时引用由桌面端仅对
+   `.playwright-mcp` 子目录开放 asset scope 兼容读取，不开放整个系统临时目录。
+   Markdown 图片的本地路径还会在 remark 阶段从原始源码恢复：CommonMark 会把
+   `Temp\.playwright-mcp` 中的 `\.` 当作转义并删掉反斜杠，只看解析后的 URL 无法
+   找回正确文件。
 
 **macOS：原生工具。** WKWebView 没有任何自动化协议（没有 CDP，也没有等价的东
 西），provider 进程连不上面板 —— 它只能驱动一个用户看不见的后台 Chromium，那
@@ -177,8 +204,8 @@ Windows 上面板自己做两件事让 CDP 链路在任何时刻都成立：
   ——启动时该出现的只有 Maju 自己。
 - **上位**：空白页里第一次出现真实 URL（agent 导航，或用户点链接）时，它就地变成
   一个 tab 并广播 `browser_panel:tabs` —— agent 打开的页面因此出现在面板里，用户
-  能看到 agent 在看什么。前端只在该面板正显示 web tab 时跟随切换，不抢正在看的
-  diff。
+  能看到 agent 在看什么。前端发现新的 tab id 时自动激活它并展开右栏一次；已有 tab
+  的标题等后续事件不会反复抢回焦点，用户手动切回 Review / Diff 后不受打扰。
 
 macOS 上这两件事都不做：没有 CDP 就没有「保活」的理由（面板的浏览器由 tab 的生死
 决定），「上位」则由原生工具的 tab 操作直接完成。

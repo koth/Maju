@@ -413,6 +413,14 @@ impl BrowserMcpService {
         let call_name = exposed_name.to_string();
         let error_name = call_name.clone();
 
+        // A hidden WebView2 controller produces no compositor frames. Keep the
+        // panel paintable off screen for exactly this call, otherwise CDP
+        // screenshots stall and actionability/hit-testing can wait on a page
+        // that is never drawn again. The lease restores hidden state on every
+        // return path, including timeout and cancellation.
+        let _paint = browser_service::panel::endpoint()
+            .and_then(|_| browser_service::panel_paint::acquire());
+
         let raw: ToolCallResult = service
             .call(&session_id, &cancel, move |resource| async move {
                 let client = resource.client().ok_or_else(|| {
@@ -468,7 +476,7 @@ impl BrowserMcpService {
         });
 
         Ok(BrowserToolResult {
-            text: raw.text,
+            text: rewrite_playwright_temp_capture_paths(&raw.text, &screenshots),
             screenshots,
             delivery,
             is_error: raw.is_error,
@@ -656,6 +664,89 @@ fn classify(tool: &str, detail: &str) -> BrowserCallError {
             detail: detail.to_string(),
         }
     }
+}
+
+/// Replace provider-owned temporary capture paths with the durable handles
+/// written by `ScreenshotPipeline`.
+///
+/// Playwright may save into `%TEMP%/.playwright-mcp` (or the platform equivalent)
+/// and print that path into the tool result. The bytes have already been
+/// persisted by the time this runs, so letting the model repeat the temporary
+/// path only guarantees a broken image later: the file is outside Maju's asset
+/// scope and may be cleaned up. Existing conversations remain readable through
+/// the shell's bounded legacy scope; new results always name the durable file.
+fn rewrite_playwright_temp_capture_paths(text: &str, screenshots: &[ScreenshotHandle]) -> String {
+    if screenshots.is_empty() || !text.contains(".playwright-mcp") {
+        return text.to_string();
+    }
+
+    let temp_root = std::env::temp_dir()
+        .join(".playwright-mcp")
+        .to_string_lossy()
+        .into_owned();
+    let normalized = temp_root.replace('\\', "/");
+    let native = normalized.replace('/', "\\");
+    let roots = if native == normalized {
+        vec![native]
+    } else {
+        vec![native, normalized]
+    };
+
+    let mut rewritten = text.to_string();
+    for handle in screenshots {
+        let Some((start, root)) = roots
+            .iter()
+            .find_map(|root| rewritten.find(root).map(|start| (start, root)))
+        else {
+            break;
+        };
+        let Some(end) = capture_path_end(&rewritten, start) else {
+            break;
+        };
+        let root_end = start + root.len();
+        // The root itself must be followed by a separator and an image name;
+        // this avoids rewriting a sentence that merely mentions the directory.
+        if !matches!(rewritten.as_bytes().get(root_end), Some(b'/' | b'\\')) {
+            continue;
+        }
+        rewritten.replace_range(start..end, &handle.path);
+    }
+    rewritten
+}
+
+/// End of a local image path beginning at `start`, stopping immediately after
+/// its real extension so Markdown punctuation and prose remain untouched.
+fn capture_path_end(text: &str, start: usize) -> Option<usize> {
+    let tail = text.get(start..)?.to_ascii_lowercase();
+    for extension in [".png", ".jpg", ".jpeg", ".webp"] {
+        let mut offset = 0;
+        while let Some(found) = tail[offset..].find(extension) {
+            let end = offset + found + extension.len();
+            let boundary = tail.as_bytes().get(end).copied();
+            if boundary.is_none_or(|byte| {
+                matches!(
+                    byte,
+                    b'\r'
+                        | b'\n'
+                        | b' '
+                        | b'\t'
+                        | b'"'
+                        | b'\''
+                        | b'`'
+                        | b')'
+                        | b']'
+                        | b'>'
+                        | b'.'
+                        | b','
+                        | b';'
+                )
+            }) {
+                return Some(start + end);
+            }
+            offset += found + extension.len();
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -864,7 +955,13 @@ mod tests {
             .project(
                 "session-1",
                 ToolCallResult {
-                    text: "captured".to_string(),
+                    text: format!(
+                        "Screenshot saved to {}",
+                        std::env::temp_dir()
+                            .join(".playwright-mcp")
+                            .join("zhihu-explore-2.png")
+                            .display()
+                    ),
                     images: vec![png],
                     is_error: false,
                 },
@@ -873,9 +970,45 @@ mod tests {
 
         assert_eq!(projected.screenshots.len(), 1);
         assert!(std::path::Path::new(&projected.screenshots[0].path).is_file());
+        assert_eq!(
+            projected.text,
+            format!("Screenshot saved to {}", projected.screenshots[0].path)
+        );
+        assert!(!projected.text.contains(".playwright-mcp"));
         // The model-facing text names the file instead of carrying bytes.
         assert!(!projected.model_text().contains("base64"));
         assert!(projected.model_text().contains("1280x720"));
+    }
+
+    #[test]
+    fn temporary_capture_paths_are_rewritten_to_durable_handles() {
+        let handle = ScreenshotHandle {
+            path: "C:\\managed\\capture-1".to_string(),
+            width: 1,
+            height: 1,
+            byte_size: 1,
+            media_type: "image/png".to_string(),
+        };
+        let captures = vec![handle];
+        let temporary = std::env::temp_dir()
+            .join(".playwright-mcp")
+            .join("zhihu-explore-2.png")
+            .to_string_lossy()
+            .into_owned();
+        let normalized = temporary.replace('\\', "/");
+
+        assert_eq!(
+            rewrite_playwright_temp_capture_paths(
+                &format!("Screenshot saved to {temporary}."),
+                &captures,
+            ),
+            "Screenshot saved to C:\\managed\\capture-1."
+        );
+        let markdown = format!("![zhihu]({normalized})");
+        assert_eq!(
+            rewrite_playwright_temp_capture_paths(&markdown, &captures),
+            "![zhihu](C:\\managed\\capture-1)"
+        );
     }
 
     #[test]

@@ -96,6 +96,23 @@ describe("MarkdownBody", () => {
     );
   });
 
+  it("does not strip local image paths before asset conversion", () => {
+    const { container } = render(
+      <MarkdownBody
+        content={"![Windows](C:\\work\\shot.png)\n\n![Cached](file:///C:/work/cached.png)\n\n![Asset](asset://localhost/x.png)"}
+      />,
+    );
+
+    const sources = Array.from(container.querySelectorAll("img.md-image")).map((image) =>
+      image.getAttribute("src"),
+    );
+    expect(sources).toHaveLength(3);
+    expect(sources[0]).toContain("shot.png");
+    expect(sources[1]).toContain("cached.png");
+    expect(sources[2]).toBe("asset://localhost/x.png");
+    expect(sources.every(Boolean)).toBe(true);
+  });
+
   it("renders inline-code file paths as fixed file links with line numbers", () => {
     // Deterministic: the shape decides at render time — no existence probe,
     // no async flip. Click-time resolution hands the editor the file.

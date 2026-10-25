@@ -14,6 +14,7 @@
 //! name. Nothing else about a tab differs by platform.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Url, Webview, WebviewBuilder, WebviewUrl,
@@ -24,6 +25,37 @@ use super::{BrowserPanelHost, OFFSCREEN, PageReport, Slot, main_window, report_t
 // `super` is a Windows-only compile error, which is why it is not here.
 #[cfg(windows)]
 use super::promote;
+
+/// Labels for short-lived authentication popups. They are not panel tabs.
+static POPUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+/// Authentication providers used by the panel's pages. They are allowed to
+/// open a real popup even when the page did not specify width/height.
+fn is_auth_popup_url(url: &Url) -> bool {
+    matches!(
+        url.host_str().unwrap_or_default(),
+        "accounts.google.com" | "appleid.apple.com" | "login.microsoftonline.com" | "login.live.com"
+    )
+}
+
+/// Whether a `window.open` request needs a real popup instead of a panel tab.
+///
+/// OAuth relies on `window.opener`: the provider posts the result back to the
+/// page that opened it and then closes itself. Turning that request into an
+/// ordinary tab drops the opener relationship, so X's "continue with Google"
+/// waits forever. A requested size is the generic signal for a popup; known
+/// identity-provider origins cover pages that omit it. Plain `target="_blank"`
+/// links have neither and keep opening as panel tabs.
+fn should_open_popup(url: &Url, has_size: bool) -> bool {
+    has_size || is_auth_popup_url(url)
+}
+
+fn next_popup_label() -> String {
+    format!(
+        "browser-popup-{}",
+        POPUP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Create one of the panel's webviews, whichever tab it is going to be.
 ///
@@ -116,13 +148,40 @@ pub(super) fn create_webview(
                 report_tabs(&titled, &state);
             }
         })
-        // A link that asks for a new window has no window to go to: the panel
-        // is the browser, so the frontend opens it as a tab. Without a handler
-        // the webview refuses the request and the click does nothing at all.
+        // An OAuth popup must stay a popup: its result travels through
+        // `window.opener`, which a separate panel tab does not have. Ordinary
+        // `target="_blank"` links still become panel tabs, as before.
         .on_new_window({
             let opened = app.clone();
             let opener = tab_id_of(label);
-            move |url, _features| {
+            move |url, features| {
+                if should_open_popup(&url, features.size().is_some()) {
+                    let title = url.host_str().unwrap_or("登录").to_string();
+                    let builder = tauri::WebviewWindowBuilder::new(
+                        &opened,
+                        next_popup_label(),
+                        WebviewUrl::External(url.clone()),
+                    )
+                    .title(title)
+                    .inner_size(520.0, 720.0)
+                    .focused(true)
+                    // Shares the opener's WebView2 environment/configuration:
+                    // required by the platform to attach the new webview.
+                    .window_features(features);
+                    match builder.build() {
+                        Ok(window) => {
+                            return tauri::webview::NewWindowResponse::Create { window };
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "browser_panel",
+                                %url,
+                                %error,
+                                "could not open authentication popup; falling back to a tab",
+                            );
+                        }
+                    }
+                }
                 let _ = opened.emit(
                     "browser_panel:new_window",
                     serde_json::json!({
@@ -162,14 +221,48 @@ pub(super) fn create_webview(
     Ok(webview)
 }
 
-/// Put a webview at the slot, or hide it entirely.
-pub(super) fn place(webview: &Webview, slot: Option<Slot>) {
-    if let Some(slot) = slot {
-        let _ = webview.set_position(LogicalPosition::new(slot.x, slot.y));
-        let _ = webview.set_size(LogicalSize::new(slot.width, slot.height));
-        let _ = webview.show();
-    } else {
-        let _ = webview.hide();
+/// Where a surface goes after a layout or paint-lease change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Placement {
+    /// No agent work needs frames: hide the controller and let WebView2 idle.
+    Hidden,
+    /// Keep the controller painting without putting the page over the app UI.
+    /// The size is deliberately left alone so parking never reflows the page.
+    Parked,
+    /// The panel's real on-screen slot.
+    Visible(Slot),
+}
+
+/// Decide a surface's native placement.
+///
+/// `IsVisible = false` is not just an OS-level hide in WebView2: it stops the
+/// compositor, and CDP screenshots wait indefinitely for a frame that will
+/// never arrive. A paint lease therefore parks the page off screen *visible*
+/// instead of hiding it. Inactive pages return to `Hidden` as soon as the last
+/// lease drops, so this does not leave every background tab rendering forever.
+pub(super) fn placement_for(slot: Option<Slot>, paint_held: bool) -> Placement {
+    match slot {
+        Some(slot) => Placement::Visible(slot),
+        None if paint_held => Placement::Parked,
+        None => Placement::Hidden,
+    }
+}
+
+/// Put a webview at the slot, park it paintably off screen, or hide it.
+pub(super) fn place(webview: &Webview, slot: Option<Slot>, paint_held: bool) {
+    match placement_for(slot, paint_held) {
+        Placement::Visible(slot) => {
+            let _ = webview.set_position(LogicalPosition::new(slot.x, slot.y));
+            let _ = webview.set_size(LogicalSize::new(slot.width, slot.height));
+            let _ = webview.show();
+        }
+        Placement::Parked => {
+            let _ = webview.set_position(LogicalPosition::new(OFFSCREEN, OFFSCREEN));
+            let _ = webview.show();
+        }
+        Placement::Hidden => {
+            let _ = webview.hide();
+        }
     }
 }
 
@@ -197,4 +290,55 @@ pub(super) fn browser_args(port: u16) -> String {
          --autoplay-policy=no-user-gesture-required \
          --remote-debugging-port={port}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot() -> Slot {
+        Slot {
+            x: 40.0,
+            y: 80.0,
+            width: 640.0,
+            height: 480.0,
+        }
+    }
+
+    #[test]
+    fn a_paint_lease_parks_hidden_pages_instead_of_stopping_their_frames() {
+        assert_eq!(placement_for(None, false), Placement::Hidden);
+        assert_eq!(placement_for(None, true), Placement::Parked);
+    }
+
+    #[test]
+    fn a_visible_slot_always_wins_over_parking() {
+        assert_eq!(
+            placement_for(Some(slot()), false),
+            Placement::Visible(slot())
+        );
+        assert_eq!(
+            placement_for(Some(slot()), true),
+            Placement::Visible(slot())
+        );
+    }
+
+    #[test]
+    fn auth_popups_keep_the_opener_while_ordinary_links_stay_tabs() {
+        let google = Url::parse("https://accounts.google.com/gsi/select").unwrap();
+        let ordinary = Url::parse("https://x.com/some/article").unwrap();
+
+        // Google's popup sometimes omits width/height; its origin still marks
+        // it as an opener-dependent flow.
+        assert!(should_open_popup(&google, false));
+        // Any explicitly sized window is a popup by intent.
+        assert!(should_open_popup(&ordinary, true));
+        // A normal target="_blank" keeps the panel-tab behaviour.
+        assert!(!should_open_popup(&ordinary, false));
+    }
+
+    #[test]
+    fn popup_labels_do_not_collide() {
+        assert_ne!(next_popup_label(), next_popup_label());
+    }
 }

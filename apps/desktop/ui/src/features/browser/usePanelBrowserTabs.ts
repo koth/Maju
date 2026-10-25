@@ -13,7 +13,7 @@
  * link. See `docs/browser-view-subsystem.md`.
  */
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onBrowserPanelNewWindow, onBrowserPanelTabs, onBrowserPanelUrl } from "../../lib/events";
@@ -94,6 +94,12 @@ export function usePanelBrowserTabs({
   openPage: (url: string) => Promise<boolean>;
   closePage: (tabId: string) => void;
 } {
+  // Native tab ids already seen by this hook. A newly appearing id is the
+  // agent opening a page (or a page asking for a window): reveal that page
+  // once. Later title/tab events for the same id must not pull the user back
+  // after they deliberately returned to Review or Diff.
+  const knownPanelTabIds = useRef<Set<string>>(new Set());
+
   const openPage = useCallback(
     async (url: string): Promise<boolean> => {
       try {
@@ -148,6 +154,9 @@ export function usePanelBrowserTabs({
     void browserPanelState()
       .then((state) => {
         if (cancelled) return;
+        // Merge rather than replace: an event that arrived while this request
+        // was in flight may already have taught us about a newer tab.
+        for (const tab of state.tabs) knownPanelTabIds.current.add(tab.tab_id);
         setOpenTabs((current) => reconcilePanelTabs(current, state.tabs));
         if (state.tabs.length === 0) return;
         setActiveTab((current) => {
@@ -179,9 +188,17 @@ export function usePanelBrowserTabs({
     track(
       onBrowserPanelTabs((event) => {
         if (cancelled) return;
+        const addedTabs = event.tabs.filter((tab) => !knownPanelTabIds.current.has(tab.tab_id));
+        knownPanelTabIds.current = new Set(event.tabs.map((tab) => tab.tab_id));
         setOpenTabs((current) => reconcilePanelTabs(current, event.tabs));
         setActiveTab((current) => {
-          if (current.kind !== "web") return current;
+          if (current.kind !== "web") {
+            // Reveal an agent-created page once. Without this branch a page
+            // opened while Review/Diff was active stayed native-hidden forever.
+            // Subsequent events for that same id leave the user's tab alone.
+            const added = addedTabs[addedTabs.length - 1];
+            return added ? webTab(added) : current;
+          }
           const same = event.tabs.find((tab) => tab.tab_id === current.id);
           if (same) {
             const url = same.url || current.url;

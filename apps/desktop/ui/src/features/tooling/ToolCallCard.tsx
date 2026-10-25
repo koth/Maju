@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { webviewImageSrc } from "../../lib/image-src";
 import { PatchDiff } from "@pierre/diffs/react";
 import type { AppTheme, DiffHunk, ToolDiffPreview, ToolInvocation } from "../../types";
 import { sessionGetToolDetail } from "../../lib/tauri";
@@ -358,27 +358,10 @@ interface Props {
 }
 
 /// 把生图结果的原始引用（data URL / `file://` / `asset://` / 本地路径）转换
-/// 为 webview 可渲染的显示 URL。Windows 路径统一为**原生反斜杠形态**再走
-/// `convertFileSrc`：正斜杠形态解析出的 asset URL 在本机 webview 里取不到
-/// 文件（坏图），与 companion 预览等既有可用路径的形态保持一致。
+/// 为 webview 可渲染的显示 URL。规则与会话里的其他图片共用，避免同一张
+/// 附件在 Markdown 和工具卡里得到不同的路径。
 function resolveImageDisplaySrc(ref: string): string {
-  if (/^(data:image\/|asset:\/\/)/i.test(ref)) return ref;
-  let path = ref;
-  if (path.startsWith("file://")) {
-    path = path.slice("file://".length);
-    // file:///C:/x → C:/x（POSIX 的 file:///home/x 保留为 /home/x）
-    if (path.startsWith("/") && /^[A-Za-z]:/.test(path.slice(1))) {
-      path = path.slice(1);
-    }
-  }
-  if (/^[A-Za-z]:[\\/]/.test(path)) {
-    path = path.replace(/\//g, "\\");
-  }
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
-  }
+  return webviewImageSrc(ref);
 }
 
 function ToolCallCardImpl({

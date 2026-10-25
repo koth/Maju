@@ -318,6 +318,13 @@ impl McpClient {
                         .cloned()
                         .unwrap_or(serde_json::Value::Null));
                 }
+                // Calls are serialized by the browser session's operation
+                // lock. A lower id is therefore the late answer to a call that
+                // already timed out, not this call's response. Dropping it is
+                // essential: one slow screenshot must not poison the next call
+                // with an id mismatch and every call behind it with the same
+                // off-by-one failure.
+                Some(response_id) if response_id < id => continue,
                 Some(response_id) => {
                     return Err(McpProtocolError::IdMismatch {
                         expected: id,
@@ -439,7 +446,11 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 /// A transport over a live child process's stdio.
 pub struct StdioTransport {
     writer: Mutex<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>,
-    reader: Mutex<BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>,
+    /// `Lines` owns the partial-frame buffer across calls. Keeping it inside
+    /// the transport is what makes a deadline cancelling `next_line` safe:
+    /// bytes already read stay here instead of being dropped with a local
+    /// `String`, so a late response can be completed and discarded intact.
+    reader: Mutex<tokio::io::Lines<BufReader<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>>,
 }
 
 impl StdioTransport {
@@ -449,7 +460,7 @@ impl StdioTransport {
     ) -> Self {
         Self {
             writer: Mutex::new(writer),
-            reader: Mutex::new(BufReader::new(reader)),
+            reader: Mutex::new(BufReader::new(reader).lines()),
         }
     }
 
@@ -481,15 +492,11 @@ impl Transport for StdioTransport {
 
     async fn read_line(&self) -> Result<String, McpProtocolError> {
         let mut reader = self.reader.lock().await;
-        let mut line = String::new();
-        let read = reader
-            .read_line(&mut line)
+        let line = reader
+            .next_line()
             .await
             .map_err(|error| McpProtocolError::Decode(error.to_string()))?;
-        if read == 0 {
-            return Err(McpProtocolError::Closed);
-        }
-        Ok(line)
+        line.ok_or(McpProtocolError::Closed)
     }
 }
 
@@ -783,6 +790,81 @@ mod tests {
                 got: 999
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_late_response_from_a_timed_out_call_does_not_poison_the_next_call() {
+        let (mut client, transport) = client_with(vec![handshake(1)]);
+        client.initialize().await.unwrap();
+
+        // Request 2 leaves before its answer arrives. Its late response will
+        // already be at the front of the stream when request 3 starts.
+        client.timeout = Duration::ZERO;
+        assert_eq!(
+            client.call_tool("slow_screenshot", json!({})).await,
+            Err(McpProtocolError::Timeout)
+        );
+        client.timeout = Duration::from_secs(5);
+        transport.incoming.lock().await.extend([
+            response(
+                2,
+                json!({ "content": [{ "type": "text", "text": "late" }] }),
+            ),
+            response(
+                3,
+                json!({ "content": [{ "type": "text", "text": "next" }] }),
+            ),
+        ]);
+
+        let result = client
+            .call_tool("browser_navigate", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "next");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_preserves_a_partial_frame_for_the_next_call() {
+        let (io, mut peer) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(io);
+        let transport = Arc::new(StdioTransport::new(Box::new(reader), Box::new(writer)));
+        let mut client = McpClient::new(transport).with_timeout(Duration::from_millis(50));
+        let late = response(
+            1,
+            json!({ "content": [{ "type": "text", "text": "late" }] }),
+        );
+        let next = response(
+            2,
+            json!({ "content": [{ "type": "text", "text": "next" }] }),
+        );
+
+        let peer_writes = async move {
+            let split = late.len() / 2;
+            peer.write_all(&late.as_bytes()[..split]).await.unwrap();
+            peer.flush().await.unwrap();
+            // The first request times out with exactly this partial frame in
+            // flight. Its remainder and the next response arrive afterwards.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            peer.write_all(&late.as_bytes()[split..]).await.unwrap();
+            peer.write_all(b"\n").await.unwrap();
+            peer.write_all(next.as_bytes()).await.unwrap();
+            peer.write_all(b"\n").await.unwrap();
+            peer.flush().await.unwrap();
+        };
+        let calls = async {
+            assert_eq!(
+                client.request("slow", None, Some("slow".to_string())).await,
+                Err(McpProtocolError::Timeout)
+            );
+            client.timeout = Duration::from_secs(1);
+            let result = client
+                .request("next", None, Some("next".to_string()))
+                .await
+                .unwrap();
+            assert_eq!(result["content"][0]["text"], json!("next"));
+        };
+
+        tokio::join!(calls, peer_writes);
     }
 
     #[tokio::test]
